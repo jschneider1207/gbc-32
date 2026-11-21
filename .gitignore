@@ -1,0 +1,7 @@
+# Downloaded by scripts/fetch-test-roms.sh
+/test-roms/
+# User-supplied game ROMs and saves (never committed)
+/roms/
+*.sav
+# Build output
+/target/

@@ -1,0 +1,281 @@
+# Stage 1 acceptance manifest.
+#
+# OWNED BY THE HUMAN. Agents must not edit this file (or any expected
+# screenshot) without explicit approval. See acceptance/README.md for the
+# format and the runner contract.
+#
+# All paths are relative to test-roms/ (populated by scripts/fetch-test-roms.sh).
+# Target hardware: CPU CGB C (see docs/decisions/0003-target-cgb-revision.md).
+#
+# Every group encodes the pass/fail rules published upstream in
+# test-roms/<suite>/game-boy-test-roms-howto.md (c-sp/game-boy-test-roms
+# src/howto/<suite>.md @ v7.0): exit condition, run time, check type and
+# expected screenshot. Each group cites its how-to in a `source` comment.
+# One addition goes beyond upstream: Blargg cpu_instrs/instr_timing also
+# require a `serial` check, because those ROMs print their results to the
+# serial port, which lets CPU work be verified before the PPU exists.
+#
+# ROMs without the CGB flag run in DMG compatibility mode.
+#
+# Suites deliberately not included in Stage 1: bully, scribbltests,
+# strikethrough, turtle-tests, little-things-gb, gbmicrotest,
+# mooneye-test-suite-wilbertpol, blargg dmg_sound/oam_bug. They are DMG-only,
+# duplicate coverage above, or have no CGB reference.
+
+roms_release = "v7.0"
+model = "cgb-c"
+
+# ---------------------------------------------------------------- must ---
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-cpu-instrs"
+tier = "must"
+roms = ["blargg/cpu_instrs/cpu_instrs.gb"]
+exit = { run_s = 31 }
+checks = [{ serial = "Passed all tests" }, { screenshot = "blargg/cpu_instrs/cpu_instrs-dmg-cgb.png" }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-instr-timing"
+tier = "must"
+roms = ["blargg/instr_timing/instr_timing.gb"]
+exit = { run_s = 1 }
+checks = [{ serial = "Passed" }, { screenshot = "blargg/instr_timing/instr_timing-dmg-cgb.png" }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-mem-timing"
+tier = "must"
+roms = ["blargg/mem_timing/mem_timing.gb"]
+exit = { run_s = 3 }
+checks = [{ screenshot = "blargg/mem_timing/mem_timing-dmg-cgb.png" }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-mem-timing-2"
+tier = "must"
+roms = ["blargg/mem_timing-2/mem_timing.gb"]
+exit = { run_s = 4 }
+checks = [{ screenshot = "blargg/mem_timing-2/mem_timing-dmg-cgb.png" }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-halt-bug"
+tier = "must"
+roms = ["blargg/halt_bug.gb"]
+exit = { run_s = 2 }
+checks = [{ screenshot = "blargg/halt_bug-dmg-cgb.png" }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-cgb-sound"
+tier = "must"
+roms = ["blargg/cgb_sound/cgb_sound.gb"]
+exit = { run_s = 37 }
+checks = [{ screenshot = "blargg/cgb_sound/cgb_sound-cgb.png" }]
+
+[[group]]
+# source: cgb-acid2/game-boy-test-roms-howto.md
+id = "cgb-acid2"
+tier = "must"
+roms = ["cgb-acid2/cgb-acid2.gbc"]
+exit = { ld_b_b = true, timeout_s = 10 }
+checks = [{ screenshot = "cgb-acid2/cgb-acid2.png" }]
+
+[[group]]
+# source: dmg-acid2/game-boy-test-roms-howto.md
+id = "dmg-acid2-compat"
+tier = "must"
+roms = ["dmg-acid2/dmg-acid2.gb"]
+exit = { ld_b_b = true, timeout_s = 10 }
+checks = [{ screenshot = "dmg-acid2/dmg-acid2-cgb.png" }]
+
+# Mooneye acceptance tests that run on every model (no model suffix),
+# excluding PPU timing, which is tier "should" below.
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-acceptance"
+tier = "must"
+roms = ["mooneye-test-suite/acceptance/**/*.gb"]
+exclude = ["mooneye-test-suite/acceptance/**/*-*.gb", "mooneye-test-suite/acceptance/ppu/**"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-mbc"
+tier = "must"
+roms = [
+  "mooneye-test-suite/emulator-only/mbc1/*.gb",
+  "mooneye-test-suite/emulator-only/mbc2/*.gb",
+  "mooneye-test-suite/emulator-only/mbc5/*.gb",
+]
+exclude = ["mooneye-test-suite/emulator-only/mbc1/multicart_rom_8Mb.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-cgb-boot-regs"
+tier = "must"
+roms = ["mooneye-test-suite/misc/boot_regs-cgb.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+id = "rtc3test-basic"
+tier = "must"
+roms = ["rtc3test/rtc3test.gb"]
+input = [{ at_s = 1.0, press = ["a"], hold_s = 0.1 }]
+exit = { run_s = 15 }
+checks = [{ screenshot = "rtc3test/rtc3test-basic-tests-cgb.png" }]
+
+[[group]]
+# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+id = "rtc3test-range"
+tier = "must"
+roms = ["rtc3test/rtc3test.gb"]
+input = [
+  { at_s = 1.0, press = ["down"], hold_s = 0.1 },
+  { at_s = 1.3, press = ["a"], hold_s = 0.1 },
+]
+exit = { run_s = 10 }
+checks = [{ screenshot = "rtc3test/rtc3test-range-tests-cgb.png" }]
+
+[[group]]
+# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+id = "rtc3test-sub-second"
+tier = "must"
+roms = ["rtc3test/rtc3test.gb"]
+input = [
+  { at_s = 1.0, press = ["down"], hold_s = 0.1 },
+  { at_s = 1.3, press = ["down"], hold_s = 0.1 },
+  { at_s = 1.6, press = ["a"], hold_s = 0.1 },
+]
+exit = { run_s = 28 }
+checks = [{ screenshot = "rtc3test/rtc3test-sub-second-writes-cgb.png" }]
+
+[[group]]
+# source: mbc3-tester/game-boy-test-roms-howto.md
+id = "mbc3-tester"
+tier = "must"
+roms = ["mbc3-tester/mbc3-tester.gb"]
+exit = { run_frames = 40 }
+checks = [{ screenshot = "mbc3-tester/mbc3-tester-cgb.png" }]
+
+# -------------------------------------------------------------- should ---
+
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-acceptance-ppu"
+tier = "should"
+roms = ["mooneye-test-suite/acceptance/ppu/*.gb"]
+exclude = ["mooneye-test-suite/acceptance/ppu/*-*.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-cgb-misc"
+tier = "should"
+roms = [
+  "mooneye-test-suite/misc/boot_div-cgbABCDE.gb",
+  "mooneye-test-suite/misc/boot_hwio-C.gb",
+  "mooneye-test-suite/misc/bits/unused_hwio-C.gb",
+  "mooneye-test-suite/misc/ppu/vblank_stat_intr-C.gb",
+]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: mooneye-test-suite/game-boy-test-roms-howto.md
+id = "mooneye-mbc1-multicart"
+tier = "should"
+roms = ["mooneye-test-suite/emulator-only/mbc1/multicart_rom_8Mb.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: blargg/game-boy-test-roms-howto.md
+id = "blargg-interrupt-time"
+tier = "should"
+roms = ["blargg/interrupt_time/interrupt_time.gb"]
+exit = { run_s = 2 }
+checks = [{ screenshot = "blargg/interrupt_time/interrupt_time-cgb.png" }]
+
+[[group]]
+# source: same-suite/game-boy-test-roms-howto.md
+id = "same-suite-cgb"
+tier = "should"
+roms = ["same-suite/dma/*.gb", "same-suite/interrupt/*.gb", "same-suite/ppu/*.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+# AGE tests verified on CGB B/C (file names containing cgbBC or cgbBCE).
+[[group]]
+# source: age-test-roms/game-boy-test-roms-howto.md
+id = "age-cgb"
+tier = "should"
+roms = ["age-test-roms/**/*cgbBC*.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+# ------------------------------------------------------------- stretch ---
+
+[[group]]
+# source: same-suite/game-boy-test-roms-howto.md
+id = "same-suite-apu"
+tier = "stretch"
+roms = ["same-suite/apu/**/*.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+# AGE tests for DMG games running on CGB hardware (compatibility mode).
+[[group]]
+# source: age-test-roms/game-boy-test-roms-howto.md
+id = "age-ncm"
+tier = "stretch"
+roms = ["age-test-roms/**/*ncmBC*.gb"]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+# source: age-test-roms/game-boy-test-roms-howto.md
+id = "age-m3-cgb"
+tier = "stretch"
+roms = [
+  "age-test-roms/m3-bg-lcdc/m3-bg-lcdc.gb",
+  "age-test-roms/m3-bg-lcdc/m3-bg-lcdc-ds.gb",
+  "age-test-roms/m3-bg-scx/m3-bg-scx.gb",
+  "age-test-roms/m3-bg-scx/m3-bg-scx-ds.gb",
+]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ screenshot = "{dir}/{stem}-cgbBCE.png" }]
+
+[[group]]
+# source: cgb-acid-hell/game-boy-test-roms-howto.md
+id = "cgb-acid-hell"
+tier = "stretch"
+roms = ["cgb-acid-hell/cgb-acid-hell.gbc"]
+exit = { ld_b_b = true, timeout_s = 10 }
+checks = [{ screenshot = "cgb-acid-hell/cgb-acid-hell.png" }]
+
+# Tests with no CGB-C reference screenshot are reported as "no-reference"
+# and excluded from the score.
+[[group]]
+# source: mealybug-tearoom-tests/game-boy-test-roms-howto.md
+id = "mealybug"
+tier = "stretch"
+roms = ["mealybug-tearoom-tests/ppu/*.gb"]
+exit = { ld_b_b = true, timeout_s = 10 }
+checks = [{ screenshot = "{dir}/{stem}_cgb_c.png" }]
+
+[[group]]
+# source: gambatte/game-boy-test-roms-howto.md
+id = "gambatte-cgb"
+tier = "stretch"
+roms = ["gambatte/**/*cgb04c*"]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
