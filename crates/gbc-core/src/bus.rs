@@ -368,6 +368,14 @@ impl Ctx<'_, '_> {
         self.hot.budget = ahead as i32;
     }
 
+    /// Idle M-cycles until the countdown reaches zero (the first M-cycle
+    /// boundary at or after the deadline): `ceil(budget / mcycle)`, and at
+    /// least one.
+    #[inline]
+    fn mcycles_to_deadline(&self) -> u32 {
+        (self.hot.budget.max(1) as u32).div_ceil(self.hot.mcycle as u32)
+    }
+
     /// The countdown reached zero: run what is due at the current clock
     /// and set the next deadline.
     #[inline(never)]
@@ -563,13 +571,30 @@ impl Bus for Ctx<'_, '_> {
         self.sys.timer.speed_switch(now, pause);
         self.schedule_timer();
         self.schedule_serial();
-        for _ in 0..2050 {
-            self.hot.budget -= self.hot.mcycle;
+        // The pause: 2050 idle M-cycles, skipped a deadline at a time
+        // (ADR 0011), each deadline handled on the M-cycle it was before.
+        let mut left = 2050;
+        while left > 0 {
+            let n = self.mcycles_to_deadline().min(left);
+            self.hot.budget -= (n * self.hot.mcycle as u32) as i32;
+            left -= n;
             if self.hot.budget <= 0 {
                 self.boundary();
             }
         }
         true
+    }
+
+    /// The halted skip (ADR 0011): nothing but a deadline can change IE &
+    /// IF, the run's end or a stopped CPU's wake-up, so consume the whole
+    /// countdown in one go and handle the deadline, on the same M-cycle
+    /// as idling one M-cycle at a time would.
+    fn idle_halted(&mut self) {
+        let n = self.mcycles_to_deadline();
+        // Up to 2^31 clocks when the countdown is capped: in i64.
+        let h = &mut self.hot;
+        h.budget = (i64::from(h.budget) - i64::from(n) * i64::from(h.mcycle)) as i32;
+        self.boundary();
     }
 
     fn stop_wakeup(&self) -> bool {
@@ -752,6 +777,36 @@ mod tests {
         assert!(ctx.done);
         assert_eq!(ctx.clock(), now + 16);
         assert_eq!(ctx.hot.budget, i32::MAX);
+    }
+
+    #[test]
+    fn idle_halted_consumes_the_whole_countdown() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF40, 0x11); // LCD off: no event scheduled
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        // (M-cycle, budget before) -> clocks idled: up to the first
+        // M-cycle boundary at or after the deadline, at least one M-cycle,
+        // then the deadline is handled (the capped countdown is renewed).
+        for (mcycle, budget, idled) in [
+            (4, 6, 8),
+            (4, 8, 8),
+            (4, 1, 4),
+            (4, 0, 4),
+            (4, -3, 4),
+            (2, 7, 8),
+            (4, i32::MAX, 1 << 31),
+            (2, i32::MAX, 1 << 31),
+        ] {
+            let start = ctx.clock();
+            ctx.hot.mcycle = mcycle;
+            ctx.hot.budget = budget;
+            ctx.hot.deadline = start.wrapping_add_signed(budget.into());
+            ctx.idle_halted();
+            assert_eq!(ctx.clock() - start, idled, "{mcycle} {budget}");
+            assert_eq!(ctx.hot.budget, i32::MAX, "{mcycle} {budget}");
+        }
     }
 
     #[test]

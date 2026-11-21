@@ -113,6 +113,15 @@ pub trait Bus {
     fn write(&mut self, addr: u16, value: u8);
     /// One M-cycle without a memory access (an internal CPU cycle).
     fn idle(&mut self);
+    /// Idles a halted, stopped, locked-up or powered-off CPU: at least one
+    /// M-cycle, and at most up to the first M-cycle boundary at which
+    /// [`Bus::interrupt_flags`], [`Bus::interrupt_enable`],
+    /// [`Bus::stop_wakeup`] or [`Bus::run_done`] can change. The default
+    /// is one M-cycle ([`Bus::idle`]); the emulator skips straight to its
+    /// next deadline (ADR 0011).
+    fn idle_halted(&mut self) {
+        self.idle();
+    }
     /// The IE register (FFFF). Free: no M-cycle.
     fn interrupt_enable(&self) -> u8;
     /// The IF register (FF0F), low 5 bits significant. Free: no M-cycle.
@@ -252,8 +261,9 @@ impl Cpu {
         }
     }
 
-    /// Executes one instruction, or dispatches one interrupt, or idles for
-    /// one M-cycle while halted, stopped, locked up or powered off.
+    /// Executes one instruction, or dispatches one interrupt, or idles
+    /// ([`Bus::idle_halted`]) while halted, stopped, locked up or powered
+    /// off.
     #[inline]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
         self.step_inline(bus);
@@ -286,7 +296,7 @@ impl Cpu {
     }
 
     /// The step for every mode except `Running`. Returns `None` if the
-    /// step is done (one idle M-cycle), or `Some(pc_step)` if the CPU is
+    /// step is done (an idle, [`Bus::idle_halted`]), or `Some(pc_step)` if the CPU is
     /// running again and the caller should go on with a normal step whose
     /// opcode fetch advances PC by `pc_step`.
     #[inline(never)]
@@ -301,7 +311,7 @@ impl Cpu {
                     self.mode = Mode::Running;
                     Some(1)
                 } else {
-                    bus.idle();
+                    bus.idle_halted();
                     None
                 }
             }
@@ -317,14 +327,20 @@ impl Cpu {
                 Some(0)
             }
             Mode::Stopped => {
-                bus.idle();
+                // A wake-up already due takes one M-cycle; otherwise the
+                // wake-up condition can't change before the skip ends.
+                if bus.stop_wakeup() {
+                    bus.idle();
+                } else {
+                    bus.idle_halted();
+                }
                 if bus.stop_wakeup() {
                     self.mode = Mode::Running;
                 }
                 None
             }
             Mode::Locked | Mode::Off => {
-                bus.idle();
+                bus.idle_halted();
                 None
             }
         }

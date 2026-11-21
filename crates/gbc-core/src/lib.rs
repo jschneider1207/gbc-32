@@ -403,7 +403,10 @@ impl<'a> Emulator<'a> {
             frame,
             audio,
             stop,
-            target.unwrap_or(u64::MAX),
+            // A single step's target is one clock ahead, so a halted CPU's
+            // skip to the next deadline (`Bus::idle_halted`) stops after
+            // one M-cycle.
+            target.unwrap_or(start + 1),
         );
         // A single step: done before it starts, so `run` stops after one.
         ctx.done = target.is_none();
@@ -976,6 +979,218 @@ mod tests {
         let r = emu.step(&mut fb, &mut []);
         assert_eq!(r.clocks, 4);
         assert!(r.events.is_empty());
+    }
+
+    /// Forwards every bus call to the emulator's [`Ctx`], but idles a
+    /// halted, stopped, locked or powered-off CPU one M-cycle at a time
+    /// (the provided [`cpu::Bus::idle_halted`]): the reference the
+    /// skip-to-deadline idling must match exactly (ADR 0011 step 5).
+    struct PerMcycle<'c, 'r, 'a>(&'c mut Ctx<'r, 'a>);
+
+    impl cpu::Bus for PerMcycle<'_, '_, '_> {
+        fn read(&mut self, addr: u16) -> u8 {
+            self.0.read(addr)
+        }
+        fn write(&mut self, addr: u16, value: u8) {
+            self.0.write(addr, value);
+        }
+        fn idle(&mut self) {
+            self.0.idle();
+        }
+        fn interrupt_enable(&self) -> u8 {
+            self.0.interrupt_enable()
+        }
+        fn interrupt_flags(&self) -> u8 {
+            self.0.interrupt_flags()
+        }
+        fn set_interrupt_flags(&mut self, value: u8) {
+            self.0.set_interrupt_flags(value);
+        }
+        fn event(&mut self, event: Events) {
+            self.0.event(event);
+        }
+        fn stop(&mut self) -> bool {
+            self.0.stop()
+        }
+        fn stop_wakeup(&self) -> bool {
+            self.0.stop_wakeup()
+        }
+        fn run_done(&self) -> bool {
+            self.0.run_done()
+        }
+    }
+
+    /// `run_until(target)` as [`Emulator::run`] does it, but through
+    /// [`PerMcycle`].
+    fn run_until_per_mcycle(emu: &mut Emulator, target: u64, fb: &mut Frame) -> RunResult {
+        let Hw { cpu, sys, stop_on } = &mut emu.hw;
+        let start = sys.hot.clock();
+        let stop = Events::ALWAYS_STOP | *stop_on;
+        let mut ctx = Ctx::new(emu.mem, sys, fb, &mut [], stop, target);
+        cpu.run(&mut PerMcycle(&mut ctx));
+        RunResult {
+            events: ctx.events,
+            clocks: ctx.clock() - start,
+            audio_samples: 0,
+        }
+    }
+
+    /// Runs a HALT loop (`IE = ie`, `TAC = tac`, optionally in double
+    /// speed) by `run_until` calls with odd targets, once with the
+    /// skip-to-deadline idling and once one M-cycle at a time, and checks
+    /// that every call ends on the same clock with the same events and
+    /// state. Returns the number of wake-ups (LD B,B after the HALT).
+    fn halted_skip_matches_per_mcycle(ie: u8, tac: u8, double: bool) -> usize {
+        let mut program = vec![];
+        if double {
+            // LD A,01; LDH (4D),A; STOP
+            program.extend_from_slice(&[0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00]);
+        }
+        program.extend_from_slice(&[
+            0x3E, tac, 0xE0, 0x07, // LD A,tac; LDH (07),A
+            0x3E, ie, 0xE0, 0xFF, // LD A,ie; LDH (FF),A (IME stays off)
+            0xAF, 0xE0, 0x0F, // XOR A; LDH (0F),A
+            0x76, 0x40, // HALT; LD B,B
+            0x18, 0xF9, // JR -7 (back to XOR A)
+        ]);
+        let a = with_program(&program, 0x80);
+        let b = with_program(&program, 0x80);
+        a.set_stop_events(Events::LD_B_B);
+        b.set_stop_events(Events::LD_B_B);
+        let mcycle = if double { 2 } else { 4 };
+        let mut fb = frame();
+        let (mut target, mut wakeups) = (0, 0);
+        for _ in 0..40 {
+            target = target.max(a.clock()) + 12_345;
+            let ra = a.run_until(target, &mut fb, &mut []);
+            let rb = run_until_per_mcycle(b, target, &mut fb);
+            assert_eq!((ra.clocks, ra.events), (rb.clocks, rb.events));
+            assert_eq!(a.clock(), b.clock());
+            assert_eq!(a.registers(), b.registers());
+            assert_eq!(a.hw.cpu.halted(), b.hw.cpu.halted());
+            for reg in [0xFF04, 0xFF05, 0xFF0F, 0xFF41, 0xFF44] {
+                assert_eq!(a.peek(reg), b.peek(reg), "{reg:#06x}");
+            }
+            if ra.events.contains(Events::LD_B_B) {
+                wakeups += 1;
+            } else if ra.events.is_empty() {
+                // Still halted: the call ends on the first M-cycle
+                // boundary at or after the target.
+                assert!(a.clock() >= target && a.clock() - target < mcycle);
+            }
+        }
+        wakeups
+    }
+
+    #[test]
+    fn halted_skip_wakes_like_per_mcycle_idling() {
+        // Timer IRQ (TIMA at 262144 Hz and 4096 Hz).
+        assert!(halted_skip_matches_per_mcycle(0x04, 0x05, false) > 10);
+        assert!(halted_skip_matches_per_mcycle(0x04, 0x04, true) >= 2);
+        // VBlank IRQ.
+        assert!(halted_skip_matches_per_mcycle(0x01, 0x00, false) > 3);
+        assert!(halted_skip_matches_per_mcycle(0x01, 0x00, true) > 3);
+        // No IRQ enabled: every call ends at its run target, mid-skip.
+        assert_eq!(halted_skip_matches_per_mcycle(0x00, 0x05, false), 0);
+        assert_eq!(halted_skip_matches_per_mcycle(0x00, 0x05, true), 0);
+    }
+
+    #[test]
+    fn stopped_and_locked_skip_matches_per_mcycle() {
+        // XOR A; LDH (00),A (select both button groups); STOP; LD B,B;
+        // JR -5 (back to STOP); then an invalid opcode (D3) locks up.
+        let program = [0xAF, 0xE0, 0x00, 0x10, 0x00, 0x40, 0x18, 0xFB];
+        let locked = [0xD3];
+        for (program, held) in [
+            (&program[..], Buttons::START),
+            (&program[..], Buttons::EMPTY),
+            (&locked[..], Buttons::EMPTY),
+        ] {
+            let a = with_program(program, 0x80);
+            let b = with_program(program, 0x80);
+            a.set_stop_events(Events::LD_B_B);
+            b.set_stop_events(Events::LD_B_B);
+            let mut fb = frame();
+            let mut target = 0;
+            for i in 0..30 {
+                // A button held from the start wakes STOP after one idle
+                // M-cycle; otherwise a press between calls wakes it.
+                let buttons = if i % 7 == 6 { Buttons::A } else { held };
+                a.set_buttons(buttons);
+                b.set_buttons(buttons);
+                target = target.max(a.clock()) + 5_001;
+                let ra = a.run_until(target, &mut fb, &mut []);
+                let rb = run_until_per_mcycle(b, target, &mut fb);
+                assert_eq!((ra.clocks, ra.events), (rb.clocks, rb.events));
+                assert_eq!(a.registers(), b.registers());
+            }
+        }
+    }
+
+    #[test]
+    fn step_while_halted_is_one_mcycle() {
+        for (double, mcycle) in [(false, 4), (true, 2)] {
+            let mut program = vec![];
+            if double {
+                program.extend_from_slice(&[0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00]);
+            }
+            // LD A,01; LDH (FF),A (IE = VBlank); XOR A; LDH (0F),A; HALT
+            program.extend_from_slice(&[0x3E, 0x01, 0xE0, 0xFF, 0xAF, 0xE0, 0x0F, 0x76]);
+            let emu = with_program(&program, 0x80);
+            let mut fb = frame();
+            while !emu.hw.cpu.halted() {
+                let _ = emu.step(&mut fb, &mut []);
+            }
+            // Every step is one idle M-cycle until VBlank sets IF.
+            let mut steps = 0;
+            while emu.hw.cpu.halted() {
+                let start = emu.clock();
+                let r = emu.step(&mut fb, &mut []);
+                assert_eq!((r.clocks, emu.clock() - start), (mcycle, mcycle));
+                steps += 1;
+            }
+            assert!(steps > 100, "{steps}");
+            assert_eq!(emu.peek(0xFF44), 144);
+        }
+    }
+
+    #[test]
+    fn speed_switch_pause_is_unchanged() {
+        // LD A,01; LDH (4D),A; STOP (to double speed), the same again (back
+        // to single speed), then LD B,B.
+        let program = [
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40,
+        ];
+        // By single steps: each STOP step is its fetch plus the pause.
+        let emu = with_program(&program, 0x80);
+        let mut fb = frame();
+        let mut seen = vec![];
+        for _ in 0..7 {
+            let r = emu.step(&mut fb, &mut []);
+            seen.push((
+                r.clocks,
+                emu.clock(),
+                emu.peek(0xFF04),
+                emu.peek(0xFF41),
+                emu.peek(0xFF44),
+            ));
+        }
+        assert_eq!(
+            seen,
+            [
+                (8, 8, 0, 134, 0),
+                (12, 20, 0, 134, 0),
+                (4104, 4124, 0, 130, 9),
+                (2, 4126, 0, 130, 9),
+                (4, 4130, 0, 130, 9),
+                (6, 4136, 0, 130, 9),
+                (8202, 12338, 0, 130, 27),
+            ]
+        );
+        // A run target in the middle of a pause ends the call after it.
+        let emu = with_program(&program, 0x80);
+        let r = emu.run_until(emu.clock() + 100, &mut fb, &mut []);
+        assert_eq!((r.clocks, emu.clock()), (4124, 4124));
     }
 
     #[test]

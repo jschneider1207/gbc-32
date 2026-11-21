@@ -15,7 +15,7 @@ Measurement: `RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core
 --release --target thumbv7em-none-eabihf --target-dir target/codesize`, then
 `nm -S -C --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
 on each object in the rlib. Sizes of same-named symbols (CGU copies) are
-summed. Sizes as of ADR 0011 step 4 (lazy timer: the tick is only the
+summed. Sizes as of ADR 0011 step 4, unchanged by step 5 (lazy timer: the tick is only the
 countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
@@ -54,12 +54,15 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,382,733,300 |
+| cpu_instrs.gb | 1,382,484,838 |
 | cgb_sound.gb | 622,018,571 |
-| cgb-acid2.gbc | 697,187,547 |
+| cgb-acid2.gbc | 13,094,335 |
 
 (ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and
-928.5 M: -28.0%, -32.6% and -24.9%.)
+928.5 M: -28.0%, -32.6% and -24.9%. ADR 0011 step 5, HALT/STOP idling
+straight to the next deadline, took cgb-acid2 from 697.2 M to 13.1 M
+(-98.1%: it spends most of its time halted waiting for VBlank);
+cpu_instrs -0.02%, cgb_sound unchanged.)
 
 Run: `scripts/check-bench.sh`. Update the baseline:
 `scripts/check-bench.sh --update-baseline`.

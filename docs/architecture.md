@@ -213,7 +213,14 @@ out, `Ctx::boundary` runs every kind due at the current clock in
 `EventKind` declaration order (fixed, so same-clock events are
 deterministic), each handler setting its next deadline, then reschedules
 the countdown; register writes that move a deadline (LCDC, SC, DIV, TIMA,
-TMA, TAC, STOP) reschedule too. On it so far: the TIMA reload (`Timer`),
+TMA, TAC, STOP) reschedule too. A halted, stopped, locked-up or powered-off CPU
+idles through `Bus::idle_halted`, which `Ctx` implements as one skip
+straight to the next deadline (`ceil(budget / mcycle)` M-cycles, at least
+one, then `boundary`): only a deadline can change `IE & IF`, a stop
+wake-up or the end of the call, so the wake-up lands on the same M-cycle
+as idling one M-cycle at a time. The CGB speed-switch pause skips the same
+way, a deadline at a time. `Emulator::step` targets `clock + 1`, so its
+halted step stays one M-cycle. On the event table so far: the TIMA reload (`Timer`),
 the serial bit clock (`Serial`) and the PPU's VBlank (`Ppu`). The timer
 (`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
 of the clock (rebased on DIV writes and speed switches), computes DIV and
