@@ -12,9 +12,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
+# Test ROMs: $TEST_ROMS (default test-roms/, e.g. the main checkout's from a
+# git worktree).
+ROMS_DIR=${TEST_ROMS:-test-roms}
 BASELINE=perf/bench-baseline.txt
 THRESHOLD_PCT=3
-# ROM (relative to test-roms/) and emulated seconds. Changing this list or
+# ROM (relative to $ROMS_DIR, or `synth:<name>` for a ROM tools/bench builds
+# in memory, docs/perf.md) and emulated seconds. Changing this list or
 # the durations changes every count: update the baseline in the same commit.
 BENCHES=(
   "blargg/cpu_instrs/cpu_instrs.gb 20"
@@ -31,21 +35,29 @@ esac
 
 command -v valgrind >/dev/null || { echo "check-bench: valgrind not found" >&2; exit 2; }
 
-cargo build --release -p bench --quiet
+# Run the binary cargo just built, wherever CARGO_TARGET_DIR or a cargo config
+# put it: a hard-coded target/release/bench may be stale.
+bench=$(cargo build --release -p bench --quiet --message-format=json \
+  | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
+[ -n "$bench" ] && [ -x "$bench" ] || { echo "check-bench: cannot find the bench binary cargo built" >&2; exit 2; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 declare -A current
 for b in "${BENCHES[@]}"; do
   read -r rom secs <<<"$b"
-  path=test-roms/$rom
-  [ -f "$path" ] || { echo "check-bench: $path missing (run scripts/fetch-test-roms.sh)" >&2; exit 2; }
-  want=$(awk -v r="$rom" '$2 == r { print $1 }' acceptance/test-roms.sha256)
-  have=$(sha256sum "$path" | cut -d' ' -f1)
-  [ -n "$want" ] && [ "$want" = "$have" ] || { echo "check-bench: $path does not match acceptance/test-roms.sha256" >&2; exit 2; }
+  if [[ $rom == synth:* ]]; then
+    path=$rom
+  else
+    path=$ROMS_DIR/$rom
+    [ -f "$path" ] || { echo "check-bench: $path missing (run scripts/fetch-test-roms.sh or set TEST_ROMS)" >&2; exit 2; }
+    want=$(awk -v r="$rom" '$2 == r { print $1 }' acceptance/test-roms.sha256)
+    have=$(sha256sum "$path" | cut -d' ' -f1)
+    [ -n "$want" ] && [ "$want" = "$have" ] || { echo "check-bench: $path does not match acceptance/test-roms.sha256" >&2; exit 2; }
+  fi
   out=$(valgrind --tool=callgrind --callgrind-out-file="$tmp/cg.out" \
     --toggle-collect='*run_emulation*' \
-    target/release/bench "$path" "$secs" 2>&1) || { echo "$out" >&2; exit 2; }
+    "$bench" "$path" "$secs" 2>&1) || { echo "$out" >&2; exit 2; }
   ir=$(sed -n 's/^==[0-9]*== Collected : \([0-9]*\).*/\1/p' <<<"$out")
   [ -n "$ir" ] && [ "$ir" -gt 0 ] || { echo "check-bench: no Ir count for $rom" >&2; echo "$out" >&2; exit 2; }
   current[$rom]=$ir
