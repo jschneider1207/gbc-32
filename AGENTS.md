@@ -227,3 +227,8 @@ every turn, so:
   helps (e.g. `// Pan Docs: STAT IRQ blocking`).
 - Use unit tests for small, well-defined behavior (opcode flags, MBC
   register decoding); ROM tests cover the rest.
+- **A test only counts once you've seen it fail.** For a test that guards a
+  fix or a check, revert or break the guarded code, run the test, see it
+  fail, then restore. Report the result. "It would fail by reading the
+  code" is not verification. Do the mutation in a scratch `git worktree`
+  if other agents share the tree.
