@@ -161,3 +161,36 @@ exact even when the LCD goes off and on within one run call, which polling
 `lcd_enabled()` after each call can miss. Front ends and `romtest` show
 white while it is true. (Requested by the romtest integrity review; see
 ADR 0007, amendments.) Additive only; nothing else in the API changed.
+
+### 2026-11-21: M0 hardware review (frame timing, LCD enable, RTC, short ROMs)
+
+The M0 milestone-close hardware review found four places where the
+skeleton or the API documentation disagreed with the hardware. Changes:
+
+- **`FRAME_READY` fires at the start of VBlank** (LY=144, 144 x 456 =
+  65,664 clocks into the frame; Pan Docs "LCD Status"), as the `Events`
+  documentation already said, instead of at the end of the frame (70,224).
+  The frame period is still `FRAME_CLOCKS` = 70,224. After `load`/`reset`
+  the first frame is ready at clock 65,664, then every 70,224 clocks. The
+  PPU still starts at LY=0 dot 0 after a reset; starting at the phase where
+  the CGB boot ROM hands over is an M3 task (`TODO(M3)` in `ppu/mod.rs`).
+- **The first frame after the LCD is turned on is not displayed.**
+  `screen_blank()` now stays true through the first `FRAME_READY` after an
+  LCD enable and is cleared only by the second (Pan Docs LCDC.7; SameBoy
+  `Core/display.c`: enabling the LCD sets `frame_skip`, and
+  `GB_display_vblank` outputs a blank frame instead). `FRAME_READY` is
+  still reported for that frame, since its timing is real; front ends must
+  check `screen_blank()` after each `FRAME_READY` rather than assume the
+  frame is shown. This also applies when the LCD was off since power-on.
+- **`set_rtc_state` masks to the register widths** (Pan Docs MBC3: S and M
+  6 bits, H 5 bits, DL 8 bits; DH bit 0 is day bit 8, bit 6 halt, bit 7
+  day carry, the other DH bits read 0) and clamps `subsecond_clocks` to
+  `CLOCK_HZ - 1`. `RtcTime` fields are documented as raw register bits:
+  values such as S=60-63 are legal and wrap at the register width without
+  carrying. New: `RtcTime::masked` and `RtcState::masked` (what
+  `set_rtc_state` stores).
+- **ROMs shorter than 32 KiB load.** `MIN_ROM_SIZE` is now 0x150 (enough
+  for the header) instead of 0x8000, as SameBoy (`GB_load_rom`) accepts
+  short files and pads them with 0xFF. Reads past the end of a short ROM
+  return 0xFF; `peek` already does, and the M1 bus must too.
+  `LoadErrorKind::RomTooSmall` now means "can't hold the header".

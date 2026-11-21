@@ -6,8 +6,15 @@
 //! [`Emulator::eject`](crate::Emulator::eject), by a later
 //! [`Emulator::load`](crate::Emulator::load), or in a [`LoadError`].
 
-/// The smallest cartridge ROM: two 16 KiB banks (Pan Docs: 0148 ROM size).
-pub const MIN_ROM_SIZE: usize = 0x8000;
+/// The smallest ROM [`Emulator::load`](crate::Emulator::load) accepts:
+/// enough to hold the cartridge header (0100-014F).
+///
+/// Real cartridges are at least 32 KiB (two 16 KiB banks; Pan Docs: 0148
+/// ROM size), but homebrew and test ROM files can be shorter. Like SameBoy
+/// (`Core/gb.c`, `GB_load_rom`, which rounds the size up and pads with
+/// 0xFF), a short ROM is accepted and behaves as if padded with 0xFF:
+/// every read past the end of the ROM returns 0xFF.
+pub const MIN_ROM_SIZE: usize = 0x150;
 
 const HEADER_CART_TYPE: usize = 0x147;
 const HEADER_RAM_SIZE: usize = 0x149;
@@ -22,7 +29,9 @@ pub type CartBuffers<'a> = (&'a [u8], &'a mut [u8]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LoadErrorKind {
-    /// The ROM is smaller than [`MIN_ROM_SIZE`].
+    /// The ROM is too short to hold the cartridge header (smaller than
+    /// [`MIN_ROM_SIZE`]). Shorter ROMs that do hold it are accepted; see
+    /// [`MIN_ROM_SIZE`].
     RomTooSmall { len: usize },
     /// The caller's cartridge RAM buffer is smaller than the header needs
     /// (see [`cart_ram_size`]).
@@ -120,17 +129,47 @@ fn has_rtc(rom: &[u8]) -> bool {
     matches!(rom[HEADER_CART_TYPE], 0x0F | 0x10)
 }
 
-/// MBC3 clock registers (Pan Docs: MBC3).
+/// MBC3 clock registers (Pan Docs: MBC3, "The Clock Counter Registers").
+///
+/// The fields are the raw register bits, not a validated time. Each
+/// register holds only its hardware width ([`Emulator::set_rtc_state`]
+/// masks to it): values a real clock never reaches, such as `seconds` =
+/// 60-63 (a game can write them), are legal; such a register counts up to
+/// the top of its width and wraps to 0 without carrying into the next
+/// register.
+///
+/// [`Emulator::set_rtc_state`]: crate::Emulator::set_rtc_state
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtcTime {
+    /// RTC S, 6 bits (0-63).
     pub seconds: u8,
+    /// RTC M, 6 bits (0-63).
     pub minutes: u8,
+    /// RTC H, 5 bits (0-31).
     pub hours: u8,
-    /// Day counter, 0-511.
+    /// Day counter, 9 bits (0-511): RTC DL is bits 0-7, RTC DH bit 0 is
+    /// bit 8.
     pub days: u16,
+    /// RTC DH bit 6: the clock is stopped.
     pub halted: bool,
-    /// Day counter overflowed past 511.
+    /// RTC DH bit 7: the day counter overflowed past 511. Stays set until
+    /// the game clears it. (The other DH bits don't exist and read as 0.)
     pub day_carry: bool,
+}
+
+impl RtcTime {
+    /// The registers cut to their hardware widths.
+    #[must_use]
+    pub const fn masked(self) -> Self {
+        Self {
+            seconds: self.seconds & 0x3F,
+            minutes: self.minutes & 0x3F,
+            hours: self.hours & 0x1F,
+            days: self.days & 0x1FF,
+            halted: self.halted,
+            day_carry: self.day_carry,
+        }
+    }
 }
 
 /// Complete MBC3 RTC state, for the caller to save and restore. The RTC
@@ -142,11 +181,29 @@ pub struct RtcState {
     pub live: RtcTime,
     /// The copy the game reads after latching.
     pub latched: RtcTime,
-    /// Base clocks elapsed in the current second, `0..CLOCK_HZ`.
+    /// Base clocks elapsed in the current second, `0..CLOCK_HZ`
+    /// ([`CLOCK_HZ`](crate::CLOCK_HZ)).
     pub subsecond_clocks: u32,
 }
 
 impl RtcState {
+    /// [`RtcTime::masked`] for both copies, and `subsecond_clocks` clamped
+    /// below one second (`CLOCK_HZ - 1` at most). What
+    /// [`Emulator::set_rtc_state`](crate::Emulator::set_rtc_state) stores.
+    #[must_use]
+    pub const fn masked(self) -> Self {
+        let max = crate::CLOCK_HZ - 1;
+        Self {
+            live: self.live.masked(),
+            latched: self.latched.masked(),
+            subsecond_clocks: if self.subsecond_clocks > max {
+                max
+            } else {
+                self.subsecond_clocks
+            },
+        }
+    }
+
     const fn zero() -> Self {
         const T: RtcTime = RtcTime {
             seconds: 0,
@@ -266,6 +323,61 @@ mod tests {
             cart_ram_size(&[0; 0x100]),
             Err(LoadErrorKind::RomTooSmall { len: 0x100 })
         );
+    }
+
+    #[test]
+    fn rom_must_hold_the_header() {
+        // Anything that holds the header (0100-014F) loads, as in SameBoy.
+        assert_eq!(MIN_ROM_SIZE, 0x150);
+        assert_eq!(
+            cart_ram_size(&[0; 0x14F]),
+            Err(LoadErrorKind::RomTooSmall { len: 0x14F })
+        );
+        assert!(Cart::new(&[0; 0x14F], &mut []).is_err());
+        let mut rom = [0u8; 0x150];
+        rom[HEADER_RAM_SIZE] = 0x02;
+        assert_eq!(cart_ram_size(&rom), Ok(0x2000));
+        assert!(Cart::new(&rom, &mut [0; 0x2000]).is_ok());
+    }
+
+    #[test]
+    fn rtc_state_masks_to_register_widths() {
+        let wide = RtcTime {
+            seconds: 0xFF,
+            minutes: 0xFF,
+            hours: 0xFF,
+            days: 0xFFFF,
+            halted: true,
+            day_carry: true,
+        };
+        let m = wide.masked();
+        assert_eq!(
+            (m.seconds, m.minutes, m.hours, m.days),
+            (0x3F, 0x3F, 0x1F, 0x1FF)
+        );
+        assert!(m.halted && m.day_carry);
+        // Out-of-range values that fit the register are kept as they are.
+        let odd = RtcTime {
+            seconds: 60,
+            minutes: 63,
+            hours: 24,
+            days: 511,
+            ..RtcTime::default()
+        };
+        assert_eq!(odd.masked(), odd);
+        let s = RtcState {
+            live: wide,
+            latched: odd,
+            subsecond_clocks: u32::MAX,
+        }
+        .masked();
+        assert_eq!((s.live, s.latched), (m, odd));
+        assert_eq!(s.subsecond_clocks, crate::CLOCK_HZ - 1);
+        let s = RtcState {
+            subsecond_clocks: 1234,
+            ..RtcState::default()
+        };
+        assert_eq!(s.masked(), s);
     }
 
     #[test]

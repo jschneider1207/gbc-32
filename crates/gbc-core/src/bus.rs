@@ -12,9 +12,12 @@ impl Emulator<'_> {
     ///
     /// Skeleton: no banking yet (ROM is read linearly, WRAM bank 1 and VRAM
     /// bank 0 are mapped) and I/O registers other than LCDC read 0xFF.
+    /// Reads past the end of a short ROM return 0xFF, as if it were padded
+    /// to a full bank ([`MIN_ROM_SIZE`](crate::MIN_ROM_SIZE)).
     pub fn peek(&self, addr: u16) -> u8 {
         let a = usize::from(addr);
         match addr {
+            // 0xFF past the end of a short ROM (SameBoy pads with 0xFF).
             0x0000..=0x7FFF => self.hw.cart.rom.get(a).copied().unwrap_or(0xFF),
             0x8000..=0x9FFF => self.mem.vram[a - 0x8000],
             0xA000..=0xBFFF => self.hw.cart.ram().get(a - 0xA000).copied().unwrap_or(0xFF),

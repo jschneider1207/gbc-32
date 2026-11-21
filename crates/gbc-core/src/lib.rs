@@ -363,12 +363,15 @@ impl<'a> Emulator<'a> {
     /// abandoned: no `FRAME_READY` is reported for it and the buffer's
     /// contents are unspecified. While the LCD is off
     /// ([`Emulator::lcd_enabled`] is false) no frames complete and the
-    /// screen should be shown as white ([`WHITE`]); keep showing that until
-    /// the next `FRAME_READY` after the LCD is turned back on. The buffer
-    /// may be swapped while the LCD is off, as nothing is being drawn.
+    /// screen should be shown as white ([`WHITE`]). The first frame after
+    /// the LCD is turned back on is not displayed by the hardware either:
+    /// its `FRAME_READY` is reported (the timing is real), but the screen
+    /// stays white until the `FRAME_READY` after it. The buffer may be
+    /// swapped while the LCD is off, as nothing is being drawn.
     /// [`Emulator::screen_blank`] says whether that white screen is
-    /// showing; unlike polling `lcd_enabled` after each call, it also
-    /// catches the LCD going off and back on within one call.
+    /// showing (check it after every `FRAME_READY`); unlike polling
+    /// `lcd_enabled` after each call, it also catches the LCD going off
+    /// and back on within one call.
     ///
     /// # Audio
     ///
@@ -445,12 +448,15 @@ impl<'a> Emulator<'a> {
     }
 
     /// Whether the screen is blank (white, [`WHITE`]): true while the LCD
-    /// is off, and after it is turned back on until the next
-    /// [`Events::FRAME_READY`]. When false, the screen shows the frame of
-    /// the last `FRAME_READY` (if there was one since the last load or
-    /// reset). The flag is set when the LCD is turned off and cleared when
-    /// a frame completes, so it is exact even if the LCD went off and on
-    /// again within a single run call (see [`Emulator::run_until`]).
+    /// is off, and after it is turned back on through the first
+    /// [`Events::FRAME_READY`], which the hardware does not display (Pan
+    /// Docs: LCDC.7; SameBoy Core/display.c, `frame_skip`). It is cleared
+    /// by the second `FRAME_READY` after the LCD is turned on. When false,
+    /// the screen shows the frame of the last `FRAME_READY` (if there was
+    /// one since the last load or reset). The flag is set when the LCD is
+    /// turned off and cleared only by a displayed frame, so it is exact
+    /// even if the LCD went off and on again within a single run call (see
+    /// [`Emulator::run_until`]).
     #[inline]
     pub fn screen_blank(&self) -> bool {
         self.hw.ppu.screen_blank()
@@ -480,9 +486,13 @@ impl<'a> Emulator<'a> {
 
     /// Restores the MBC3 RTC state (e.g. from a save, advanced to the
     /// current wall-clock time). Ignored if the cartridge has no RTC.
+    ///
+    /// The registers are masked to their hardware widths and
+    /// `subsecond_clocks` is clamped below one second (see [`RtcTime`] and
+    /// [`RtcState`]), so `rtc_state()` afterwards may differ from `state`.
     pub fn set_rtc_state(&mut self, state: RtcState) {
         if self.hw.cart.has_rtc {
-            self.hw.cart.rtc = state;
+            self.hw.cart.rtc = state.masked();
         }
     }
 }
@@ -497,7 +507,7 @@ mod tests {
     /// A heap-allocated emulator with a blank 32 KiB ROM loaded. Leaks
     /// everything, which keeps the lifetimes trivial in tests.
     fn emulator() -> &'static mut Emulator<'static> {
-        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        let rom = vec![0u8; 0x8000].leak();
         rom[0x100] = 0xAB;
         let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
         let emu = Emulator::init(Box::leak(Box::new_uninit()));
@@ -666,15 +676,25 @@ mod tests {
         assert_eq!(emu.clock(), clock);
     }
 
+    /// Clocks from LY=0 dot 0 to the start of VBlank (LY=144).
+    const VBLANK: u64 = 144 * 456;
+
     #[test]
-    fn run_frame_produces_white_frame_after_frame_clocks() {
+    fn run_frame_produces_white_frame_at_vblank() {
         let emu = emulator();
         let mut fb = frame();
         let r = emu.run_frame(&mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
-        assert_eq!(r.clocks, u64::from(FRAME_CLOCKS));
+        // FRAME_READY at the start of VBlank, not at the end of the frame.
+        assert_eq!(r.clocks, VBLANK);
         assert_eq!(r.audio_samples, 0);
         assert!(fb.iter().all(|&p| p == WHITE));
+        // Then one frame every FRAME_CLOCKS.
+        for n in 1..4 {
+            let r = emu.run_frame(&mut fb, &mut []);
+            assert_eq!(r.events, Events::FRAME_READY);
+            assert_eq!(emu.clock(), VBLANK + n * u64::from(FRAME_CLOCKS));
+        }
     }
 
     #[test]
@@ -696,7 +716,7 @@ mod tests {
         let mut fb = frame();
         let r = emu.run_cycles(100_000, &mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
-        assert_eq!(emu.clock(), u64::from(FRAME_CLOCKS));
+        assert_eq!(emu.clock(), VBLANK);
     }
 
     #[test]
@@ -712,19 +732,103 @@ mod tests {
         emu.hw.ppu.write_lcdc(0x91); // back on: still blank
         assert!(emu.lcd_enabled());
         assert!(emu.screen_blank());
-        // The PPU restarts at line 0, so the next frame takes a full frame.
+        // The PPU restarts at line 0, so the first frame is ready at the
+        // next VBlank. The hardware doesn't display it: still blank.
         let start = emu.clock();
         let r = emu.run_cycles(100_000, &mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
-        assert_eq!(emu.clock() - start, u64::from(FRAME_CLOCKS));
+        assert_eq!(emu.clock() - start, VBLANK);
+        assert!(emu.screen_blank());
+        // The second frame is displayed.
+        let r = emu.run_cycles(100_000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::FRAME_READY);
+        assert_eq!(emu.clock() - start, VBLANK + u64::from(FRAME_CLOCKS));
         assert!(!emu.screen_blank());
         // Writes that keep the LCD on don't blank it.
         emu.hw.ppu.write_lcdc(0x93);
         assert!(!emu.screen_blank());
-        // Off and on again with no frame in between: blank.
+        // Off and on again with no frame in between: blank, through the
+        // first frame after.
         emu.hw.ppu.write_lcdc(0x13);
         emu.hw.ppu.write_lcdc(0x93);
         assert!(emu.screen_blank());
+        let _ = emu.run_frame(&mut fb, &mut []);
+        assert!(emu.screen_blank());
+        let _ = emu.run_frame(&mut fb, &mut []);
+        assert!(!emu.screen_blank());
+    }
+
+    #[test]
+    fn lcd_on_from_power_off_skips_the_first_frame_too() {
+        // The LCD was never on since `init`: turning it on still hides the
+        // first frame.
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let mut fb = frame();
+        assert!(emu.screen_blank());
+        emu.hw.ppu.write_lcdc(0x91);
+        assert!(emu.screen_blank());
+        let r = emu.run_frame(&mut fb, &mut []);
+        assert_eq!(r.events, Events::FRAME_READY);
+        assert!(emu.screen_blank());
+        let _ = emu.run_frame(&mut fb, &mut []);
+        assert!(!emu.screen_blank());
+    }
+
+    #[test]
+    fn short_rom_loads_and_reads_ff_past_its_end() {
+        let rom = vec![0x11u8; MIN_ROM_SIZE].leak();
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        rom[0x147] = 0;
+        rom[0x149] = 0;
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        assert_eq!(emu.peek(0x0100), 0x11);
+        assert_eq!(emu.peek(0x014F), 0x11);
+        assert_eq!(emu.peek(0x0150), 0xFF);
+        assert_eq!(emu.peek(0x7FFF), 0xFF);
+        let short = vec![0u8; MIN_ROM_SIZE - 1].leak();
+        let err = emu.load(short, &mut [], Config::default()).unwrap_err();
+        assert_eq!(
+            err.kind,
+            LoadErrorKind::RomTooSmall {
+                len: MIN_ROM_SIZE - 1
+            }
+        );
+    }
+
+    #[test]
+    fn set_rtc_state_masks_registers() {
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x147] = 0x10; // MBC3+TIMER+RAM+BATTERY
+        rom[0x149] = 0x03;
+        let ram = vec![0u8; 0x8000].leak();
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, ram, Config::default()).unwrap();
+        assert_eq!(emu.rtc_state(), Some(RtcState::default()));
+        let t = RtcTime {
+            seconds: 0xFF,
+            minutes: 0x7F,
+            hours: 0x3F,
+            days: 0x3FF,
+            halted: true,
+            day_carry: false,
+        };
+        emu.set_rtc_state(RtcState {
+            live: t,
+            latched: RtcTime {
+                seconds: 61,
+                ..RtcTime::default()
+            },
+            subsecond_clocks: CLOCK_HZ,
+        });
+        let s = emu.rtc_state().unwrap();
+        assert_eq!(
+            (s.live.seconds, s.live.minutes, s.live.hours, s.live.days),
+            (0x3F, 0x3F, 0x1F, 0x1FF)
+        );
+        assert!(s.live.halted && !s.live.day_carry);
+        // 61 fits the 6-bit register: kept, not carried into minutes.
+        assert_eq!((s.latched.seconds, s.latched.minutes), (61, 0));
+        assert_eq!(s.subsecond_clocks, CLOCK_HZ - 1);
     }
 
     #[test]
@@ -740,7 +844,8 @@ mod tests {
             }
         }
         assert_eq!(emu.clock(), target);
-        assert_eq!(frames, CLOCK_HZ / FRAME_CLOCKS);
+        // Frames are ready at VBLANK + k * FRAME_CLOCKS.
+        assert_eq!(frames, (target - VBLANK) / u64::from(FRAME_CLOCKS) + 1);
     }
 
     #[test]

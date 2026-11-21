@@ -14,7 +14,9 @@ bitset! {
     pub struct Events(u16) {
         /// A frame was completed (the PPU entered VBlank, LY = 144). The
         /// frame buffer passed to this call now holds the whole frame.
-        /// Always stops. Never fires while the LCD is off.
+        /// Always stops. Never fires while the LCD is off. The first frame
+        /// after the LCD is turned on is reported but not displayed; see
+        /// [`Emulator::screen_blank`](crate::Emulator::screen_blank).
         const FRAME_READY = 1 << 0;
         /// The audio buffer passed to this call is full. Always stops.
         /// Never fires for an empty audio buffer.
