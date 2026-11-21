@@ -62,3 +62,23 @@ Run: `scripts/check-bench.sh`. Update the baseline:
 Rule: a baseline change is committed together with the change that caused it,
 with the measured delta per ROM and the reason in the commit body. Changing the
 ROM list or durations also needs a baseline update in the same commit.
+
+## Behavior fingerprint
+
+`bench --fingerprint [--seconds N] [--root DIR]` (N defaults to 3, root to
+`test-roms`) prints one line per ROM, `<16-hex FNV-1a hash> <path>`, sorted by
+path, so two builds can be compared bit for bit (ADR 0011 "Verification").
+Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`, `misc` and
+`emulator-only`, `blargg`, `age-test-roms`, `same-suite` and `cgb-acid2`;
+a ROM that fails to load prints `LOAD-ERROR <path>`. Each ROM runs on the
+only supported model (CGB C, default palettes) in 456-clock `run_until`
+chunks with `LD_B_B` and `SERIAL_TX` stops on. After each chunk the hash folds
+the clock, the chunk's clocks and events, the CPU registers, the serial byte
+(on `SERIAL_TX`) and, via `peek`, SB SC DIV TIMA TMA TAC IF LY; at the end it
+folds WRAM `C000-DFFF` (the mapped bank only, since `peek` cannot switch
+banks). ROMs run in parallel; output order does not depend on it.
+
+`scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
+worktree and the working tree, runs both fingerprints with the same args,
+lists the differing ROMs and exits 0 only if none differ. Use it on commits
+that restructure core timing, which must not change behavior.
