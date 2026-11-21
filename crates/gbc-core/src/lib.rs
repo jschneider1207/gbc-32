@@ -427,7 +427,9 @@ impl<'a> Emulator<'a> {
     }
 
     /// Executes one instruction (or interrupt dispatch, or one idle M-cycle
-    /// while halted, stopped or locked up). The frame buffer rules of
+    /// while halted, stopped or locked up). The step that leaves HALT also
+    /// includes the CGB wake-up M-cycle before the next instruction or
+    /// dispatch (`docs/reference/halt.md`). The frame buffer rules of
     /// [`Emulator::run_until`] apply.
     pub fn step(&mut self, frame: &mut Frame, audio: &mut [StereoSample]) -> RunResult {
         self.run(None, frame, audio)
