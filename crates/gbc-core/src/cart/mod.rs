@@ -1,5 +1,5 @@
-//! Cartridge: ROM, external RAM, mappers and RTC. Skeleton only: mappers
-//! arrive in M1 (MBC1) and M4 (the rest).
+//! Cartridge: ROM, external RAM, mappers and RTC. No MBC and MBC1 since
+//! M1; the other mappers arrive in M4.
 //!
 //! The ROM and cartridge RAM are borrowed from the caller for the
 //! emulator's lifetime `'a` (ADR 0006) and handed back by
@@ -221,16 +221,61 @@ impl RtcState {
     }
 }
 
+/// The memory bank controller, from the header's cartridge type (0147).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mapper {
+    /// No MBC: 32 KiB of ROM, optional RAM that is always enabled (Pan
+    /// Docs: No MBC).
+    None,
+    /// MBC1 (types 01-03). TODO(M4): MBC1M multicarts.
+    Mbc1,
+}
+
+impl Mapper {
+    fn from_header(cart_type: u8) -> Self {
+        match cart_type {
+            0x01..=0x03 => Self::Mbc1,
+            // TODO(M4): MBC2, MBC3, MBC5 and the rest; until then they
+            // run as if they had no MBC.
+            _ => Self::None,
+        }
+    }
+}
+
+/// Bytes per switchable ROM bank and RAM bank.
+const ROM_BANK: usize = 0x4000;
+const RAM_BANK: usize = 0x2000;
+
 pub(crate) struct Cart<'a> {
     pub(crate) rom: &'a [u8],
     /// The caller's whole RAM buffer, kept so that eject returns all of it.
     /// Emulation must use only `ram()`, so behavior and the save file
     /// depend on the header, not on the buffer length.
     ram_buf: &'a mut [u8],
-    /// [`cart_ram_size`] of the ROM.
+    /// [`cart_ram_size`] of the ROM (0 or a power of two).
     ram_len: usize,
     pub(crate) has_rtc: bool,
     pub(crate) rtc: RtcState,
+    mapper: Mapper,
+    /// The ROM size rounded up to a whole bank, then to a power of two (at
+    /// least 32 KiB), minus one. Bank offsets wrap with this mask, so bank
+    /// numbers past the end of the ROM mirror like on hardware (SameBoy
+    /// `GB_load_rom` rounds the same way). Recorded at load.
+    rom_mask: usize,
+    /// The ROM visible at 0000-3FFF and 4000-7FFF: at most 0x4000 bytes,
+    /// recomputed on bank switches only. Shorter (or empty) where the ROM
+    /// file ends; reads past the end of a window return 0xFF, as if the
+    /// ROM were padded with 0xFF (the M0 short-ROM rule).
+    rom_lo: &'a [u8],
+    rom_hi: &'a [u8],
+    /// Offset of the RAM bank visible at A000-BFFF.
+    ram_off: usize,
+    ram_enabled: bool,
+    /// MBC1 registers: BANK1 (5 bits, 2000-3FFF), BANK2 (2 bits,
+    /// 4000-5FFF), MODE (1 bit, 6000-7FFF) (Pan Docs: MBC1; GBCTR: MBC1).
+    bank1: u8,
+    bank2: u8,
+    mode: u8,
 }
 
 impl<'a> Cart<'a> {
@@ -242,20 +287,35 @@ impl<'a> Cart<'a> {
             ram_len: 0,
             has_rtc: false,
             rtc: RtcState::zero(),
+            mapper: Mapper::None,
+            rom_mask: 0,
+            rom_lo: &[],
+            rom_hi: &[],
+            ram_off: 0,
+            ram_enabled: false,
+            bank1: 1,
+            bank2: 0,
+            mode: 0,
         }
     }
 
-    /// On error, the buffers come back in the [`LoadError`].
+    /// On error, the buffers come back in the [`LoadError`]. The mapper is
+    /// in its power-on state.
     pub(crate) fn new(rom: &'a [u8], ram: &'a mut [u8]) -> Result<Self, LoadError<'a>> {
         let kind = match cart_ram_size(rom) {
             Ok(needed) if ram.len() >= needed => {
-                return Ok(Self {
+                let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
+                let mut cart = Self {
                     rom,
                     ram_buf: ram,
                     ram_len: needed,
                     has_rtc: has_rtc(rom),
-                    rtc: RtcState::zero(),
-                });
+                    mapper: Mapper::from_header(rom[HEADER_CART_TYPE]),
+                    rom_mask: padded.next_power_of_two() - 1,
+                    ..Self::empty()
+                };
+                cart.reset();
+                return Ok(cart);
             }
             Ok(needed) => LoadErrorKind::CartRamTooSmall {
                 needed,
@@ -281,9 +341,8 @@ impl<'a> Cart<'a> {
         &self.ram_buf[..self.ram_len]
     }
 
-    /// Mutable [`Cart::ram`], for the mappers.
-    #[inline]
-    #[allow(dead_code)] // Used by the mappers from M1 on.
+    /// Mutable [`Cart::ram`], for tests.
+    #[cfg(test)]
     pub(crate) fn ram_mut(&mut self) -> &mut [u8] {
         &mut self.ram_buf[..self.ram_len]
     }
@@ -296,7 +355,101 @@ impl<'a> Cart<'a> {
 
     /// Mapper state back to power-on. Cartridge RAM and the RTC keep their
     /// contents (battery backed).
-    pub(crate) fn reset(&mut self) {}
+    pub(crate) fn reset(&mut self) {
+        self.bank1 = 1;
+        self.bank2 = 0;
+        self.mode = 0;
+        // Without an MBC there is no enable register.
+        self.ram_enabled = self.mapper == Mapper::None;
+        self.update_banks();
+    }
+
+    /// A read of 0000-7FFF.
+    #[inline(always)]
+    pub(crate) fn read_rom(&self, addr: u16) -> u8 {
+        let window = if addr < 0x4000 {
+            self.rom_lo
+        } else {
+            self.rom_hi
+        };
+        // One compare against the window length (ADR 0008).
+        match window.get(usize::from(addr) & (ROM_BANK - 1)) {
+            Some(&v) => v,
+            None => 0xFF,
+        }
+    }
+
+    /// A read of A000-BFFF.
+    #[inline]
+    pub(crate) fn read_ram(&self, addr: u16) -> u8 {
+        if !self.ram_enabled || self.ram_len == 0 {
+            return 0xFF;
+        }
+        self.ram_buf[self.ram_index(addr)]
+    }
+
+    /// A write to A000-BFFF.
+    #[inline]
+    pub(crate) fn write_ram(&mut self, addr: u16, value: u8) {
+        if self.ram_enabled && self.ram_len != 0 {
+            let i = self.ram_index(addr);
+            self.ram_buf[i] = value;
+        }
+    }
+
+    /// RAM smaller than the window (2 KiB) or than the selected bank
+    /// mirrors: `ram_len` is a power of two.
+    #[inline]
+    fn ram_index(&self, addr: u16) -> usize {
+        (self.ram_off | (usize::from(addr) & (RAM_BANK - 1))) & (self.ram_len - 1)
+    }
+
+    /// A write to 0000-7FFF (the mapper's registers).
+    pub(crate) fn write_rom(&mut self, addr: u16, value: u8) {
+        match self.mapper {
+            Mapper::None => {}
+            Mapper::Mbc1 => {
+                match addr >> 13 {
+                    // RAM enable: 0A in the low nibble.
+                    0 => self.ram_enabled = value & 0x0F == 0x0A,
+                    // BANK1: 0 selects 1 (the 5-bit value, before masking
+                    // to the ROM size, is what is checked).
+                    1 => self.bank1 = (value & 0x1F).max(1),
+                    2 => self.bank2 = value & 0x03,
+                    _ => self.mode = value & 0x01,
+                }
+                self.update_banks();
+            }
+        }
+    }
+
+    /// Recomputes the ROM windows and RAM offset from the mapper registers.
+    fn update_banks(&mut self) {
+        let (lo, hi, ram) = match self.mapper {
+            Mapper::None => (0, 1, 0),
+            Mapper::Mbc1 => {
+                // Mode 1 also applies BANK2 to 0000-3FFF and to RAM (Pan
+                // Docs: MBC1, 6000-7FFF).
+                let upper = usize::from(self.bank2) << 5;
+                let hi = upper | usize::from(self.bank1);
+                if self.mode == 0 {
+                    (0, hi, 0)
+                } else {
+                    (upper, hi, usize::from(self.bank2))
+                }
+            }
+        };
+        self.rom_lo = self.rom_window(lo);
+        self.rom_hi = self.rom_window(hi);
+        self.ram_off = ram * RAM_BANK;
+    }
+
+    fn rom_window(&self, bank: usize) -> &'a [u8] {
+        let rom: &'a [u8] = self.rom;
+        let start = (bank * ROM_BANK) & self.rom_mask;
+        rom.get(start..rom.len().min(start + ROM_BANK))
+            .unwrap_or(&[])
+    }
 }
 
 #[cfg(test)]

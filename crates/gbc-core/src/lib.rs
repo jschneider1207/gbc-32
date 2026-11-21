@@ -96,6 +96,7 @@ mod joypad;
 mod memory;
 mod ppu;
 mod serial;
+mod timer;
 
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
@@ -110,11 +111,17 @@ pub use events::Events;
 pub use joypad::Buttons;
 pub use ppu::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH, WHITE};
 
+/// Direct access to the SM83 CPU, for instruction-level tests that drive it
+/// with their own [`sm83::Bus`] (`tools/sm83-tests`). Front ends don't need
+/// this; [`Emulator`] wires the CPU to the real bus.
+pub mod sm83 {
+    pub use crate::cpu::{Bus, Cpu, Registers};
+}
+
+use bus::{Ctx, Sys};
 use cart::Cart;
 use cpu::Cpu;
 use memory::Memory;
-use ppu::Ppu;
-use serial::Serial;
 
 /// Base clock rate: 4,194,304 Hz. All times in this API ("clocks") are
 /// counted in base clocks, independent of CGB double-speed mode. One
@@ -157,32 +164,23 @@ pub struct Emulator<'a> {
 /// and mapper registers fit with room to spare. Anything large and made
 /// only of integers belongs in `Memory` instead, which is zero-filled in
 /// place.
+///
+/// The CPU is kept apart from [`Sys`] (what its bus reaches) so a run call
+/// can borrow both mutably at once: `cpu.step(&mut Ctx { sys, mem, .. })`
+/// (ADR 0008).
 struct Hw<'a> {
     cpu: Cpu,
-    ppu: Ppu,
-    serial: Serial,
-    cart: Cart<'a>,
-    config: Config,
-    buttons: Buttons,
+    sys: Sys<'a>,
     /// Optional events that end a run call, besides `Events::ALWAYS_STOP`.
     stop_on: Events,
-    /// Base clocks since the last load or reset.
-    clock: u64,
 }
 
 impl Hw<'_> {
     const fn new() -> Self {
         Self {
-            cpu: Cpu::new(),
-            ppu: Ppu::new(),
-            serial: Serial::new(),
-            cart: Cart::empty(),
-            config: Config {
-                dmg_palettes: DmgPalettes::GRAYSCALE,
-            },
-            buttons: Buttons::EMPTY,
+            cpu: Cpu::powered_off(),
+            sys: Sys::new(),
             stop_on: Events::EMPTY,
-            clock: 0,
         }
     }
 }
@@ -261,8 +259,8 @@ impl<'a> Emulator<'a> {
         config: Config,
     ) -> Result<Option<CartBuffers<'a>>, LoadError<'a>> {
         let cart = Cart::new(rom, cart_ram)?;
-        let previous = core::mem::replace(&mut self.hw.cart, cart).into_buffers();
-        self.hw.config = config;
+        let previous = core::mem::replace(&mut self.hw.sys.cart, cart).into_buffers();
+        self.hw.sys.config = config;
         self.reset();
         Ok(previous)
     }
@@ -277,11 +275,12 @@ impl<'a> Emulator<'a> {
     /// buttons and palettes are cleared). Returns `None`, changing nothing,
     /// if no cartridge is inserted.
     pub fn eject(&mut self) -> Option<CartBuffers<'a>> {
-        if !self.hw.cart.is_loaded() {
+        if !self.hw.sys.cart.is_loaded() {
             return None;
         }
         self.mem.clear();
         core::mem::replace(&mut self.hw, Hw::new())
+            .sys
             .cart
             .into_buffers()
     }
@@ -290,7 +289,7 @@ impl<'a> Emulator<'a> {
     /// from the next pixel drawn.
     #[inline]
     pub fn set_dmg_palettes(&mut self, palettes: DmgPalettes) {
-        self.hw.config.dmg_palettes = palettes;
+        self.hw.sys.config.dmg_palettes = palettes;
     }
 
     /// Power cycle: the post-boot state (no boot ROM is run; registers are
@@ -299,17 +298,15 @@ impl<'a> Emulator<'a> {
     /// stop events are kept.
     pub fn reset(&mut self) {
         self.mem.clear();
-        self.hw.cpu.reset();
-        self.hw.ppu.reset();
-        self.hw.serial = Serial::new();
-        self.hw.cart.reset();
-        self.hw.clock = 0;
+        let sys = &mut self.hw.sys;
+        sys.reset(&mut self.mem);
+        self.hw.cpu.reset(sys.cart.rom, sys.cgb_mode);
     }
 
     /// Sets the buttons currently held.
     #[inline]
     pub fn set_buttons(&mut self, buttons: Buttons) {
-        self.hw.buttons = buttons;
+        self.hw.sys.buttons = buttons;
     }
 
     /// Sets which optional events (e.g. [`Events::LD_B_B`],
@@ -337,7 +334,7 @@ impl<'a> Emulator<'a> {
         frame: &mut Frame,
         audio: &mut [StereoSample],
     ) -> RunResult {
-        let target = self.hw.clock.saturating_add(clocks);
+        let target = self.hw.sys.clock.saturating_add(clocks);
         self.run_until(target, frame, audio)
     }
 
@@ -383,41 +380,53 @@ impl<'a> Emulator<'a> {
         frame: &mut Frame,
         audio: &mut [StereoSample],
     ) -> RunResult {
-        let start = self.hw.clock;
-        let stop = Events::ALWAYS_STOP | self.hw.stop_on;
-        let mut events = Events::EMPTY;
-        while self.hw.clock < target {
-            events |= self.step_inner(frame, audio);
-            if events.intersects(stop) {
-                break;
-            }
-        }
-        RunResult {
-            events,
-            clocks: self.hw.clock - start,
-            audio_samples: 0,
-        }
+        self.run(Some(target), frame, audio)
     }
 
     /// Executes one instruction (or interrupt dispatch, or one idle M-cycle
     /// while halted, stopped or locked up). The frame buffer rules of
     /// [`Emulator::run_until`] apply.
     pub fn step(&mut self, frame: &mut Frame, audio: &mut [StereoSample]) -> RunResult {
-        let start = self.hw.clock;
-        let events = self.step_inner(frame, audio);
-        RunResult {
-            events,
-            clocks: self.hw.clock - start,
-            audio_samples: 0,
-        }
+        self.run(None, frame, audio)
     }
 
-    /// Skeleton: no CPU yet, so every step is one idle M-cycle.
+    /// The run loop: one step if `target` is `None`, else steps until the
+    /// clock reaches `target` or a stop event. Builds the per-call context
+    /// (ADR 0008) once; the CPU gets a pointer to it.
     #[inline]
-    fn step_inner(&mut self, frame: &mut Frame, _audio: &mut [StereoSample]) -> Events {
-        let clocks = self.hw.cpu.mcycle_clocks();
-        self.hw.clock += u64::from(clocks);
-        self.hw.ppu.advance(clocks, frame)
+    fn run(
+        &mut self,
+        target: Option<u64>,
+        frame: &mut Frame,
+        audio: &mut [StereoSample],
+    ) -> RunResult {
+        let Hw { cpu, sys, stop_on } = &mut self.hw;
+        let stop = Events::ALWAYS_STOP | *stop_on;
+        let start = sys.clock;
+        let mut ctx = Ctx {
+            mem: &mut self.mem,
+            sys,
+            frame,
+            audio,
+            audio_len: 0,
+            events: Events::EMPTY,
+        };
+        match target {
+            None => cpu.step(&mut ctx),
+            Some(target) => {
+                while ctx.sys.clock < target {
+                    cpu.step(&mut ctx);
+                    if ctx.events.intersects(stop) {
+                        break;
+                    }
+                }
+            }
+        }
+        RunResult {
+            events: ctx.events,
+            clocks: ctx.sys.clock - start,
+            audio_samples: ctx.audio_len,
+        }
     }
 
     // --- Debug access: plain field reads, nothing on the hot path. ---
@@ -425,7 +434,7 @@ impl<'a> Emulator<'a> {
     /// Base clocks since the last load or reset.
     #[inline]
     pub fn clock(&self) -> u64 {
-        self.hw.clock
+        self.hw.sys.clock
     }
 
     /// The CPU registers.
@@ -437,14 +446,14 @@ impl<'a> Emulator<'a> {
     /// The last byte sent on the serial port (see [`Events::SERIAL_TX`]).
     #[inline]
     pub fn serial_byte(&self) -> u8 {
-        self.hw.serial.last_byte
+        self.hw.sys.serial.last_byte
     }
 
     /// Whether the LCD is on (LCDC bit 7). While it is off, no frames
     /// complete and the screen shows white.
     #[inline]
     pub fn lcd_enabled(&self) -> bool {
-        self.hw.ppu.lcd_enabled()
+        self.hw.sys.ppu.lcd_enabled()
     }
 
     /// Whether the screen is blank (white, [`WHITE`]): true while the LCD
@@ -459,13 +468,13 @@ impl<'a> Emulator<'a> {
     /// [`Emulator::run_until`]).
     #[inline]
     pub fn screen_blank(&self) -> bool {
-        self.hw.ppu.screen_blank()
+        self.hw.sys.ppu.screen_blank()
     }
 
     /// Whether the CPU has locked up on an invalid opcode.
     #[inline]
     pub fn cpu_locked(&self) -> bool {
-        self.hw.cpu.locked
+        self.hw.cpu.locked()
     }
 
     // --- Cartridge state for the caller to persist. ---
@@ -476,12 +485,12 @@ impl<'a> Emulator<'a> {
     /// cartridge is inserted.
     #[inline]
     pub fn cart_ram(&self) -> &[u8] {
-        self.hw.cart.ram()
+        self.hw.sys.cart.ram()
     }
 
     /// The MBC3 RTC state, or `None` if the cartridge has no RTC.
     pub fn rtc_state(&self) -> Option<RtcState> {
-        self.hw.cart.has_rtc.then_some(self.hw.cart.rtc)
+        self.hw.sys.cart.has_rtc.then_some(self.hw.sys.cart.rtc)
     }
 
     /// Restores the MBC3 RTC state (e.g. from a save, advanced to the
@@ -491,8 +500,8 @@ impl<'a> Emulator<'a> {
     /// `subsecond_clocks` is clamped below one second (see [`RtcTime`] and
     /// [`RtcState`]), so `rtc_state()` afterwards may differ from `state`.
     pub fn set_rtc_state(&mut self, state: RtcState) {
-        if self.hw.cart.has_rtc {
-            self.hw.cart.rtc = state.masked();
+        if self.hw.sys.cart.has_rtc {
+            self.hw.sys.cart.rtc = state.masked();
         }
     }
 }
@@ -506,13 +515,31 @@ mod tests {
 
     /// A heap-allocated emulator with a blank 32 KiB ROM loaded. Leaks
     /// everything, which keeps the lifetimes trivial in tests.
+    /// The ROM is NOPs, with XOR E at 0100 and JP HL at the end (HL is
+    /// 007C after boot in DMG compatibility mode), so every instruction is
+    /// one M-cycle and runs end exactly at their target or event.
     fn emulator() -> &'static mut Emulator<'static> {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x100] = 0xAB;
+        rom[0x7FFF] = 0xE9;
         let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
         let emu = Emulator::init(Box::leak(Box::new_uninit()));
         emu.load(rom, ram, Config::default()).unwrap();
         emu
+    }
+
+    /// A CPU write to an I/O register, through the bus (no M-cycle).
+    fn write_lcdc(emu: &mut Emulator, value: u8) {
+        let mut fb = frame();
+        let mut ctx = Ctx {
+            mem: &mut emu.mem,
+            sys: &mut emu.hw.sys,
+            frame: &mut fb,
+            audio: &mut [],
+            audio_len: 0,
+            events: Events::EMPTY,
+        };
+        ctx.write_mapped(0xFF40, value);
     }
 
     fn frame() -> Box<Frame> {
@@ -562,16 +589,23 @@ mod tests {
     #[test]
     fn memory_zero_init_equals_cleared_state() {
         // `init` zero-fills `Memory` in place; that must equal both
-        // `Memory::new()` and what `reset` (via `Memory::clear`) produces
-        // after the RAM has been dirtied.
+        // `Memory::new()` and what `Memory::clear` (used by `reset`)
+        // produces after the RAM has been dirtied. `reset` then writes the
+        // post-boot values of the stub I/O registers.
         let fresh = Emulator::init(Box::leak(Box::new_uninit()));
         let emu = emulator();
         emu.mem.wram.fill(0x5A);
         emu.mem.vram.fill(0xA5);
         emu.mem.oam.fill(1);
         emu.mem.hram.fill(2);
-        emu.reset();
+        emu.mem.extra_oam.fill(3);
+        emu.mem.io.fill(4);
+        emu.mem.clear();
         assert!(emu.mem == fresh.mem);
+        emu.mem.wram.fill(0x5A);
+        emu.reset();
+        assert!(emu.mem.wram == fresh.mem.wram);
+        assert_eq!(emu.peek(0xFF47), 0xFC); // BGP after boot
         static NEW: Memory = Memory::new();
         assert!(fresh.mem == NEW);
     }
@@ -672,7 +706,7 @@ mod tests {
             ..DmgPalettes::GRAYSCALE
         };
         emu.set_dmg_palettes(p);
-        assert_eq!(emu.hw.config.dmg_palettes, p);
+        assert_eq!(emu.hw.sys.config.dmg_palettes, p);
         assert_eq!(emu.clock(), clock);
     }
 
@@ -725,11 +759,11 @@ mod tests {
         let mut fb = frame();
         assert!(!emu.screen_blank());
         let _ = emu.run_cycles(1000, &mut fb, &mut []);
-        emu.hw.ppu.write_lcdc(0x11); // LCD off
+        write_lcdc(emu, 0x11); // LCD off
         assert!(emu.screen_blank());
         let r = emu.run_cycles(u64::from(FRAME_CLOCKS) * 2, &mut fb, &mut []);
         assert!(r.events.is_empty());
-        emu.hw.ppu.write_lcdc(0x91); // back on: still blank
+        write_lcdc(emu, 0x91); // back on: still blank
         assert!(emu.lcd_enabled());
         assert!(emu.screen_blank());
         // The PPU restarts at line 0, so the first frame is ready at the
@@ -745,12 +779,12 @@ mod tests {
         assert_eq!(emu.clock() - start, VBLANK + u64::from(FRAME_CLOCKS));
         assert!(!emu.screen_blank());
         // Writes that keep the LCD on don't blank it.
-        emu.hw.ppu.write_lcdc(0x93);
+        write_lcdc(emu, 0x93);
         assert!(!emu.screen_blank());
         // Off and on again with no frame in between: blank, through the
         // first frame after.
-        emu.hw.ppu.write_lcdc(0x13);
-        emu.hw.ppu.write_lcdc(0x93);
+        write_lcdc(emu, 0x13);
+        write_lcdc(emu, 0x93);
         assert!(emu.screen_blank());
         let _ = emu.run_frame(&mut fb, &mut []);
         assert!(emu.screen_blank());
@@ -765,7 +799,7 @@ mod tests {
         let emu = Emulator::init(Box::leak(Box::new_uninit()));
         let mut fb = frame();
         assert!(emu.screen_blank());
-        emu.hw.ppu.write_lcdc(0x91);
+        write_lcdc(emu, 0x91);
         assert!(emu.screen_blank());
         let r = emu.run_frame(&mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
@@ -872,5 +906,118 @@ mod tests {
         assert_eq!(emu.clock(), 0);
         assert_eq!(emu.cart_ram()[0], 0x5A);
         assert_eq!(emu.peek(0xA000), 0x5A);
+    }
+
+    /// Loads `program` at 0100 of an otherwise empty 32 KiB ROM.
+    fn with_program(program: &[u8], cgb_flag: u8) -> &'static mut Emulator<'static> {
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        rom[0x143] = cgb_flag;
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        emu
+    }
+
+    #[test]
+    fn post_boot_registers_cgb_and_dmg_compatibility() {
+        let emu = with_program(&[], 0x80);
+        let r = emu.registers();
+        assert_eq!(
+            (r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l, r.sp, r.pc),
+            (
+                0x11, 0x80, 0x00, 0x00, 0xFF, 0x56, 0x00, 0x0D, 0xFFFE, 0x0100
+            )
+        );
+        // DMG compatibility, non-Nintendo licensee: B = 0, HL = 007C.
+        let emu = with_program(&[], 0x00);
+        let r = emu.registers();
+        assert_eq!(
+            (r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l),
+            (0x11, 0x80, 0x00, 0x00, 0x00, 0x08, 0x00, 0x7C)
+        );
+        // Nintendo licensee (old code 01): B = title checksum.
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x134..0x13A].copy_from_slice(b"TETRIS");
+        rom[0x14B] = 0x01;
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        let sum = b"TETRIS".iter().fold(0u8, |s, &x| s.wrapping_add(x));
+        assert_eq!(emu.registers().b, sum);
+        // New licensee "01" with old code 33; a sum of 0x58 gives HL = 991A.
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x134] = 0x58;
+        rom[0x14B] = 0x33;
+        rom[0x144..0x146].copy_from_slice(b"01");
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        let r = emu.registers();
+        assert_eq!((r.b, r.h, r.l), (0x58, 0x99, 0x1A));
+    }
+
+    #[test]
+    fn serial_transfer_reports_the_byte() {
+        // LD A,'X'; LDH (01),A; LD A,81; LDH (02),A; JR -2
+        let emu = with_program(
+            &[0x3E, b'X', 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02, 0x18, 0xFE],
+            0,
+        );
+        emu.set_stop_events(Events::SERIAL_TX);
+        let mut fb = frame();
+        let mut r = emu.run_cycles(20_000, &mut fb, &mut []);
+        while r.events.contains(Events::FRAME_READY) {
+            r = emu.run_cycles(20_000, &mut fb, &mut []);
+        }
+        assert_eq!(r.events, Events::SERIAL_TX);
+        assert_eq!(emu.serial_byte(), b'X');
+        // 8 bits at 8192 Hz: 8 x 512 clocks, plus up to one bit period of
+        // phase (the bit clock comes from the timer's counter).
+        assert!(
+            (4096..4096 + 512 + 64).contains(&emu.clock()),
+            "{}",
+            emu.clock()
+        );
+        assert_eq!(emu.peek(0xFF02) & 0x80, 0);
+        assert_eq!(emu.peek(0xFF0F) & 0x08, 0x08);
+    }
+
+    #[test]
+    fn ld_b_b_stops_only_when_enabled() {
+        let emu = with_program(&[0x00, 0x40, 0x18, 0xFE], 0);
+        let mut fb = frame();
+        let r = emu.run_cycles(100, &mut fb, &mut []);
+        assert!(r.events.contains(Events::LD_B_B));
+        assert!(emu.clock() >= 100);
+        let emu = with_program(&[0x00, 0x40, 0x18, 0xFE], 0);
+        emu.set_stop_events(Events::LD_B_B);
+        let r = emu.run_cycles(100, &mut fb, &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        assert_eq!((r.clocks, emu.registers().pc), (8, 0x102));
+    }
+
+    #[test]
+    fn invalid_opcode_locks_up_but_time_goes_on() {
+        let emu = with_program(&[0x00, 0xDD], 0);
+        let mut fb = frame();
+        let r = emu.run_cycles(1000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::CPU_LOCKED);
+        assert_eq!(r.clocks, 8);
+        assert!(emu.cpu_locked());
+        // Time and the PPU keep running; the event doesn't repeat.
+        let r = emu.run_frame(&mut fb, &mut []);
+        assert_eq!(r.events, Events::FRAME_READY);
+        assert_eq!(emu.registers().pc, 0x102);
+    }
+
+    #[test]
+    fn ly_follows_the_line_timing() {
+        let emu = emulator();
+        let mut fb = frame();
+        assert_eq!(emu.peek(0xFF44), 0);
+        let _ = emu.run_cycles(456 * 3 + 8, &mut fb, &mut []);
+        assert_eq!(emu.peek(0xFF44), 3);
+        let _ = emu.run_frame(&mut fb, &mut []); // to VBlank
+        assert_eq!(emu.peek(0xFF44), 144);
+        assert_eq!(emu.peek(0xFF41) & 0x03, 1);
+        assert_eq!(emu.peek(0xFF0F) & 0x01, 0x01);
     }
 }

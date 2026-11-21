@@ -18,6 +18,15 @@ pub(crate) struct Memory {
     pub(crate) vram: [u8; 0x4000],
     pub(crate) oam: [u8; 0xA0],
     pub(crate) hram: [u8; 0x7F],
+    /// FEA0-FEFF: on CGB revisions 0-C an extra RAM area with address
+    /// bits 3-4 ignored (Pan Docs: "FEA0-FEFF range"; SameBoy
+    /// `GB_read_oam`, `addr &= ~0x18` for CGB_C).
+    pub(crate) extra_oam: [u8; 0x60],
+    /// Backing store for I/O registers (FF00-FF7F) that are plain
+    /// read/write storage until their component exists (sound until M6,
+    /// most PPU and CGB palette registers until M3/M5). Indexed by the
+    /// low address byte; registers with behavior live in their component.
+    pub(crate) io: [u8; 0x80],
 }
 
 /// Types for which the all-zero bit pattern is a valid value.
@@ -46,11 +55,15 @@ impl Memory {
             vram,
             oam,
             hram,
+            extra_oam,
+            io,
         } = m;
         check(wram);
         check(vram);
         check(oam);
         check(hram);
+        check(extra_oam);
+        check(io);
     };
 
     pub(crate) const fn new() -> Self {
@@ -59,6 +72,8 @@ impl Memory {
             vram: [0; 0x4000],
             oam: [0; 0xA0],
             hram: [0; 0x7F],
+            extra_oam: [0; 0x60],
+            io: [0; 0x80],
         }
     }
 
@@ -69,5 +84,7 @@ impl Memory {
         self.vram.fill(0);
         self.oam.fill(0);
         self.hram.fill(0);
+        self.extra_oam.fill(0);
+        self.io.fill(0);
     }
 }
