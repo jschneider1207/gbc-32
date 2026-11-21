@@ -42,14 +42,26 @@ let important state exist only in the conversation.
 architecture and APIs, data structures, algorithms, refactors, test
 strategy, dependencies for `gbc-desktop` and `tools/*`, debugging and
 tooling, task ordering within a milestone, and adding tasks the plan
-missed.
+missed. Also, recording each one in the session log (and in an ADR if the
+reason isn't obvious):
+- Changes to the gate scripts or to the contract text in
+  `acceptance/README.md` that only make checks **stricter**: more checks,
+  more steps, harder failure conditions, fewer ways to pass. The test is
+  simple: no ROM, check or build that fails today may pass because of it.
+- Factual and technical corrections in `README.md`, such as a wrong spec,
+  a stale reference, or how a stated constraint will be met. Goals and
+  scope are not corrections.
 
 **Escalate**: add it to the "Needs human" list in `docs/STATUS.md`, then
 continue with other work. Stop only if nothing else is unblocked.
-- Any change to `acceptance/*.toml`, `acceptance/test-roms.sha256`, the
-  gate scripts, or expected screenshots, including "this test is wrong,
-  exclude it"
+- Any change to `acceptance/*.toml`, `acceptance/test-roms.sha256` or
+  expected screenshots, including "this test is wrong, exclude it"
+- Any change to the gate scripts or `acceptance/README.md` that loosens,
+  skips or more leniently reinterprets a check, or where you're unsure
+  whether it does
 - Changes to stage scope, goals in `README.md`, or an Accepted ADR's decision
+- Changes to permission settings (`.claude/`) and anything in
+  `../gbc-32-hardware`
 - Adding a dependency to `gbc-core`
 - Declaring a **stage** complete (milestones close automatically when their gate passes)
 - Anything that costs money, touches hardware, or installs software system-wide
