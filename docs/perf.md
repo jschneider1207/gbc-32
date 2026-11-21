@@ -20,23 +20,38 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 32,560 | 34,200 |
-| `Cpu::execute_cb::<Ctx>` | 14,126 | 14,600 |
+| `Cpu::run::<Ctx>` | 28,560 | 32,500 |
+| `Cpu::execute_cb::<Ctx>` | 13,158 | 14,600 |
 | `Ctx::write_high` | 160 | 170 |
 | `Ctx::write_io` | 1,180 | 1,240 |
-| `bus::read_high` | 992 | 1,160 |
+| `bus::read_high` | 1,008 | 1,160 |
 | `Ctx::sync_ppu` | 496 | 520 |
-| `Ctx::write_mapped` | 420 | 440 |
+| `Ctx::write_mapped` | 428 | 440 |
 | `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
 
-OAM DMA (M2) grew `Cpu::run` by 1,640 B (+5.3%): every inlined read ORs
-`Hot::dma` into its address dispatch (the cheapest of three measured
-variants: a flag test with an out-of-line call per read was +1,224 B for
-reads alone but +2,008 B with writes, and LLVM re-inlined `write_io`; see
-the commit). Writes test the flag in the out-of-line `write_mapped`, which
-is now `#[inline(never)]`; `write_high` and `sync_ppu` are
-`#[inline(never)]` to keep their earlier out-of-line shape.
+OAM DMA (M2): every CPU access ORs `Hot::dma` (FE00 during a transfer)
+into its region dispatch, so a transfer sends every address to the
+E000-FFFF arm, the only one that tests the flag (`read_high`, and the last
+arms of the out-of-line `write_mapped`). Echo RAM moved out of the inlined
+read into `read_high`. `write_high`, `write_io` and `sync_ppu` stay out of
+line. The OR is +1 instruction per access (x86 `movzwl`+`or` replacing
+`test`); the ROM windows became `[&[u8]; 2]` indexed by address bit 14,
+which removed a window select LLVM computed twice per ROM read. Measured
+layouts (check-bench Ir vs the pre-DMA baseline; `run` on thumbv7em):
+
+| Layout | cpu_instrs | cgb_sound | cgb-acid2 | `run` (B) |
+|---|---|---|---|---|
+| 7bdaee2: read OR + flag test first in `#[inline(never)]` `write_mapped` | +2.94% | +4.31% | +3.05% | 32,560 |
+| same, `write_mapped` `#[inline]` | -2.70% | +2.91% | +1.70% | 40,862 |
+| OR in reads and writes, echo out of line (u16 key) | +2.03% | +3.74% | +3.18% | 29,928 |
+| same, `usize` key | | +5.50% | | 29,536 |
+| same (u16) + ROM windows by bit 14 (chosen) | +0.40% | -2.45% | -1.01% | 28,560 |
+
+Earlier 7bdaee2 measurements: a flag test with an out-of-line call per
+read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
+50,376 B. With the chosen layout `run` is back under the pre-DMA
+30,920 B and its 32,500 B budget is restored.
 
 Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the

@@ -202,11 +202,11 @@ pub(crate) struct Hot {
     /// ahead of the clock it was set at, so `budget` always fits.
     deadline: u64,
     /// FE00 while an OAM DMA transfer runs (from the FF46 write to its
-    /// `Dma` deadline), else 0. CPU reads dispatch on `addr | dma`, so
-    /// during a transfer every address goes to `read_high` and the
-    /// conflict path, at one OR per access (ADR 0011: conflicts in the
-    /// access, not the tick). Writes test it in the out-of-line
-    /// `write_mapped`.
+    /// `Dma` deadline), else 0. CPU accesses dispatch on `addr | dma`, so
+    /// during a transfer every address takes the E000-FFFF arm, the only
+    /// one that tests the flag (`read_high`, `write_mapped`) and goes to
+    /// the conflict path: one OR per access and no extra branch on the
+    /// fast path (ADR 0011: conflicts in the access, not the tick).
     pub(crate) dma: u16,
 }
 
@@ -478,18 +478,25 @@ impl Ctx<'_, '_> {
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
-    /// During an OAM DMA transfer it takes the conflict path: one flag
-    /// test, here rather than at every inlined write site (ADR 0011:
-    /// conflicts in the access, not the tick).
+    /// During an OAM DMA transfer every address takes the last arm
+    /// ([`Hot::dma`]), where the flag test sends it to the conflict path,
+    /// off the RAM fast path.
     #[inline(never)]
     pub(crate) fn write_mapped(&mut self, addr: u16, value: u8) {
-        if self.hot.dma != 0 {
-            return self.write_during_dma(addr, value);
+        let a = usize::from(addr);
+        match (addr | self.hot.dma) >> 13 {
+            0..=3 => self.sys.cart.write_rom(addr, value),
+            4 => self.mem.vram[(self.sys.vram_off | (a & 0x1FFF)) & 0x3FFF] = value,
+            5 => self.sys.cart.write_ram(addr, value),
+            6 => *wram_mut(self.mem, self.sys, a) = value,
+            _ if self.hot.dma != 0 => self.write_during_dma(addr, value),
+            _ if addr < 0xFE00 => *wram_mut(self.mem, self.sys, a) = value,
+            _ => self.write_high(addr, value),
         }
-        self.write_to(addr, value);
     }
 
-    /// [`Self::write_mapped`] without the conflict path.
+    /// [`Self::write_mapped`] without the conflict path, for
+    /// [`Self::write_during_dma`].
     #[inline(always)]
     fn write_to(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
@@ -776,18 +783,16 @@ impl Bus for Ctx<'_, '_> {
 /// during a run call, [`Sys::hot`] otherwise. While an OAM DMA transfer
 /// runs, every address goes to `read_high` and the conflict path
 /// ([`Hot::dma`]); `peek` and the DMA's own reads clear it
-/// ([`Hot::without_dma`]).
+/// ([`Hot::without_dma`]). Echo RAM is out of line in `read_high`, so
+/// the inlined dispatch has no compare beyond the region.
 #[inline(always)]
 pub(crate) fn read(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
-    let key = addr | hot.dma;
-    match key >> 13 {
+    match (addr | hot.dma) >> 13 {
         0..=3 => sys.cart.read_rom(addr),
         4 => mem.vram[(sys.vram_off | (a & 0x1FFF)) & 0x3FFF],
         5 => sys.cart.read_ram(addr),
         6 => wram(mem, sys, a),
-        // E000-FDFF: echo of C000-DDFF (Pan Docs: Memory Map).
-        _ if key < 0xFE00 => wram(mem, sys, a),
         _ => read_high(mem, sys, hot, addr),
     }
 }
@@ -853,13 +858,15 @@ fn extra_oam_index(a: usize) -> usize {
     ((a & 0xFF) & !0x18) - 0xA0
 }
 
-/// FE00-FFFF.
+/// E000-FFFF, and every address during an OAM DMA transfer.
 fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     if hot.dma != 0 {
         return read_during_dma(mem, sys, hot, addr);
     }
     let a = usize::from(addr);
     match addr {
+        // E000-FDFF: echo of C000-DDFF (Pan Docs: Memory Map).
+        0..=0xFDFF => wram(mem, sys, a),
         0xFE00..=0xFE9F => mem.oam[a & 0xFF],
         0xFEA0..=0xFEFF => mem.extra_oam[extra_oam_index(a)],
         0xFF00..=0xFF7F => read_io(mem, sys, hot, a & 0x7F),

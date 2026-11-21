@@ -265,9 +265,9 @@ pub(crate) struct Cart<'a> {
     /// The ROM visible at 0000-3FFF and 4000-7FFF: at most 0x4000 bytes,
     /// recomputed on bank switches only. Shorter (or empty) where the ROM
     /// file ends; reads past the end of a window return 0xFF, as if the
-    /// ROM were padded with 0xFF (the M0 short-ROM rule).
-    rom_lo: &'a [u8],
-    rom_hi: &'a [u8],
+    /// ROM were padded with 0xFF (the M0 short-ROM rule). Indexed by
+    /// address bit 14, so a read selects its window with one shift.
+    rom_win: [&'a [u8]; 2],
     /// Offset of the RAM bank visible at A000-BFFF.
     ram_off: usize,
     ram_enabled: bool,
@@ -289,8 +289,7 @@ impl<'a> Cart<'a> {
             rtc: RtcState::zero(),
             mapper: Mapper::None,
             rom_mask: 0,
-            rom_lo: &[],
-            rom_hi: &[],
+            rom_win: [&[]; 2],
             ram_off: 0,
             ram_enabled: false,
             bank1: 1,
@@ -367,11 +366,7 @@ impl<'a> Cart<'a> {
     /// A read of 0000-7FFF.
     #[inline(always)]
     pub(crate) fn read_rom(&self, addr: u16) -> u8 {
-        let window = if addr < 0x4000 {
-            self.rom_lo
-        } else {
-            self.rom_hi
-        };
+        let window = self.rom_win[usize::from(addr >> 14) & 1];
         // One compare against the window length (ADR 0008).
         match window.get(usize::from(addr) & (ROM_BANK - 1)) {
             Some(&v) => v,
@@ -448,8 +443,7 @@ impl<'a> Cart<'a> {
                 }
             }
         };
-        self.rom_lo = self.rom_window(lo);
-        self.rom_hi = self.rom_window(hi);
+        self.rom_win = [self.rom_window(lo), self.rom_window(hi)];
         self.ram_off = ram * RAM_BANK;
     }
 
