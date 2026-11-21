@@ -1,6 +1,6 @@
 # 2026-11-21-04: ADR 0011 event-scheduled timer
 
-- Milestone: M2
+- Milestone: M2 (closed, tagged `stage1-m2` on ac36d13) → M3
 - Commits: 7ebc7a5..HEAD
 
 ## Done
@@ -83,3 +83,28 @@ Performance/portability:
   reschedule in div_reset → fixed with P1 (same code).
 - P5 low `run`+`execute_cb` 41.7 KB vs 16 KiB I-cache / 40 KB plan target
   → plan task (MCU stage).
+
+## Review fixes and close (after triage)
+- H1 serial flip-flop (b58c196), H2 IF clear in the dispatch's last
+  M-cycle (782b89e), Q1/Q2 resolved in ADR 0011 (27c3084). Gambatte
+  (throwaway harness) serial 39 → 46/46, tima 116 → 118/119.
+- I1-I4, I8, P3 tooling (b7f647d..e5d9af2): binaries from cargo's JSON,
+  fingerprint 295 → 3,822 runs (frame buffer, VRAM, OAM, IO, cart RAM, all
+  suites, input pass), synthetic bench ROMs in the gate. Each fix shown to
+  catch its bad case.
+- P1/P2/P4/P6 (2944113): incremental event-table minimum, ~191 → 136 Ir per
+  event, event-storm 4.32 → 3.46 M Ir/frame (x86 proxy; M7 measurement is
+  an M8 plan task), shifts instead of u64 division, 5 new size budgets.
+- H4 (fec7164): OAM DMA pauses while halted (SameBoy `GB_dma_run`), one
+  step on wake. Adds two defaulted `sm83::Bus` hooks (`halt_begin`,
+  `halt_end`), non-breaking like ADR 0011's `idle_halted`; no separate
+  API review.
+- No re-review: only the tooling fixes touched checks, and each was shown
+  to fail on its bad case.
+- Gate: all steps pass except must-tier ROMs owned by M3/M4; romtest
+  baseline updated (ac36d13, 20 fail → pass, no regressions).
+
+## Learned (late)
+- Cherry-picking a worktree branch leaves it "not fully merged"; check
+  with `git cherry`, then `branch -D` (the human runs it).
+- A fused single-pass `take_due` was 6% slower than early-exit + min fold.

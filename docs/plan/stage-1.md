@@ -78,13 +78,13 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Confirm OAM DMA pausing in HALT (M2 review H4, SameBoy model) against gambatte `oamdma/oamdmasrc80_halt_*` and `mgb_oam_dma_halt_sprites` once STAT IRQs exist; a halted DMA blocks the mode-2 OAM scan on CGB C (SameBoy `add_object_from_index`)
 - [ ] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts
 - [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
-- [ ] Event deadlines: a small fixed array (timer, PPU mode/STAT, APU buffer) with `next_event = min`, recomputed only when a deadline changes; STAT and LYC writes must sync the PPU and reschedule (M1 reviews)
+- [ ] Event deadlines: the table exists since M2 (`schedule.rs`, ADR 0011; incremental minimum 2944113). Remaining: PPU mode/STAT deadlines on `EventKind::Ppu`; STAT and LYC writes must sync the PPU and reschedule (M1 reviews)
 - [ ] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
 - [ ] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review)
 - [ ] First line after LCD enable skips OAM scan (GBCTR, SameBoy); no manifest ROM covers it (the lcdon_* tests are excluded), so add a unit test
 - [ ] Before writing the PPU: decide the output pixel format and stride (STM32 LTDC wants RGB565 or ARGB1555; converting per palette entry at palette-write time is free on the hot path). Record it in an ADR (review finding 4)
-- [ ] First headless performance benchmark recorded in `docs/perf.md`
+- [ ] First headless performance benchmark recorded in `docs/perf.md` (the callgrind Ir gate exists since M1 close, ADR 0010; add PPU-heavy numbers once the renderer runs)
 
 **Acceptance:** groups `mooneye-acceptance`, `dmg-acid2-compat`, `blargg-cpu-instrs`,
 `blargg-instr-timing`, `blargg-mem-timing`, `blargg-mem-timing-2` and
@@ -141,6 +141,7 @@ The human checks interactive play.
 - [ ] Fix issues found in the real-game checklist
 - [ ] Bring `should`-tier scores up where cheap
 - [ ] Code size: re-measure `execute`/`execute_cb` on thumbv7em (68 KB at M1, more than the H753's fixed 64 KB ITCM; the H735 ITCM can be configured up to 256 KB). Target <= 40 KB, e.g. by moving rare read regions out of line (M1 perf review 1). At M2 close `run` 28,560 B + `execute_cb` 13,158 B = 41.7 KB, ~45.5 KB with boundary/read_high/write_mapped, 2.6x the M7 16 KiB I-cache: plan ITCM placement (M2 perf review P5)
+- [ ] Worst-case event density on the M7: `synth:event-storm` (double-speed timer TMA=FF + fast serial) is ~3.46 M x86 Ir/frame after 2944113, under the 4.02 M (50%) line only as an x86 proxy; the M2 perf review estimated M7 cycles at 1.3-2x Ir for this u64-heavy code. Measure on hardware (Stage 2) and, if over, e.g. u32 epoch-relative deadlines
 - [ ] Unaligned ROM reads: the Stage 3 MCU (STM32H735) does not support unaligned reads from the FMC SDRAM that holds the ROM (ES0491 2.7.3). `-C target-feature=+strict-align` is unstable on Rust 1.100 (warns, slated to become a hard error, rust-lang/rust#162235), so ensure at code level that ROM bytes are never merged into wider loads (e.g. one ROM-read function using byte reads LLVM can't combine) and add a disassembly check; record in an ADR
 - [ ] ROM placement hook for the MCU front ends (e.g. caller-supplied per-bank slices so bank 0 and the current bank can sit in internal SRAM) only if Stage 2 measurements show ROM fetch misses matter (M1 perf review 5)
 - [ ] Benchmark: headless emulated frames/second on desktop for a fixed set of ROMs; record host cycles per emulated frame as the baseline for Stage 2
