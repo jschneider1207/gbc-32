@@ -329,8 +329,8 @@ impl Ctx<'_, '_> {
 
     /// Sets the Serial deadline to the bit clock's next shift (the
     /// flip-flop's next 1 -> 0 edge, `serial` module docs) while a
-    /// transfer runs, and reschedules.
-    fn schedule_serial(&mut self) {
+    /// transfer runs. The caller reschedules ([`Self::schedule_serial`]).
+    fn set_serial_deadline(&mut self) {
         let now = self.clock();
         let s = &mut *self.sys;
         let at = match s.serial.next_shift(s.timer.sc(now)) {
@@ -338,13 +338,24 @@ impl Ctx<'_, '_> {
             Some(v) => s.timer.clock_at(v),
         };
         s.sched.set(EventKind::Serial, at);
+    }
+
+    /// [`Self::set_serial_deadline`], and reschedules.
+    fn schedule_serial(&mut self) {
+        self.set_serial_deadline();
         self.reschedule();
     }
 
-    /// Sets the Timer deadline after a timer state change, and reschedules.
-    fn schedule_timer(&mut self) {
+    /// Sets the Timer deadline after a timer state change. The caller
+    /// reschedules ([`Self::schedule_timer`]).
+    fn set_timer_deadline(&mut self) {
         let s = &mut *self.sys;
         s.sched.set(EventKind::Timer, s.timer.deadline());
+    }
+
+    /// [`Self::set_timer_deadline`], and reschedules.
+    fn schedule_timer(&mut self) {
+        self.set_timer_deadline();
         self.reschedule();
     }
 
@@ -380,7 +391,7 @@ impl Ctx<'_, '_> {
         let new = self.sys.timer.sc(now);
         let done = self.sys.serial.div_reset(old, new);
         self.serial_done(done);
-        self.schedule_timer();
+        self.set_timer_deadline();
         self.schedule_serial();
     }
 
@@ -438,12 +449,13 @@ impl Ctx<'_, '_> {
                 EventKind::Timer => {
                     let s = &mut *self.sys;
                     s.iflags |= s.timer.reload(now);
-                    s.sched.set(EventKind::Timer, s.timer.deadline());
+                    s.sched.set_inline(EventKind::Timer, s.timer.deadline());
                 }
                 EventKind::Serial => {
                     let done = self.sys.serial.shift();
                     self.serial_done(done);
-                    self.schedule_serial();
+                    // `boundary` reschedules after the loop.
+                    self.set_serial_deadline();
                 }
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
@@ -748,7 +760,7 @@ impl Bus for Ctx<'_, '_> {
         // button change rounds down to (ADR 0012); `schedule_serial`
         // reschedules the countdown.
         self.sys.schedule_inputs(self.hot.mcycle as u64);
-        self.schedule_timer();
+        self.set_timer_deadline();
         self.schedule_serial();
         // The pause: 2050 idle M-cycles, skipped a deadline at a time
         // (ADR 0011), each deadline handled on the M-cycle it was before.
@@ -808,7 +820,10 @@ fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) 
     if now < d.start {
         return (Conflict::None, 0);
     }
-    let i = ((now - d.start) / mcycle as u64) as u8;
+    // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
+    // thumbv7em).
+    debug_assert!(mcycle == 2 || mcycle == 4);
+    let i = ((now - d.start) >> mcycle.trailing_zeros()) as u8;
     (dma::conflict(d.base, d.base + u16::from(i), addr), i)
 }
 

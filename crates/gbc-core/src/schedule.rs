@@ -5,7 +5,8 @@
 //! deadline (or the run target), and `Ctx::boundary` then runs the due
 //! kinds in [`EventKind`] order. Deadlines change only when the work they
 //! stand for is rescheduled (a PPU sync, a register write), so the minimum
-//! is recomputed there and never per M-cycle.
+//! is maintained there (incrementally, rescanning only when the earliest
+//! entry moves later) and never per M-cycle.
 
 /// No deadline.
 pub(crate) const NEVER: u64 = u64::MAX;
@@ -82,20 +83,51 @@ impl Schedule {
 
     /// Sets the deadline of `kind` (a clock, or [`NEVER`]). The caller
     /// reschedules the countdown if it is running (`Ctx::reschedule`).
+    ///
+    /// The minimum is kept incrementally: a deadline at or before it
+    /// becomes it, and the table is rescanned only when the entry that
+    /// held it moves later. A handler re-arming its own kind (cleared by
+    /// `take_due`, so not the holder) never rescans.
     #[inline(never)]
     pub(crate) fn set(&mut self, kind: EventKind, at: u64) {
-        self.at[kind as usize] = at;
-        self.recompute();
+        self.set_inline(kind, at);
     }
 
+    /// [`Self::set`], inlined: for the event handlers in `Ctx::boundary`.
+    #[inline(always)]
+    pub(crate) fn set_inline(&mut self, kind: EventKind, at: u64) {
+        let i = kind as usize;
+        let old = self.at[i];
+        self.at[i] = at;
+        if at <= self.next {
+            self.next = at;
+        } else if old == self.next {
+            self.recompute();
+        }
+    }
+
+    #[inline]
     fn recompute(&mut self) {
         self.next = self.at.iter().fold(NEVER, |m, &t| m.min(t));
     }
 
     /// The first kind, in [`EventKind`] order, whose deadline is at or
     /// before `now`, with its deadline cleared to [`NEVER`] (its handler
-    /// sets the next one). `None` once nothing is due.
+    /// sets the next one). `None` once nothing is due, at the cost of one
+    /// compare: nothing is due while `now` is before the minimum.
+    #[inline]
     pub(crate) fn take_due(&mut self, now: u64) -> Option<EventKind> {
+        if now < self.next {
+            return None;
+        }
+        self.take_first_due(now)
+    }
+
+    /// `take_due` once something is due: the first due entry (an
+    /// early-exit scan), then the new minimum (a branchless fold; one
+    /// pass doing both measured slower, a branch per entry).
+    #[inline(never)]
+    fn take_first_due(&mut self, now: u64) -> Option<EventKind> {
         let i = self.at.iter().position(|&t| t <= now)?;
         self.at[i] = NEVER;
         self.recompute();
@@ -188,5 +220,105 @@ mod tests {
         assert_eq!(s.take_due(10), Some(EventKind::Ppu));
         assert_eq!(s.take_due(10), None);
         assert_eq!(s.next(), 14);
+    }
+
+    // The incremental minimum (`Schedule::set`, `take_due`).
+
+    #[test]
+    fn minimum_moving_later_rescans() {
+        let mut s = Schedule::new();
+        s.set(EventKind::Ppu, 500);
+        s.set(EventKind::Timer, 400);
+        // The holder moves later but stays the earliest.
+        s.set(EventKind::Timer, 450);
+        assert_eq!(s.next(), 450);
+        // The holder moves past another entry: that one is the minimum.
+        s.set(EventKind::Timer, 900);
+        assert_eq!(s.next(), 500);
+    }
+
+    #[test]
+    fn earlier_deadline_becomes_the_minimum_later_does_not() {
+        let mut s = Schedule::new();
+        s.set(EventKind::Ppu, 500);
+        s.set(EventKind::Dma, 300);
+        assert_eq!(s.next(), 300);
+        // A later deadline of another kind leaves the minimum alone.
+        s.set(EventKind::Timer, 600);
+        assert_eq!(s.next(), 300);
+        s.set(EventKind::Input, NEVER);
+        assert_eq!(s.next(), 300);
+    }
+
+    #[test]
+    fn equal_deadlines_keep_the_minimum() {
+        let mut s = Schedule::new();
+        s.set(EventKind::Timer, 100);
+        s.set(EventKind::Ppu, 100);
+        // One of two holders moves later: the other still holds it.
+        s.set(EventKind::Ppu, 200);
+        s.set(EventKind::Ppu, 100);
+        assert_eq!(s.next(), 100);
+        // Taking one of two due entries leaves the other due.
+        assert_eq!(s.take_due(100), Some(EventKind::Timer));
+        assert_eq!(s.next(), 100);
+        assert_eq!(s.take_due(100), Some(EventKind::Ppu));
+        assert_eq!(s.next(), NEVER);
+    }
+
+    #[test]
+    fn taking_or_clearing_the_last_deadline_leaves_never() {
+        let mut s = Schedule::new();
+        s.set(EventKind::Timer, 10);
+        assert_eq!(s.take_due(10), Some(EventKind::Timer));
+        assert_eq!(s.next(), NEVER);
+        assert_eq!(s.take_due(NEVER - 1), None);
+        s.set(EventKind::Serial, 20);
+        s.set(EventKind::Serial, NEVER);
+        assert_eq!(s.next(), NEVER);
+        assert_eq!(s.take_due(NEVER - 1), None);
+    }
+
+    #[test]
+    fn handler_rearming_at_or_before_now_runs_again() {
+        let mut s = Schedule::new();
+        s.set(EventKind::Timer, 10);
+        s.set(EventKind::Ppu, 30);
+        assert_eq!(s.take_due(10), Some(EventKind::Timer));
+        s.set(EventKind::Timer, 10);
+        assert_eq!(s.take_due(10), Some(EventKind::Timer));
+        s.set(EventKind::Timer, 6);
+        assert_eq!(s.take_due(10), Some(EventKind::Timer));
+        s.set(EventKind::Timer, 14);
+        assert_eq!(s.take_due(10), None);
+        assert_eq!(s.next(), 14);
+    }
+
+    #[test]
+    fn minimum_matches_a_full_scan_under_random_operations() {
+        // A fixed LCG: deterministic, no host randomness.
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut rand = move |n: u64| {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (x >> 33) % n
+        };
+        let mut s = Schedule::new();
+        let mut now = 0;
+        for _ in 0..20_000 {
+            match rand(4) {
+                0 => now += rand(8),
+                1 => {
+                    let k = EventKind::ALL[rand(7) as usize];
+                    let at = if rand(5) == 0 { NEVER } else { now + rand(16) };
+                    s.set(k, at);
+                }
+                _ => {
+                    let before = s.at;
+                    let want = before.iter().position(|&t| t <= now);
+                    assert_eq!(s.take_due(now).map(|k| k as usize), want);
+                }
+            }
+            assert_eq!(s.next(), s.at.iter().fold(NEVER, |m, &t| m.min(t)));
+        }
     }
 }

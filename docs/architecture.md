@@ -210,8 +210,9 @@ The countdown (`Hot`) is copied into the `Ctx` for the call
 and back into `Sys::hot` when it is dropped, so the tick doesn't go
 through `ctx.sys`; the u64 clock is `deadline - budget`. Scheduled work
 lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
-deadline per `EventKind` (`NEVER` = none) and their minimum, recomputed
-only when a deadline is set, never per M-cycle. When the countdown runs
+deadline per `EventKind` (`NEVER` = none) and their minimum, maintained
+only when a deadline is set (incrementally: the table is rescanned only
+when the earliest entry moves later or is taken), never per M-cycle. When the countdown runs
 out, `Ctx::boundary` runs every kind due at the current clock in
 `EventKind` declaration order (fixed, so same-clock events are
 deterministic), each handler setting its next deadline, then reschedules

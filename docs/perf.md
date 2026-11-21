@@ -28,12 +28,18 @@ Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,388,020,611 |
-| cgb_sound.gb | 606,760,080 |
-| cgb-acid2.gbc | 12,961,034 |
-| synth:event-storm (2 s) | 519,429,543 |
-| synth:dma-storm (3 s) | 384,933,620 |
-| synth:halt-irq (10 s) | 121,080,725 |
+| cpu_instrs.gb | 1,388,017,297 |
+| cgb_sound.gb | 607,486,659 |
+| cgb-acid2.gbc | 12,864,502 |
+| synth:event-storm (2 s) | 413,681,227 |
+| synth:dma-storm (3 s) | 372,085,388 |
+| synth:halt-irq (10 s) | 111,371,508 |
+
+The incremental event-table minimum (`schedule.rs`: the table is rescanned
+only when the earliest entry moves later or is taken; handlers re-arm
+without a rescan) took event-storm from 516.4 M to 413.7 M (-19.9%;
+`boundary` inclusive 190.7 -> 135.9 Ir per call, 1.85 M calls: about
+4.32 M -> 3.46 M Ir per emulated frame), halt-irq -7.0%, dma-storm -3.2%.
 
 ## Code-size budgets
 
@@ -113,9 +119,9 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,388,020,611 |
-| cgb_sound.gb | 606,760,080 |
-| cgb-acid2.gbc | 12,961,034 |
+| cpu_instrs.gb | 1,388,017,297 |
+| cgb_sound.gb | 607,486,659 |
+| cgb-acid2.gbc | 12,864,502 |
 
 (ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and
 928.5 M: -28.0%, -32.6% and -24.9%. ADR 0011 step 5, HALT/STOP idling

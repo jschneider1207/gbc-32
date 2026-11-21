@@ -50,7 +50,10 @@ impl OamDma {
         if now < self.start {
             return 0;
         }
-        ((now - self.start) / mcycle + 1).min(u64::from(LEN)) as u8
+        // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
+        // thumbv7em).
+        debug_assert!(mcycle == 2 || mcycle == 4);
+        (((now - self.start) >> mcycle.trailing_zeros()) + 1).min(u64::from(LEN)) as u8
     }
 }
 
