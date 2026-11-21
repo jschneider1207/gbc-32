@@ -36,3 +36,50 @@
 ## Left open
 - HALT tasks, OAM DMA, `set_buttons_at`, ADR 0011 open hardware questions.
 - romtest baseline is still M1's (two timer ROMs show fail→pass).
+
+## Later in the session
+- HALT tasks (3ee75c7), scheduled inputs ADR 0012 (acffc11..aadd26b, one
+  API reviewer: 2 medium doc/runner findings fixed in 1b79d45/aadd26b; late
+  inputs now `crash`), OAM DMA (7bdaee2, must 44 → 60/86), DMA hot-path
+  layout (75b12ad, bench under the old baseline), gate tightened (586ca1e).
+
+## Review (M2 close, stage1-m1..HEAD; 3 reviewers)
+Hardware correctness:
+- H1 medium (verified) serial clock: SameBoy master flip-flop on bit 7 falls,
+  reset by SC writes; gambatte serial 39/46 → fix (also closes ADR 0011 Q2).
+- H2 medium (verified) dispatch clears IF too early (SameBoy clears 2 T
+  into the 5th M-cycle) → fix.
+- H3 medium (verified) speed switch: ~0x20008-clock halt with DIV/TIMA
+  running, DMA paused, not a 2050 M-cycle freeze → M5 plan task (speed
+  switch is M5 scope; ADR 0011 already defers the pause length to M5).
+- H4 medium (by reading) OAM DMA must pause during HALT (SameBoy
+  `GB_dma_run` returns while halted; gambatte oamdmasrc80_halt_*) → fix,
+  plus correct docs/reference/oam-dma.md.
+- H5 low: STOP's second byte → M5 plan task.
+- Q1 (CGB timer-disable glitch): keep SameBoy behavior; rapid_toggle and
+  gambatte tima need it. Record in ADR 0011 → with the H1 fix.
+Test integrity:
+- I1 medium (verified) check-bench/check-fuzz run a stale binary under
+  CARGO_TARGET_DIR → fix.
+- I2 medium fingerprint coverage too narrow (no VRAM/OAM/HRAM/cart RAM/
+  PPU-APU regs/frame, missing suites, no inputs) → fix.
+- I3 low `--seconds 0`, I4 low dirty-tree / partial root, I8 low perf.md
+  stale text → fixed with I2 (same files).
+- I5 low: 586ca1e body says "stricter" but cpu_instrs baseline rose
+  +0.40%. Accepted: the wording was wrong for that ROM (the gate as a whole
+  got tighter); can't rewrite history; noted here.
+- I6 low: 7bdaee2 committed with check-bench red until 75b12ad. Accepted as
+  a process miss; agents must not commit a red perf check.
+- I7 low: 8ede259 called exact-M-cycle input timing "stricter"; it is a
+  reinterpretation the README had pre-announced for M2, with zero status
+  changes. Recorded; told the human.
+Performance/portability:
+- P1 medium (measured) ~186 Ir per event (linear rescans); DS timer+fast
+  serial storm ≈ 54% of an M7 frame → fix (incremental min).
+- P3 medium (measured) bench has no DMA/double-speed/event-dense ROM → fix
+  (synthetic ROMs built by tools/bench, no ROM files in git).
+- P2 low u64 division on DMA paths (`__aeabi_uldivmod`), P4 low missing
+  budgets (boundary, read/write_during_dma, div_reset, stop), P6 low double
+  reschedule in div_reset → fixed with P1 (same code).
+- P5 low `run`+`execute_cb` 41.7 KB vs 16 KiB I-cache / 40 KB plan target
+  → plan task (MCU stage).
