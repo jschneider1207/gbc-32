@@ -12,7 +12,11 @@
 //!   `use std ...`); `core::alloc::...` is fine;
 //! - `#[path ...]` / `#![path ...]` (also inside `cfg_attr`) anywhere,
 //!   test code included;
-//! - `include!(...)` anywhere.
+//! - `include!(...)` anywhere;
+//! - the `unsafe` keyword anywhere, test code included (ADR 0009). Like
+//!   the other checks it ignores comments and literals; `lib.rs` must also
+//!   declare `#![forbid(unsafe_code)]`, which makes the compiler reject
+//!   `unsafe` code too (and `forbid` can't be overridden by an `allow`).
 //!
 //! **Test-code rule (deliberately simple and conservative):** the first two
 //! checks skip only the body of an inline module declared exactly as
@@ -293,6 +297,9 @@ fn violations(src: &str) -> Vec<String> {
         if w == "include" && is_punct(at(i + 1), '!') {
             out.push(format!("{line}: include!"));
         }
+        if w == "unsafe" {
+            out.push(format!("{line}: `unsafe` (ADR 0009)"));
+        }
         if test[i] {
             continue;
         }
@@ -353,15 +360,30 @@ fn core_sources_follow_the_hard_rules() {
         bad.join("\n")
     );
     let lib = std::fs::read_to_string(core_dir().join("src/lib.rs")).unwrap();
-    let toks: Vec<Tok> = tokenize(&lib).into_iter().map(|t| t.0).collect();
-    let no_std = ["#", "!", "[", "no_std", "]"].map(|s| match s.parse::<char>() {
-        Ok(c) if !c.is_alphanumeric() => Tok::Punct(c),
-        _ => Tok::Ident(s.into()),
-    });
     assert!(
-        toks.windows(5).any(|w| w == no_std),
+        has_inner_attr(&lib, &["no_std"]),
         "lib.rs must declare #![no_std]"
     );
+    assert!(
+        has_inner_attr(&lib, &["forbid", "(", "unsafe_code", ")"]),
+        "lib.rs must declare #![forbid(unsafe_code)] (ADR 0009)"
+    );
+}
+
+/// Whether `src` contains the crate attribute `#![<attr>]`, given as
+/// tokens (comments and whitespace don't matter).
+fn has_inner_attr(src: &str, attr: &[&str]) -> bool {
+    let toks: Vec<Tok> = tokenize(src).into_iter().map(|t| t.0).collect();
+    let want: Vec<Tok> = ["#", "!", "["]
+        .iter()
+        .chain(attr)
+        .chain(&["]"])
+        .map(|s| match s.parse::<char>() {
+            Ok(c) if !c.is_alphanumeric() && c != '_' => Tok::Punct(c),
+            _ => Tok::Ident((*s).into()),
+        })
+        .collect();
+    toks.windows(want.len()).any(|w| w == want)
 }
 
 /// Entries in any dependency table of a Cargo.toml.
@@ -469,6 +491,49 @@ fn catches_path_and_include() {
             violations(src).iter().any(|v| v.contains(needle)),
             "{src:?}"
         );
+    }
+}
+
+#[test]
+fn catches_unsafe_anywhere() {
+    for src in [
+        "unsafe fn f() {}",
+        "fn f() { unsafe { g() } }",
+        "unsafe impl Send for X {}",
+        "unsafe trait T {}",
+        "unsafe extern \"C\" {}",
+        "#[cfg(test)]\nmod tests {\n fn f() { unsafe { g() } }\n}",
+        "fn f() { /* hi */ unsafe\n{ g() } }",
+        "fn f() { r#unsafe(); }",
+    ] {
+        assert!(
+            violations(src).iter().any(|v| v.contains("unsafe")),
+            "{src:?}"
+        );
+    }
+    // Comments, doc comments and literals don't count.
+    let ok = "//! no `unsafe` here\n/// unsafe\n// unsafe { }\nconst S: &str = \"unsafe\";";
+    assert_eq!(violations(ok), Vec::<String>::new());
+}
+
+#[test]
+fn crate_attributes_are_found() {
+    let forbid = ["forbid", "(", "unsafe_code", ")"];
+    assert!(has_inner_attr(
+        "#![no_std]\n#![forbid(unsafe_code)]",
+        &forbid
+    ));
+    assert!(has_inner_attr("# ! [ forbid ( unsafe_code ) ]", &forbid));
+    assert!(has_inner_attr("#![no_std]", &["no_std"]));
+    for src in [
+        "#![no_std]",
+        "// #![forbid(unsafe_code)]",
+        "#[forbid(unsafe_code)] fn f() {}",
+        "#![deny(unsafe_code)]",
+        "#![forbid(unused)]",
+        "const S: &str = \"#![forbid(unsafe_code)]\";",
+    ] {
+        assert!(!has_inner_attr(src, &forbid), "{src:?}");
     }
 }
 
