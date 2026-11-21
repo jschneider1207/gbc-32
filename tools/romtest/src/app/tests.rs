@@ -409,16 +409,46 @@ fn baseline_keys_without_a_result() {
     assert_eq!(r, Ok(1), "{out}");
     assert!(out.contains("REGRESSIONS (2)"), "{out}");
 
-    // A non-passing entry that disappears is not a regression, and the
-    // next update drops it.
+    // In a full run, a non-passing entry that disappears is a regression
+    // too (also under --gate), and --update-baseline refuses it.
     let m = MANIFEST.replace(
         "exclude = [\"s/pass*\"]",
         "exclude = [\"s/pass*\", \"s/lock.gb\"]",
     );
     ws.write("acceptance/m.toml", m.as_bytes());
-    assert_eq!(ws.run(&[]).0, Ok(0));
-    assert_eq!(ws.run(&["--update-baseline"]).0, Ok(0));
+    let (r, out) = ws.run(&[]);
+    assert_eq!(r, Ok(1), "{out}");
+    assert!(out.contains("REGRESSIONS (1)"), "{out}");
+    assert!(out.contains("g-mixed s/lock.gb: crash -> missing"), "{out}");
+    let reg = &ws.json()["regressions"][0];
+    assert_eq!(
+        (&reg["was"], &reg["now"]),
+        (&"crash".into(), &"missing".into())
+    );
+    assert!(
+        ws.run(&["--gate", "must"])
+            .1
+            .contains("g-mixed s/lock.gb: crash -> missing")
+    );
+    let (r, out) = ws.run(&["--update-baseline"]);
+    assert_eq!(r, Ok(1), "{out}");
+    assert!(out.contains("refusing to update"), "{out}");
+    assert_eq!(
+        ws.baseline().status("g-mixed", "s/lock.gb"),
+        Some(Status::Crash)
+    );
+    // A partial run only answers for in-scope passing entries.
+    assert_eq!(ws.run(&["--group", "g-mixed"]).0, Ok(0));
+    assert_eq!(ws.run(&["--filter", "s/{lock,timeout}.gb"]).0, Ok(0));
+    // Only --allow-removed drops it, listing every removed key.
+    let (r, out) = ws.run(&["--update-baseline", "--allow-removed"]);
+    assert_eq!(r, Ok(0), "{out}");
+    assert!(out.contains("removing 1 baseline entry"), "{out}");
+    assert!(out.contains("  g-mixed s/lock.gb (was crash)"), "{out}");
+    assert!(out.contains("baseline updated"), "{out}");
+    assert_eq!(ws.json()["removed_from_baseline"][0]["rom"], "s/lock.gb");
     assert_eq!(ws.baseline().status("g-mixed", "s/lock.gb"), None);
+    assert_eq!(ws.run(&[]).0, Ok(0));
     assert_eq!(
         ws.baseline()
             .results
@@ -706,6 +736,10 @@ fn main_exit_codes() {
     let (code, out, _) = ws.main(&["--help"]);
     assert_eq!(code, 0);
     assert!(out.contains("usage: romtest"));
+    // Help with anything else is a usage error, not a silent exit 0.
+    let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/m.toml", "-h"]);
+    assert_eq!(code, 2);
+    assert!(out.is_empty() && err.contains("only argument"), "{err}");
     // A runner error (missing manifest).
     assert_eq!(ws.main(&["--manifest", "ws:acceptance/none.toml"]).0, 2);
     // Ran: exit 0 without regressions, 1 with gate failures.
@@ -743,4 +777,125 @@ fn panics_in_the_core_crash_but_panics_in_the_runner_exit_2() {
     let (code, _, err) = ws.main(&["--manifest", "ws:acceptance/p.toml", "--jobs", "2"]);
     assert_eq!(code, 2);
     assert!(err.contains("internal error"), "{err}");
+}
+
+#[test]
+fn allow_removed_keeps_real_regressions() {
+    // --allow-removed drops missing entries but still refuses a pass that
+    // now fails.
+    let ws = Ws::new();
+    assert_eq!(ws.run(&["--update-baseline"]).0, Ok(0));
+    let m = MANIFEST.replace(
+        "exclude = [\"s/pass*\"]",
+        "exclude = [\"s/pass*\", \"s/lock.gb\"]",
+    );
+    ws.write("acceptance/m.toml", m.as_bytes());
+    ws.write("test-roms/s/pass1.gb", b"ldbb");
+    let (r, out) = ws.run(&["--update-baseline", "--allow-removed"]);
+    assert_eq!(r, Ok(1), "{out}");
+    assert!(out.contains("REGRESSIONS (1)"), "{out}");
+    assert!(out.contains("g-pass s/pass1.gb: pass -> fail"), "{out}");
+    assert!(out.contains("refusing to update"), "{out}");
+    assert_eq!(
+        ws.baseline().status("g-mixed", "s/lock.gb"),
+        Some(Status::Crash)
+    );
+}
+
+#[test]
+fn missing_reference_does_not_hide_an_unsupported_check() {
+    let ws = Ws::new();
+    let m = r#"
+roms_release = "v7.0"
+model = "cgb-c"
+
+[[group]]
+id = "u"
+tier = "must"
+roms = ["t/noref.gbc"]
+exit = { run_frames = 1 }
+checks = [{ screenshot = "{dir}/{stem}.png" }, { gambatte = true }]
+"#;
+    ws.write("acceptance/u.toml", m.as_bytes());
+    let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/u.toml"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let json = ws.json_of("u");
+    assert_eq!(statuses_of(&json), [s("u", "t/noref.gbc", "unsupported")]);
+    assert_eq!(json["results"][0]["checks"][0]["status"], "no-reference");
+    assert_eq!(json["summary"]["tiers"]["must"]["unsupported"], 1);
+}
+
+const TAMPER_MANIFEST: &str = r#"
+roms_release = "v7.0"
+model = "cgb-c"
+
+[[group]]
+id = "rom"
+tier = "must"
+roms = ["s/pass1.gb", "s/pass2.gb"]
+exit = { ld_b_b = true, timeout_s = 1 }
+checks = [{ fibonacci = true }]
+
+[[group]]
+id = "png"
+tier = "should"
+roms = ["t/white.gb"]
+exit = { run_frames = 2 }
+checks = [{ screenshot = "{dir}/{stem}.png" }]
+"#;
+
+#[test]
+fn files_changed_after_the_upfront_check_are_caught_at_load() {
+    let ws = Ws::new();
+    ws.write("acceptance/tamper.toml", TAMPER_MANIFEST.as_bytes());
+    let manifest = ws.root.join("acceptance/tamper.toml");
+    let paths = Paths::new(&ws.root, &manifest).unwrap();
+    let rom2 = ws.root.join("test-roms/s/pass2.gb");
+    let png = ws.root.join("test-roms/t/white.png");
+    let first = AtomicBool::new(true);
+    let run_with = |group: &str, backend: &Backend<'_>| {
+        let args = cli::Args {
+            manifest: manifest.clone(),
+            groups: vec![group.into()],
+            jobs: Some(1),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let r = run(&args, &paths, backend, &mut out);
+        (r, String::from_utf8(out).unwrap())
+    };
+
+    // Untouched: every loaded file is hashed again and matches.
+    let (r, out) = run_with("rom", &fake_backend);
+    assert_eq!(r, Ok(0), "{out}");
+    assert!(out.contains("re-verified 2 loaded files"), "{out}");
+    let (r, out) = run_with("png", &fake_backend);
+    assert_eq!(r, Ok(0), "{out}");
+    assert!(out.contains("re-verified 2 loaded files"), "{out}");
+
+    // A ROM rewritten while another runs (after the up-front check, before
+    // its own load): runner error. Jobs run in order with --jobs 1.
+    let tamper_rom = |rom: &[u8], plan: &RunPlan, st: &mut RunState| {
+        if first.swap(false, Ordering::Relaxed) {
+            std::fs::write(&rom2, b"ldbb fib ").unwrap();
+        }
+        fake_backend(rom, plan, st)
+    };
+    let e = run_with("rom", &tamper_rom).0.unwrap_err();
+    assert!(
+        e.contains("s/pass2.gb changed after the integrity check"),
+        "{e}"
+    );
+    std::fs::write(&rom2, b"ldbb fib").unwrap();
+
+    // A reference PNG rewritten during the run, before the check reads it.
+    let tamper_png = |rom: &[u8], plan: &RunPlan, st: &mut RunState| {
+        std::fs::write(&png, encode_png(&img(254)).unwrap()).unwrap();
+        fake_backend(rom, plan, st)
+    };
+    let e = run_with("png", &tamper_png).0.unwrap_err();
+    assert!(
+        e.contains("reference t/white.png changed after the integrity check"),
+        "{e}"
+    );
 }

@@ -196,6 +196,9 @@ pub fn diff_image(actual: &Rgb, expected: &Rgb) -> Rgb {
     }
 }
 
+/// See [`Ctx::verify`].
+pub type VerifyFn<'a> = dyn Fn(&str, &[u8]) -> Result<(), String> + 'a;
+
 /// Everything a check needs about one ROM run.
 pub struct Ctx<'a> {
     pub roms_dir: &'a Path,
@@ -207,9 +210,11 @@ pub struct Ctx<'a> {
     /// Where to write failure images: `(actual, diff)` paths for this
     /// check, relative to the output root, or `None` to skip writing.
     pub failure_pngs: &'a dyn Fn(usize) -> Option<(PathBuf, String, String)>,
-    /// Whether a path (relative to `roms_dir`) is in the integrity list
-    /// (and therefore hash-verified). A check may only load listed files.
-    pub listed: &'a dyn Fn(&str) -> bool,
+    /// Verifies bytes loaded from a path (relative to `roms_dir`) against
+    /// the integrity list: `Err` (a runner error) if the path isn't listed
+    /// or the bytes don't match its SHA-256. A check may only use loaded
+    /// bytes that passed this.
+    pub verify: &'a VerifyFn<'a>,
 }
 
 /// The ROM's directory and file stem, for `{dir}` and `{stem}`.
@@ -288,12 +293,8 @@ fn screenshot(
             format!("{reference} not found"),
         ),
         Err(e) => return Err(format!("reading {}: {e}", path.display())),
-        Ok(_) if !(ctx.listed)(&reference) => {
-            return Err(format!(
-                "reference {reference} is not in the test-roms integrity list, so it can't be trusted"
-            ));
-        }
         Ok(bytes) => {
+            (ctx.verify)(&reference, &bytes).map_err(|e| format!("reference {e}"))?;
             let expected =
                 decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
             let actual = frame_to_rgb(ctx.final_frame);
@@ -351,8 +352,8 @@ mod tests {
         None
     }
 
-    fn all_listed(_: &str) -> bool {
-        true
+    fn all_listed(_: &str, _: &[u8]) -> Result<(), String> {
+        Ok(())
     }
 
     fn ctx<'a>(roms_dir: &'a Path, rom: &'a str, serial: &'a [u8], frame: &'a Frame) -> Ctx<'a> {
@@ -363,7 +364,7 @@ mod tests {
             registers: Some(Registers::default()),
             final_frame: frame,
             failure_pngs: &no_pngs,
-            listed: &all_listed,
+            verify: &all_listed,
         }
     }
 
@@ -508,8 +509,14 @@ mod tests {
 
         // So is a reference that isn't in the integrity list.
         let mut cx = ctx(dir.path(), "suite/sub/t.gb", b"", &frame);
-        let only_small = |p: &str| p == "small.png";
-        cx.listed = &only_small;
+        let only_small = |p: &str, _: &[u8]| {
+            if p == "small.png" {
+                Ok(())
+            } else {
+                Err(format!("{p} is not in the test-roms integrity list"))
+            }
+        };
+        cx.verify = &only_small;
         let e = evaluate(&c, 0, &cx).unwrap_err();
         assert!(e.contains("not in the test-roms integrity list"), "{e}");
     }

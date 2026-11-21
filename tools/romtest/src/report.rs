@@ -61,10 +61,11 @@ impl Outcome {
 
 /// The ROM's status from how the run ended and its check results.
 ///
-/// Precedence (ADR 0007 amendments): crash/timeout > fail > no-reference >
-/// unsupported > pass. `no-reference` (excluded from the score) applies
-/// only when everything else that could be evaluated passed, so a missing
-/// PNG can never hide a crash, a timeout or another failing check.
+/// Precedence (ADR 0007 amendments): crash/timeout > fail > unsupported >
+/// no-reference > pass. `no-reference` (excluded from the score) applies
+/// only when every other check passed, so a missing PNG can never hide a
+/// crash, a timeout, a failing check or an unsupported (scored as failing)
+/// check.
 pub fn rom_status(outcome: &Outcome, checks: &[CheckStatus]) -> Status {
     let any = |s: CheckStatus| checks.contains(&s);
     match outcome {
@@ -77,10 +78,10 @@ pub fn rom_status(outcome: &Outcome, checks: &[CheckStatus]) -> Status {
     // count it as a failure in case that ever changes.
     if any(CheckStatus::Fail) || any(CheckStatus::Skipped) {
         Status::Fail
-    } else if any(CheckStatus::NoReference) {
-        Status::NoReference
     } else if any(CheckStatus::Unsupported) {
         Status::Unsupported
+    } else if any(CheckStatus::NoReference) {
+        Status::NoReference
     } else {
         Status::Pass
     }
@@ -311,15 +312,29 @@ fn serialize_now<S: serde::Serializer>(now: &Option<Status>, s: S) -> Result<S::
     s.serialize_str(now.map_or("missing", Status::name))
 }
 
-/// Regressions: every baseline entry with status `pass` whose current
-/// status isn't `pass`, or which has no current result although
-/// `in_scope(group, rom)` says the selection covers it (the ROM was
-/// removed, excluded or renamed, or its group was). In a full run every
-/// baseline entry is in scope; a partial run checks only its selection.
+/// Which baseline entries a run answers for.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+    /// A full run: every baseline entry must still have a result.
+    Full,
+    /// A partial run (`--filter`, `--group`, `--only-check`): the
+    /// function says whether `(group, rom)` is inside the selection.
+    Partial(&'a dyn Fn(&str, &str) -> bool),
+}
+
+/// Regressions (ADR 0007 amendments):
+/// - every baseline entry with status `pass` whose current status isn't
+///   `pass`;
+/// - in a full run, every baseline entry, whatever its status, with no
+///   current result (the ROM was removed, excluded or renamed, or its
+///   group was): `<status> -> missing`. Only `--update-baseline
+///   --allow-removed` may drop such entries;
+/// - in a partial run, every baseline `pass` entry inside the selection
+///   with no current result.
 pub fn regressions(
     baseline: Option<&Baseline>,
     results: &[RomResult],
-    in_scope: &dyn Fn(&str, &str) -> bool,
+    scope: Scope<'_>,
 ) -> Vec<Regression> {
     let Some(b) = baseline else {
         return Vec::new();
@@ -340,20 +355,31 @@ pub fn regressions(
         .collect();
     for (group, roms) in &b.results {
         for (rom, &status) in roms {
-            if status == Status::Pass
-                && !ran.contains(&(group.as_str(), rom.as_str()))
-                && in_scope(group, rom)
-            {
+            if ran.contains(&(group.as_str(), rom.as_str())) {
+                continue;
+            }
+            let missing = match scope {
+                Scope::Full => true,
+                Scope::Partial(in_scope) => status == Status::Pass && in_scope(group, rom),
+            };
+            if missing {
                 out.push(Regression {
                     group: group.clone(),
                     rom: rom.clone(),
-                    was: Status::Pass,
+                    was: status,
                     now: None,
                 });
             }
         }
     }
     out
+}
+
+/// Splits off the baseline entries with no current result (`now` is
+/// `None`), which `--update-baseline --allow-removed` drops instead of
+/// counting as regressions. Returns `(regressions, removed)`.
+pub fn split_removed(regressions: Vec<Regression>) -> (Vec<Regression>, Vec<Regression>) {
+    regressions.into_iter().partition(|r| r.now.is_some())
 }
 
 /// Results in the `--gate` tier that don't pass.
@@ -451,6 +477,9 @@ pub struct Report<'a> {
     pub gate: Option<GateResult>,
     pub baseline_found: bool,
     pub regressions: Vec<Regression>,
+    /// Baseline entries with no current result that `--update-baseline
+    /// --allow-removed` dropped (otherwise they are in `regressions`).
+    pub removed_from_baseline: Vec<Regression>,
     pub results: &'a [RomResult],
 }
 
@@ -506,6 +535,16 @@ impl Report<'_> {
                     r.was.name(),
                     r.now_name()
                 );
+            }
+            md.push('\n');
+        }
+        if !self.removed_from_baseline.is_empty() {
+            let _ = writeln!(
+                md,
+                "## Removed from the baseline (--allow-removed)\n\n| Group | ROM | Was |\n|---|---|---|"
+            );
+            for r in &self.removed_from_baseline {
+                let _ = writeln!(md, "| {} | `{}` | {} |", r.group, r.rom, r.was.name());
             }
             md.push('\n');
         }
@@ -632,16 +671,22 @@ pub mod tests {
             rom_status(&ran, &[C::Pass, C::Unsupported]),
             Status::Unsupported
         );
+        // A missing PNG doesn't exclude a ROM whose other check is
+        // unsupported (scored as a failure).
         assert_eq!(
             rom_status(&ran, &[C::NoReference, C::Unsupported]),
-            Status::NoReference
+            Status::Unsupported
+        );
+        assert_eq!(
+            rom_status(&ran, &[C::Unsupported, C::NoReference]),
+            Status::Unsupported
         );
         assert_eq!(
             rom_status(&ran, &[C::Pass, C::NoReference]),
             Status::NoReference
         );
         // A missing reference never hides a failure, timeout or crash:
-        // crash/timeout > fail > no-reference > unsupported > pass.
+        // crash/timeout > fail > unsupported > no-reference > pass.
         assert_eq!(rom_status(&ran, &[C::Fail, C::NoReference]), Status::Fail);
         assert_eq!(rom_status(&ran, &[C::NoReference, C::Fail]), Status::Fail);
         let timeout = Outcome::Ran(End::Timeout);
@@ -738,8 +783,9 @@ pub mod tests {
             result("new", Tier::Must, "a.gb", Status::Fail),
         ];
         // h/a.gb is out of this run's scope.
-        let scope = |g: &str, _: &str| g != "h";
-        let r = regressions(Some(&b), &now, &scope);
+        let in_scope = |g: &str, _: &str| g != "h";
+        let scope = Scope::Partial(&in_scope);
+        let r = regressions(Some(&b), &now, scope);
         assert_eq!(
             r,
             [Regression {
@@ -749,26 +795,45 @@ pub mod tests {
                 now: Some(Status::NoReference)
             }]
         );
-        assert!(regressions(None, &now, &scope).is_empty());
+        assert!(regressions(None, &now, scope).is_empty());
 
-        // In scope (e.g. a full run), a passing key with no result is a
+        // In a partial run's scope, a passing key with no result is a
         // regression; a missing non-passing key (g/c.gb below) is not.
         let all = |_: &str, _: &str| true;
-        let r = regressions(Some(&b), &now[..2], &all);
-        let missing: Vec<_> = r
-            .iter()
-            .map(|r| (r.group.as_str(), r.rom.as_str(), r.now_name()))
-            .collect();
+        let names = |r: &[Regression]| -> Vec<(String, String, &str, &str)> {
+            r.iter()
+                .map(|r| (r.group.clone(), r.rom.clone(), r.was.name(), r.now_name()))
+                .collect()
+        };
+        let r = regressions(Some(&b), &now[..2], Scope::Partial(&all));
         assert_eq!(
-            missing,
-            [("g", "b.gb", "no-reference"), ("h", "a.gb", "missing")]
+            names(&r),
+            [
+                ("g".into(), "b.gb".into(), "pass", "no-reference"),
+                ("h".into(), "a.gb".into(), "pass", "missing")
+            ]
         );
         let json = serde_json::to_value(&r[1]).unwrap();
         assert_eq!(json["now"], "missing");
         assert_eq!(json["was"], "pass");
 
+        // In a full run every missing key counts, whatever its status.
+        let r = regressions(Some(&b), &now[..2], Scope::Full);
+        assert_eq!(
+            names(&r),
+            [
+                ("g".into(), "b.gb".into(), "pass", "no-reference"),
+                ("g".into(), "c.gb".into(), "fail", "missing"),
+                ("h".into(), "a.gb".into(), "pass", "missing")
+            ]
+        );
+        let (changed, removed) = split_removed(r);
+        assert_eq!(names(&changed).len(), 1);
+        assert_eq!(names(&removed).len(), 2);
+        assert!(removed.iter().all(|r| r.now.is_none()));
+
         b.results.clear();
-        assert!(regressions(Some(&b), &now, &all).is_empty());
+        assert!(regressions(Some(&b), &now, Scope::Full).is_empty());
     }
 
     #[test]
@@ -863,6 +928,7 @@ pub mod tests {
             gate: None,
             baseline_found: false,
             regressions: vec![],
+            removed_from_baseline: vec![],
             results: &rs,
         };
         let md = report.to_markdown(&[("g1".into(), Tier::Must), ("g2".into(), Tier::Stretch)]);

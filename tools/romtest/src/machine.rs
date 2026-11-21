@@ -137,7 +137,9 @@ pub enum End {
     Timeout,
     /// The CPU locked up on an invalid opcode.
     Locked,
-    /// A run call returned without advancing time or reporting an event.
+    /// Run calls stopped advancing time: one returned with no event and no
+    /// time passed, or [`MAX_STALLED_CALLS`] in a row returned events
+    /// without time passing.
     NoProgress,
 }
 
@@ -152,6 +154,13 @@ impl End {
         }
     }
 }
+
+/// How many run calls in a row may return without advancing the clock
+/// before the run counts as a crash ([`End::NoProgress`]). Every run call
+/// executes at least one instruction (one M-cycle or more), so even one is
+/// a core bug; the bound only keeps a broken core that keeps reporting
+/// events (e.g. `SERIAL_TX`) from looping until the timeout, or forever.
+pub const MAX_STALLED_CALLS: u32 = 1000;
 
 /// What a run produced. Lives outside the panic boundary so partial results
 /// (e.g. serial output before a panic) survive a crash.
@@ -179,9 +188,10 @@ impl RunState {
     /// The final frame (acceptance/README.md, "Checks"): the last fully
     /// drawn frame, or solid white if no frame was completed or the screen
     /// is blank at exit. The screen is blank while the LCD is off and also
-    /// after it is turned back on, until the next completed frame
-    /// (`gbc_core::Emulator::run_until`), so a frame drawn before an
-    /// off/on cycle is never the final frame.
+    /// after it is turned back on, through the first completed frame,
+    /// which the hardware doesn't display (`gbc_core::Emulator::run_until`
+    /// and `screen_blank`). So a frame drawn before an off/on cycle, or the
+    /// first one after it, is never the final frame.
     pub fn final_frame(&self) -> Box<Frame> {
         match &self.last_frame {
             Some(f) if !self.screen_blank_at_exit => f.clone(),
@@ -210,6 +220,7 @@ pub fn run<M: Machine + ?Sized>(
 
     let mut fb = new_frame();
     let mut next_input = 0;
+    let mut stalled_calls = 0u32;
     let end = loop {
         let now = core_call(|| m.clock())?;
         // Apply input changes once the clock has reached them (runs end on
@@ -245,8 +256,13 @@ pub fn run<M: Machine + ?Sized>(
         if ld_b_b && events.contains(Events::LD_B_B) {
             break End::LdBB;
         }
-        if events.is_empty() && core_call(|| m.clock())? == now {
-            break End::NoProgress;
+        if core_call(|| m.clock())? == now {
+            stalled_calls += 1;
+            if events.is_empty() || stalled_calls >= MAX_STALLED_CALLS {
+                break End::NoProgress;
+            }
+        } else {
+            stalled_calls = 0;
         }
     };
     st.end = Some(end);
@@ -296,13 +312,22 @@ pub mod fake {
         LcdOn,
         /// Stop advancing time (to test the no-progress guard).
         Stall,
+        /// Stop advancing time but keep returning `SERIAL_TX` from every
+        /// run call.
+        StallWithEvents,
     }
 
+    /// Clocks from the start of a frame (LY=0) to the start of VBlank
+    /// (LY=144), where the core reports `FRAME_READY`.
+    pub const VBLANK: u64 = 144 * 456;
+
     /// Advances in 4-clock steps (or `step` clocks); completes a frame
-    /// (filled with the frame number) every `FRAME_CLOCKS` while the LCD is
-    /// on; fires scripted actions at given clocks. Like the core, turning
-    /// the LCD off abandons the frame in progress and blanks the screen
-    /// until the next completed frame.
+    /// (filled with the frame number) at the start of each VBlank
+    /// (`VBLANK` into every `FRAME_CLOCKS` period) while the LCD is on;
+    /// fires scripted actions at given clocks. Like the core, turning the
+    /// LCD off abandons the frame in progress and blanks the screen, and
+    /// after the LCD is turned on the screen stays blank through the first
+    /// completed frame.
     pub struct FakeMachine {
         pub clock: u64,
         pub step: u64,
@@ -317,7 +342,8 @@ pub mod fake {
         frame_clock: u64,
         frames: u16,
         blanked: bool,
-        stalled: bool,
+        skip_frame: bool,
+        stalled: Option<Events>,
         locked: bool,
     }
 
@@ -336,7 +362,8 @@ pub mod fake {
                 frame_clock: 0,
                 frames: 0,
                 blanked: false,
-                stalled: false,
+                skip_frame: false,
+                stalled: None,
                 locked: false,
             }
         }
@@ -364,20 +391,32 @@ pub mod fake {
                     Action::LcdOff => {
                         if self.lcd {
                             self.blanked = true;
+                            self.skip_frame = false;
                             self.frame_clock = 0;
                         }
                         self.lcd = false;
                     }
-                    Action::LcdOn => self.lcd = true,
-                    Action::Stall => self.stalled = true,
+                    Action::LcdOn => {
+                        if !self.lcd {
+                            self.blanked = true;
+                            self.skip_frame = true;
+                        }
+                        self.lcd = true;
+                    }
+                    Action::Stall => self.stalled = Some(Events::EMPTY),
+                    Action::StallWithEvents => self.stalled = Some(Events::SERIAL_TX),
                 }
             }
             if self.lcd {
-                self.frame_clock += self.step;
-                if self.frame_clock >= u64::from(FRAME_CLOCKS) {
-                    self.frame_clock -= u64::from(FRAME_CLOCKS);
+                let before = self.frame_clock;
+                self.frame_clock = (before + self.step) % u64::from(FRAME_CLOCKS);
+                if before < VBLANK && before + self.step >= VBLANK {
                     self.frames += 1;
-                    self.blanked = false;
+                    if self.skip_frame {
+                        self.skip_frame = false;
+                    } else {
+                        self.blanked = false;
+                    }
                     frame.fill(self.frames);
                     ev |= Events::FRAME_READY;
                 }
@@ -397,7 +436,10 @@ pub mod fake {
         fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events {
             let stop = Events::ALWAYS_STOP | self.stop;
             let mut ev = Events::EMPTY;
-            while self.clock < target && !self.stalled {
+            if let Some(stalled) = self.stalled {
+                return stalled;
+            }
+            while self.clock < target && self.stalled.is_none() {
                 ev |= self.step_once(frame);
                 if ev.intersects(stop) {
                     break;
@@ -422,7 +464,7 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::fake::{Action, FakeMachine};
+    use super::fake::{Action, FakeMachine, VBLANK};
     use super::*;
     use gbc_core::{CLOCK_HZ, FRAME_CLOCKS, rgb555_to_888};
 
@@ -445,7 +487,8 @@ mod tests {
         let st = run_fake(&mut m, &plan(Exit::RunS { seconds: 2.0 }));
         assert_eq!(st.end, Some(End::Completed));
         assert_eq!(st.clock, 2 * HZ);
-        assert_eq!(st.frames, 2 * HZ / FRAME);
+        // Frames are ready at the start of VBlank: VBLANK + k * FRAME.
+        assert_eq!(st.frames, (2 * HZ - VBLANK) / FRAME + 1);
     }
 
     #[test]
@@ -504,6 +547,26 @@ mod tests {
     }
 
     #[test]
+    fn no_progress_is_detected_while_events_keep_coming() {
+        // A broken core that stops advancing time but keeps reporting
+        // events: caught after MAX_STALLED_CALLS calls, not at the timeout.
+        let mut m = FakeMachine::new(vec![(100, Action::StallWithEvents)]);
+        let st = run_fake(&mut m, &plan(Exit::LdBB { timeout_s: 120.0 }));
+        assert_eq!(st.end, Some(End::NoProgress));
+        assert_eq!(st.clock, 104);
+        assert_eq!(st.serial.len(), MAX_STALLED_CALLS as usize);
+
+        // Events with progress in between reset the count.
+        let script = (0..2 * u64::from(MAX_STALLED_CALLS))
+            .map(|i| (100 + 4 * i, Action::Serial(b'x')))
+            .collect();
+        let mut m = FakeMachine::new(script);
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 1 }));
+        assert_eq!(st.end, Some(End::Completed));
+        assert_eq!(st.serial.len(), 2 * MAX_STALLED_CALLS as usize);
+    }
+
+    #[test]
     fn collects_every_serial_byte() {
         let script = b"Passed"
             .iter()
@@ -545,19 +608,34 @@ mod tests {
         // still white (gbc_core::Emulator::run_until), so the final frame
         // is white, not the frame drawn before the LCD went off.
         let script = vec![
-            (2 * FRAME + 100, Action::LcdOff),
-            (2 * FRAME + 1000, Action::LcdOn),
+            (VBLANK + FRAME + 100, Action::LcdOff),
+            (VBLANK + FRAME + 1000, Action::LcdOn),
         ];
-        let mut m = FakeMachine::new(script);
-        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
+        let mut m = FakeMachine::new(script.clone());
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 2 }));
         assert_eq!(st.frames, 2);
         assert!(m.lcd);
         assert!(st.screen_blank_at_exit);
         assert!(st.final_frame().iter().all(|&p| p == WHITE));
 
-        // A frame completed after the LCD came back on: that frame counts.
-        // The PPU restarts at line 0, so it completes a frame after LcdOn.
+        // The first frame after the LCD comes back on is not displayed
+        // (gbc_core::Emulator::screen_blank): still white, although a frame
+        // completed after LcdOn.
+        let mut m = FakeMachine::new(script);
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
+        assert_eq!(st.frames, 3);
+        assert!(st.screen_blank_at_exit);
+        assert!(st.final_frame().iter().all(|&p| p == WHITE));
+
+        // The second frame after the LCD came back on is displayed. The
+        // PPU restarts at line 0 on LcdOn, so frames complete at
+        // FRAME + VBLANK (not shown) and 2 * FRAME + VBLANK.
         let script = vec![(FRAME / 2, Action::LcdOff), (FRAME, Action::LcdOn)];
+        let mut m = FakeMachine::new(script.clone());
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 2 }));
+        assert_eq!(st.frames, 1);
+        assert!(st.screen_blank_at_exit);
+        assert!(st.final_frame().iter().all(|&p| p == WHITE));
         let mut m = FakeMachine::new(script);
         let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
         assert_eq!(st.frames, 2);
@@ -685,12 +763,17 @@ mod tests {
 
     #[test]
     fn real_core_runs_a_blank_rom() {
-        let rom = vec![0u8; gbc_core::MIN_ROM_SIZE];
+        let rom = vec![0u8; 0x8000];
         let mut st = RunState::default();
         run_core(&rom, &plan(Exit::RunFrames { frames: 2 }), &mut st).unwrap();
         assert_eq!(st.end, Some(End::Completed));
         assert_eq!(st.clock, 2 * FRAME);
+        // Ready at the start of VBlank, like the fake.
+        assert_eq!(st.frames, 2);
         assert!(!st.screen_blank_at_exit);
+        let mut st = RunState::default();
+        run_core(&rom, &plan(Exit::RunS { seconds: 1.0 }), &mut st).unwrap();
+        assert_eq!(st.frames, (HZ - VBLANK) / FRAME + 1);
         let mut st = RunState::default();
         assert!(matches!(
             run_core(&rom[..100], &plan(Exit::RunFrames { frames: 1 }), &mut st),

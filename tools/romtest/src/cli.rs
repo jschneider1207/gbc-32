@@ -17,9 +17,11 @@ usage: romtest --manifest <path> [options]
   --gate <tier>         exit 1 unless every selected ROM in this tier passes (must, should, stretch)
   --jobs <n>            parallel ROM runs (default: number of CPU cores)
   --update-baseline     write acceptance/results/<manifest>.json (full runs only; refused on regressions)
+  --allow-removed       with --update-baseline: drop baseline entries that no longer have a result
+                        (each one is listed); without it they are regressions
   --roms-dir <path>     read test ROMs from here instead of test-roms/ (for testing the runner;
                         still verified against acceptance/test-roms.sha256)
-  -h, --help            show this help
+  -h, --help            show this help (only as the sole argument)
 
 Exit codes: 0 ok, 1 regressions or gate failures, 2 runner error.";
 
@@ -32,6 +34,9 @@ pub struct Args {
     pub gate: Option<Tier>,
     pub jobs: Option<usize>,
     pub update_baseline: bool,
+    /// Lets `--update-baseline` drop baseline entries with no current
+    /// result (ADR 0007 amendments).
+    pub allow_removed: bool,
     pub roms_dir: Option<PathBuf>,
 }
 
@@ -44,16 +49,26 @@ pub enum Command {
 pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Command, String> {
     let mut out = Args::default();
     let mut manifest = None;
+    let args: Vec<OsString> = args.into_iter().collect();
+    // Help only on its own: combined with anything else it is a usage
+    // error, so a typo'd run can't exit 0 without running.
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        if args.len() == 1 {
+            return Ok(Command::Help);
+        }
+        return Err(format!("-h/--help must be the only argument\n\n{USAGE}"));
+    }
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         let arg = arg
             .into_string()
             .map_err(|a| format!("argument is not UTF-8: {a:?}"))?;
-        if arg == "-h" || arg == "--help" {
-            return Ok(Command::Help);
-        }
         if arg == "--update-baseline" {
             out.update_baseline = true;
+            continue;
+        }
+        if arg == "--allow-removed" {
+            out.allow_removed = true;
             continue;
         }
         // `--flag value` or `--flag=value`.
@@ -104,6 +119,9 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Command, Strin
         }
     }
     out.manifest = manifest.ok_or_else(|| format!("--manifest is required\n\n{USAGE}"))?;
+    if out.allow_removed && !out.update_baseline {
+        return Err("--allow-removed only makes sense with --update-baseline".into());
+    }
     if out.update_baseline
         && (out.filter.is_some() || !out.groups.is_empty() || out.only_check.is_some())
     {
@@ -168,6 +186,22 @@ mod tests {
                 .update_baseline
         );
         assert_eq!(p(&["--help"]).unwrap_err(), "help");
+        assert_eq!(p(&["-h"]).unwrap_err(), "help");
+        let a = p(&["--manifest", "m", "--update-baseline", "--allow-removed"]).unwrap();
+        assert!(a.update_baseline && a.allow_removed);
+    }
+
+    #[test]
+    fn help_must_be_the_only_argument() {
+        for args in [
+            &["--help", "--manifest", "m"][..],
+            &["--manifest", "m", "-h"][..],
+            &["--help", "--help"][..],
+            &["-h", "--bogus"][..],
+        ] {
+            let e = p(args).unwrap_err();
+            assert!(e.contains("only argument"), "{args:?} => {e}");
+        }
     }
 
     #[test]
@@ -185,6 +219,7 @@ mod tests {
             (&["--manifest", "m", "--jobs", "x"], "--jobs"),
             (&["--manifest", "m", "--filter", "a/{b"], "bad glob"),
             (&["--manifest", "m", "--manifest", "n"], "more than once"),
+            (&["--manifest", "m", "--allow-removed"], "--update-baseline"),
         ];
         for (args, needle) in cases {
             let e = p(args).unwrap_err();

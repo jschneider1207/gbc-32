@@ -6,7 +6,9 @@
 //! the gate would pass. Before anything runs, every listed file must exist
 //! with the listed SHA-256, the list must belong to the manifest's release,
 //! and every ROM a manifest glob matches must be listed. Checks may only
-//! load listed files (see `checks::Ctx::listed`).
+//! load listed files, and every ROM and reference PNG is hashed again
+//! from the bytes actually loaded ([`RomHashes::check_bytes`],
+//! `checks::Ctx::verify`).
 //!
 //! The format is `sha256sum` output (`<hex>  <path>`, paths relative to
 //! `test-roms/`, sorted), plus `#` comment lines, one of which is
@@ -40,6 +42,26 @@ pub struct RomHashes {
 impl RomHashes {
     pub fn contains(&self, path: &str) -> bool {
         self.files.contains_key(path)
+    }
+
+    /// Checks the bytes a run actually loaded from `path` (relative to
+    /// `test-roms/`) against the list. The up-front [`verify`] can't
+    /// cover a file that changes between that check and the read, so
+    /// every ROM and reference PNG is hashed again as it is loaded.
+    pub fn check_bytes(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let Some(want) = self.files.get(path) else {
+            return Err(format!(
+                "{path} is not in the test-roms integrity list, so it can't be trusted"
+            ));
+        };
+        let got: Sha256Hash = Sha256::digest(bytes).into();
+        if &got != want {
+            return Err(format!(
+                "{path} changed after the integrity check: the bytes loaded don't match its \
+                 SHA-256 in the integrity list ({REGENERATE})"
+            ));
+        }
+        Ok(())
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {

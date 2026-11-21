@@ -6,8 +6,8 @@ use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::checks::{self, CheckResult, Ctx};
 use crate::cli::{self, Args};
@@ -15,14 +15,15 @@ use crate::integrity::{self, RomHashes};
 use crate::machine::{CoreFailure, End, RunPlan, RunState};
 use crate::manifest::{self, Check, Exit, Manifest};
 use crate::report::{
-    self, Baseline, GateResult, Outcome, Report, RomResult, Selection, rom_status,
+    self, Baseline, GateResult, Outcome, Report, RomResult, Scope, Selection, rom_status,
 };
 
 /// Runs one ROM on an emulator. Only the calls into the emulator core are
 /// inside the panic boundary (`machine::core_call`); `Err` is the core
 /// rejecting the ROM or panicking (status `crash`). A panic that escapes
 /// is a runner bug (exit 2).
-pub type Backend = dyn Fn(&[u8], &RunPlan, &mut RunState) -> Result<(), CoreFailure> + Sync;
+pub type Backend<'a> =
+    dyn Fn(&[u8], &RunPlan, &mut RunState) -> Result<(), CoreFailure> + Sync + 'a;
 
 /// The whole program behind `main`: parses `argv`, runs, and maps every
 /// failure to an exit code. Usage errors, runner errors and panics outside
@@ -30,7 +31,7 @@ pub type Backend = dyn Fn(&[u8], &RunPlan, &mut RunState) -> Result<(), CoreFail
 pub fn main_with(
     argv: impl IntoIterator<Item = OsString>,
     root: &Path,
-    backend: &Backend,
+    backend: &Backend<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
@@ -115,7 +116,7 @@ struct Job<'a> {
 pub fn run(
     args: &Args,
     paths: &Paths,
-    backend: &Backend,
+    backend: &Backend<'_>,
     out: &mut dyn Write,
 ) -> Result<u8, String> {
     let wall_start = Instant::now();
@@ -217,13 +218,41 @@ pub fn run(
         hash_time.as_secs_f64()
     );
 
-    let mut results = execute(&jobs, &manifest, paths, &rom_hashes, backend, n_jobs)?;
+    let loaded = LoadedHashes::default();
+    let mut results = execute(
+        &jobs,
+        &manifest,
+        paths,
+        &rom_hashes,
+        &loaded,
+        backend,
+        n_jobs,
+    )?;
     results.sort_by(|a, b| (a.group_index, &a.rom).cmp(&(b.group_index, &b.rom)));
     let wall = wall_start.elapsed();
+    let _ = writeln!(
+        out,
+        "romtest: re-verified {} loaded files ({:.1} MB) at load time, {:.2} s hashing (summed over jobs)",
+        loaded.files.load(Ordering::Relaxed),
+        loaded.bytes.load(Ordering::Relaxed) as f64 / 1e6,
+        Duration::from_nanos(loaded.nanos.load(Ordering::Relaxed)).as_secs_f64()
+    );
 
     let summary = report::summarize(&results);
     let in_scope = |group: &str, rom: &str| selected(&manifest, args, group, rom);
-    let regressions = report::regressions(baseline.as_ref(), &results, &in_scope);
+    let scope = if selection.is_full() {
+        Scope::Full
+    } else {
+        Scope::Partial(&in_scope)
+    };
+    let all_regressions = report::regressions(baseline.as_ref(), &results, scope);
+    // `--allow-removed` (only with `--update-baseline`, so a full run):
+    // entries with no result are dropped from the baseline, not regressions.
+    let (regressions, removed_from_baseline) = if args.allow_removed {
+        report::split_removed(all_regressions)
+    } else {
+        (all_regressions, Vec::new())
+    };
     let gate = args.gate.map(|tier| {
         let failures = report::gate_failures(&results, tier).len();
         GateResult {
@@ -243,6 +272,7 @@ pub fn run(
         gate,
         baseline_found: baseline.is_some(),
         regressions,
+        removed_from_baseline,
         results: &results,
     };
     let json_path = paths.out_dir.join(format!("{}.json", paths.stem));
@@ -271,6 +301,21 @@ pub fn run(
     if args.update_baseline {
         match report::may_update_baseline(&rep.regressions) {
             Ok(()) => {
+                if !rep.removed_from_baseline.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "removing {} baseline entr{} with no current result (--allow-removed):",
+                        rep.removed_from_baseline.len(),
+                        if rep.removed_from_baseline.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        }
+                    );
+                    for r in &rep.removed_from_baseline {
+                        let _ = writeln!(out, "  {} {} (was {})", r.group, r.rom, r.was.name());
+                    }
+                }
                 let b = Baseline::from_results(&manifest.roms_release, &results);
                 if let Some(dir) = paths.baseline.parent() {
                     std::fs::create_dir_all(dir)
@@ -359,6 +404,29 @@ fn select<'a>(
     Ok(jobs)
 }
 
+/// Totals for the files hashed again as they were loaded for a run.
+#[derive(Default)]
+struct LoadedHashes {
+    files: AtomicUsize,
+    bytes: AtomicU64,
+    nanos: AtomicU64,
+}
+
+impl LoadedHashes {
+    /// Checks bytes just read from `test-roms/` against the integrity
+    /// list, so a file changed after the up-front check can't be used
+    /// unverified. `Err` is a runner error (exit 2).
+    fn verify(&self, list: &RomHashes, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let start = Instant::now();
+        let r = list.check_bytes(path, bytes);
+        self.files.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.nanos
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+}
+
 /// Runs every job on `n_jobs` threads. Each ROM gets its own emulator.
 /// Longest runs start first; the result order is restored by the caller.
 fn execute(
@@ -366,7 +434,8 @@ fn execute(
     manifest: &Manifest,
     paths: &Paths,
     rom_hashes: &RomHashes,
-    backend: &Backend,
+    loaded: &LoadedHashes,
+    backend: &Backend<'_>,
     n_jobs: usize,
 ) -> Result<Vec<RomResult>, String> {
     /// Stops the other workers if this one unwinds (a runner bug; the
@@ -392,7 +461,7 @@ fn execute(
                 while !abort.load(Ordering::Relaxed) {
                     let k = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&i) = order.get(k) else { break };
-                    match run_job(&jobs[i], manifest, paths, rom_hashes, backend) {
+                    match run_job(&jobs[i], manifest, paths, rom_hashes, loaded, backend) {
                         Ok(r) => results.lock().expect("results lock").push(r),
                         Err(e) => {
                             abort.store(true, Ordering::Relaxed);
@@ -414,13 +483,15 @@ fn run_job(
     manifest: &Manifest,
     paths: &Paths,
     rom_hashes: &RomHashes,
-    backend: &Backend,
+    loaded: &LoadedHashes,
+    backend: &Backend<'_>,
 ) -> Result<RomResult, String> {
     let start = Instant::now();
     let group = &manifest.groups[job.group_index];
     let rom_path = paths.roms_dir.join(&job.rom);
     let rom =
         std::fs::read(&rom_path).map_err(|e| format!("reading {}: {e}", rom_path.display()))?;
+    loaded.verify(rom_hashes, &job.rom, &rom)?;
 
     let mut st = RunState::default();
     let outcome =
@@ -467,7 +538,7 @@ fn run_job(
             registers: st.registers,
             final_frame: &frame,
             failure_pngs: &failed,
-            listed: &|p| rom_hashes.contains(p),
+            verify: &|p, bytes| loaded.verify(rom_hashes, p, bytes),
         };
         job.checks
             .iter()
