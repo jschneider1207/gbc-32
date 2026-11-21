@@ -305,9 +305,13 @@ impl Cpu {
             Mode::Running => Some(1),
             Mode::Halted => {
                 // Any pending interrupt ends HALT, even with IME off (then
-                // execution just continues after HALT). TODO(M2): the
-                // exact wake-up latency (GBCTR: HALT; SameBoy).
+                // execution just continues after HALT). On CGB the wake-up
+                // costs one more idle M-cycle before the dispatch (IME on)
+                // or the next fetch (IME off): SameBoy `GB_cpu_run` samples
+                // IE & IF, then advances 4 clocks while halted, then takes
+                // either branch. See docs/reference/halt.md.
                 if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                    bus.idle();
                     self.mode = Mode::Running;
                     Some(1)
                 } else {
@@ -380,10 +384,15 @@ impl Cpu {
             self.mode = Mode::Halted;
         } else if !self.ime {
             self.mode = Mode::HaltBug;
+        } else {
+            // IME on and an interrupt pending (this includes `EI; HALT`:
+            // EI's delay set IME before HALT's fetch): no halt, the
+            // interrupt is dispatched next, and PC is rewound so the pushed
+            // return address is the HALT itself, which runs again after
+            // RETI (SameBoy `halt()`: `gb->pc--`; Pan Docs: halt bug;
+            // SameSuite `ei_delay_halt`).
+            self.regs.pc = self.regs.pc.wrapping_sub(1);
         }
-        // IME on and an interrupt pending: no halt; it is dispatched next.
-        // TODO(M2): `EI; HALT` with an interrupt pending returns to the HALT
-        // itself (Pan Docs: halt bug).
     }
 
     /// STOP (opcode 10). With a CGB speed switch armed (KEY1 bit 0), the

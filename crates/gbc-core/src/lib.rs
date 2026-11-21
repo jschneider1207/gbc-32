@@ -1141,12 +1141,15 @@ mod tests {
             while !emu.hw.cpu.halted() {
                 let _ = emu.step(&mut fb, &mut []);
             }
-            // Every step is one idle M-cycle until VBlank sets IF.
+            // Every step is one idle M-cycle until VBlank sets IF. The step
+            // that wakes up is the extra wake-up M-cycle plus the NOP after
+            // the HALT (IME off).
             let mut steps = 0;
             while emu.hw.cpu.halted() {
                 let start = emu.clock();
                 let r = emu.step(&mut fb, &mut []);
-                assert_eq!((r.clocks, emu.clock() - start), (mcycle, mcycle));
+                let n = if emu.hw.cpu.halted() { 1 } else { 2 };
+                assert_eq!((r.clocks, emu.clock() - start), (n * mcycle, n * mcycle));
                 steps += 1;
             }
             assert!(steps > 100, "{steps}");

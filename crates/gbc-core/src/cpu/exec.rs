@@ -576,6 +576,8 @@ mod tests {
         ie: u8,
         iflags: u8,
         events: Events,
+        /// IF bits set at the end of the M-cycle that reads this address.
+        irq_on_read: Option<(u16, u8)>,
     }
 
     impl TestBus {
@@ -588,6 +590,7 @@ mod tests {
                 ie: 0,
                 iflags: 0,
                 events: Events::EMPTY,
+                irq_on_read: None,
             }
         }
     }
@@ -596,6 +599,11 @@ mod tests {
         fn read(&mut self, addr: u16) -> u8 {
             let v = self.mem[usize::from(addr)];
             self.log.push((addr, v, 'r'));
+            if let Some((at, bits)) = self.irq_on_read
+                && at == addr
+            {
+                self.iflags |= bits;
+            }
             v
         }
         fn write(&mut self, addr: u16, value: u8) {
@@ -693,6 +701,92 @@ mod tests {
         }
         assert_eq!(cpu.regs.a, 2);
         assert_eq!(cpu.regs.pc, 0x102);
+    }
+
+    #[test]
+    fn halt_bug_before_rst_pushes_the_rst_address() {
+        // The bugged fetch doesn't advance PC, so RST 38 pushes its own
+        // address (Pan Docs: halt bug).
+        let mut bus = TestBus::new(&[0x76, 0xFF], 0x100);
+        bus.ie = 0x01;
+        bus.iflags = 0x01;
+        let mut cpu = cpu_at(0x100);
+        cpu.step(&mut bus); // HALT (bugged)
+        cpu.step(&mut bus); // RST 38
+        assert_eq!(cpu.regs.pc, 0x38);
+        assert_eq!((bus.mem[0xFFFD], bus.mem[0xFFFC]), (0x01, 0x01));
+    }
+
+    #[test]
+    fn halt_with_ime_and_pending_interrupt_returns_to_the_halt() {
+        // IME on and an interrupt raised during HALT's fetch, so pending at
+        // HALT's check: no halt, and the dispatch pushes the HALT's own
+        // address (SameBoy `halt()`).
+        let mut bus = TestBus::new(&[0x76, 0x3C], 0x100); // HALT; INC A
+        bus.ie = 0x04;
+        bus.irq_on_read = Some((0x100, 0x04));
+        let mut cpu = cpu_at(0x100);
+        cpu.ime = true;
+        cpu.step(&mut bus); // HALT
+        assert!(!cpu.halted());
+        cpu.step(&mut bus); // dispatch
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!((bus.mem[0xFFFD], bus.mem[0xFFFC]), (0x01, 0x00));
+        assert_eq!(cpu.regs.a, 0);
+    }
+
+    #[test]
+    fn ei_halt_with_pending_interrupt_returns_to_the_halt() {
+        // EI; HALT; INC A with an interrupt pending: EI's delay has set IME
+        // by HALT, so the handler returns to the HALT, which then halts
+        // (Pan Docs: halt bug; SameSuite `ei_delay_halt`).
+        let mut bus = TestBus::new(&[0xFB, 0x76, 0x3C], 0x100);
+        bus.mem[0x50] = 0xD9; // RETI
+        bus.ie = 0x04;
+        bus.iflags = 0x04;
+        let mut cpu = cpu_at(0x100);
+        cpu.step(&mut bus); // EI
+        cpu.step(&mut bus); // HALT
+        cpu.step(&mut bus); // dispatch
+        assert_eq!(cpu.regs.pc, 0x50);
+        assert_eq!((bus.mem[0xFFFD], bus.mem[0xFFFC]), (0x01, 0x01));
+        cpu.step(&mut bus); // RETI
+        assert_eq!(cpu.regs.pc, 0x101);
+        cpu.step(&mut bus); // HALT again, nothing pending now
+        assert!(cpu.halted());
+        assert_eq!(cpu.regs.a, 0);
+    }
+
+    #[test]
+    fn halt_wake_up_takes_one_extra_mcycle() {
+        // CGB: once IE & IF is set, the halted CPU idles one more M-cycle
+        // (4 clocks at single speed) before the next fetch (IME off) or
+        // the 5-M-cycle dispatch (IME on) (SameBoy `GB_cpu_run`).
+        for ime in [false, true] {
+            let mut bus = TestBus::new(&[0x76, 0x3C], 0x100); // HALT; INC A
+            let mut cpu = cpu_at(0x100);
+            cpu.ime = ime;
+            cpu.step(&mut bus); // HALT
+            cpu.step(&mut bus); // one idle M-cycle while halted
+            assert!(cpu.halted());
+            bus.ie = 0x01;
+            bus.iflags = 0x01;
+            bus.log.clear();
+            cpu.step(&mut bus);
+            assert!(!cpu.halted());
+            assert_eq!(bus.log[0], (0, 0, '-'), "ime={ime}");
+            if ime {
+                // Idle + dispatch (2 idle, 2 pushes, 1 idle) = 24 clocks.
+                assert_eq!(bus.log.len(), 6, "ime={ime}");
+                assert_eq!(cpu.regs.pc, 0x40);
+                assert_eq!((bus.mem[0xFFFD], bus.mem[0xFFFC]), (0x01, 0x01));
+            } else {
+                // Idle + the INC A fetch = 8 clocks.
+                assert_eq!(bus.log.len(), 2, "ime={ime}");
+                assert_eq!(bus.log[1], (0x101, 0x3C, 'r'));
+                assert_eq!(cpu.regs.a, 1);
+            }
+        }
     }
 
     #[test]
