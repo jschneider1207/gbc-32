@@ -1,6 +1,6 @@
 # 0006: Core public API (buffers, construction, events, debug access)
 
-- Status: Accepted
+- Status: Accepted; the construction part (`Emulator::init` over `MaybeUninit`, `ZeroValid`) is superseded by 0009
 - Date: 2026-11-21
 
 ## Context
