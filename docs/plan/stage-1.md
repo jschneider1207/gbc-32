@@ -39,6 +39,8 @@ clippy, test and embedded-build steps, and fails at the ROM step with
 - [ ] MBC1 (enough for Blargg), serial port output capture
 - [ ] Post-boot register state for CGB (no boot ROM)
 - [ ] Instruction-level unit tests (e.g. against the SM83 JSON single-step tests, if adopted)
+- [ ] Before fixing the bus signature: a per-run-call context struct (memory, hardware state, frame, audio + write position) so lazy PPU/APU catch-up on any bus write costs one pointer, not threaded arguments (ADR 0006 review, finding 6)
+- [ ] ROM size: record size/mask at `load` so opcode fetch avoids a per-access bounds check; define out-of-range reads for non-power-of-two ROMs (review finding 11)
 
 **Acceptance:** `romtest --group blargg-cpu-instrs --group blargg-instr-timing --only-check serial --gate must`
 exits 0. (Their screenshot checks need the PPU and are covered in M3.)
@@ -49,6 +51,7 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 - [ ] Interrupt dispatch timing, HALT bug, IE/IF behavior
 - [ ] DIV/TIMA with the falling-edge behavior, TMA reload windows
 - [ ] OAM DMA timing and bus conflicts
+- [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
 
 **Acceptance:** `romtest --filter 'mooneye-test-suite/acceptance/{timer,instr,interrupts,oam_dma}/**' --gate must`
 exits 0. Some top-level Mooneye acceptance tests depend on LY/VBlank timing or
@@ -60,6 +63,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
 - [ ] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
+- [ ] Before writing the PPU: decide the output pixel format and stride (STM32 LTDC wants RGB565 or ARGB1555; converting per palette entry at palette-write time is free on the hot path). Record it in an ADR (review finding 4)
 - [ ] First headless performance benchmark recorded in `docs/perf.md`
 
 **Acceptance:** groups `mooneye-acceptance`, `dmg-acid2-compat`, `blargg-cpu-instrs`,
@@ -71,6 +75,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] MBC1 (full), MBC2, MBC3 + RTC (on emulated time), MBC5 (incl. rumble bit ignored)
 - [ ] Cartridge header parsing, ROM/RAM size handling
 - [ ] Save RAM and RTC state exposed through the core API (the caller owns persistence)
+- [ ] `RtcState::advance_seconds(u64)` in the core with hardware rollover (out-of-range wrap, day carry, halt bit), so front ends can sync to wall-clock time correctly; document load-then-set_rtc_state order (review finding 8)
 
 **Acceptance:** groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
 `rtc3test-sub-second` and `mbc3-tester` all passing.
