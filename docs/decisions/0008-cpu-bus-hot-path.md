@@ -99,3 +99,68 @@ button is pressed. Exact behavior is M5.
 - Measured on the host (release, x86-64): Blargg `cpu_instrs` runs 31
   emulated seconds in ~0.38 s, about 80x real time (~4,800 frames/s).
   The proper benchmark is M3/M8 (`docs/perf.md`).
+
+## Amendments
+
+### 2026-11-21: hot path after the M1 milestone-close review
+
+The M1 performance review found per-instruction and per-M-cycle overhead
+that the structure above didn't need. Changes (behavior is unchanged:
+every unit test, all 500,000 SM83 single-step cases and the full romtest
+manifest results, including end clocks, frame counts, serial output and
+registers, are bit-identical):
+
+- **The instruction loop runs inside the CPU.** `Cpu::run(bus)` steps
+  until `Bus::run_done()` (default true: one step) and is the only caller
+  of the 256-arm dispatch, which is `#[inline(always)]`, so a run call
+  saves and restores callee-saved registers once, not once per
+  instruction. `Emulator::step` uses the same `run` with the context
+  already marked done. `Cpu::step` remains for `tools/sm83-tests` and
+  tests. The HALT-bug step now goes through the normal fetch with a PC
+  increment of 0 instead of calling the dispatch a second time (IME and
+  the EI delay are always off in that state).
+- **32-bit clock countdown.** The tick no longer compares a u64 clock with
+  `next_event`. `Hot::budget: i32` holds the base clocks left until
+  `deadline = min(Sys::next_event, run target)`, capped at `i32::MAX`
+  ahead; the tick subtracts the M-cycle length (4 or 2) and calls the
+  out-of-line `Ctx::boundary` when it is `<= 0`, which runs due events,
+  ends the call if the target was reached, and sets the next deadline.
+  The clock is `deadline - budget`, exact at every point, so `clock()`,
+  LY/STAT reads and event timing are unchanged. Anything that moves
+  `next_event` (PPU sync, LCDC writes) reschedules.
+- **Hot state in `Ctx` by value.** The countdown, M-cycle length and timer
+  (`bus::Hot`) are copied into `Ctx` when it is built and back to
+  `Sys::hot` when it is dropped, so the tick reaches them through the one
+  pointer the CPU holds and never loads `ctx.sys`. `read` takes the live
+  `Hot` (the context's during a run, `Sys::hot` for `peek`). One mask,
+  `Hot::watch`, holds the TIMA input bit and the serial bit clock, so one
+  test per M-cycle covers both; the work behind it is out of line. Stop
+  events set a `done` flag when raised, so the loop checks one bool per
+  instruction. The timer's behavior is unchanged (the lazy timer is an
+  M2 decision).
+- **No bounds-check panics in the dispatch.** Cartridge RAM accesses use
+  `get`/`get_mut` with an unreachable fallback instead of indexing (the
+  index is masked to the header size, which the compiler can't relate to
+  the buffer length). `run`, `step_not_running` and `write_mapped` have
+  no `panic_bounds_check` relocations on thumbv7em; `read_high`,
+  `write_high` (OAM/HRAM/FEA0 indexing) and `Cpu::reset` still do.
+
+Measurements (host x86-64 release, Blargg `cpu_instrs` per-ROM wall time
+from romtest, best of 5, interleaved runs): **0.373 s before, 0.275 s
+after** (~26% less; about 113x real time for its 31 emulated seconds).
+
+Code size in bytes (`thumbv7em-none-eabihf`, release, `RUSTFLAGS="-C
+target-cpu=cortex-m7"`; `nm --size-sort -S` on the rlib's objects):
+
+| Function | Before | After |
+|---|---|---|
+| `Cpu::execute::<Ctx>` | 50,076 + 50,068 (two CGU-local copies) | inlined into `run` |
+| `Cpu::step::<Ctx>` | 452 | inlined into `run` |
+| `Cpu::dispatch::<Ctx>` | 792 | inlined into `run` |
+| `Cpu::run::<Ctx>` | - | 37,064 |
+| `Cpu::execute_cb::<Ctx>` | 18,092 | 15,702 |
+| `Cpu::step_not_running::<Ctx>` | 902 | 216 |
+| crate `.text` total | 131,021 | 63,805 |
+
+Inlining `execute_cb` into `run` as well was measured and gave no host
+speedup, so it stays out of line.

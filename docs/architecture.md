@@ -165,11 +165,11 @@ lib.rs      * Emulator, Hw (cpu + sys), RunResult, run loop, public re-exports, 
 memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, stub I/O storage)
 bitset.rs   * bitset! macro behind Buttons and Events
 events.rs   * Events
-joypad.rs   * Buttons (P1/JOYP reads are in bus.rs)
+joypad.rs   * Buttons, P1 line logic and the joypad interrupt edge (P1/JOYP register access is in bus.rs)
 config.rs   * Config, DmgPalettes, RGB555 helpers
-cpu/        * SM83: Registers, Bus trait, Cpu (step, interrupts, HALT/HALT bug, STOP stub)
+cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP stub)
   exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
-bus.rs      * Sys (state the bus reaches), Ctx (per-run-call context), memory map, I/O, peek
+bus.rs      * Sys (state the bus reaches), Hot (clock countdown + timer), Ctx (per-run-call context), memory map, I/O, peek
 timer.rs    * DIV/TIMA/TMA/TAC (falling-edge counter; its fallen bits clock serial)
 ppu/        * Frame, lazy stub timing (VBlank, LY, STAT mode); later modes, renderer, palettes
 apu/        * StereoSample; later channels, frame sequencer, mixer
@@ -182,10 +182,20 @@ serial.rs   * SB/SC internal-clock transfers, last byte sent
 
 `Hw` holds `cpu: Cpu` and `sys: Sys<'a>` (everything the bus reaches:
 clock, PPU, timer, serial, cartridge, interrupt and banking registers).
-Each run call builds one `Ctx { mem, sys, frame, audio, .. }` and calls
-`cpu.step(&mut ctx)` per instruction. The CPU is generic over the `Bus`
+Each run call builds one `Ctx` (`Ctx::new`: the memory, `sys`, the frame
+and audio buffers, the stop events and the target) and calls
+`cpu.run(&mut ctx)`, which loops over instructions until the context
+reports the call done (target reached or a stop event raised); the opcode
+dispatch is inlined into that loop. The CPU is generic over the `Bus`
 trait; every `read`/`write`/`idle` is one M-cycle: the access at the
-current clock, then a tick (clock, timer, serial, and one compare against
-`Sys::next_event` for lazily-run components such as the PPU). Reads have no
-side effects, so the CPU and `Emulator::peek` share one `read` function.
-The same CPU runs against a flat test bus in `tools/sm83-tests`.
+current clock, then a tick (timer, serial bit clock and an `i32` countdown
+to the next deadline, the earlier of `Sys::next_event` and the target).
+The countdown and timer (`Hot`) are copied into the `Ctx` for the call
+and back into `Sys::hot` when it is dropped, so the tick doesn't go
+through `ctx.sys`; the u64 clock is `deadline - budget`. Reads have no
+side effects, so the CPU and `Emulator::peek` share one `read` function
+(given the live `Hot`). The same CPU runs against a flat test bus in
+`tools/sm83-tests`, which runs only with the data from
+`scripts/fetch-sm83-tests.sh`, verified file by file against the committed
+`tools/sm83-tests/sm83-v1.sha256` (`GBC_REQUIRE_TEST_DATA=1` makes missing
+data a failure instead of a skip).
