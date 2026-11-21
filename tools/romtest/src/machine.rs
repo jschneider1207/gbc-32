@@ -19,6 +19,9 @@ use crate::manifest::{Exit, InputEntry};
 pub trait Machine {
     fn set_stop_events(&mut self, events: Events);
     fn set_buttons(&mut self, buttons: Buttons);
+    /// Schedules a button change at `clock` (applied now if that has
+    /// passed); `false` if the machine's queue is full (ADR 0012).
+    fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool;
     /// Runs until `clock() >= target` or a stop event; returns the events.
     fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events;
     fn clock(&self) -> u64;
@@ -35,6 +38,9 @@ impl Machine for Emulator<'_> {
     }
     fn set_buttons(&mut self, buttons: Buttons) {
         Emulator::set_buttons(self, buttons);
+    }
+    fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool {
+        Emulator::set_buttons_at(self, clock, buttons)
     }
     fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events {
         Emulator::run_until(self, target, frame, &mut []).events
@@ -219,26 +225,34 @@ pub fn run<M: Machine + ?Sized>(
     })?;
 
     let mut fb = new_frame();
+    // Input changes before `next_input` have been handed to the machine.
     let mut next_input = 0;
     let mut stalled_calls = 0u32;
     let end = loop {
         let now = core_call(|| m.clock())?;
-        // Apply input changes once the clock has reached them (runs end on
-        // instruction boundaries, so this is the first boundary >= at).
+        // Hand the machine every change its queue takes. It applies each
+        // on its exact M-cycle, wherever run calls end (ADR 0012); one
+        // whose time has passed applies now.
         while let Some(&(at, buttons)) = plan.input.get(next_input) {
-            if at > now {
+            if !core_call(|| m.set_buttons_at(at, buttons))? {
                 break;
             }
-            core_call(|| m.set_buttons(buttons))?;
             next_input += 1;
         }
         if now >= limit {
             break if ld_b_b { End::Timeout } else { End::Completed };
         }
-        let target = plan
-            .input
-            .get(next_input)
-            .map_or(limit, |&(at, _)| at.min(limit));
+        // With the queue full, stop at its earliest change so it drains
+        // and can be refilled.
+        let target = match plan.input.get(next_input) {
+            None => limit,
+            Some(&(waiting, _)) => plan.input[..next_input]
+                .iter()
+                .map(|&(at, _)| at)
+                .find(|&at| at > now)
+                .unwrap_or(waiting)
+                .min(limit),
+        };
         let events = core_call(|| m.run_until(target, &mut fb))?;
         if events.contains(Events::SERIAL_TX) {
             st.serial.push(core_call(|| m.serial_byte())?);
@@ -336,8 +350,12 @@ pub mod fake {
         pub lcd: bool,
         pub stop: Events,
         pub buttons: Buttons,
-        /// Every `set_buttons` call with the clock at the time.
+        /// Every button change with the clock it applied at.
         pub button_log: Vec<(u64, Buttons)>,
+        /// Scheduled changes (sorted, one per clock) and the queue size;
+        /// like the core, each applies at its exact clock.
+        pub pending: Vec<(u64, Buttons)>,
+        pub pending_cap: usize,
         pub serial: u8,
         frame_clock: u64,
         frames: u16,
@@ -358,6 +376,8 @@ pub mod fake {
                 stop: Events::EMPTY,
                 buttons: Buttons::EMPTY,
                 button_log: Vec::new(),
+                pending: Vec::new(),
+                pending_cap: gbc_core::SCHEDULED_INPUTS,
                 serial: 0,
                 frame_clock: 0,
                 frames: 0,
@@ -372,6 +392,14 @@ pub mod fake {
             let mut ev = Events::EMPTY;
             let before = self.clock;
             self.clock += self.step;
+            while let Some(&(at, buttons)) = self.pending.first() {
+                if at > self.clock {
+                    break;
+                }
+                self.pending.remove(0);
+                self.buttons = buttons;
+                self.button_log.push((at, buttons));
+            }
             for &(at, action) in &self.script {
                 if at < before || at >= self.clock {
                     continue;
@@ -432,6 +460,18 @@ pub mod fake {
         fn set_buttons(&mut self, buttons: Buttons) {
             self.buttons = buttons;
             self.button_log.push((self.clock, buttons));
+        }
+        fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool {
+            if clock <= self.clock {
+                self.set_buttons(buttons);
+                return true;
+            }
+            match self.pending.binary_search_by_key(&clock, |p| p.0) {
+                Ok(i) => self.pending[i].1 = buttons,
+                Err(_) if self.pending.len() == self.pending_cap => return false,
+                Err(i) => self.pending.insert(i, (clock, buttons)),
+            }
+            true
         }
         fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events {
             let stop = Events::ALWAYS_STOP | self.stop;
@@ -683,9 +723,9 @@ mod tests {
             m.button_log,
             [
                 (0, Buttons::EMPTY),
-                (2004, Buttons::START),
-                (4008, Buttons::EMPTY),
-                (8004, Buttons::A),
+                (2000, Buttons::START),
+                (4000, Buttons::EMPTY),
+                (8000, Buttons::A),
             ]
         );
         // A serial byte in the same step as LD B,B is still collected.
@@ -740,10 +780,40 @@ mod tests {
             m.button_log,
             [
                 (0, Buttons::EMPTY),
-                (4008, Buttons::A),
+                (4000, Buttons::A),
                 (6000, Buttons::A | Buttons::B),
-                (8004, Buttons::B),
-                (10008, Buttons::EMPTY),
+                (8000, Buttons::B),
+                (10000, Buttons::EMPTY),
+            ]
+        );
+    }
+
+    #[test]
+    fn inputs_beyond_the_queue_wait_for_it_to_drain() {
+        // A queue of one: each change is handed over once the previous
+        // one has applied, and still lands on its exact clock. Changes
+        // closer together than one run call's overshoot can't all be
+        // queued; the late one applies when the run returns.
+        let input = [
+            entry(4000, 8000, Buttons::A),
+            entry(6000, 10000, Buttons::B),
+            entry(20000, 20002, Buttons::START),
+        ];
+        let plan = RunPlan::new(Exit::RunFrames { frames: 1 }, &input);
+        let mut m = FakeMachine::new(vec![]);
+        m.step = 12;
+        m.pending_cap = 1;
+        run_fake(&mut m, &plan);
+        assert_eq!(
+            m.button_log,
+            [
+                (0, Buttons::EMPTY),
+                (4000, Buttons::A),
+                (6000, Buttons::A | Buttons::B),
+                (8000, Buttons::B),
+                (10000, Buttons::EMPTY),
+                (20000, Buttons::START),
+                (20004, Buttons::EMPTY),
             ]
         );
     }

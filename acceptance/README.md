@@ -70,9 +70,9 @@ Top level: `roms_release` (must equal `test-roms/.version`, else exit 2),
 button in `press` (`a`, `b`, `select`, `start`, `up`, `down`, `left`,
 `right`) at emulated time `at_s` and releases them at `at_s + hold_s`. Times
 are rounded down to the nearest M-cycle. Overlapping entries combine: a
-button is held while any entry is holding it. (Until stage 1 M2 adds
-scheduled input changes to the core, a change lands at the first
-instruction boundary at or after its M-cycle.)
+button is held while any entry is holding it. Each change lands on its
+M-cycle, wherever run calls end (the core's scheduled button changes,
+ADR 0012).
 
 For every ROM matched by every group in the manifest, the runner:
 
