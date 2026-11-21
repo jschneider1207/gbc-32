@@ -26,7 +26,10 @@ tools/
 Workspace: edition 2024, resolver 3. The release profile keeps unwinding
 panics (`romtest` catches them per ROM) and line-table debug info. Workspace
 lints deny `unsafe_op_in_unsafe_fn` and `clippy::undocumented_unsafe_blocks`
-(every `unsafe` block needs a `// SAFETY:` comment).
+(every `unsafe` block needs a `// SAFETY:` comment). `gbc-core` itself has
+no `unsafe` at all: `#![forbid(unsafe_code)]`, checked by
+`crates/gbc-core/tests/hard_rules.rs` (ADR 0009). `unsafe` belongs in front
+ends and platform layers only.
 
 Dependency direction: front ends and tools depend on `gbc-core`. `gbc-core`
 depends on nothing outside `core` without human approval (AGENTS.md).
@@ -60,16 +63,18 @@ conservative stand-in for SDRAM. The custom-board contract is
 ## Core ↔ platform boundary
 
 The core is a library the platform drives. It never calls out to the
-platform. The concrete API and its rationale are in ADR 0006; the crate
-docs in `crates/gbc-core/src/lib.rs` have a usage example.
+platform. The concrete API and its rationale are in ADR 0006 (construction:
+ADR 0009); the crate docs in `crates/gbc-core/src/lib.rs` have desktop and
+MCU usage examples.
 
 ```text
-Emulator<'a>                       // 'a = lifetime of the cartridge ROM/RAM borrows
-  const fn new() -> Self                            // powered off, no cartridge; const/static only
-  fn init(&mut MaybeUninit<Self>) -> &mut Self      // same, built in place (no stack temporary)
+Memory                             // the ~49 KiB of RAM arrays, provided by the caller
+  const fn new() -> Self                            // all zero bytes: a static goes to .bss
+Emulator<'a>                       // 'a = lifetime of the Memory and cartridge ROM/RAM borrows
+  fn new(mem: &'a mut Memory) -> Self               // powered off, no cartridge; zero-fills mem
   fn load(&mut self, rom: &'a [u8], cart_ram: &'a mut [u8], Config)
       -> Result<Option<CartBuffers<'a>>, LoadError<'a>>  // Ok: previous cart's buffers; Err: hands back rom/cart_ram
-  fn eject(&mut self) -> Option<CartBuffers<'a>>    // unload; back to the init state
+  fn eject(&mut self) -> Option<CartBuffers<'a>>    // unload; back to the `new` state
   fn set_dmg_palettes(&mut self, DmgPalettes)       // no reset
   fn reset(&mut self)                               // power cycle; cart RAM/RTC kept
   fn set_buttons(&mut self, Buttons)
@@ -133,13 +138,16 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   plain field reads; nothing is on the hot path (no callbacks or dynamic
   dispatch).
 
-The `Emulator` struct is large (WRAM 32 KiB + VRAM 16 KiB + OAM, etc.) and
-must never be required to live on the stack. It has exactly two fields:
-`mem: Memory` (only `u8` arrays, so all-zero is valid) and `hw: Hw<'a>`
-(everything else, kept under 1 KiB). `Emulator::init` zero-fills `mem`
-in place and writes `hw`, so desktop and `romtest` use `Box::new_uninit()`
-plus `init`, and the MCU uses a `static MaybeUninit<Emulator<'static>>` in
-a no-init RAM section. New large state goes in `Memory`, everything else in
+The large RAM arrays (WRAM 32 KiB + VRAM 16 KiB + OAM, etc.) are the
+caller's `Memory`, which must never be required to live on the stack
+(ADR 0009). `Memory::new()` is all zero bytes, so on the MCU a
+`static MEM: Memory` goes to `.bss` (no flash image, no boot copy); the
+desktop and `romtest` use `Box::new(Memory::new())`. `Emulator` holds
+`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else, kept under 1 KiB)
+and is small enough for the stack. Run calls copy the `mem` pointer into
+the per-call `Ctx`, so the hot path is the same as with an inline field.
+New large state goes in `Memory` as fields whose power-on value is zero
+(non-zero post-boot values are written by `reset`); everything else goes in
 `Hw`.
 
 Core unit tests live in `#[cfg(test)]` modules, which may use `std`. The
