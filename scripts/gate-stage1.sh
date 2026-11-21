@@ -52,6 +52,9 @@ step "Code-size budgets (thumbv7em, cortex-m7)"
 step "Instruction-count benchmark (valgrind)"
 ./scripts/check-bench.sh || fail "instruction-count benchmark (perf/bench-baseline.txt, docs/perf.md)"
 
+step "Fuzz pass over untrusted inputs (fixed seed + corpus)"
+./scripts/check-fuzz.sh || fail "fuzz pass (docs/fuzzing.md; failing input in target/fuzz-failures/)"
+
 step "Acceptance ROMs (must tier + regressions)"
 set +e
 cargo run -p romtest --release -- --manifest acceptance/stage1.toml --gate must

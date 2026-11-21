@@ -209,7 +209,10 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
    Raising a budget or a baseline is committed together with the change
    that needs it, with the measured numbers and the reason in the commit
    body (`docs/perf.md`).
-7. The runner exits 0 with `--gate must` on the full manifest: every `must`
+7. `scripts/check-fuzz.sh` passes: every input in `tools/fuzz/corpus/` and
+   the fixed-seed generated inputs run through the core's public API
+   without a panic or a hang (`docs/fuzzing.md`).
+8. The runner exits 0 with `--gate must` on the full manifest: every `must`
    ROM passes and there are no regressions against
    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
    runner error.
