@@ -50,12 +50,18 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 
 - [ ] M-cycle-accurate memory access timing (ADR 0002)
 - [ ] Interrupt dispatch timing, HALT bug, IE/IF behavior
-- [ ] Decide first: lazy, event-scheduled timer (DIV from the clock; TIMA overflow, serial bit clock and DIV-APU as scheduled events) vs. the eager per-M-cycle tick, which costs ~25% of host time (M1 perf review). Record in an ADR before building M2 timing on it
+- [x] Decide first (ADR 0011: lazy, event-scheduled): lazy, event-scheduled timer (DIV from the clock; TIMA overflow, serial bit clock and DIV-APU as scheduled events) vs. the eager per-M-cycle tick, which costs ~25% of host time (M1 perf review). Record in an ADR before building M2 timing on it
+- [ ] ADR 0011 implementation, in order:
+  - [ ] Fixed event table (deadlines); move the PPU onto it
+  - [ ] `bench --fingerprint` and `scripts/diff-fingerprint.sh` (behavior fingerprints to compare models)
+  - [ ] Reload-window rules in the eager timer, kept afterwards as a test-only reference model
+  - [ ] Lazy timer and serial clock, differential test against the eager model; rebaseline the benchmark and size budgets (keep timer I/O out of line so `write_high`/`read_high` stay in budget)
+  - [ ] HALT/STOP/lockup/power-off jump to the next deadline
+  - [ ] Open hardware questions (ADR 0011): does disabling the timer tick TIMA on CGB (Pan Docs vs SameBoy); serial clock phase after a DIV reset
 - [ ] HALT: IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
 - [ ] DIV/TIMA with the falling-edge behavior, TMA reload windows
 - [ ] OAM DMA timing and bus conflicts (DMA conflicts put state into the CPU read path, so `peek` needs its own side-effect-free path; consider driving DMA through `next_event`)
 - [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
-
 - [x] Quality-bar tooling in the gate (README "Quality and performance bar": the benchmark runs in the gate from M2 on):
   - [x] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
   - [x] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate

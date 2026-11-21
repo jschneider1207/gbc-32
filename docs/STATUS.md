@@ -4,82 +4,66 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M1 (CPU + memory bus): acceptance passes; close-out remaining (below). M0 tagged `stage1-m0`.
-- **Last updated:** 2026-11-21, end of session 01 (logs `logs/2026-11-21-01-*.md`, `logs/2026-11-21-02-*.md`)
+- **Milestone:** M2 (timing, interrupts, timers, OAM DMA). M1 is tagged `stage1-m1`.
+- **Last updated:** 2026-11-21, end of session 03 (`logs/2026-11-21-03-m1-close-quality-bar.md`)
 
 ## Next up
 
-1. **Close M1:**
-   - The core API changed in 262e011 (ADR 0009: caller-provided `Memory`,
-     `#![forbid(unsafe_code)]`), so run **one** API reviewer scoped to
-     `6fd632e^..HEAD` core changes (AGENTS.md trigger 3).
-   - Triage under the new rules: fix high and medium, send low to the plan,
-     no re-review.
-   - The three M1 milestone-close reviews are already done and triaged
-     (fixes 6fd632e..853f66f; deferred items are plan tasks), so don't
-     repeat them.
-   - Then:
-     - `cargo run -p romtest --release -- --manifest acceptance/stage1.toml --update-baseline`
-       (no regressions expected; must 42/86);
-     - tick the M1 boxes in the plan;
-     - add a "Review" section to the session-02 log;
-     - `git tag -a stage1-m1 -m "..."` (tags must be annotated here).
-2. **Quality-bar tooling** (README "Quality and performance bar", approved):
-   - **Benchmark:** a deterministic instruction-count benchmark under
-     valgrind (e.g. iai-callgrind) on fixed ROMs, with a committed baseline.
-     The gate fails on a regression of more than a few percent.
-   - **Code size:** budgets for `Cpu::run::<Ctx>` (37,064 B now) and
-     `execute_cb` (15,702 B) on thumbv7em with `-C target-cpu=cortex-m7`.
-   - **Fuzzing:** a short fuzz pass in the gate over untrusted inputs: ROM
-     header/`load`, save RAM, `set_rtc_state`. It must stay deterministic in
-     the gate, e.g. fixed-seed or bounded corpus runs. Nightly via rustup is
-     fine if needed (user-level).
-   - All of these only make the gate stricter, so they are agent decisions.
-     Note that the `.claude/settings.json` ask rule on `scripts/gate-*.sh`
-     will still prompt the human.
-3. **M2:** first the ADR on a lazy, event-scheduled timer vs the eager tick
-   (plan task), then interrupt, HALT, timer and OAM DMA timing. The M2 plan
-   section lists the review findings already queued.
+1. **ADR 0011 implementation**, in the order listed in the M2 plan:
+   - event table + PPU on it;
+   - fingerprint tooling;
+   - the reload window in the eager timer, kept afterwards as a test-only
+     reference;
+   - the lazy timer and serial clock with a differential test;
+   - halted/idle jumps to the next deadline.
+
+   Read `docs/decisions/0011-event-scheduled-timer.md` first. It is
+   detailed, with measured numbers from a throwaway prototype. Each step
+   is new emulation/timing logic, so use the most capable model.
+   - When it lands, rebaseline the benchmark and size budgets in the same
+     commit, with the numbers in the commit body (ADR 0010).
+   - The prototype went over the `write_high`/`read_high` size budgets.
+     Keep the timer I/O out of line.
+2. The rest of M2: HALT tasks, OAM DMA, scheduled inputs at M-cycle
+   resolution, and `hard_rules` hardening (M1 API review, low).
+3. **M2 acceptance subset:** 15/17 must pass. Failing:
+   `timer/tima_write_reloading` and `timer/tma_write_reloading` (the TIMA
+   reload window, ADR 0011 step 3).
 
 ## Needs human
 
 None open.
 
-Decisions the human made on 2026-11-21, for context:
+Context on earlier human decisions:
 - `acceptance/test-roms.sha256` is human-owned.
-- The gate was hardened, including the SM83 data fetch with
-  `GBC_REQUIRE_TEST_DATA=1`.
-- The runner rulings were folded into `acceptance/README.md`.
 - Strictly-tightening gate/contract changes and factual README fixes are
   agent decisions.
 - README quality bar: the core uses at most 50% of an H753 at 480 MHz in
   the worst case.
 - Unsafe-free core (ADR 0009).
-- Valgrind is installed.
-- Leaner review rules (AGENTS.md "Independent review", f9b9126).
+- The project is MIT-licensed. AGENTS.md has a rule on dependency licenses
+  and on not copying code from copyleft emulators.
+- Remote `origin` = `git@github.com:jschneider1207/gbc-32.git`. The human
+  pushes; agents never do.
 
 ## Environment
 
-- **Rust:** via rustup (user-level, `~/.rustup` and `~/.cargo`), not asdf.
+- **Rust:** via rustup (user-level, `~/.rustup` and `~/.cargo`).
   - `cargo` is **not on PATH in non-interactive shells**: prefix commands
     with `source ~/.cargo/env &&`.
-  - The toolchain is pinned to 1.100.0 in `rust-toolchain.toml`. No nightly
-    is installed yet.
-  - `-C target-feature=+strict-align` is unstable on 1.100 (it warns), so
-    the unaligned-ROM-read constraint is handled in code (plan task).
-- **valgrind** 3.22.0 at `/usr/bin/valgrind`.
+  - The toolchain is pinned to 1.100.0. Nightly is installed, but only for
+    cargo-fuzz (`tools/fuzz/fuzz/`, outside the workspace; see
+    `docs/fuzzing.md`).
+- **valgrind** 3.22.0. Benchmark Ir counts are tied to it and the pinned
+  toolchain; a change to either is a rebaseline commit.
 - **SM83 single-step data:** `scripts/fetch-sm83-tests.sh` →
-  `test-data/sm83/` (gitignored, hash-verified per file via
-  `tools/sm83-tests/sm83-v1.sha256`). Locally, set
-  `GBC_REQUIRE_TEST_DATA=1` so missing data fails.
-- **Desktop system libraries:** installed
-  (`./scripts/install-system-deps.sh --check` passes). WSL2 Ubuntu 24.04,
-  gcc 13.3, no `jq`. Scripts are written in bash or Elixir, not Python.
-- **Hardware datasheets** (DS13312, RM0468, ES0491, RM0433, ...) are in
-  `../gbc-32-hardware/datasheets/`, and `pdftotext` works on them. Don't
-  modify that repo without the human.
-- **Commits:** stage only your own paths (`git add <paths>`). The human
-  sometimes commits concurrently.
+  `test-data/sm83/`. Set `GBC_REQUIRE_TEST_DATA=1` locally.
+- **Desktop system libraries:** installed. WSL2 Ubuntu 24.04, no `jq`.
+  Scripts are bash or Elixir, not Python.
+- **Datasheets:** `../gbc-32-hardware/datasheets/` (read-only for agents).
+- **Commits:** stage by explicit path only (AGENTS.md Git). Other agents
+  and the human commit concurrently.
+- **Gate:** `scripts/gate-*.sh` edits prompt the human (`.claude/settings.json`).
 
 ## Blockers
 
@@ -87,16 +71,19 @@ None.
 
 ## Acceptance snapshot
 
-As of 6d67a02 (M1 CPU/bus/timer/serial/MBC1, unsafe-free core). The
-committed baseline is still the M0 one until M1 closes. The full manifest
-takes about 4 s wall with 8 jobs.
-
-Blargg cpu_instrs runs 31 emulated s in about 0.28 s on the host release
-build, roughly 110× real time. On thumbv7em, `run` is 37 KB and
-`execute_cb` 15.7 KB.
+As of 8e9bae8. The committed baseline is the M1 one (f2c7098). The gate
+fails only at the last step (must-tier ROMs), as expected mid-stage:
+fmt, clippy, tests, no-alloc, code size, the benchmark and fuzzing all
+pass. The full gate takes about 1 min with the valgrind benchmark.
 
 | Tier | Pass | Fail | Timeout | Crash | Unsupported | No reference |
 |---|---|---|---|---|---|---|
 | must (86) | 42 | 42 | 2 | 0 | 0 | 0 |
 | should (40) | 2 | 30 | 8 | 0 | 0 | 0 |
 | stretch (3268) | 1 | 107 | 2 | 10 | 3144 | 4 |
+
+Performance (`docs/perf.md`):
+- Benchmark Ir over 20 emulated s: cpu_instrs 1,926,303,053, cgb_sound
+  922,727,228, cgb-acid2 928,451,269.
+- Code size: `Cpu::run::<Ctx>` 37,064 B (budget 39,000), `execute_cb`
+  15,702 B (budget 16,500).
