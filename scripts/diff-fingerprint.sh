@@ -1,10 +1,3 @@
-
-# The new side is the working tree, not HEAD: say so loudly if it differs.
-if [ -n "$(git status --porcelain -- crates tools Cargo.toml Cargo.lock)" ]; then
-  echo "diff-fingerprint: WARNING: uncommitted changes under crates/ or tools/ (or Cargo.*):" >&2
-  echo "diff-fingerprint: WARNING: the new side is the WORKING TREE, not HEAD" >&2
-  git status --short -- crates tools Cargo.toml Cargo.lock >&2
-fi
 #!/usr/bin/env bash
 # Prove a change is behavior-identical to an earlier revision (docs/perf.md,
 # ADR 0011 "Verification").
@@ -69,10 +62,15 @@ if diff -q "$tmp/old.txt" "$tmp/new.txt" >/dev/null; then
   exit 0
 fi
 
-# Paths are the second column; compare by path so added/removed ROMs show too.
+# The path is everything after the first space (some paths contain spaces);
+# compare by path so added/removed ROMs show too.
 cmp="$tmp/cmp.txt"
-join -1 2 -2 2 -a1 -a2 -e MISSING -o 0,1.1,2.1 \
-  <(sort -k2 "$tmp/old.txt") <(sort -k2 "$tmp/new.txt") | awk '$2 != $3' > "$cmp"
-awk '{ printf "DIFF %s  %s -> %s\n", $1, $2, $3 }' "$cmp"
+awk '
+  { h = $1; p = $0; sub(/^[^ ]* /, "", p) }
+  NR == FNR { old[p] = h; next }
+  { seen[p] = 1; o = (p in old) ? old[p] : "MISSING"; if (o != h) print "DIFF " p "  " o " -> " h }
+  END { for (p in old) if (!(p in seen)) print "DIFF " p "  " old[p] " -> MISSING" }
+' "$tmp/old.txt" "$tmp/new.txt" | sort > "$cmp"
+cat "$cmp"
 echo "diff-fingerprint: $(wc -l < "$cmp") of $total ROMs differ vs $rev" >&2
 exit 1
