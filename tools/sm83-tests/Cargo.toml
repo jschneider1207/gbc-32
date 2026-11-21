@@ -3,6 +3,7 @@ name = "sm83-tests"
 description = "Runs the SM83 single-step CPU tests against gbc-core's CPU"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

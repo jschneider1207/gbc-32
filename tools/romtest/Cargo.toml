@@ -3,6 +3,7 @@ name = "romtest"
 description = "Acceptance test runner (contract: acceptance/README.md)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

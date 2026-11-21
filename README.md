@@ -106,4 +106,8 @@ Iterate on the prototype to fix what testing uncovered and polish the design.
 
 **Done when:** the refined board is a reliable, finished handheld.
 
+## License
 
+MIT. See [LICENSE](LICENSE). Test ROMs are downloaded separately and remain under their authors' licenses. No Nintendo code or boot ROMs are included.
+
+"Game Boy" and "Game Boy Color" are trademarks of Nintendo. This project is not affiliated with or endorsed by Nintendo.

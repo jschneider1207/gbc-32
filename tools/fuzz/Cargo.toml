@@ -3,6 +3,7 @@ name = "fuzz"
 description = "Fuzz targets and the deterministic gate pass over every untrusted input to gbc-core (docs/fuzzing.md)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
