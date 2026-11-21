@@ -11,11 +11,11 @@
 #  - Raising a budget is committed with the change that needs it, with the
 #    measured size and the reason in the commit body.
 # Initial budgets are the measured size plus about 5% headroom.
-32500 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-14600 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+30000 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+13820 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
 170 <gbc_core::bus::Ctx>::write_high
 1240 <gbc_core::bus::Ctx>::write_io
-1160 gbc_core::bus::read_high
+1060 gbc_core::bus::read_high
 520 <gbc_core::bus::Ctx>::sync_ppu
 440 <gbc_core::bus::Ctx>::write_mapped
 1620 <gbc_core::bus::Ctx>::write_timer_io

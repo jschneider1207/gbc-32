@@ -20,11 +20,11 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 28,560 | 32,500 |
-| `Cpu::execute_cb::<Ctx>` | 13,158 | 14,600 |
+| `Cpu::run::<Ctx>` | 28,560 | 30,000 |
+| `Cpu::execute_cb::<Ctx>` | 13,158 | 13,820 |
 | `Ctx::write_high` | 160 | 170 |
 | `Ctx::write_io` | 1,180 | 1,240 |
-| `bus::read_high` | 1,008 | 1,160 |
+| `bus::read_high` | 1,008 | 1,060 |
 | `Ctx::sync_ppu` | 496 | 520 |
 | `Ctx::write_mapped` | 428 | 440 |
 | `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
@@ -78,9 +78,9 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,382,484,838 |
-| cgb_sound.gb | 622,018,571 |
-| cgb-acid2.gbc | 13,094,335 |
+| cpu_instrs.gb | 1,388,020,611 |
+| cgb_sound.gb | 606,760,080 |
+| cgb-acid2.gbc | 12,961,034 |
 
 (ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and
 928.5 M: -28.0%, -32.6% and -24.9%. ADR 0011 step 5, HALT/STOP idling
