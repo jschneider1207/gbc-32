@@ -16,6 +16,12 @@ command -v cargo >/dev/null || fail "cargo not found (Rust toolchain not install
 step "Test ROMs"
 ./scripts/fetch-test-roms.sh
 
+step "SM83 single-step test data"
+./scripts/fetch-sm83-tests.sh || fail "could not fetch the SM83 single-step test data"
+# Without this, tools/sm83-tests skips (and passes) when test-data/ is
+# missing, so a clean checkout would pass the gate with zero CPU cases run.
+export GBC_REQUIRE_TEST_DATA=1
+
 step "cargo fmt --check"
 cargo fmt --all --check || fail "formatting"
 
