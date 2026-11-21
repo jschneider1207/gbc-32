@@ -13,6 +13,7 @@ use crate::apu::StereoSample;
 use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK};
+use crate::joypad::{p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
 use crate::serial::{INT_SERIAL, Serial};
@@ -81,6 +82,15 @@ impl Sys<'_> {
         }
     }
 
+    /// Sets the held buttons and the P1 select bits (4-5), requesting the
+    /// joypad interrupt if a P10-P13 line goes low ([`p1_interrupt`]).
+    pub(crate) fn set_joypad(&mut self, buttons: Buttons, select: u8) {
+        let old = p1_lines(self.buttons, self.joyp_select);
+        self.buttons = buttons;
+        self.joyp_select = select & 0x30;
+        self.iflags |= p1_interrupt(old, p1_lines(self.buttons, self.joyp_select));
+    }
+
     /// Power-on state after the boot ROM, for the inserted cartridge. The
     /// cartridge RAM, RTC, config and held buttons are kept.
     pub(crate) fn reset(&mut self, mem: &mut Memory) {
@@ -97,11 +107,24 @@ impl Sys<'_> {
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
         // Up Sequence, "Hardware registers").
         self.iflags = 0x01;
-        // TODO(M3): DIV, LY and STAT where the boot ROM hands over, and SC
+        // SC reads 7F in CGB mode and 7E in DMG compatibility mode (Pan
+        // Docs: Power Up Sequence, "Hardware registers": CGB/AGB 7F;
+        // Mooneye `misc/boot_hwio-C`, a DMG-mode ROM verified on CGB,
+        // expects 7E). In CGB mode bits 0-1 are readable, so both are set.
+        if self.cgb_mode {
+            self.serial.sc = 0x03;
+        }
+        // TODO(M3): DIV, LY and STAT where the boot ROM hands over
         // (boot_hwio).
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
+        // OPRI bit 0: the boot ROM selects coordinate priority (1) for
+        // DMG compatibility mode, and leaves 0 (OAM index priority) in CGB
+        // mode (Pan Docs: FF6C - OPRI; SameBoy Core/memory.c, OPRI write
+        // allowed while the boot ROM runs). Mooneye `boot_hwio-C` expects
+        // FF6C = FF in DMG compatibility mode.
+        mem.io[0x6C] = u8::from(!self.cgb_mode);
     }
 }
 
@@ -213,7 +236,7 @@ impl Ctx<'_, '_> {
         let s = &mut *self.sys;
         let cgb = s.cgb_mode;
         match reg {
-            0x00 => s.joyp_select = value & 0x30,
+            0x00 => s.set_joypad(s.buttons, value),
             0x01 => s.serial.sb = value,
             0x02 => s.serial.write_sc(value, cgb),
             0x04 => {
@@ -246,11 +269,18 @@ impl Ctx<'_, '_> {
             }
             // CGB palettes: plain storage until M5.
             0x68..=0x6B if cgb => self.mem.io[reg] = value,
+            // OPRI: writable in CGB mode only (after the boot ROM). Plain
+            // storage until the M3 renderer uses it.
+            0x6C if cgb => self.mem.io[reg] = value,
             0x70 if cgb => {
                 s.svbk = value & 0x07;
                 // Bank 0 selects bank 1 (Pan Docs: SVBK).
                 s.wram_off = usize::from(s.svbk.max(1)) * 0x1000;
             }
+            // Undocumented CGB registers (SameBoy Core/memory.c,
+            // `write_high_memory`: GB_IO_PSWX/PSWY/PSW/PGB store the
+            // value; the read masks are in `read_io`).
+            0x72..=0x75 => self.mem.io[reg] = value,
             _ => {}
         }
     }
@@ -395,19 +425,8 @@ fn read_high(mem: &Memory, sys: &Sys, addr: u16) -> u8 {
 fn read_io(mem: &Memory, sys: &Sys, reg: usize) -> u8 {
     let cgb = sys.cgb_mode;
     match reg {
-        0x00 => {
-            // P1/JOYP: a 0 in bit 4 selects the d-pad, in bit 5 the
-            // buttons; pressed buttons read 0 (Pan Docs: Joypad Input).
-            let b = sys.buttons.bits();
-            let mut low = 0x0F;
-            if sys.joyp_select & 0x10 == 0 {
-                low &= !(b >> 4);
-            }
-            if sys.joyp_select & 0x20 == 0 {
-                low &= !b & 0x0F;
-            }
-            0xC0 | sys.joyp_select | low
-        }
+        // P1/JOYP (Pan Docs: Joypad Input).
+        0x00 => 0xC0 | sys.joyp_select | p1_lines(sys.buttons, sys.joyp_select),
         0x01 => sys.serial.sb,
         0x02 => sys.serial.read_sc(cgb),
         0x04 => sys.timer.div(),
@@ -426,6 +445,19 @@ fn read_io(mem: &Memory, sys: &Sys, reg: usize) -> u8 {
         0x4F if cgb => 0xFE | sys.vbk,
         0x68..=0x6B if cgb => mem.io[reg],
         0x70 if cgb => 0xF8 | sys.svbk,
+        // Undocumented CGB registers, as in SameBoy (Core/memory.c,
+        // `read_high_memory`, the I/O part of `GB_read_memory`): OPRI
+        // reads `| 0xFE` on CGB in either mode; FF72 and FF73
+        // (GB_IO_PSWX/PSWY) are fully R/W on CGB; FF74 (GB_IO_PSW) is R/W
+        // in CGB mode only and reads FF otherwise; FF75 (GB_IO_PGB) has
+        // only bits 4-6 R/W and reads `| 0x8F`. The model is always a CGB
+        // (ADR 0003), so "on CGB" needs no check.
+        0x6C => 0xFE | mem.io[reg],
+        0x72 | 0x73 => mem.io[reg],
+        0x74 if cgb => mem.io[reg],
+        0x75 => 0x8F | mem.io[reg],
+        // TODO(M6): FF76/FF77 PCM12/PCM34 (the channel amplitudes; read
+        // only, CGB) read 00 with the APU silent.
         _ => 0xFF,
     }
 }
@@ -621,6 +653,120 @@ mod tests {
             (0xFF4F, 0xFE),
             (0xFF70, 0xF8),
             (0xFFFF, 0x00),
+        ] {
+            assert_eq!(emu.peek(reg), v, "{reg:#06x}");
+        }
+    }
+
+    #[test]
+    fn joypad_interrupt_on_a_line_going_low() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let joyp_if = |emu: &mut Emulator| {
+            let v = emu.peek(0xFF0F) & 0x10 != 0;
+            write(emu, 0xFF0F, 0);
+            v
+        };
+        write(emu, 0xFF0F, 0);
+        write(emu, 0xFF00, 0x10); // action buttons selected
+        emu.set_buttons(Buttons::A);
+        assert!(joyp_if(emu), "A pressed");
+        emu.set_buttons(Buttons::A | Buttons::B);
+        assert!(joyp_if(emu), "B pressed while A held");
+        emu.set_buttons(Buttons::A);
+        assert!(!joyp_if(emu), "release: line goes high");
+        emu.set_buttons(Buttons::A | Buttons::UP);
+        assert!(!joyp_if(emu), "d-pad not selected");
+        // Selecting the d-pad exposes the held Up: P12 goes low.
+        write(emu, 0xFF00, 0x20);
+        assert!(joyp_if(emu), "select exposes Up");
+        // Deselecting raises the lines; selecting both groups lowers P10
+        // (A) and P12 (Up) again.
+        write(emu, 0xFF00, 0x30);
+        assert!(!joyp_if(emu));
+        write(emu, 0xFF00, 0x00);
+        assert!(joyp_if(emu));
+        // Same lines low as before: no edge.
+        write(emu, 0xFF00, 0x00);
+        assert!(!joyp_if(emu));
+        // Pressing Right while A already holds P10 low: no edge.
+        emu.set_buttons(Buttons::A | Buttons::UP | Buttons::RIGHT);
+        assert!(!joyp_if(emu));
+    }
+
+    #[test]
+    fn serial_control_after_boot() {
+        // Pan Docs: Power Up Sequence (CGB 7F); Mooneye boot_hwio-C (DMG
+        // compatibility mode on CGB: 7E).
+        assert_eq!(load(rom(0x8000, 0, 0, 0x80)).peek(0xFF02), 0x7F);
+        assert_eq!(load(rom(0x8000, 0, 0, 0x00)).peek(0xFF02), 0x7E);
+    }
+
+    #[test]
+    fn undocumented_cgb_registers() {
+        // CGB mode (SameBoy Core/memory.c read_high_memory).
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        for (reg, v) in [
+            (0xFF6C, 0xFE),
+            (0xFF72, 0),
+            (0xFF73, 0),
+            (0xFF74, 0),
+            (0xFF75, 0x8F),
+        ] {
+            assert_eq!(emu.peek(reg), v, "{reg:#06x} after boot");
+        }
+        for reg in [0xFF6C, 0xFF72, 0xFF73, 0xFF74, 0xFF75] {
+            write(emu, reg, 0xFF);
+        }
+        for (reg, v) in [
+            (0xFF6C, 0xFF),
+            (0xFF72, 0xFF),
+            (0xFF73, 0xFF),
+            (0xFF74, 0xFF),
+            (0xFF75, 0xFF),
+        ] {
+            assert_eq!(emu.peek(reg), v, "{reg:#06x}");
+        }
+        for reg in [0xFF6C, 0xFF72, 0xFF73, 0xFF74, 0xFF75] {
+            write(emu, reg, 0x00);
+        }
+        for (reg, v) in [
+            (0xFF6C, 0xFE),
+            (0xFF72, 0),
+            (0xFF73, 0),
+            (0xFF74, 0),
+            (0xFF75, 0x8F),
+        ] {
+            assert_eq!(emu.peek(reg), v, "{reg:#06x}");
+        }
+        write(emu, 0xFF72, 0x5A);
+        write(emu, 0xFF73, 0xA5);
+        write(emu, 0xFF75, 0x50);
+        assert_eq!(
+            (emu.peek(0xFF72), emu.peek(0xFF73), emu.peek(0xFF75)),
+            (0x5A, 0xA5, 0xDF)
+        );
+
+        // DMG compatibility mode: the values Mooneye boot_hwio-C expects;
+        // OPRI and FF74 are locked, FF72/FF73/FF75 still work.
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        for (reg, v) in [
+            (0xFF6C, 0xFF),
+            (0xFF72, 0),
+            (0xFF73, 0),
+            (0xFF74, 0xFF),
+            (0xFF75, 0x8F),
+        ] {
+            assert_eq!(emu.peek(reg), v, "{reg:#06x} after boot");
+        }
+        write(emu, 0xFF6C, 0x00);
+        write(emu, 0xFF72, 0x12);
+        write(emu, 0xFF74, 0x34);
+        write(emu, 0xFF75, 0x70);
+        for (reg, v) in [
+            (0xFF6C, 0xFF),
+            (0xFF72, 0x12),
+            (0xFF74, 0xFF),
+            (0xFF75, 0xFF),
         ] {
             assert_eq!(emu.peek(reg), v, "{reg:#06x}");
         }

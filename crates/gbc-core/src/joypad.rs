@@ -21,6 +21,41 @@ bitset! {
     }
 }
 
+/// The joypad interrupt bit in IF.
+pub(crate) const INT_JOYPAD: u8 = 0x10;
+
+/// The P1/JOYP input lines P10-P13 (bits 0-3; 1 = high) for `buttons` and
+/// the select bits as written (P1 bits 4-5): a 0 in bit 4 selects the
+/// d-pad, in bit 5 the action buttons, and a pressed button in a selected
+/// group pulls its line low (Pan Docs: Joypad Input).
+#[inline]
+pub(crate) const fn p1_lines(buttons: Buttons, select: u8) -> u8 {
+    let b = buttons.bits();
+    let mut low = 0x0F;
+    if select & 0x10 == 0 {
+        low &= !(b >> 4);
+    }
+    if select & 0x20 == 0 {
+        low &= !b & 0x0F;
+    }
+    low
+}
+
+/// The IF bits to request when the P1 lines change from `old` to `new`:
+/// the joypad interrupt if any of P10-P13 went from high to low (Pan Docs:
+/// Interrupt Sources, "INT $60 - Joypad interrupt"). That happens both
+/// when a button in a selected group is pressed and when a P1 write
+/// selects a group in which a button is already held (SameBoy
+/// `GB_update_joyp`: `previous_state & ~new_state` sets IF bit 4).
+#[inline]
+pub(crate) const fn p1_interrupt(old: u8, new: u8) -> u8 {
+    if old & !new & 0x0F != 0 {
+        INT_JOYPAD
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;

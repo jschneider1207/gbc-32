@@ -303,10 +303,14 @@ impl<'a> Emulator<'a> {
         self.hw.cpu.reset(sys.cart.rom, sys.cgb_mode);
     }
 
-    /// Sets the buttons currently held.
+    /// Sets the buttons currently held. Pressing a button in a group the
+    /// game has selected in P1 requests the joypad interrupt (Pan Docs:
+    /// Interrupt Sources, "INT $60 - Joypad interrupt"), which also ends
+    /// HALT if enabled in IE.
     #[inline]
     pub fn set_buttons(&mut self, buttons: Buttons) {
-        self.hw.sys.buttons = buttons;
+        let sys = &mut self.hw.sys;
+        sys.set_joypad(buttons, sys.joyp_select);
     }
 
     /// Sets which optional events (e.g. [`Events::LD_B_B`],
@@ -1019,5 +1023,34 @@ mod tests {
         assert_eq!(emu.peek(0xFF44), 144);
         assert_eq!(emu.peek(0xFF41) & 0x03, 1);
         assert_eq!(emu.peek(0xFF0F) & 0x01, 0x01);
+    }
+
+    #[test]
+    fn joypad_interrupt_ends_halt() {
+        // LD A,10; LDH (FF),A (IE = joypad); XOR A; LDH (0F),A; LD A,10;
+        // LDH (00),A (select the action buttons); HALT; LD B,B; JR -2.
+        let emu = with_program(
+            &[
+                0x3E, 0x10, 0xE0, 0xFF, 0xAF, 0xE0, 0x0F, 0x3E, 0x10, 0xE0, 0x00, 0x76, 0x40, 0x18,
+                0xFE,
+            ],
+            0x80,
+        );
+        emu.set_stop_events(Events::LD_B_B);
+        let mut fb = frame();
+        let r = emu.run_cycles(10_000, &mut fb, &mut []);
+        assert!(r.events.is_empty());
+        assert!(emu.hw.cpu.halted());
+        // A d-pad button isn't selected: no interrupt, still halted.
+        emu.set_buttons(Buttons::DOWN);
+        let r = emu.run_cycles(1000, &mut fb, &mut []);
+        assert!(r.events.is_empty() && emu.hw.cpu.halted());
+        // IE & IF bit 4 ends HALT; IME is off, so execution continues
+        // after it.
+        emu.set_buttons(Buttons::DOWN | Buttons::START);
+        assert_eq!(emu.peek(0xFF0F) & 0x10, 0x10);
+        let r = emu.run_cycles(1000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        assert_eq!(emu.registers().pc, 0x10D);
     }
 }
