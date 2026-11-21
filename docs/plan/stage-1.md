@@ -55,7 +55,7 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
   - [x] Fixed event table (deadlines); move the PPU onto it (f74cceb)
   - [x] `bench --fingerprint` and `scripts/diff-fingerprint.sh` (7ebc7a5) (behavior fingerprints to compare models)
   - [x] Reload-window rules in the eager timer (0f3d68a), kept afterwards as a test-only reference model
-  - [ ] Lazy timer and serial clock, differential test against the eager model; rebaseline the benchmark and size budgets (keep timer I/O out of line so `write_high`/`read_high` stay in budget)
+  - [x] Lazy timer and serial clock (4b81a49), differential test against the eager model; rebaseline the benchmark and size budgets (keep timer I/O out of line so `write_high`/`read_high` stay in budget)
   - [ ] HALT/STOP/lockup/power-off jump to the next deadline
   - [ ] Open hardware questions (ADR 0011): does disabling the timer tick TIMA on CGB (Pan Docs vs SameBoy); serial clock phase after a DIV reset
 - [ ] HALT: IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
