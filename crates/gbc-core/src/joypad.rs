@@ -92,6 +92,11 @@ impl InputQueue {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        usize::from(self.len)
+    }
+
     /// Adds a change at `at`, keeping clock order. A change already
     /// pending at the same clock is replaced (the later call wins).
     /// Returns `false`, changing nothing, if the queue is full.
@@ -115,7 +120,9 @@ impl InputQueue {
 
     /// Removes every change at or before `now` and returns the last one's
     /// buttons. Changes that land on the same M-cycle boundary collapse
-    /// into one, as nothing can observe the P1 lines between them.
+    /// into one: no CPU access can observe the P1 lines between them, and
+    /// we model no interrupt edge there either (a modelling choice; ADR
+    /// 0012).
     pub(crate) fn take_due(&mut self, now: u64) -> Option<Buttons> {
         let len = usize::from(self.len);
         let n = self.at[..len].partition_point(|&t| t <= now);

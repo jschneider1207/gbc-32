@@ -313,14 +313,23 @@ impl<'a> Emulator<'a> {
     ///   like `set_buttons`.
     /// - A speed switch between the call and `clock` moves the M-cycle
     ///   grid; the change still lands on the boundary at or before `clock`
-    ///   on the new grid, unless that is inside the switch's pause or
-    ///   already past, in which case it lands at the next boundary.
+    ///   on the new grid. That includes a boundary inside the switch's
+    ///   pause: the change lands there, during the pause, and requests the
+    ///   joypad interrupt there. Only if that boundary is already past when
+    ///   the grid changes (before the switch's clock) does it land at the
+    ///   first boundary after the switch.
     /// - Up to [`SCHEDULED_INPUTS`] changes can be pending; they apply in
     ///   clock order. Scheduling at a clock that already has a pending
-    ///   change replaces it. Changes landing on the same M-cycle boundary
-    ///   apply as one (the last of them).
+    ///   change replaces it.
+    /// - Changes landing on the same M-cycle boundary apply as one (the
+    ///   last of them), so a press and release inside one M-cycle request
+    ///   no interrupt. This is a modelling choice, not a measured hardware
+    ///   behaviour: SameBoy (`GB_set_key_state`, `GB_update_joyp`) sets IF
+    ///   on every falling edge of the P1 lines as the key state changes.
     /// - Returns `false`, changing nothing, if the queue is full and
-    ///   `clock` is in the future and not already pending.
+    ///   `clock` is in the future and not already pending, or if `clock`
+    ///   is `u64::MAX` (reserved: it marks empty queue slots and would
+    ///   never be reached).
     /// - `load`, `reset` and `eject` drop pending changes (the clock
     ///   restarts at 0).
     #[must_use = "a full queue drops the change"]
@@ -331,6 +340,10 @@ impl<'a> Emulator<'a> {
         if clock < sys.hot.clock() + mcycle {
             sys.set_joypad(buttons, sys.joyp_select);
             return true;
+        }
+        // `NEVER` marks empty queue slots: a change there would never fire.
+        if clock == schedule::NEVER {
+            return false;
         }
         if !sys.inputs.push(clock, buttons) {
             return false;
@@ -1605,5 +1618,110 @@ mod tests {
         emu.reset();
         run_to(emu, 8000);
         assert_eq!(p1(emu), 0x0F);
+    }
+
+    /// Runs the double-speed program of
+    /// `scheduled_input_rounds_down_on_the_grid_after_a_speed_switch` to
+    /// its LD B,B, schedules `changes` at clocks relative to `T` (the
+    /// clock where its second STOP switches back to normal speed), and
+    /// runs past the switch. Returns IF bit 4 and the P1 lines.
+    fn across_switch_to_normal(changes: &[(u64, Buttons)]) -> (u8, u8) {
+        let program = [
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0x00, 0xE0, 0x4D, 0x10, 0x00,
+        ];
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::LD_B_B);
+        let r = emu.run_cycles(100_000, &mut frame(), &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        // NOP (2 clocks), LDH (6), STOP's fetch (2), then the switch. T is
+        // 2 mod 4: the normal-speed grid after it is too.
+        const T: u64 = 4138;
+        assert_eq!(emu.clock(), T - 10);
+        emu.set_stop_events(Events::EMPTY);
+        for &(dt, buttons) in changes {
+            assert!(emu.set_buttons_at(T + dt, buttons));
+        }
+        emu.hw.sys.iflags = 0;
+        // IE = 0 and IME = 0 after boot: IF bit 4 stays as set.
+        let _ = emu.run_cycles(20_000, &mut frame(), &mut []);
+        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        (emu.peek(0xFF0F) & 0x10, p1(emu))
+    }
+
+    #[test]
+    fn scheduled_input_inside_the_speed_switch_pause_lands_on_its_mcycle() {
+        // Each change lands on its own boundary on the new grid inside
+        // the 8200-clock pause (the pause idles a deadline at a time), not
+        // after the pause: a press and a release 2000 clocks apart raise
+        // the joypad interrupt.
+        let (a, none) = (Buttons::A, Buttons::EMPTY);
+        assert_eq!(
+            across_switch_to_normal(&[(1001, a), (3001, none)]),
+            (0x10, 0x0F)
+        );
+        // T + 1001 and T + 1003 share the normal-speed M-cycle starting at
+        // T + 1000 and collapse (no interrupt); T + 1004 starts the next.
+        assert_eq!(
+            across_switch_to_normal(&[(1001, a), (1003, none)]),
+            (0, 0x0F)
+        );
+        assert_eq!(
+            across_switch_to_normal(&[(1001, a), (1004, none)]),
+            (0x10, 0x0F)
+        );
+        assert_eq!(across_switch_to_normal(&[(1001, a)]), (0x10, 0x0E));
+    }
+
+    #[test]
+    fn scheduled_input_already_past_after_a_speed_switch_lands_next() {
+        // Scheduled in double speed for T + 2; on the normal-speed grid
+        // after the switch at T that M-cycle started at T - 2, already
+        // past, so it lands at the next boundary, T + 4: with a release
+        // at T + 7 (also T + 4) it collapses, with one at T + 8 it doesn't.
+        let (a, none) = (Buttons::A, Buttons::EMPTY);
+        assert_eq!(across_switch_to_normal(&[(2, a), (7, none)]), (0, 0x0F));
+        assert_eq!(across_switch_to_normal(&[(2, a), (8, none)]), (0x10, 0x0F));
+    }
+
+    #[test]
+    fn scheduled_input_lands_on_the_double_speed_grid() {
+        // LD A,01; LDH (4D),A; STOP (to double speed at clock 24, after
+        // the pause at 4124); NOPs. A change scheduled in normal speed
+        // lands on the double-speed grid (24 + 2k).
+        let program = [0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00];
+        let emu = with_program(&program, 0x80);
+        assert!(emu.set_buttons_at(4167, Buttons::A));
+        run_to(emu, 4164);
+        assert_eq!(emu.hw.sys.hot.mcycle, 2, "in double speed");
+        assert_eq!(p1(emu), 0x0F, "not before its M-cycle");
+        run_to(emu, 4166);
+        assert_eq!(p1(emu), 0x0E, "from its M-cycle on");
+    }
+
+    #[test]
+    fn load_and_eject_drop_scheduled_inputs() {
+        let emu = emulator();
+        run_to(emu, 400);
+        assert!(emu.set_buttons_at(1000, Buttons::A));
+        let rom = vec![0u8; 0x8000].leak();
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        assert_eq!(emu.hw.sys.inputs.len(), 0, "load drops the queue");
+        run_to(emu, 2000);
+        assert_eq!(p1(emu), 0x0F);
+        assert!(emu.set_buttons_at(3000, Buttons::A));
+        let _ = emu.eject();
+        assert_eq!(emu.hw.sys.inputs.len(), 0, "eject drops the queue");
+        let input = emu.hw.sys.sched.deadline(schedule::EventKind::Input);
+        assert_eq!(input, schedule::NEVER);
+    }
+
+    #[test]
+    fn scheduled_input_at_u64_max_is_refused() {
+        // u64::MAX is the queue's empty-slot sentinel: it would never
+        // fire and hold a slot until reset.
+        let emu = emulator();
+        assert!(!emu.set_buttons_at(u64::MAX, Buttons::A));
+        assert_eq!(emu.hw.sys.inputs.len(), 0, "no slot taken");
+        assert!(emu.set_buttons_at(u64::MAX - 1, Buttons::A));
     }
 }
