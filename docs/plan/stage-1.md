@@ -103,6 +103,8 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 ## M5: CGB features
 
 - [ ] Double speed (KEY1/STOP), VRAM/WRAM banking
+  - [ ] Speed-switch timing (M2 hardware review H3): the CPU halts ~0x20008 clocks (SameBoy `stop()`, `speed_switch_halt_countdown`) with DIV/TIMA running and OAM DMA paused, not a 2050 M-cycle frozen counter; no halt when IE&IF is pending; STOP with a button held does not reset DIV; replace `dma_rescale`. Arbiters: gambatte `speedchange*_tima*` cgb04c (19/35 fail at M2 close)
+  - [ ] STOP consumes its second byte (SameBoy `stop()`; runs it as an opcode only with an interrupt pending), read before the pause (M2 review H5)
 - [ ] STOP accuracy: DIV/TIMA/serial frozen in STOP, wake-up only on a selected P1 line, DIV reset rules, 2-byte STOP (Pan Docs "Using the STOP instruction"; M1 hardware review 6)
 - [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
 - [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
@@ -137,7 +139,7 @@ The human checks interactive play.
 
 - [ ] Fix issues found in the real-game checklist
 - [ ] Bring `should`-tier scores up where cheap
-- [ ] Code size: re-measure `execute`/`execute_cb` on thumbv7em (68 KB at M1, more than the H753's fixed 64 KB ITCM; the H735 ITCM can be configured up to 256 KB). Target <= 40 KB, e.g. by moving rare read regions out of line (M1 perf review 1)
+- [ ] Code size: re-measure `execute`/`execute_cb` on thumbv7em (68 KB at M1, more than the H753's fixed 64 KB ITCM; the H735 ITCM can be configured up to 256 KB). Target <= 40 KB, e.g. by moving rare read regions out of line (M1 perf review 1). At M2 close `run` 28,560 B + `execute_cb` 13,158 B = 41.7 KB, ~45.5 KB with boundary/read_high/write_mapped, 2.6x the M7 16 KiB I-cache: plan ITCM placement (M2 perf review P5)
 - [ ] Unaligned ROM reads: the Stage 3 MCU (STM32H735) does not support unaligned reads from the FMC SDRAM that holds the ROM (ES0491 2.7.3). `-C target-feature=+strict-align` is unstable on Rust 1.100 (warns, slated to become a hard error, rust-lang/rust#162235), so ensure at code level that ROM bytes are never merged into wider loads (e.g. one ROM-read function using byte reads LLVM can't combine) and add a disassembly check; record in an ADR
 - [ ] ROM placement hook for the MCU front ends (e.g. caller-supplied per-bank slices so bank 0 and the current bank can sit in internal SRAM) only if Stage 2 measurements show ROM fetch misses matter (M1 perf review 5)
 - [ ] Benchmark: headless emulated frames/second on desktop for a fixed set of ROMs; record host cycles per emulated frame as the baseline for Stage 2
