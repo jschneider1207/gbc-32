@@ -296,10 +296,10 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// The M-cycle after a TIMA overflow.
+    /// The two M-cycles after a TIMA overflow (cycles A and B, [`crate::timer`]).
     #[inline(never)]
     fn timer_reload(&mut self) {
-        self.sys.iflags |= self.hot.timer.finish_reload();
+        self.sys.iflags |= self.hot.timer.advance_reload();
     }
 
     /// Counter bits in `fell` that the timer or the serial port watch.
@@ -438,8 +438,8 @@ impl Ctx<'_, '_> {
                     self.serial_clock(fell);
                 }
             }
-            0x05 => self.hot.timer.tima = value,
-            0x06 => self.hot.timer.tma = value,
+            0x05 => self.hot.timer.write_tima(value),
+            0x06 => self.hot.timer.write_tma(value),
             0x07 => {
                 self.hot.timer.write_tac(value);
                 self.update_watch();
