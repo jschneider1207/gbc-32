@@ -58,7 +58,7 @@ mod tests {
         fn write(&mut self, reg: u8, value: u8) {
             match reg {
                 1 => self.serial.sb = value,
-                2 => self.serial.write_sc(value, self.cgb),
+                2 => self.serial.write_sc_eager(value, self.cgb),
                 _ => {
                     let fell = self.timer.write(reg, value);
                     self.clock_serial(fell);

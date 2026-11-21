@@ -319,22 +319,23 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// One serial bit (the Serial event, or a DIV write's falling edge).
-    fn serial_shift(&mut self) {
-        if self.sys.serial.shift() {
+    /// A serial byte completed (`done`): the serial interrupt.
+    fn serial_done(&mut self, done: bool) {
+        if done {
             self.sys.iflags |= INT_SERIAL;
             self.raise(Events::SERIAL_TX);
         }
     }
 
-    /// Sets the Serial deadline to the bit clock's next falling edge while
-    /// a transfer runs, and reschedules.
+    /// Sets the Serial deadline to the bit clock's next shift (the
+    /// flip-flop's next 1 -> 0 edge, `serial` module docs) while a
+    /// transfer runs, and reschedules.
     fn schedule_serial(&mut self) {
         let now = self.clock();
         let s = &mut *self.sys;
-        let at = match s.serial.clock_bit {
-            0 => NEVER,
-            bit => s.timer.fall_clock(bit, now),
+        let at = match s.serial.next_shift(s.timer.sc(now)) {
+            None => NEVER,
+            Some(v) => s.timer.clock_at(v),
         };
         s.sched.set(EventKind::Serial, at);
         self.reschedule();
@@ -356,7 +357,8 @@ impl Ctx<'_, '_> {
         let s = &mut *self.sys;
         match reg {
             0x02 => {
-                s.serial.write_sc(value, s.cgb_mode);
+                let c = s.timer.sc(now);
+                s.serial.write_sc(value, s.cgb_mode, c);
                 self.schedule_serial();
                 return;
             }
@@ -369,14 +371,15 @@ impl Ctx<'_, '_> {
     }
 
     /// A DIV write or STOP: every set counter bit falls (the TIMA glitch
-    /// in [`Timer::write_div`], one serial bit here; Pan Docs FF04), then
-    /// both deadlines move with the rebased counter.
+    /// in [`Timer::write_div`], a serial flip-flop toggle in
+    /// [`Serial::div_reset`]; Pan Docs FF04), then both deadlines move
+    /// with the rebased counter.
     fn div_reset(&mut self) {
         let now = self.clock();
         let old = self.sys.timer.write_div(now);
-        if old & self.sys.serial.clock_bit != 0 {
-            self.serial_shift();
-        }
+        let new = self.sys.timer.sc(now);
+        let done = self.sys.serial.div_reset(old, new);
+        self.serial_done(done);
         self.schedule_timer();
         self.schedule_serial();
     }
@@ -438,7 +441,8 @@ impl Ctx<'_, '_> {
                     s.sched.set(EventKind::Timer, s.timer.deadline());
                 }
                 EventKind::Serial => {
-                    self.serial_shift();
+                    let done = self.sys.serial.shift();
+                    self.serial_done(done);
                     self.schedule_serial();
                 }
                 EventKind::Ppu => self.sync_ppu(),

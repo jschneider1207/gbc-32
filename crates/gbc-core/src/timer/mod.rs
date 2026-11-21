@@ -7,7 +7,7 @@
 //! from the clock when a register is read or written, and its one effect
 //! (the TIMA reload with the timer interrupt) is the `EventKind::Timer`
 //! deadline, at [`Timer::deadline`]. The serial bit clock's deadlines come
-//! from [`Timer::fall_clock`].
+//! from [`Timer::clock_at`].
 //!
 //! # The system counter
 //! It counts CPU clocks, 4 per M-cycle in both speeds: 1 per base clock at
@@ -121,12 +121,11 @@ impl Timer {
         4 >> self.shift
     }
 
-    /// The clock of the next falling edge of counter bit `bit` after
-    /// `now`: the serial bit clock's next shift.
+    /// The clock at which the counter reaches `v` (`v >= sc(now)`, a
+    /// multiple of 4): the serial bit clock's next shift.
     #[inline]
-    pub(crate) fn fall_clock(&self, bit: u64, now: u64) -> u64 {
-        let s = bit.trailing_zeros() + 1;
-        self.clock_of(((self.sc(now) >> s) + 1) << s)
+    pub(crate) fn clock_at(&self, v: u64) -> u64 {
+        self.clock_of(v)
     }
 
     #[inline]
