@@ -44,6 +44,7 @@ decided when Stage 2 starts.
 | MCU | STM32H753ZI, 480 MHz, RM0433 | STM32H735IGK6, 520 MHz (550 with `CPU_FREQ_BOOST`), RM0468 |
 | Core supply | LDO | On-chip SMPS (different supply config at boot) |
 | Internal RAM / L1 cache | ~1 MB / 16 KB I + 16 KB D | 564 KB / 32 KB I + 32 KB D |
+| ITCM (fast code RAM) | 64 KB, fixed | 64 KB by default; configurable to 128, 192 or 256 KB, taken from AXI SRAM (RM0468 `TCM_AXI_SHARED`; `FLASH_OPTSR2_PRG`) |
 | ROM source | Shield's QSPI NOR, memory-mapped | eMMC → copied into external FMC SDRAM (32 MiB) at load |
 | Saves | (Stage 2 choice) | eMMC |
 | Display | Shield's ILI9341V, 8-bit 8080 bus on FMC (stand-in only) | TBD by the hardware repo (FMC parallel or LTDC) |
