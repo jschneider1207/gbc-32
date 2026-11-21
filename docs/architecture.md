@@ -78,6 +78,7 @@ Emulator<'a>                       // 'a = lifetime of the Memory and cartridge 
   fn set_dmg_palettes(&mut self, DmgPalettes)       // no reset
   fn reset(&mut self)                               // power cycle; cart RAM/RTC kept
   fn set_buttons(&mut self, Buttons)
+  fn set_buttons_at(&mut self, clock: u64, Buttons) -> bool  // lands on its M-cycle; false = queue full (ADR 0012)
   fn set_stop_events(&mut self, Events)             // opt-in stops: LD_B_B, SERIAL_TX
   fn run_frame (&mut self,              &mut Frame, &mut [StereoSample]) -> RunResult
   fn run_cycles(&mut self, clocks: u64, &mut Frame, &mut [StereoSample]) -> RunResult
@@ -125,7 +126,9 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   the core writes from index 0 and reports the count. A full buffer ends
   the call. The internal rate is fixed and resampling is the platform's job
   (exact approach decided in M6).
-- **Input:** `set_buttons(Buttons)`, where `Buttons` is a hand-written bit set
+- **Input:** `set_buttons(Buttons)` (now) and `set_buttons_at(clock, Buttons)`
+  (scheduled on the `Input` deadline, exact to the M-cycle, up to
+  `SCHEDULED_INPUTS` pending; ADR 0012), where `Buttons` is a hand-written bit set
   (not the `bitflags` crate; the core has no dependencies). So is `Events`.
 - **Driving and time:** all times are base clocks (4,194,304 Hz) regardless
   of CGB double speed. `run_until(t)` runs until `clock() >= t`, ending on an
@@ -177,7 +180,7 @@ memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, st
 bitset.rs   * bitset! macro behind Buttons and Events
 events.rs   * Events
 schedule.rs * event table (ADR 0011): EventKind (dispatch order), Schedule (one u64 deadline per kind + their minimum)
-joypad.rs   * Buttons, P1 line logic and the joypad interrupt edge (P1/JOYP register access is in bus.rs)
+joypad.rs   * Buttons, P1 line logic, the joypad interrupt edge, InputQueue (scheduled changes, ADR 0012; P1/JOYP register access is in bus.rs)
 config.rs   * Config, DmgPalettes, RGB555 helpers
 cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP stub)
   exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
@@ -221,7 +224,8 @@ wake-up or the end of the call, so the wake-up lands on the same M-cycle
 as idling one M-cycle at a time. The CGB speed-switch pause skips the same
 way, a deadline at a time. `Emulator::step` targets `clock + 1`, so its
 halted step stays one M-cycle. On the event table so far: the TIMA reload (`Timer`),
-the serial bit clock (`Serial`) and the PPU's VBlank (`Ppu`). The timer
+the serial bit clock (`Serial`), the PPU's VBlank (`Ppu`) and scheduled
+button changes (`Input`, `Sys::inputs`, ADR 0012). The timer
 (`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
 of the clock (rebased on DIV writes and speed switches), computes DIV and
 TIMA from it on reads, and stores the overflow clock and the last reload

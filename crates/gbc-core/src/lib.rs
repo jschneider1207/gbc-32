@@ -117,7 +117,7 @@ pub use cart::{
 pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
 pub use events::Events;
-pub use joypad::Buttons;
+pub use joypad::{Buttons, SCHEDULED_INPUTS};
 pub use memory::Memory;
 pub use ppu::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH, WHITE};
 
@@ -288,10 +288,55 @@ impl<'a> Emulator<'a> {
     /// game has selected in P1 requests the joypad interrupt (Pan Docs:
     /// Interrupt Sources, "INT $60 - Joypad interrupt"), which also ends
     /// HALT if enabled in IE.
+    ///
+    /// The same as `set_buttons_at(self.clock(), buttons)`: changes
+    /// already scheduled with [`Emulator::set_buttons_at`] stay pending.
     #[inline]
     pub fn set_buttons(&mut self, buttons: Buttons) {
         let sys = &mut self.hw.sys;
         sys.set_joypad(buttons, sys.joyp_select);
+    }
+
+    /// Schedules the held buttons to become `buttons` at emulated time
+    /// `clock` (base clocks, like [`Emulator::clock`]), during a later run
+    /// call (ADR 0012).
+    ///
+    /// The time is rounded down to an M-cycle: the change lands at the
+    /// start of the M-cycle that `clock` falls in (at the speed in effect
+    /// then). CPU accesses from that boundary on (P1 reads, the IF read,
+    /// HALT's and STOP's wake-up checks) see it, earlier ones don't, and
+    /// it requests the joypad interrupt there as [`Emulator::set_buttons`]
+    /// would. This is independent of where run calls end.
+    ///
+    /// - If that boundary is not after [`Emulator::clock`] (`clock` is in
+    ///   the past or the current M-cycle), the change applies now, exactly
+    ///   like `set_buttons`.
+    /// - A speed switch between the call and `clock` moves the M-cycle
+    ///   grid; the change still lands on the boundary at or before `clock`
+    ///   on the new grid, unless that is inside the switch's pause or
+    ///   already past, in which case it lands at the next boundary.
+    /// - Up to [`SCHEDULED_INPUTS`] changes can be pending; they apply in
+    ///   clock order. Scheduling at a clock that already has a pending
+    ///   change replaces it. Changes landing on the same M-cycle boundary
+    ///   apply as one (the last of them).
+    /// - Returns `false`, changing nothing, if the queue is full and
+    ///   `clock` is in the future and not already pending.
+    /// - `load`, `reset` and `eject` drop pending changes (the clock
+    ///   restarts at 0).
+    #[must_use = "a full queue drops the change"]
+    pub fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool {
+        let sys = &mut self.hw.sys;
+        // Between run calls the clock is on an M-cycle boundary.
+        let mcycle = sys.hot.mcycle as u64;
+        if clock < sys.hot.clock() + mcycle {
+            sys.set_joypad(buttons, sys.joyp_select);
+            return true;
+        }
+        if !sys.inputs.push(clock, buttons) {
+            return false;
+        }
+        sys.schedule_inputs(mcycle);
+        true
     }
 
     /// Sets which optional events (e.g. [`Events::LD_B_B`],
@@ -1352,5 +1397,213 @@ mod tests {
         let r = emu.run_cycles(1000, &mut fb, &mut []);
         assert_eq!(r.events, Events::LD_B_B);
         assert_eq!(emu.registers().pc, 0x10D);
+    }
+
+    // --- Scheduled inputs (ADR 0012) ---
+
+    /// The P1 input lines (both groups are selected after boot).
+    fn p1(emu: &Emulator) -> u8 {
+        emu.peek(0xFF00) & 0x0F
+    }
+
+    fn run_to(emu: &mut Emulator, target: u64) {
+        let _ = emu.run_until(target, &mut frame(), &mut []);
+        assert_eq!(emu.clock(), target, "NOP ROM: runs end at the target");
+    }
+
+    #[test]
+    fn scheduled_input_lands_on_its_mcycle() {
+        let emu = emulator();
+        run_to(emu, 400);
+        assert!(emu.set_buttons_at(1000, Buttons::A));
+        assert_eq!(p1(emu), 0x0F);
+        run_to(emu, 996);
+        assert_eq!(p1(emu), 0x0F, "not before its M-cycle");
+        run_to(emu, 1000);
+        assert_eq!(p1(emu), 0x0E, "from its M-cycle on");
+        // Between boundaries: rounded down to the M-cycle it falls in.
+        assert!(emu.set_buttons_at(1203, Buttons::EMPTY));
+        run_to(emu, 1196);
+        assert_eq!(p1(emu), 0x0E);
+        run_to(emu, 1200);
+        assert_eq!(p1(emu), 0x0F);
+    }
+
+    #[test]
+    fn scheduled_input_rounds_down_on_the_grid_after_a_speed_switch() {
+        // LD A,01; LDH (4D),A; STOP (to double speed); LD B,B; NOP;
+        // LDH (4D),A; STOP (back to normal speed); NOPs. An odd number of
+        // double-speed M-cycles leaves the normal-speed grid at 2 mod 4.
+        let program = [
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0x00, 0xE0, 0x4D, 0x10, 0x00,
+        ];
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::LD_B_B);
+        let r = emu.run_cycles(100_000, &mut frame(), &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        assert_eq!(emu.hw.sys.hot.mcycle, 2, "in double speed");
+        // Scheduled in double speed, landing after the switch back.
+        let t = (emu.clock() + 40_000) & !3;
+        assert!(emu.set_buttons_at(t, Buttons::A));
+        run_to(emu, t - 6);
+        assert_eq!(emu.hw.sys.hot.mcycle, 4, "back in normal speed");
+        assert_eq!(p1(emu), 0x0F);
+        // t is not a boundary on this grid: the M-cycle it falls in
+        // starts at t - 2.
+        run_to(emu, t - 2);
+        assert_eq!(p1(emu), 0x0E);
+    }
+
+    #[test]
+    fn scheduled_input_wakes_stop_on_its_mcycle() {
+        // STOP (DMG mode: no speed switch); LD B,B; JR -2.
+        let program = [0x10, 0x00, 0x40, 0x18, 0xFE];
+        let mut fb = frame();
+        let mut clocks = [0; 2];
+        for (i, single_steps) in [false, true].into_iter().enumerate() {
+            let emu = with_program(&program, 0x00);
+            emu.set_stop_events(Events::LD_B_B);
+            let _ = emu.run_cycles(10_000, &mut fb, &mut []);
+            let d = emu.clock() + 4000;
+            assert!(emu.set_buttons_at(d, Buttons::START));
+            if single_steps {
+                // One idle M-cycle per step, no skip: the reference.
+                while !emu.step(&mut fb, &mut []).events.contains(Events::LD_B_B) {}
+            } else {
+                let r = emu.run_cycles(100_000, &mut fb, &mut []);
+                assert_eq!(r.events, Events::LD_B_B);
+            }
+            clocks[i] = emu.clock();
+            // The stopped step's check after its idle M-cycle ending at d
+            // sees the press; then the 00 after STOP (one byte here, a
+            // stub until M5) runs as a NOP, then LD B,B's fetch.
+            assert_eq!(emu.clock(), d + 8);
+        }
+        assert_eq!(clocks[0], clocks[1]);
+    }
+
+    #[test]
+    fn scheduled_input_p1_read_and_irq_from_its_mcycle_on() {
+        use crate::cpu::Bus;
+        let emu = emulator();
+        let now = emu.clock();
+        assert!(emu.set_buttons_at(now + 8, Buttons::START));
+        emu.hw.sys.iflags = 0;
+        let mut fb = frame();
+        let mut ctx = Ctx::new(
+            emu.mem,
+            &mut emu.hw.sys,
+            &mut fb,
+            &mut [],
+            Events::EMPTY,
+            u64::MAX,
+        );
+        // Each read is one M-cycle, at the clock it starts on: the change
+        // at now + 8 is seen by the third (P1 lines and IF bit 4).
+        let seen: [(u64, u8, u8); 3] = core::array::from_fn(|_| {
+            let (at, irq) = (ctx.clock(), ctx.interrupt_flags() & 0x10);
+            (at, Bus::read(&mut ctx, 0xFF00) & 0x0F, irq)
+        });
+        assert_eq!(
+            seen,
+            [(now, 0x0F, 0), (now + 4, 0x0F, 0), (now + 8, 0x07, 0x10)]
+        );
+    }
+
+    #[test]
+    fn scheduled_input_wakes_halt_on_its_mcycle() {
+        // IE = joypad, IF = 0, action buttons selected; HALT; LD B,B.
+        let program = [
+            0x3E, 0x10, 0xE0, 0xFF, 0xAF, 0xE0, 0x0F, 0x3E, 0x10, 0xE0, 0x00, 0x76, 0x40, 0x18,
+            0xFE,
+        ];
+        let mut fb = frame();
+        let mut clocks = [0; 3];
+        // Scheduled with the halted skip; scheduled with one idle M-cycle
+        // per step (no skip); and `set_buttons` once the clock is at d.
+        for (i, how) in [0, 1, 2].into_iter().enumerate() {
+            let emu = with_program(&program, 0x80);
+            emu.set_stop_events(Events::LD_B_B);
+            let _ = emu.run_cycles(10_000, &mut fb, &mut []);
+            assert!(emu.hw.cpu.halted());
+            // Far from any other deadline (the next VBlank), so only the
+            // Input deadline can stop a halted skip there.
+            let d = emu.clock() + 4000;
+            if how == 2 {
+                run_to(emu, d);
+                emu.set_buttons(Buttons::START);
+            } else {
+                assert!(emu.set_buttons_at(d, Buttons::START));
+            }
+            if how == 1 {
+                while !emu.step(&mut fb, &mut []).events.contains(Events::LD_B_B) {}
+            } else {
+                let r = emu.run_cycles(100_000, &mut fb, &mut []);
+                assert_eq!(r.events, Events::LD_B_B);
+            }
+            assert_eq!(emu.registers().pc, 0x10D);
+            clocks[i] = emu.clock();
+        }
+        assert_eq!(clocks[0], clocks[2], "same as set_buttons at d");
+        assert_eq!(clocks[0], clocks[1], "same as without the skip");
+    }
+
+    #[test]
+    fn scheduled_input_in_the_past_applies_now() {
+        let emu = emulator();
+        run_to(emu, 400);
+        emu.hw.sys.iflags = 0;
+        assert!(emu.set_buttons_at(100, Buttons::B));
+        assert_eq!((p1(emu), emu.peek(0xFF0F) & 0x10), (0x0D, 0x10));
+        // The current clock, and any in the M-cycle starting now, count
+        // as the past.
+        assert!(emu.set_buttons_at(400, Buttons::EMPTY));
+        assert_eq!(p1(emu), 0x0F);
+        assert!(emu.set_buttons_at(403, Buttons::A));
+        assert_eq!(p1(emu), 0x0E);
+        let input = emu.hw.sys.sched.deadline(schedule::EventKind::Input);
+        assert_eq!(input, schedule::NEVER);
+    }
+
+    #[test]
+    fn scheduled_inputs_reschedule_queue_and_collapse() {
+        let emu = emulator();
+        run_to(emu, 400);
+        // Scheduled out of order: they still apply in clock order.
+        assert!(emu.set_buttons_at(2000, Buttons::B));
+        assert!(emu.set_buttons_at(1000, Buttons::A));
+        // Same clock: the later call replaces the change.
+        assert!(emu.set_buttons_at(3000, Buttons::UP));
+        assert!(emu.set_buttons_at(3000, Buttons::SELECT));
+        assert!(emu.set_buttons_at(4000, Buttons::EMPTY));
+        // Full: a new future clock is refused and changes nothing; a
+        // replacement or a past clock still works.
+        assert!(!emu.set_buttons_at(5000, Buttons::START));
+        assert!(emu.set_buttons_at(4000, Buttons::EMPTY));
+        // `set_buttons` applies now and keeps the queue.
+        emu.set_buttons(Buttons::START);
+        assert_eq!(p1(emu), 0x07);
+        run_to(emu, 1000);
+        assert_eq!(p1(emu), 0x0E);
+        run_to(emu, 2000);
+        assert_eq!(p1(emu), 0x0D);
+        run_to(emu, 3000);
+        assert_eq!(p1(emu), 0x0B);
+        run_to(emu, 5000);
+        assert_eq!(p1(emu), 0x0F, "the refused change never applies");
+        // Two changes landing on the same M-cycle boundary apply as one:
+        // a press and release within it raise no interrupt.
+        emu.hw.sys.iflags = 0;
+        assert!(emu.set_buttons_at(5201, Buttons::A));
+        assert!(emu.set_buttons_at(5203, Buttons::EMPTY));
+        run_to(emu, 5196);
+        assert_eq!(emu.hw.sys.sched.deadline(schedule::EventKind::Input), 5198);
+        run_to(emu, 5200);
+        assert_eq!((p1(emu), emu.peek(0xFF0F) & 0x10), (0x0F, 0));
+        // Reset drops pending changes.
+        assert!(emu.set_buttons_at(6000, Buttons::A));
+        emu.reset();
+        run_to(emu, 8000);
+        assert_eq!(p1(emu), 0x0F);
     }
 }

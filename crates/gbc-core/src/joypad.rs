@@ -1,6 +1,7 @@
 //! Joypad input.
 
 use crate::bitset::bitset;
+use crate::schedule::NEVER;
 
 bitset! {
     /// Buttons currently held, passed to [`Emulator::set_buttons`](crate::Emulator::set_buttons).
@@ -53,6 +54,80 @@ pub(crate) const fn p1_interrupt(old: u8, new: u8) -> u8 {
         INT_JOYPAD
     } else {
         0
+    }
+}
+
+/// How many scheduled button changes
+/// ([`Emulator::set_buttons_at`](crate::Emulator::set_buttons_at)) can be
+/// pending at once (ADR 0012).
+pub const SCHEDULED_INPUTS: usize = 4;
+
+/// The pending scheduled button changes, sorted by clock, at most one per
+/// clock (ADR 0012). A fixed array: the core has no heap.
+#[derive(Clone, Copy)]
+pub(crate) struct InputQueue {
+    /// Clocks of the pending changes, then [`NEVER`] in the unused slots.
+    at: [u64; SCHEDULED_INPUTS],
+    buttons: [Buttons; SCHEDULED_INPUTS],
+    len: u8,
+}
+
+impl InputQueue {
+    pub(crate) const fn new() -> Self {
+        Self {
+            at: [NEVER; SCHEDULED_INPUTS],
+            buttons: [Buttons::EMPTY; SCHEDULED_INPUTS],
+            len: 0,
+        }
+    }
+
+    /// The `Input` deadline for M-cycles of `mcycle` clocks: the earliest
+    /// change's clock less `mcycle - 1`, so the countdown stops at the
+    /// last M-cycle boundary at or before that clock (ADR 0012, rounded
+    /// down). [`NEVER`] if nothing is pending.
+    pub(crate) const fn deadline(&self, mcycle: u64) -> u64 {
+        match self.at[0] {
+            NEVER => NEVER,
+            at => at.saturating_sub(mcycle - 1),
+        }
+    }
+
+    /// Adds a change at `at`, keeping clock order. A change already
+    /// pending at the same clock is replaced (the later call wins).
+    /// Returns `false`, changing nothing, if the queue is full.
+    pub(crate) fn push(&mut self, at: u64, buttons: Buttons) -> bool {
+        let len = usize::from(self.len);
+        let i = self.at[..len].partition_point(|&t| t < at);
+        if i < len && self.at[i] == at {
+            self.buttons[i] = buttons;
+            return true;
+        }
+        if len == SCHEDULED_INPUTS {
+            return false;
+        }
+        self.at.copy_within(i..len, i + 1);
+        self.buttons.copy_within(i..len, i + 1);
+        self.at[i] = at;
+        self.buttons[i] = buttons;
+        self.len += 1;
+        true
+    }
+
+    /// Removes every change at or before `now` and returns the last one's
+    /// buttons. Changes that land on the same M-cycle boundary collapse
+    /// into one, as nothing can observe the P1 lines between them.
+    pub(crate) fn take_due(&mut self, now: u64) -> Option<Buttons> {
+        let len = usize::from(self.len);
+        let n = self.at[..len].partition_point(|&t| t <= now);
+        if n == 0 {
+            return None;
+        }
+        let last = self.buttons[n - 1];
+        self.at.copy_within(n..len, 0);
+        self.buttons.copy_within(n..len, 0);
+        self.at[len - n..len].fill(NEVER);
+        self.len -= n as u8;
+        Some(last)
     }
 }
 

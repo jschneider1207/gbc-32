@@ -21,7 +21,7 @@ use crate::apu::StereoSample;
 use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK};
-use crate::joypad::{p1_interrupt, p1_lines};
+use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
 use crate::schedule::{EventKind, NEVER, Schedule};
@@ -69,6 +69,9 @@ pub(crate) struct Sys<'a> {
     /// The event table: when each kind of scheduled work must next run
     /// ([`Ctx::run_events`]).
     pub(crate) sched: Schedule,
+    /// Scheduled button changes; the earliest is the `Input` deadline
+    /// (ADR 0012).
+    pub(crate) inputs: InputQueue,
 }
 
 impl Sys<'_> {
@@ -76,6 +79,7 @@ impl Sys<'_> {
         Self {
             hot: Hot::new(),
             sched: Schedule::new(),
+            inputs: InputQueue::new(),
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
@@ -103,6 +107,14 @@ impl Sys<'_> {
         self.buttons = buttons;
         self.joyp_select = select & 0x30;
         self.iflags |= p1_interrupt(old, p1_lines(self.buttons, self.joyp_select));
+    }
+
+    /// Sets the `Input` deadline for the earliest scheduled button change
+    /// at the current M-cycle length `mcycle` (ADR 0012). The caller
+    /// reschedules the countdown if it is running.
+    pub(crate) fn schedule_inputs(&mut self, mcycle: u64) {
+        self.sched
+            .set(EventKind::Input, self.inputs.deadline(mcycle));
     }
 
     /// Power-on state after the boot ROM, for the inserted cartridge. The
@@ -407,11 +419,24 @@ impl Ctx<'_, '_> {
                     self.schedule_serial();
                 }
                 EventKind::Ppu => self.sync_ppu(),
-                // Not scheduled yet: DMA and input in ADR 0011 step 6, the
-                // APU in M6.
-                EventKind::Dma | EventKind::Input | EventKind::DivApu | EventKind::AudioBuffer => {}
+                EventKind::Input => self.apply_inputs(now),
+                // Not scheduled yet: DMA in ADR 0011 step 6, the APU in M6.
+                EventKind::Dma | EventKind::DivApu | EventKind::AudioBuffer => {}
             }
         }
+    }
+
+    /// Applies the scheduled button changes due at the M-cycle boundary
+    /// `now`: those at a clock inside the M-cycle that starts at `now` or
+    /// earlier (rounded down, ADR 0012), so accesses from `now` on see
+    /// them. Then schedules the next one.
+    fn apply_inputs(&mut self, now: u64) {
+        let m = self.hot.mcycle as u64;
+        let s = &mut *self.sys;
+        if let Some(buttons) = s.inputs.take_due(now + m - 1) {
+            s.set_joypad(buttons, s.joyp_select);
+        }
+        s.schedule_inputs(m);
     }
 
     /// Catches the PPU up to the current clock and reschedules.
@@ -569,6 +594,10 @@ impl Bus for Ctx<'_, '_> {
         h.mcycle = if h.mcycle == 4 { 2 } else { 4 };
         let (now, pause) = (self.clock(), 2050 * self.hot.mcycle as u64);
         self.sys.timer.speed_switch(now, pause);
+        // The M-cycle grid changes, and with it the boundary a scheduled
+        // button change rounds down to (ADR 0012); `schedule_serial`
+        // reschedules the countdown.
+        self.sys.schedule_inputs(self.hot.mcycle as u64);
         self.schedule_timer();
         self.schedule_serial();
         // The pause: 2050 idle M-cycles, skipped a deadline at a time
