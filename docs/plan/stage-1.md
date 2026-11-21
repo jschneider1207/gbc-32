@@ -37,7 +37,8 @@ clippy, test and embedded-build steps, and fails at the ROM step with
 - [ ] SM83 instruction set (all opcodes including CB), flags, HALT, STOP stub, EI delay
 - [ ] Memory map, echo RAM, unusable region, I/O register stubs
 - [ ] MBC1 (enough for Blargg), serial port output capture
-- [ ] Post-boot register state for CGB (no boot ROM)
+- [ ] Post-boot register state for CGB (no boot ROM), including the different DMG-compatibility-mode values (Pan Docs "Power Up Sequence": e.g. D=$00, E=$08, L=$7C, B from the title checksum)
+- [ ] Unusable area FEA0-FEFF reads as CGB revision C does (Pan Docs "FEA0-FEFF range": revisions 0-D differ from E; ADR 0003)
 - [ ] Instruction-level unit tests (e.g. against the SM83 JSON single-step tests, if adopted)
 - [ ] Before fixing the bus signature: a per-run-call context struct (memory, hardware state, frame, audio + write position) so lazy PPU/APU catch-up on any bus write costs one pointer, not threaded arguments (ADR 0006 review, finding 6)
 - [ ] ROM size: record size/mask at `load` so opcode fetch avoids a per-access bounds check; define out-of-range reads for non-power-of-two ROMs (review finding 11)
@@ -63,6 +64,8 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
 - [ ] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
+- [ ] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review)
+- [ ] First line after LCD enable skips OAM scan (GBCTR, SameBoy); no manifest ROM covers it (the lcdon_* tests are excluded), so add a unit test
 - [ ] Before writing the PPU: decide the output pixel format and stride (STM32 LTDC wants RGB565 or ARGB1555; converting per palette entry at palette-write time is free on the hot path). Record it in an ADR (review finding 4)
 - [ ] First headless performance benchmark recorded in `docs/perf.md`
 
@@ -73,7 +76,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 ## M4: Cartridges + saves
 
 - [ ] MBC1 (full), MBC2, MBC3 + RTC (on emulated time), MBC5 (incl. rumble bit ignored)
-- [ ] Cartridge header parsing, ROM/RAM size handling
+- [ ] Cartridge header parsing, ROM/RAM size handling. Review gaps from M0: types without RAM (Pan Docs 0147) vs. a nonzero 0x149 code, MBC7 EEPROM size (SameBoy 0x100), HuC3 RTC; decide which are in scope
 - [ ] Save RAM and RTC state exposed through the core API (the caller owns persistence)
 - [ ] `RtcState::advance_seconds(u64)` in the core with hardware rollover (out-of-range wrap, day carry, halt bit), so front ends can sync to wall-clock time correctly; document load-then-set_rtc_state order (review finding 8)
 
@@ -83,6 +86,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 ## M5: CGB features
 
 - [ ] Double speed (KEY1/STOP), VRAM/WRAM banking
+- [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
 - [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
 - [ ] CGB vs. DMG-compatibility mode selection from the header
