@@ -17,13 +17,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use gbc_core::sm83::{Bus, Cpu, Registers};
 use serde::Deserialize;
 
+/// One M-cycle as listed: address pins, data pins, "r-m" / "-wm" / "---".
+type RawCycle = (Option<u16>, Option<u8>, String);
+
 #[derive(Deserialize)]
 struct Case {
     name: String,
     initial: State,
     #[serde(rename = "final")]
     end: State,
-    cycles: Vec<Option<(Option<u16>, Option<u8>, String)>>,
+    cycles: Vec<Option<RawCycle>>,
 }
 
 #[derive(Deserialize)]
