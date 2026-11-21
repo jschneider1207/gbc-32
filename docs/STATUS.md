@@ -16,19 +16,16 @@
 
 ## Needs human
 
-- **Before M7 (desktop front end), not urgent yet:** the window and audio
-  libraries need system packages that need `sudo`. Run:
-  `sudo ./scripts/install-system-deps.sh`. Agents check the current state
-  with `./scripts/install-system-deps.sh --check` (exit 0 = all installed)
-  and remove this item once it passes.
-  Until then, keep `gbc-desktop` a dependency-free stub so the workspace
-  builds without them.
+None.
 
 ## Environment
 
 - Rust via **rustup** (user-level, `~/.rustup` and `~/.cargo`), not asdf:
   rust 1.100.0 stable, components clippy and rustfmt, target
   `thumbv7em-none-eabihf`. Pin the exact version in `rust-toolchain.toml`.
+- Desktop system libraries installed 2026-11-21 (`./scripts/install-system-deps.sh --check` passes):
+  ALSA 1.2.11, libudev 255, wayland-client 1.22.0, xkbcommon 1.6.0, x11 1.8.7.
+  `ldconfig` warnings about `/usr/lib/wsl/lib/libnvoptix*` are harmless WSL noise.
 - Host C compiler: gcc 13.3 (`cc`). The machine is WSL2 Ubuntu 24.04.
 - `python3` through asdf has no version set. Use `/usr/bin/python3` (3.12) for one-off scripts.
 
