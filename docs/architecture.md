@@ -6,7 +6,8 @@ the structure changes. The reasons behind decisions belong in
 
 > Status: the workspace and the core's public API (ADR 0006) are concrete as
 > of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
-> The PPU and APU are still skeletons.
+> The PPU and APU are still skeletons. Targets (dev board, then custom
+> board) as of 2026-11-21.
 
 ## Workspace
 
@@ -16,7 +17,7 @@ rust-toolchain.toml        pinned stable toolchain + thumbv7em-none-eabihf
 crates/
   gbc-core/                #![no_std], no alloc. All emulation logic.
   gbc-desktop/             std front end (Stage 1 only): window, audio, input, saves
-  gbc-stm32/               (Stage 2, not yet created) bare-metal platform layer
+  gbc-stm32/               (Stage 2, not yet created) bare-metal platform layer(s); see Targets
 tools/
   romtest/                 acceptance runner (contract: acceptance/README.md)
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
@@ -29,6 +30,31 @@ lints deny `unsafe_op_in_unsafe_fn` and `clippy::undocumented_unsafe_blocks`
 
 Dependency direction: front ends and tools depend on `gbc-core`. `gbc-core`
 depends on nothing outside `core` without human approval (AGENTS.md).
+
+## Targets
+
+There are two MCU targets in sequence. Both use the same `gbc-core` build
+(`thumbv7em-none-eabihf`), but each needs its own platform layer. How that
+code is split (one crate with per-board modules, or separate crates) is
+decided when Stage 2 starts.
+
+| | Stage 2: dev board | Stage 3+: custom board |
+|---|---|---|
+| Board | NUCLEO-H753ZI + X-NUCLEO-GFX02Z1 | Custom PCB (`../gbc-32-hardware`) |
+| MCU | STM32H753ZI, 480 MHz, RM0433 | STM32H735IGK6, 520 MHz (550 with `CPU_FREQ_BOOST`), RM0468 |
+| Core supply | LDO | On-chip SMPS (different supply config at boot) |
+| Internal RAM / L1 cache | ~1 MB / 16 KB I + 16 KB D | 564 KB / 32 KB I + 32 KB D |
+| ROM source | Shield's QSPI NOR, memory-mapped | eMMC → copied into external FMC SDRAM (32 MiB) at load |
+| Saves | (Stage 2 choice) | eMMC |
+| Display | Shield's ILI9341V, 8-bit 8080 bus on FMC (stand-in only) | TBD by the hardware repo (FMC parallel or LTDC) |
+| Audio | (Stage 2 choice) | SAI → external DAC/amplifier |
+
+What carries over from Stage 2: proof that the core runs at full speed on a
+Cortex-M7, the frame pacing / audio / input structure, and the cache and
+memory-placement findings. The latter are a starting point only, because
+the RAM layout and cache sizes differ. Reading the ROM from QSPI NOR is a
+conservative stand-in for SDRAM. The custom-board contract is
+`../gbc-32-hardware/docs/firmware-interface.md`.
 
 ## Core ↔ platform boundary
 
@@ -60,8 +86,17 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
 
 ```
 
-- **ROM:** a `&'a [u8]` borrowed from the caller. On the MCU this is the
-  memory-mapped QSPI/eMMC-cached region (`'static`); on desktop, a `Vec`.
+- **ROM:** a `&'a [u8]` borrowed from the caller; on desktop, a `Vec`. On
+  the MCU it is `'static` and lives in external memory:
+  - Stage 2: the shield's QSPI NOR, memory-mapped.
+  - Stage 3+: external FMC SDRAM, filled from eMMC when the game loads.
+
+  The core must not assume the ROM is in internal RAM, or that it is
+  aligned beyond a byte. On the custom board, unaligned reads from the FMC
+  region are unsupported (STM32H735 erratum ES0491 §2.7.3). Code that reads
+  the ROM therefore has to be built so the compiler never merges byte reads
+  into an unaligned halfword or word read, and the platform has to map the
+  SDRAM as normal, cacheable memory through the MPU.
 - **Cartridge RAM:** a `&'a mut [u8]` owned by the caller, at least
   `cart_ram_size(rom)` bytes (up to 128 KiB). Only the header's size is
   used; `cart_ram()` (the save file) is exactly that long. The caller
