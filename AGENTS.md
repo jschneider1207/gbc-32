@@ -139,19 +139,21 @@ cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter 'b
 You can't fully review your own work: you share its assumptions. The
 acceptance gate shows that ROMs pass, not that the code is right, that the
 runner is honest, or that the code will be fast on the MCU. So get
-independent reviews from fresh subagents.
+independent reviews from fresh subagents. Reviews are worth their cost
+only where they don't overlap, so keep them few and targeted.
 
 **When it's required:**
 1. **Milestone close**, after acceptance passes and before tagging. The
    review covers `<previous tag>..HEAD` (or the first commit for M0).
 2. **Changes to pass/fail logic** in `tools/romtest` (checks, statuses,
    scoring, baseline, regressions). Review before trusting any results it
-   produces, because the runner decides what counts as passing.
+   produces, because the runner decides what counts as passing. Skip this
+   if the milestone-close test-integrity review will cover the same diff
+   before any of its results are relied on.
 3. **Core public API changes**, i.e. anything that needs an ADR about the
-   core ↔ platform boundary.
+   core ↔ platform boundary. One reviewer, scoped to that diff.
 
-Don't review every commit. Cap it at 3 reviewers per milestone close and 1
-for each other trigger.
+Don't review every commit. Other triggers get 1 reviewer each.
 
 **How:**
 - Use a fresh subagent (not a fork, which inherits your context and
@@ -161,22 +163,49 @@ for each other trigger.
   tell it why you think the code is correct. You want its reading, not a
   confirmation of yours.
 - Reviewers are read-only. They report each finding with file:line,
-  severity, and a concrete scenario that goes wrong.
+  severity (high/medium/low), and a concrete scenario that goes wrong.
 - At milestone close, run these as separate reviewers in parallel:
   - **Hardware correctness:** does the behavior match the references (Pan
-    Docs, GBCTR, SameBoy)? What edge cases does no ROM test?
+    Docs, GBCTR, SameBoy)? What edge cases does no ROM test? For a
+    milestone with no emulation logic (pure infrastructure), merge this
+    into the test-integrity review instead.
   - **Test integrity:** any special-casing of test ROMs, weakened or bypassed
     checks, runner leniency, tests changed to match the output, sources of
-    non-determinism, `alloc`/`std` getting into the core?
-  - **Performance and portability** (from M3 on): allocations, dynamic
-    dispatch or large stack frames in hot paths, floats, anything that will
-    hurt on a Cortex-M7 with limited RAM.
+    non-determinism, `alloc`/`std`/`unsafe` getting into the core?
+  - **Performance and portability**, only when the milestone changed the
+    hot path (CPU, bus, PPU, APU inner loops): allocations, dynamic
+    dispatch, bounds checks or panics, large stack frames, code size,
+    anything that will hurt on a Cortex-M7 with limited RAM. Quote
+    measurements.
 
-**Triage:** reviewers can be wrong, so verify each finding yourself. Fix the
-confirmed ones, with a regression test where possible. Give each rejected
-finding a one-line reason. Record the outcome in the session log under
-"Review". Anything that needs the human's judgment goes in STATUS under
-"Needs human". Don't tag a milestone while confirmed findings are still open.
+**Triage:** reviewers can be wrong, so verify each finding yourself.
+- Fix confirmed **high** and **medium** findings, with a regression test
+  where possible. **Low** findings and work that belongs to a later
+  milestone become one-line plan tasks, not a fix round.
+- Give each rejected finding a one-line reason.
+- **No re-review of the fixes**, unless a fix changed the runner's pass/fail
+  logic or the core public API again.
+- Record the outcome in the session log under "Review". Anything that
+  needs the human's judgment goes in STATUS under "Needs human".
+- Don't tag a milestone while confirmed high or medium findings are still
+  open.
+
+**Fix agents:**
+- One theme per agent (e.g. "runner fixes", "hot-path perf"), and no new
+  features. Aim for about 30 tool calls or fewer; split bigger work.
+- Paste the triaged findings into a fresh, short brief.
+- Use a cheaper model or lower effort when the fix is already specified.
+  Keep the most capable model for new emulation logic, subtle
+  timing/performance work and reviews.
+
+**Orchestrator hygiene:** the orchestrator's own context is re-sent on
+every turn, so:
+- keep replies short;
+- spot-check subagent claims rather than re-running everything;
+- check local files (e.g. `../gbc-32-hardware/datasheets/`) before fetching
+  from the web;
+- start a fresh session at each milestone boundary, after STATUS is
+  rewritten.
 
 ## Code conventions
 
