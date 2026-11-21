@@ -16,7 +16,12 @@
 
 ## Needs human
 
-None.
+- **Before M7 (desktop front end), not urgent yet:** the window and audio
+  libraries need system packages that need `sudo`:
+  `sudo apt install libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev`
+  (missing as of 2026-11-21; `libx11-dev` and `pkg-config` are present).
+  Until then, keep `gbc-desktop` a dependency-free stub so the workspace
+  builds without them.
 
 ## Environment
 

@@ -35,21 +35,33 @@ platform.
   the RTC state to save it or to sync it to wall-clock time on load.
 - **Video:** the core writes 160×144 RGB555 (`u16`) pixels into a caller-provided
   framebuffer, line by line. Converting to the display's color format is
-  the platform's job.
+  the platform's job. For DMG games (compatibility mode), the caller passes
+  the BG/OBJ0/OBJ1 compatibility palettes at construction, in place of the
+  boot ROM's choice. `romtest` passes the reference "common palette"
+  (acceptance/README.md); the desktop front end may choose per title.
 - **Audio:** the core writes stereo samples into a caller-provided buffer at
   a fixed internal rate. Resampling is the platform's job (exact approach
   decided in M6).
-- **Input:** `set_buttons(Buttons)` (bitflags).
+- **Input:** `set_buttons(Buttons)`, where `Buttons` is a hand-written bit set (not the `bitflags` crate; the core has no dependencies).
 - **Driving:** `run_frame()` runs until VBlank. `run_cycles(n)` and
-  `step()` exist for tools. Both return an event set (frame ready, audio
-  buffer full, `LD B,B` breakpoint hit, ...).
+  `step()` exist for tools. All three return an event set (frame ready, audio
+  buffer full, `LD B,B` breakpoint hit, CPU locked up, ...).
 - **Debug access** for `romtest` and tests: registers, serial output bytes,
   and memory peek. This must cost nothing in release embedded builds
   (plain fields and flags, no callbacks or dynamic dispatch on hot paths).
 
 The `Emulator` struct is large (WRAM 32 KiB + VRAM 16 KiB + OAM, etc.). It
 must never be required to live on the stack: desktop boxes it, and the MCU
-puts it in a `static` placed in a chosen RAM region.
+puts it in a `static` placed in a chosen RAM region. Note that
+`Box::new(Emulator::new())` still builds it on the stack first. The API
+therefore needs a `const fn` constructor or initialization in place
+(e.g. `init(&mut self, ...)`). How ROM and cart RAM borrows coexist with a
+`static` emulator (`'static` borrows vs. passing buffers on each call) is an
+M0 decision; record it in an ADR.
+
+Core unit tests live in `#[cfg(test)]` modules, which may use `std`. The
+gate only forbids `alloc` in `gbc-core/src`, and the `thumbv7em` build
+enforces `no_std` for non-test code.
 
 ## Timing model
 

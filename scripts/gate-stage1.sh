@@ -25,14 +25,21 @@ cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 step "cargo test"
 cargo test --workspace || fail "tests"
 
-step "gbc-core: no_std, no alloc, builds for thumbv7em-none-eabihf"
-if grep -rnE 'extern crate (alloc|std)|^\s*use (alloc|std)::' crates/gbc-core/src; then
-    fail "gbc-core must not use std or alloc"
+step "gbc-core: no alloc, builds for thumbv7em-none-eabihf (no std there)"
+if grep -rnE 'extern crate alloc' crates/gbc-core/src; then
+    fail "gbc-core must not use alloc"
 fi
 cargo build -p gbc-core --release --target thumbv7em-none-eabihf || fail "gbc-core embedded build"
 
 step "Acceptance ROMs (must tier + regressions)"
-cargo run -p romtest --release -- --manifest acceptance/stage1.toml --gate must \
-    || fail "acceptance ROMs (see target/acceptance/stage1.md)"
+set +e
+cargo run -p romtest --release -- --manifest acceptance/stage1.toml --gate must
+rc=$?
+set -e
+case ${rc} in
+    0) ;;
+    1) fail "must-tier ROM failures or regressions (see target/acceptance/stage1.md)" ;;
+    *) fail "romtest runner error (exit ${rc}); results are not meaningful" ;;
+esac
 
 printf '\nGATE PASSED: stage 1\n'

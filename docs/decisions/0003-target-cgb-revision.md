@@ -9,7 +9,7 @@ publish expected results for specific revisions. We need one target.
 
 | Suite | Revisions with references |
 |---|---|
-| Blargg | CGB B, C, E (cgb_sound fails on B) |
+| Blargg | Verified on CGB B and E; the upstream table also marks C as passing (cgb_sound fails on B) |
 | Mealybug | CGB C (27 screenshots), CGB D (20) |
 | Gambatte | CGB C (`cgb04c`) |
 | AGE | CGB B/C and E variants |

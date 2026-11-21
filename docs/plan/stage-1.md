@@ -17,15 +17,18 @@ Milestone acceptance criteria are fixed unless the human changes them.
 
 Set up the infrastructure that every later milestone is measured with.
 
-- [ ] Rust toolchain available (see STATUS "Needs human" if not installed), `rust-toolchain.toml` pinned, `thumbv7em-none-eabihf` target added
+- [ ] `rust-toolchain.toml` pinning the installed stable version (see STATUS "Environment"), with rustfmt, clippy and the `thumbv7em-none-eabihf` target
 - [ ] Cargo workspace per `docs/architecture.md`: `gbc-core`, `gbc-desktop` (stub), `tools/romtest`
 - [ ] `gbc-core` skeleton: public API shape from architecture.md, compiling for host and `thumbv7em-none-eabihf`
-- [ ] `romtest`: manifest parsing, glob expansion, exit conditions, all check types except `gambatte`, JSON/markdown output, failure PNGs, baseline + regression logic, `--gate`, `--filter`, `--jobs`
+- [ ] `romtest` implementing everything in `acceptance/README.md` except the `gambatte` check, which reports `unsupported` until M5: manifest schema validation, exit codes 0/1/2, all CLI flags, JSON/markdown output, failure PNGs, baseline and regression logic, timing report
+- [ ] Decide how to test `romtest` before a real CPU exists (e.g. a fake emulator behind a trait, or tiny hand-assembled ROMs) and record it in an ADR
+- [ ] ADR for the core public API (buffer ownership and lifetimes, building the `Emulator` without putting it on the stack, event set, debug access)
 - [ ] `romtest` unit tests for manifest parsing, scoring and regression detection
 - [ ] Initial baseline committed (everything failing is expected)
 
 **Acceptance:** `scripts/gate-stage1.sh` gets through the toolchain, fmt,
-clippy, test and embedded-build steps, and fails only at the ROM step.
+clippy, test and embedded-build steps, and fails at the ROM step with
+**exit code 1** (ROM failures), not 2 (runner error).
 `target/acceptance/stage1.md` lists every ROM in the manifest.
 
 ## M1: CPU + memory bus
@@ -36,9 +39,8 @@ clippy, test and embedded-build steps, and fails only at the ROM step.
 - [ ] Post-boot register state for CGB (no boot ROM)
 - [ ] Instruction-level unit tests (e.g. against the SM83 JSON single-step tests, if adopted)
 
-**Acceptance:** `romtest --filter 'blargg/cpu_instrs/**'` and
-`--filter 'blargg/instr_timing/**'` pass their `serial` checks. (Screenshot
-checks need the PPU from M3.)
+**Acceptance:** `romtest --group blargg-cpu-instrs --group blargg-instr-timing --only-check serial --gate must`
+exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 
 ## M2: Timing, interrupts, timers, OAM DMA
 
@@ -47,7 +49,9 @@ checks need the PPU from M3.)
 - [ ] DIV/TIMA with the falling-edge behavior, TMA reload windows
 - [ ] OAM DMA timing and bus conflicts
 
-**Acceptance:** group `mooneye-acceptance` all passing.
+**Acceptance:** `romtest --filter 'mooneye-test-suite/acceptance/{timer,instr,interrupts,oam_dma}/**' --gate must`
+exits 0. Some top-level Mooneye acceptance tests depend on LY/VBlank timing or
+OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 
 ## M3: PPU (DMG-compatibility rendering) + screenshots
 
@@ -57,7 +61,7 @@ checks need the PPU from M3.)
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
 - [ ] First headless performance benchmark recorded in `docs/perf.md`
 
-**Acceptance:** groups `dmg-acid2-compat`, `blargg-cpu-instrs`,
+**Acceptance:** groups `mooneye-acceptance`, `dmg-acid2-compat`, `blargg-cpu-instrs`,
 `blargg-instr-timing`, `blargg-mem-timing`, `blargg-mem-timing-2` and
 `blargg-halt-bug` all passing.
 
@@ -76,6 +80,7 @@ checks need the PPU from M3.)
 - [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
 - [ ] CGB vs. DMG-compatibility mode selection from the header
+- [ ] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results
 
 **Acceptance:** groups `cgb-acid2` and `mooneye-cgb-boot-regs` passing;
 `same-suite-cgb` and `age-cgb` tracked (should tier).
@@ -94,6 +99,7 @@ checks need the PPU from M3.)
 - [ ] Audio output with frame pacing driven by audio
 - [ ] Load ROM from a path; battery saves and RTC persisted next to the ROM (`.sav`)
 - [ ] Builds and runs on Windows and on WSL2 (WSLg)
+- [ ] Before starting: likely needs system libraries (ALSA, udev, Wayland, xkbcommon dev packages). Check STATUS "Needs human" and don't install them yourself
 
 **Acceptance:** `cargo build -p gbc-desktop` succeeds; the front end runs a
 test ROM headlessly for N frames via `--headless --frames N` and exits 0.

@@ -124,16 +124,16 @@ exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
 
 [[group]]
-# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+# source: rtc3test/game-boy-test-roms-howto.md (run time >= last menu press + documented duration + 2 s margin)
 id = "rtc3test-basic"
 tier = "must"
 roms = ["rtc3test/rtc3test.gb"]
 input = [{ at_s = 1.0, press = ["a"], hold_s = 0.1 }]
-exit = { run_s = 15 }
+exit = { run_s = 16 }
 checks = [{ screenshot = "rtc3test/rtc3test-basic-tests-cgb.png" }]
 
 [[group]]
-# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+# source: rtc3test/game-boy-test-roms-howto.md (run time >= last menu press + documented duration + 2 s margin)
 id = "rtc3test-range"
 tier = "must"
 roms = ["rtc3test/rtc3test.gb"]
@@ -141,11 +141,11 @@ input = [
   { at_s = 1.0, press = ["down"], hold_s = 0.1 },
   { at_s = 1.3, press = ["a"], hold_s = 0.1 },
 ]
-exit = { run_s = 10 }
+exit = { run_s = 12 }
 checks = [{ screenshot = "rtc3test/rtc3test-range-tests-cgb.png" }]
 
 [[group]]
-# source: rtc3test/game-boy-test-roms-howto.md (run time = menu input + documented duration + 1 s margin)
+# source: rtc3test/game-boy-test-roms-howto.md (run time >= last menu press + documented duration + 2 s margin)
 id = "rtc3test-sub-second"
 tier = "must"
 roms = ["rtc3test/rtc3test.gb"]
@@ -154,7 +154,7 @@ input = [
   { at_s = 1.3, press = ["down"], hold_s = 0.1 },
   { at_s = 1.6, press = ["a"], hold_s = 0.1 },
 ]
-exit = { run_s = 28 }
+exit = { run_s = 30 }
 checks = [{ screenshot = "rtc3test/rtc3test-sub-second-writes-cgb.png" }]
 
 [[group]]
