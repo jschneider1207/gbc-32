@@ -26,9 +26,18 @@ step "cargo test"
 cargo test --workspace || fail "tests"
 
 step "gbc-core: no alloc, builds for thumbv7em-none-eabihf (no std there)"
-if grep -rnE 'extern crate alloc' crates/gbc-core/src; then
+# alloc is forbidden everywhere in the core, test code included. -z treats
+# each file as one record so a declaration split across lines still matches;
+# \s+ tolerates any whitespace. Deliberately strict: a comment spelling out
+# `alloc::` also fails (rephrase it).
+if grep -rlPz 'extern\s+crate\s+alloc\b|\buse\s+alloc\b|\balloc::' crates/gbc-core/src; then
     fail "gbc-core must not use alloc"
 fi
+# The detailed rules (std only inside #[cfg(test)] modules, no #[path] or
+# include!, #![no_std] present, no dependencies of any kind) are enforced by
+# this test. Naming it explicitly makes the gate fail if it is deleted or
+# renamed, not just if it fails.
+cargo test -p gbc-core --test hard_rules || fail "gbc-core hard rules (crates/gbc-core/tests/hard_rules.rs)"
 cargo build -p gbc-core --release --target thumbv7em-none-eabihf || fail "gbc-core embedded build"
 
 step "Acceptance ROMs (must tier + regressions)"
