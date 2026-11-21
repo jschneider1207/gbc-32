@@ -106,6 +106,7 @@ mod events;
 mod joypad;
 mod memory;
 mod ppu;
+mod schedule;
 mod serial;
 mod timer;
 

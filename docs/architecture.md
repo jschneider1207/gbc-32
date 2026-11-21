@@ -173,6 +173,7 @@ lib.rs      * Emulator, Hw (cpu + sys), RunResult, run loop, public re-exports, 
 memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, stub I/O storage)
 bitset.rs   * bitset! macro behind Buttons and Events
 events.rs   * Events
+schedule.rs * event table (ADR 0011): EventKind (dispatch order), Schedule (one u64 deadline per kind + their minimum)
 joypad.rs   * Buttons, P1 line logic and the joypad interrupt edge (P1/JOYP register access is in bus.rs)
 config.rs   * Config, DmgPalettes, RGB555 helpers
 cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP stub)
@@ -197,10 +198,22 @@ reports the call done (target reached or a stop event raised); the opcode
 dispatch is inlined into that loop. The CPU is generic over the `Bus`
 trait; every `read`/`write`/`idle` is one M-cycle: the access at the
 current clock, then a tick (timer, serial bit clock and an `i32` countdown
-to the next deadline, the earlier of `Sys::next_event` and the target).
+to the next deadline, the earlier of the event table's minimum and the target).
 The countdown and timer (`Hot`) are copied into the `Ctx` for the call
 and back into `Sys::hot` when it is dropped, so the tick doesn't go
-through `ctx.sys`; the u64 clock is `deadline - budget`. Reads have no
+through `ctx.sys`; the u64 clock is `deadline - budget`. Scheduled work
+lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
+deadline per `EventKind` (`NEVER` = none) and their minimum, recomputed
+only when a deadline is set, never per M-cycle. When the countdown runs
+out, `Ctx::boundary` runs every kind due at the current clock in
+`EventKind` declaration order (fixed, so same-clock events are
+deterministic), each handler setting its next deadline, then reschedules
+the countdown; register writes that move a deadline (LCDC) reschedule too.
+So far only the PPU's VBlank is on it; the timer and serial clock still
+tick per M-cycle until ADR 0011 step 4. `Sys` is `repr(C)` with the
+fields the inlined bus path reads first, to keep their Thumb-2 load
+offsets small (the event table at the front cost `Cpu::run` about 1 KB).
+Reads have no
 side effects, so the CPU and `Emulator::peek` share one `read` function
 (given the live `Hot`). The same CPU runs against a flat test bus in
 `tools/sm83-tests`, which runs only with the data from

@@ -5,9 +5,10 @@
 //! Each CPU bus call is one M-cycle: the access happens at the start of the
 //! cycle (it sees the state as of the current clock), then [`Ctx::tick`]
 //! advances the clock, the timer and the serial port by one M-cycle, and
-//! runs scheduled events (the PPU's VBlank) when the clock reaches
-//! `Sys::next_event`. The PPU is otherwise caught up only when one of its
-//! registers is written (ADR 0002).
+//! runs scheduled events (the PPU's VBlank) when the clock reaches the
+//! earliest deadline in `Sys::sched` (the event table, ADR 0011). The PPU
+//! is otherwise caught up only when one of its registers is written (ADR
+//! 0002).
 //!
 //! The per-M-cycle state ([`Hot`]: a clock countdown and the timer) is
 //! copied into the [`Ctx`] for the duration of a run call, so the tick
@@ -21,31 +22,27 @@ use crate::cpu::{Bus, INT_MASK};
 use crate::joypad::{p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
+use crate::schedule::{EventKind, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
 use crate::{Buttons, Emulator, Events};
 
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
+#[repr(C)]
 pub(crate) struct Sys<'a> {
-    /// The clock and timer between run calls. During a run call the live
-    /// copy is [`Ctx::hot`] (this one is stale until the `Ctx` is dropped),
-    /// so code running inside a call must use that one.
-    pub(crate) hot: Hot,
-    /// The clock at which [`Ctx::run_events`] must next run (the PPU's
-    /// next VBlank; `u64::MAX` if nothing is scheduled).
-    pub(crate) next_event: u64,
-    pub(crate) ppu: Ppu,
-    pub(crate) serial: Serial,
+    // Fields the inlined CPU bus path reads (`read`, `write_mapped`, the
+    // interrupt checks) come first, so their offsets stay small: Thumb-2
+    // has 16-bit loads only for small offsets (ADR 0011 step 1 measured
+    // +1 KB in `Cpu::run` with the event table at the front).
     pub(crate) cart: Cart<'a>,
-    pub(crate) config: Config,
-    pub(crate) buttons: Buttons,
+    /// Offsets of the VRAM bank at 8000 and the WRAM bank at D000.
+    vram_off: usize,
+    wram_off: usize,
     /// IE (FFFF), all 8 bits.
     pub(crate) ie: u8,
     /// IF (FF0F), low 5 bits.
     pub(crate) iflags: u8,
-    /// P1/JOYP select bits (4-5) as written.
-    pub(crate) joyp_select: u8,
     /// The cartridge runs in CGB mode (header 0143 bit 7); otherwise DMG
     /// compatibility mode, where the CGB-only registers are locked (KEY0 =
     /// 04; Pan Docs: Power Up Sequence; SameBoy `cgb_mode`).
@@ -53,18 +50,28 @@ pub(crate) struct Sys<'a> {
     /// VBK (bit 0) and SVBK (bits 0-2) as written.
     pub(crate) vbk: u8,
     pub(crate) svbk: u8,
-    /// Offsets of the VRAM bank at 8000 and the WRAM bank at D000.
-    vram_off: usize,
-    wram_off: usize,
     /// KEY1 bit 0 (speed switch armed).
     pub(crate) key1: u8,
+    /// P1/JOYP select bits (4-5) as written.
+    pub(crate) joyp_select: u8,
+    pub(crate) buttons: Buttons,
+    pub(crate) config: Config,
+    pub(crate) serial: Serial,
+    pub(crate) ppu: Ppu,
+    /// The clock and timer between run calls. During a run call the live
+    /// copy is [`Ctx::hot`] (this one is stale until the `Ctx` is dropped),
+    /// so code running inside a call must use that one.
+    pub(crate) hot: Hot,
+    /// The event table: when each kind of scheduled work must next run
+    /// ([`Ctx::run_events`]; so far only the PPU's next VBlank).
+    pub(crate) sched: Schedule,
 }
 
 impl Sys<'_> {
     pub(crate) const fn new() -> Self {
         Self {
             hot: Hot::new(),
-            next_event: u64::MAX,
+            sched: Schedule::new(),
             ppu: Ppu::new(),
             serial: Serial::new(),
             cart: Cart::empty(),
@@ -105,7 +112,7 @@ impl Sys<'_> {
         self.buttons = buttons;
         self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|&f| f & 0x80 != 0);
         self.ppu.reset();
-        self.next_event = self.ppu.next_event();
+        self.sched.set(EventKind::Ppu, self.ppu.next_event());
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
         // Up Sequence, "Hardware registers").
         self.iflags = 0x01;
@@ -159,7 +166,7 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
 /// [`Sys::hot`] between calls.
 ///
 /// The clock is not counted directly. `budget` counts the base clocks
-/// left until `deadline` (the earlier of `Sys::next_event` and the run
+/// left until `deadline` (the earlier of `Sys::sched.next()` and the run
 /// call's target), and the tick only subtracts the M-cycle length and
 /// tests the sign; the u64 clock is `deadline - budget`, exact at every
 /// point (ADR 0008, amendments).
@@ -330,12 +337,13 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// Sets the countdown to the earlier of `Sys::next_event` and the
-    /// target, capped at `i32::MAX` clocks ahead (reaching a capped
-    /// deadline just reschedules).
+    /// Sets the countdown to the earlier of the earliest scheduled event
+    /// and the target, capped at `i32::MAX` clocks ahead (reaching a
+    /// capped deadline just reschedules). Called whenever a deadline
+    /// changes while the countdown runs.
     fn reschedule(&mut self) {
         let now = self.clock();
-        let deadline = self.sys.next_event.min(self.target);
+        let deadline = self.sys.sched.next().min(self.target);
         let ahead = deadline.saturating_sub(now).min(i32::MAX as u64);
         self.hot.deadline = now + ahead;
         self.hot.budget = ahead as i32;
@@ -346,8 +354,8 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn boundary(&mut self) {
         let now = self.clock();
-        if now >= self.sys.next_event {
-            self.run_events();
+        if now >= self.sys.sched.next() {
+            self.run_events(now);
         }
         if now >= self.target {
             self.target = u64::MAX;
@@ -356,9 +364,24 @@ impl Ctx<'_, '_> {
         self.reschedule();
     }
 
-    /// Scheduled work at `Sys::next_event`.
-    fn run_events(&mut self) {
-        self.sync_ppu();
+    /// Runs every kind of scheduled work whose deadline is at or before
+    /// `now`, in [`EventKind`] order, so events on the same clock run in a
+    /// fixed order (ADR 0011). Each handler sets its next deadline.
+    fn run_events(&mut self, now: u64) {
+        while let Some(kind) = self.sys.sched.take_due(now) {
+            match kind {
+                EventKind::Ppu => self.sync_ppu(),
+                // Not scheduled yet: the timer and serial port still tick
+                // every M-cycle (ADR 0011 step 4); DMA and input in step 6,
+                // the APU in M6.
+                EventKind::Timer
+                | EventKind::Serial
+                | EventKind::Dma
+                | EventKind::Input
+                | EventKind::DivApu
+                | EventKind::AudioBuffer => {}
+            }
+        }
     }
 
     /// Catches the PPU up to the current clock and reschedules.
@@ -366,7 +389,7 @@ impl Ctx<'_, '_> {
         let now = self.clock();
         let s = &mut *self.sys;
         let events = s.ppu.sync(now, self.frame, &mut s.iflags);
-        s.next_event = s.ppu.next_event();
+        s.sched.set(EventKind::Ppu, s.ppu.next_event());
         self.raise(events);
         self.reschedule();
     }
@@ -429,7 +452,7 @@ impl Ctx<'_, '_> {
                 let now = self.clock();
                 let s = &mut *self.sys;
                 s.ppu.write_lcdc(now, value);
-                s.next_event = s.ppu.next_event();
+                s.sched.set(EventKind::Ppu, s.ppu.next_event());
                 self.reschedule();
             }
             0x41 => s.ppu.write_stat(value),
