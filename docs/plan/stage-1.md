@@ -34,14 +34,14 @@ clippy, test and embedded-build steps, and fails at the ROM step with
 
 ## M1: CPU + memory bus
 
-- [ ] SM83 instruction set (all opcodes including CB), flags, HALT, STOP stub, EI delay
-- [ ] Memory map, echo RAM, unusable region, I/O register stubs
-- [ ] MBC1 (enough for Blargg), serial port output capture
-- [ ] Post-boot register state for CGB (no boot ROM), including the different DMG-compatibility-mode values (Pan Docs "Power Up Sequence": e.g. D=$00, E=$08, L=$7C, B from the title checksum)
-- [ ] Unusable area FEA0-FEFF reads as CGB revision C does (Pan Docs "FEA0-FEFF range": revisions 0-D differ from E; ADR 0003)
-- [ ] Instruction-level unit tests (e.g. against the SM83 JSON single-step tests, if adopted)
-- [ ] Before fixing the bus signature: a per-run-call context struct (memory, hardware state, frame, audio + write position) so lazy PPU/APU catch-up on any bus write costs one pointer, not threaded arguments (ADR 0006 review, finding 6)
-- [ ] ROM size: record size/mask at `load` so opcode fetch avoids a per-access bounds check; define out-of-range reads for non-power-of-two ROMs (review finding 11)
+- [x] SM83 instruction set (all opcodes including CB), flags, HALT, STOP stub, EI delay
+- [x] Memory map, echo RAM, unusable region, I/O register stubs
+- [x] MBC1 (enough for Blargg), serial port output capture
+- [x] Post-boot register state for CGB (no boot ROM), including the different DMG-compatibility-mode values (Pan Docs "Power Up Sequence": e.g. D=$00, E=$08, L=$7C, B from the title checksum)
+- [x] Unusable area FEA0-FEFF reads as CGB revision C does (Pan Docs "FEA0-FEFF range": revisions 0-D differ from E; ADR 0003)
+- [x] Instruction-level unit tests (e.g. against the SM83 JSON single-step tests, if adopted)
+- [x] Before fixing the bus signature: a per-run-call context struct (memory, hardware state, frame, audio + write position) so lazy PPU/APU catch-up on any bus write costs one pointer, not threaded arguments (ADR 0006 review, finding 6)
+- [x] ROM size: record size/mask at `load` so opcode fetch avoids a per-access bounds check; define out-of-range reads for non-power-of-two ROMs (review finding 11)
 
 **Acceptance:** `romtest --group blargg-cpu-instrs --group blargg-instr-timing --only-check serial --gate must`
 exits 0. (Their screenshot checks need the PPU and are covered in M3.)
