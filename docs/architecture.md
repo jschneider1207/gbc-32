@@ -5,7 +5,8 @@ the structure changes. The reasons behind decisions belong in
 `docs/decisions/`; this file describes the current shape.
 
 > Status: the workspace and the core's public API (ADR 0006) are concrete as
-> of M0. Internals beyond the skeleton follow the module sketch below.
+> of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
+> The PPU and APU are still skeletons.
 
 ## Workspace
 
@@ -18,6 +19,7 @@ crates/
   gbc-stm32/               (Stage 2, not yet created) bare-metal platform layer
 tools/
   romtest/                 acceptance runner (contract: acceptance/README.md)
+  sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
 ```
 
 Workspace: edition 2024, resolver 3. The release profile keeps unwinding
@@ -98,7 +100,7 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
 The `Emulator` struct is large (WRAM 32 KiB + VRAM 16 KiB + OAM, etc.) and
 must never be required to live on the stack. It has exactly two fields:
 `mem: Memory` (only `u8` arrays, so all-zero is valid) and `hw: Hw<'a>`
-(everything else, kept under 512 bytes). `Emulator::init` zero-fills `mem`
+(everything else, kept under 1 KiB). `Emulator::init` zero-fills `mem`
 in place and writes `hw`, so desktop and `romtest` use `Box::new_uninit()`
 plus `init`, and the MCU uses a `static MaybeUninit<Emulator<'static>>` in
 a no-init RAM section. New large state goes in `Memory`, everything else in
@@ -111,7 +113,7 @@ enforces `no_std` for non-test code.
 ## Timing model
 
 See ADR 0002. In short:
-- The CPU is the master clock and ticks the timer/DMA every M-cycle.
+- The CPU is the master clock and ticks the timer/serial (later DMA) every M-cycle (ADR 0008).
 - The PPU and APU are lazily caught up to the current cycle whenever one of
   their registers is accessed, and at scheduled events (mode changes, frame
   end, audio buffer boundaries).
@@ -120,21 +122,34 @@ See ADR 0002. In short:
 
 ## Module sketch (`gbc-core`)
 
-Modules marked * exist as skeletons (M0); the others are planned.
+Modules marked * exist; the others are planned. Skeleton parts are noted.
 
 ```
-lib.rs      * Emulator, Hw, RunResult, run loop, public re-exports
-memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM)
+lib.rs      * Emulator, Hw (cpu + sys), RunResult, run loop, public re-exports, sm83 test API
+memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, stub I/O storage)
 bitset.rs   * bitset! macro behind Buttons and Events
 events.rs   * Events
-joypad.rs   * Buttons; later P1/JOYP
+joypad.rs   * Buttons (P1/JOYP reads are in bus.rs)
 config.rs   * Config, DmgPalettes, RGB555 helpers
-cpu/        * Registers; later SM83 decode/execute, interrupts, HALT/STOP
-bus.rs      * debug peek; later memory map, I/O dispatch, banking
-timer.rs      DIV/TIMA
-ppu/        * Frame, stub frame timing; later mode state machine, renderer, palettes, OAM scan
+cpu/        * SM83: Registers, Bus trait, Cpu (step, interrupts, HALT/HALT bug, STOP stub)
+  exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
+bus.rs      * Sys (state the bus reaches), Ctx (per-run-call context), memory map, I/O, peek
+timer.rs    * DIV/TIMA/TMA/TAC (falling-edge counter; its fallen bits clock serial)
+ppu/        * Frame, lazy stub timing (VBlank, LY, STAT mode); later modes, renderer, palettes
 apu/        * StereoSample; later channels, frame sequencer, mixer
-dma.rs        OAM DMA, GDMA/HDMA
-cart/       * header (cart_ram_size), RtcState; later MBC1/2/3(+RTC)/5
-serial.rs   * last byte sent; later SB/SC transfers
+dma.rs        OAM DMA (instant-copy stub in bus.rs until M2), GDMA/HDMA
+cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1; later MBC2/3(+RTC)/5
+serial.rs   * SB/SC internal-clock transfers, last byte sent
 ```
+
+### CPU and bus (ADR 0008)
+
+`Hw` holds `cpu: Cpu` and `sys: Sys<'a>` (everything the bus reaches:
+clock, PPU, timer, serial, cartridge, interrupt and banking registers).
+Each run call builds one `Ctx { mem, sys, frame, audio, .. }` and calls
+`cpu.step(&mut ctx)` per instruction. The CPU is generic over the `Bus`
+trait; every `read`/`write`/`idle` is one M-cycle: the access at the
+current clock, then a tick (clock, timer, serial, and one compare against
+`Sys::next_event` for lazily-run components such as the PPU). Reads have no
+side effects, so the CPU and `Emulator::peek` share one `read` function.
+The same CPU runs against a flat test bus in `tools/sm83-tests`.
