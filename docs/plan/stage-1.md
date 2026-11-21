@@ -6,8 +6,9 @@ and plays real games correctly on the desktop.
 **Stage gate:** `./scripts/gate-stage1.sh` exits 0, **and** the human signs
 off on the real-game checklist at the bottom of this file.
 
-Each milestone closes when its acceptance command passes. Then update the
-baseline, commit, and tag `stage1-m<N>`. Tasks are a starting point: split,
+Each milestone closes when its acceptance command passes **and** the
+milestone review (AGENTS.md, "Independent review") has no confirmed
+findings left open. Then update the baseline, commit, and tag `stage1-m<N>`. Tasks are a starting point: split,
 reorder, or add tasks as needed (record notable changes in the session log).
 Milestone acceptance criteria are fixed unless the human changes them.
 

@@ -112,9 +112,54 @@ cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter 'b
 - Message: imperative subject (`core: implement MBC5 banking`) with an
   area prefix (`core`, `ppu`, `apu`, `desktop`, `romtest`, `docs`, `infra`),
   and a body explaining *why* when it isn't obvious.
-- When a milestone's gate passes, update the baseline
-  (`--update-baseline`), commit it, and tag the commit `stage1-m<N>`.
+- When a milestone's acceptance passes, run the milestone review (see
+  Independent review below) and fix the confirmed findings. Then update the
+  baseline (`--update-baseline`), commit it, and tag the commit `stage1-m<N>`.
 - Don't push, force-push, rewrite history, or delete tags.
+
+## Independent review
+
+You can't fully review your own work: you share its assumptions. The
+acceptance gate shows that ROMs pass, not that the code is right, that the
+runner is honest, or that the code will be fast on the MCU. So get
+independent reviews from fresh subagents.
+
+**When it's required:**
+1. **Milestone close**, after acceptance passes and before tagging. The
+   review covers `<previous tag>..HEAD` (or the first commit for M0).
+2. **Changes to pass/fail logic** in `tools/romtest` (checks, statuses,
+   scoring, baseline, regressions). Review before trusting any results it
+   produces, because the runner decides what counts as passing.
+3. **Core public API changes**, i.e. anything that needs an ADR about the
+   core ↔ platform boundary.
+
+Don't review every commit. Cap it at 3 reviewers per milestone close and 1
+for each other trigger.
+
+**How:**
+- Use a fresh subagent (not a fork, which inherits your context and
+  assumptions). Give it the commit range, the files to read (`AGENTS.md`
+  hard rules, `docs/architecture.md`, the milestone section of the plan,
+  `acceptance/README.md` when relevant) and the questions below. **Don't**
+  tell it why you think the code is correct. You want its reading, not a
+  confirmation of yours.
+- Reviewers are read-only. They report each finding with file:line,
+  severity, and a concrete scenario that goes wrong.
+- At milestone close, run these as separate reviewers in parallel:
+  - **Hardware correctness:** does the behavior match the references (Pan
+    Docs, GBCTR, SameBoy)? What edge cases does no ROM test?
+  - **Test integrity:** any special-casing of test ROMs, weakened or bypassed
+    checks, runner leniency, tests changed to match the output, sources of
+    non-determinism, `alloc`/`std` getting into the core?
+  - **Performance and portability** (from M3 on): allocations, dynamic
+    dispatch or large stack frames in hot paths, floats, anything that will
+    hurt on a Cortex-M7 with limited RAM.
+
+**Triage:** reviewers can be wrong, so verify each finding yourself. Fix the
+confirmed ones, with a regression test where possible. Give each rejected
+finding a one-line reason. Record the outcome in the session log under
+"Review". Anything that needs the human's judgment goes in STATUS under
+"Needs human". Don't tag a milestone while confirmed findings are still open.
 
 ## Code conventions
 

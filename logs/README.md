@@ -19,6 +19,9 @@ Keep each log short: 10–30 lines.
 ## Learned / surprises
 - Hardware behavior, tooling gotchas, dead ends (and why they were dead).
 
+## Review (only if a review ran this session)
+- Trigger + reviewers run; each finding: fixed (commit) / rejected (one-line reason)
+
 ## Left open
 - ...
 ```
