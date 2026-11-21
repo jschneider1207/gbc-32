@@ -380,20 +380,29 @@ impl<'a> Cart<'a> {
     }
 
     /// A read of A000-BFFF.
+    ///
+    /// The index is below `ram_len <= ram_buf.len()`, but the compiler
+    /// can't see that, so `get` replaces the bounds check: the fallback
+    /// is never taken and there is no panic path in the CPU's hot code.
     #[inline]
     pub(crate) fn read_ram(&self, addr: u16) -> u8 {
         if !self.ram_enabled || self.ram_len == 0 {
             return 0xFF;
         }
-        self.ram_buf[self.ram_index(addr)]
+        self.ram_buf
+            .get(self.ram_index(addr))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
-    /// A write to A000-BFFF.
+    /// A write to A000-BFFF (no panic path; see [`Cart::read_ram`]).
     #[inline]
     pub(crate) fn write_ram(&mut self, addr: u16, value: u8) {
         if self.ram_enabled && self.ram_len != 0 {
             let i = self.ram_index(addr);
-            self.ram_buf[i] = value;
+            if let Some(b) = self.ram_buf.get_mut(i) {
+                *b = value;
+            }
         }
     }
 
