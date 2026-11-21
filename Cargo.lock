@@ -123,6 +123,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzz"
+version = "0.1.0"
+dependencies = [
+ "gbc-core",
+]
+
+[[package]]
 name = "gbc-core"
 version = "0.1.0"
 

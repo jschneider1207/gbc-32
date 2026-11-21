@@ -1,0 +1,20 @@
+[package]
+name = "fuzz"
+description = "Fuzz targets and the deterministic gate pass over every untrusted input to gbc-core (docs/fuzzing.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "gbc_fuzz"
+
+[[bin]]
+name = "fuzz-pass"
+path = "src/main.rs"
+
+[dependencies]
+gbc-core = { path = "../../crates/gbc-core" }

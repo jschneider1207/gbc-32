@@ -87,6 +87,12 @@ under "Blockers", then move on to something else. Don't loop.
 - **Performance claims need numbers.** Quote a benchmark (see
   `docs/plan/stage-1.md` M8 and `docs/perf.md` once it exists), not
   intuition.
+- **Licensing: the project is MIT** (`LICENSE`). Only add dependencies with
+  MIT/Apache-2.0/BSD/Zlib-style licenses; anything else needs the human.
+  Never copy code from GPL/LGPL/MPL projects (e.g. Gambatte is GPL). You may
+  read them to understand hardware behavior, then write your own code.
+  Copying from MIT/BSD projects (e.g. SameBoy) is fine if you keep their
+  copyright notice next to the copied code.
 - **Hardware truth comes from references.** When behavior is unclear, check
   Pan Docs, Gekkio's GBCTR, or the behavior of accurate emulators such as
   SameBoy. Cite the source in a code comment or in `docs/reference/`.
