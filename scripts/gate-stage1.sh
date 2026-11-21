@@ -46,6 +46,12 @@ fi
 cargo test -p gbc-core --test hard_rules || fail "gbc-core hard rules (crates/gbc-core/tests/hard_rules.rs)"
 cargo build -p gbc-core --release --target thumbv7em-none-eabihf || fail "gbc-core embedded build"
 
+step "Code-size budgets (thumbv7em, cortex-m7)"
+./scripts/check-code-size.sh || fail "code-size budgets (perf/code-size-budgets.txt, docs/perf.md)"
+
+step "Instruction-count benchmark (valgrind)"
+./scripts/check-bench.sh || fail "instruction-count benchmark (perf/bench-baseline.txt, docs/perf.md)"
+
 step "Acceptance ROMs (must tier + regressions)"
 set +e
 cargo run -p romtest --release -- --manifest acceptance/stage1.toml --gate must

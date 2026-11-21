@@ -57,8 +57,8 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 - [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
 
 - [ ] Quality-bar tooling in the gate (README "Quality and performance bar": the benchmark runs in the gate from M2 on):
-  - [ ] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
-  - [ ] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate
+  - [x] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
+  - [x] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate
   - [ ] Short, deterministic fuzz pass in the gate over untrusted inputs: ROM header/`load`, save RAM, `set_rtc_state`
 - [ ] `hard_rules` test hardening (M1 API review, low): lex `'\''` correctly (start at `q + 3`, add the case to the allow-test); require `#![forbid(unsafe_code)]` among lib.rs's leading crate attributes, not in a nested module; reject a `[lib] path`, a `build` key and a `build.rs` in gbc-core
 

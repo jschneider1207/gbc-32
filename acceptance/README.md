@@ -199,7 +199,17 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
    `crates/gbc-core/tests/hard_rules.rs` must exist and pass: `std` only
    inside `#[cfg(test)]` modules, no `#[path]` or `include!`, `#![no_std]`
    present, and no dependencies of any kind in the core's `Cargo.toml`.
-5. The runner exits 0 with `--gate must` on the full manifest: every `must`
+5. `scripts/check-code-size.sh` passes: every symbol in
+   `perf/code-size-budgets.txt` is found in the `thumbv7em-none-eabihf`
+   release build (`-C target-cpu=cortex-m7`) and fits its budget. A missing
+   symbol fails.
+6. `scripts/check-bench.sh` passes: the benchmark ROMs are present with the
+   hashes in `acceptance/test-roms.sha256`, and no ROM's instruction count
+   under valgrind exceeds `perf/bench-baseline.txt` by more than 3%.
+   Raising a budget or a baseline is committed together with the change
+   that needs it, with the measured numbers and the reason in the commit
+   body (`docs/perf.md`).
+7. The runner exits 0 with `--gate must` on the full manifest: every `must`
    ROM passes and there are no regressions against
    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
    runner error.
