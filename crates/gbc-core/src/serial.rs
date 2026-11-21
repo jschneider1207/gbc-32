@@ -5,8 +5,10 @@
 //! as with no cable). Each bit is shifted on a falling edge of a bit of the
 //! timer's internal counter (8192 Hz: bit 8; CGB fast clock, SC bit 1,
 //! 262144 Hz: bit 3), like the hardware, which derives the serial clock
-//! from the same divider (SameBoy `GB_serial_master_edge`).
+//! from the same divider (SameBoy `GB_serial_master_edge`). Each bit is an
+//! `EventKind::Serial` deadline at the next such edge (ADR 0011).
 
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Serial {
     /// The most recent byte sent out (reported with `Events::SERIAL_TX`).
     pub(crate) last_byte: u8,
@@ -14,9 +16,9 @@ pub(crate) struct Serial {
     pub(crate) sc: u8,
     /// The counter bit whose falling edge shifts one bit, or 0 when no
     /// transfer is running.
-    pub(crate) clock_bit: u16,
+    pub(crate) clock_bit: u64,
     /// Bits shifted so far in the running transfer.
-    bits: u8,
+    pub(crate) bits: u8,
     /// The bits shifted out so far.
     out: u8,
 }
@@ -53,15 +55,19 @@ impl Serial {
         self.sc | if cgb_mode { 0x7C } else { 0x7E }
     }
 
-    /// Called when the timer counter bits in `fell` went from 1 to 0 and a
-    /// transfer is running. Returns true when a byte completes: SC bit 7 is
-    /// cleared, the caller requests the serial interrupt, and `last_byte`
-    /// holds the byte sent.
-    #[inline]
-    pub(crate) fn clock(&mut self, fell: u16) -> bool {
-        if fell & self.clock_bit == 0 {
-            return false;
-        }
+    /// The eager model's per-M-cycle hook, for the differential test's
+    /// reference (`timer::reference`): one [`Serial::shift`] if the counter
+    /// bits in `fell` (those that went from 1 to 0) include the bit clock.
+    #[cfg(test)]
+    pub(crate) fn clock(&mut self, fell: u64) -> bool {
+        fell & self.clock_bit != 0 && self.shift()
+    }
+
+    /// One bit clock edge of a running transfer (the `EventKind::Serial`
+    /// event, or a DIV write that clears the clock bit). Returns true when
+    /// a byte completes: SC bit 7 is cleared, the caller requests the
+    /// serial interrupt, and `last_byte` holds the byte sent.
+    pub(crate) fn shift(&mut self) -> bool {
         self.out = (self.out << 1) | (self.sb >> 7);
         self.sb = (self.sb << 1) | 1;
         self.bits += 1;

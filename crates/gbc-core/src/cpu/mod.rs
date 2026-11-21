@@ -4,8 +4,9 @@
 //! The CPU is generic over a [`Bus`], which it drives one M-cycle at a time:
 //! every [`Bus::read`], [`Bus::write`] and [`Bus::idle`] call is exactly one
 //! M-cycle, in the order the hardware performs them (Gekkio's GBCTR,
-//! "Instruction set"). The emulator's bus advances the timer, serial port
-//! and PPU on each call, so the CPU is the master clock (ADR 0002). The
+//! "Instruction set"). The emulator's bus advances the clock on each call
+//! (the timer, serial port and PPU follow from it, ADR 0011), so the CPU
+//! is the master clock (ADR 0002). The
 //! bus is a type parameter, not `dyn`, so the emulator's instance is
 //! monomorphized and inlined; the SM83 single-step tests (`tools/sm83-tests`)
 //! use a flat 64 KiB test bus through the same trait.

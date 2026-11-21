@@ -157,7 +157,10 @@ enforces `no_std` for non-test code.
 ## Timing model
 
 See ADR 0002. In short:
-- The CPU is the master clock and ticks the timer/serial (later DMA) every M-cycle (ADR 0008).
+- The CPU is the master clock (ADR 0008). The per-M-cycle tick is only a
+  clock countdown; the timer, serial bit clock (and later DMA and DIV-APU)
+  are computed from the clock on access and act through deadlines in the
+  event table (ADR 0011).
 - The PPU and APU are lazily caught up to the current cycle whenever one of
   their registers is accessed, and at scheduled events (mode changes, frame
   end, audio buffer boundaries).
@@ -178,8 +181,9 @@ joypad.rs   * Buttons, P1 line logic and the joypad interrupt edge (P1/JOYP regi
 config.rs   * Config, DmgPalettes, RGB555 helpers
 cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP stub)
   exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
-bus.rs      * Sys (state the bus reaches), Hot (clock countdown + timer), Ctx (per-run-call context), memory map, I/O, peek
-timer.rs    * DIV/TIMA/TMA/TAC (falling-edge counter; its fallen bits clock serial)
+bus.rs      * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), memory map, I/O, peek
+timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clock, TIMA reload as the Timer event, serial edge clocks
+  reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
 ppu/        * Frame, lazy stub timing (VBlank, LY, STAT mode); later modes, renderer, palettes
 apu/        * StereoSample; later channels, frame sequencer, mixer
 dma.rs        OAM DMA (instant-copy stub in bus.rs until M2), GDMA/HDMA
@@ -197,9 +201,9 @@ and audio buffers, the stop events and the target) and calls
 reports the call done (target reached or a stop event raised); the opcode
 dispatch is inlined into that loop. The CPU is generic over the `Bus`
 trait; every `read`/`write`/`idle` is one M-cycle: the access at the
-current clock, then a tick (timer, serial bit clock and an `i32` countdown
-to the next deadline, the earlier of the event table's minimum and the target).
-The countdown and timer (`Hot`) are copied into the `Ctx` for the call
+current clock, then a tick: only an `i32` countdown to the next deadline,
+the earlier of the event table's minimum and the target.
+The countdown (`Hot`) is copied into the `Ctx` for the call
 and back into `Sys::hot` when it is dropped, so the tick doesn't go
 through `ctx.sys`; the u64 clock is `deadline - budget`. Scheduled work
 lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
@@ -208,9 +212,15 @@ only when a deadline is set, never per M-cycle. When the countdown runs
 out, `Ctx::boundary` runs every kind due at the current clock in
 `EventKind` declaration order (fixed, so same-clock events are
 deterministic), each handler setting its next deadline, then reschedules
-the countdown; register writes that move a deadline (LCDC) reschedule too.
-So far only the PPU's VBlank is on it; the timer and serial clock still
-tick per M-cycle until ADR 0011 step 4. `Sys` is `repr(C)` with the
+the countdown; register writes that move a deadline (LCDC, SC, DIV, TIMA,
+TMA, TAC, STOP) reschedule too. On it so far: the TIMA reload (`Timer`),
+the serial bit clock (`Serial`) and the PPU's VBlank (`Ppu`). The timer
+(`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
+of the clock (rebased on DIV writes and speed switches), computes DIV and
+TIMA from it on reads, and stores the overflow clock and the last reload
+clock for the cycle A/B window; timer, serial and DIV writes go through
+the out-of-line `Ctx::write_timer_io` and reads through `Timer::read`, off
+the inlined bus path. `Sys` is `repr(C)` with the
 fields the inlined bus path reads first, to keep their Thumb-2 load
 offsets small (the event table at the front cost `Cpu::run` about 1 KB).
 Reads have no

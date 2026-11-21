@@ -1,3 +1,8 @@
+//! The eager timer model, kept as the test-only reference the lazy timer
+//! ([`super`]) is checked against (ADR 0011, "Verification"; the
+//! differential test is in `super::differential`). Moved here unchanged
+//! from the bus's per-M-cycle tick (ADR 0008) in ADR 0011 step 4.
+//!
 //! DIV/TIMA/TMA/TAC (Pan Docs: Timer and Divider Registers; "Timer
 //! obscure behaviour").
 //!
@@ -76,8 +81,7 @@ pub(crate) struct Timer {
 /// Counter bit per TAC clock select: 4096, 262144, 65536, 16384 Hz.
 const TAC_BITS: [u16; 4] = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
 
-/// The timer interrupt bit in IF.
-pub(crate) const INT_TIMER: u8 = 0x04;
+use super::INT_TIMER;
 
 impl Timer {
     pub(crate) const fn new() -> Self {
@@ -94,7 +98,6 @@ impl Timer {
     /// The tick that ends one M-cycle, after its access. Returns the
     /// counter bits that fell (1 -> 0), for the serial clock, and ORs the
     /// timer interrupt into `iflags`. The bus inlines the same sequence.
-    #[cfg(test)]
     pub(crate) fn tick(&mut self, iflags: &mut u8) -> u16 {
         if self.reload_pending() {
             *iflags |= self.advance_reload();
@@ -145,12 +148,6 @@ impl Timer {
         if fell & self.tima_bit != 0 {
             self.increment();
         }
-    }
-
-    /// The counter bit TIMA counts falling edges of (0 when disabled).
-    #[inline]
-    pub(crate) fn tima_bit(&self) -> u16 {
-        self.tima_bit
     }
 
     /// One TIMA increment. An overflow leaves TIMA at 00 and opens the
@@ -227,7 +224,6 @@ impl Timer {
 
     /// Reads FF04-FF07 by the low address bits (standalone driving; the
     /// bus reads the fields).
-    #[cfg(test)]
     pub(crate) fn read(&self, reg: u8) -> u8 {
         match reg & 3 {
             0 => self.div(),
@@ -239,7 +235,6 @@ impl Timer {
 
     /// Writes FF04-FF07 by the low address bits, as the bus does. Returns
     /// the counter bits that fell (a DIV write), for the serial clock.
-    #[cfg(test)]
     pub(crate) fn write(&mut self, reg: u8, value: u8) -> u16 {
         match reg & 3 {
             0 => return self.write_div(),

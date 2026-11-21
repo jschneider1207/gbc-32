@@ -165,9 +165,11 @@ Docs "Timer obscure behaviour", Timer overflow behavior. SameBoy
   - `overflow_at = t` (the access clock) and `reloaded_at = t + mcycle`.
     This equals today's eager result: reload + IF visible from the next
     M-cycle, TIMA = 00 never observable.
-  - A glitch increment *during* cycle A is a corner case that no
-    reference covers. The lazy model must do whatever the eager reference
-    does (see Verification).
+  - A glitch increment *during* cycle A can't happen (clarified in step
+    3/4): the selected counter bit just fell, so it and every bit below
+    it are 0 at cycle A's access, and neither a DIV nor a TAC write sees
+    a 1 -> 0 edge on it. The lazy model therefore never syncs TIMA in
+    cycle A; the differential test checks it against the eager reference.
 - **TMA write** outside cycle B just stores. The reload reads `tma` at the
   event, so a write in cycle A is used (SameBoy: TMA writes reach TIMA when
   the state isn't RUNNING).

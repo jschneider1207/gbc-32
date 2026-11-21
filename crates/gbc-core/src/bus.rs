@@ -4,16 +4,18 @@
 //!
 //! Each CPU bus call is one M-cycle: the access happens at the start of the
 //! cycle (it sees the state as of the current clock), then [`Ctx::tick`]
-//! advances the clock, the timer and the serial port by one M-cycle, and
-//! runs scheduled events (the PPU's VBlank) when the clock reaches the
-//! earliest deadline in `Sys::sched` (the event table, ADR 0011). The PPU
-//! is otherwise caught up only when one of its registers is written (ADR
-//! 0002).
+//! advances the clock by one M-cycle and runs scheduled events (the TIMA
+//! reload, a serial bit, the PPU's next sync) when the clock reaches the
+//! earliest deadline in `Sys::sched` (the event table, ADR 0011). Nothing
+//! else runs per M-cycle: the timer and the serial bit clock are computed
+//! from the clock when their registers are accessed ([`crate::timer`]),
+//! and the PPU is otherwise caught up only when one of its registers is
+//! written (ADR 0002).
 //!
-//! The per-M-cycle state ([`Hot`]: a clock countdown and the timer) is
-//! copied into the [`Ctx`] for the duration of a run call, so the tick
-//! reaches it through the one context pointer the CPU holds instead of
-//! through `Ctx::sys` (ADR 0008, amendments).
+//! The per-M-cycle state ([`Hot`]: the clock countdown) is copied into the
+//! [`Ctx`] for the duration of a run call, so the tick reaches it through
+//! the one context pointer the CPU holds instead of through `Ctx::sys`
+//! (ADR 0008, amendments).
 
 use crate::apu::StereoSample;
 use crate::cart::Cart;
@@ -22,7 +24,7 @@ use crate::cpu::{Bus, INT_MASK};
 use crate::joypad::{p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
-use crate::schedule::{EventKind, Schedule};
+use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
 use crate::{Buttons, Emulator, Events};
@@ -58,12 +60,14 @@ pub(crate) struct Sys<'a> {
     pub(crate) config: Config,
     pub(crate) serial: Serial,
     pub(crate) ppu: Ppu,
-    /// The clock and timer between run calls. During a run call the live
+    /// DIV/TIMA/TMA/TAC and the system counter (off the bus hot path).
+    pub(crate) timer: Timer,
+    /// The clock between run calls. During a run call the live
     /// copy is [`Ctx::hot`] (this one is stale until the `Ctx` is dropped),
     /// so code running inside a call must use that one.
     pub(crate) hot: Hot,
     /// The event table: when each kind of scheduled work must next run
-    /// ([`Ctx::run_events`]; so far only the PPU's next VBlank).
+    /// ([`Ctx::run_events`]).
     pub(crate) sched: Schedule,
 }
 
@@ -73,6 +77,7 @@ impl Sys<'_> {
             hot: Hot::new(),
             sched: Schedule::new(),
             ppu: Ppu::new(),
+            timer: Timer::new(),
             serial: Serial::new(),
             cart: Cart::empty(),
             config: Config {
@@ -161,9 +166,9 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
     (0xFF47, 0xFC),
 ];
 
-/// The state the bus touches on every M-cycle: the clock, as a countdown,
-/// and the timer. Kept by value in [`Ctx`] during a run call and in
-/// [`Sys::hot`] between calls.
+/// The state the bus touches on every M-cycle: the clock, as a countdown.
+/// Kept by value in [`Ctx`] during a run call and in [`Sys::hot`] between
+/// calls.
 ///
 /// The clock is not counted directly. `budget` counts the base clocks
 /// left until `deadline` (the earlier of `Sys::sched.next()` and the run
@@ -180,10 +185,6 @@ pub(crate) struct Hot {
     /// The clock at which `budget` reaches 0. At most `i32::MAX` clocks
     /// ahead of the clock it was set at, so `budget` always fits.
     deadline: u64,
-    pub(crate) timer: Timer,
-    /// Counter bits whose falling edge needs work: the TIMA input bit and
-    /// the serial bit clock. One test per M-cycle covers both.
-    watch: u16,
 }
 
 impl Hot {
@@ -192,8 +193,6 @@ impl Hot {
             budget: 0,
             mcycle: 4,
             deadline: 0,
-            timer: Timer::new(),
-            watch: 0,
         }
     }
 
@@ -262,7 +261,6 @@ impl<'r, 'a> Ctx<'r, 'a> {
             target,
             done: false,
         };
-        ctx.update_watch();
         ctx.reschedule();
         ctx
     }
@@ -275,20 +273,10 @@ impl Ctx<'_, '_> {
         self.hot.clock()
     }
 
-    /// Advances everything but the CPU by one M-cycle: the timer (with the
-    /// serial clock it drives) and the clock countdown. Only `self.hot` is
-    /// touched unless something is due.
+    /// Advances everything but the CPU by one M-cycle: only the clock
+    /// countdown. Everything else is an event (ADR 0011).
     #[inline(always)]
     fn tick(&mut self) {
-        let h = &mut self.hot;
-        if h.timer.reload_pending() {
-            self.timer_reload();
-        }
-        let h = &mut self.hot;
-        let fell = h.timer.advance();
-        if fell & h.watch != 0 {
-            self.counter_edges(fell);
-        }
         let h = &mut self.hot;
         h.budget -= h.mcycle;
         if h.budget <= 0 {
@@ -296,35 +284,66 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// The two M-cycles after a TIMA overflow (cycles A and B, [`crate::timer`]).
-    #[inline(never)]
-    fn timer_reload(&mut self) {
-        self.sys.iflags |= self.hot.timer.advance_reload();
-    }
-
-    /// Counter bits in `fell` that the timer or the serial port watch.
-    #[inline(never)]
-    fn counter_edges(&mut self, fell: u16) {
-        self.hot.timer.edges(fell);
-        if fell & self.sys.serial.clock_bit != 0 {
-            self.serial_clock(fell);
-        }
-    }
-
-    /// Recomputes [`Hot::watch`] after the TIMA input or the serial clock
-    /// bit changes.
-    #[inline]
-    fn update_watch(&mut self) {
-        self.hot.watch = self.hot.timer.tima_bit() | self.sys.serial.clock_bit;
-    }
-
-    #[inline(never)]
-    fn serial_clock(&mut self, fell: u16) {
-        if self.sys.serial.clock(fell) {
+    /// One serial bit (the Serial event, or a DIV write's falling edge).
+    fn serial_shift(&mut self) {
+        if self.sys.serial.shift() {
             self.sys.iflags |= INT_SERIAL;
             self.raise(Events::SERIAL_TX);
         }
-        self.update_watch();
+    }
+
+    /// Sets the Serial deadline to the bit clock's next falling edge while
+    /// a transfer runs, and reschedules.
+    fn schedule_serial(&mut self) {
+        let now = self.clock();
+        let s = &mut *self.sys;
+        let at = match s.serial.clock_bit {
+            0 => NEVER,
+            bit => s.timer.fall_clock(bit, now),
+        };
+        s.sched.set(EventKind::Serial, at);
+        self.reschedule();
+    }
+
+    /// Sets the Timer deadline after a timer state change, and reschedules.
+    fn schedule_timer(&mut self) {
+        let s = &mut *self.sys;
+        s.sched.set(EventKind::Timer, s.timer.deadline());
+        self.reschedule();
+    }
+
+    /// Writes to SC, DIV, TIMA, TMA and TAC (by the low 7 address bits):
+    /// they move the Timer and Serial deadlines. Out of line so the
+    /// register logic stays off `write_high` (ADR 0011).
+    #[inline(never)]
+    fn write_timer_io(&mut self, reg: usize, value: u8) {
+        let now = self.clock();
+        let s = &mut *self.sys;
+        match reg {
+            0x02 => {
+                s.serial.write_sc(value, s.cgb_mode);
+                self.schedule_serial();
+                return;
+            }
+            0x04 => return self.div_reset(),
+            0x05 => s.timer.write_tima(now, value),
+            0x06 => s.timer.write_tma(now, value),
+            _ => s.timer.write_tac(now, value),
+        }
+        self.schedule_timer();
+    }
+
+    /// A DIV write or STOP: every set counter bit falls (the TIMA glitch
+    /// in [`Timer::write_div`], one serial bit here; Pan Docs FF04), then
+    /// both deadlines move with the rebased counter.
+    fn div_reset(&mut self) {
+        let now = self.clock();
+        let old = self.sys.timer.write_div(now);
+        if old & self.sys.serial.clock_bit != 0 {
+            self.serial_shift();
+        }
+        self.schedule_timer();
+        self.schedule_serial();
     }
 
     /// Records `events`, ending the run call after this instruction if
@@ -370,16 +389,19 @@ impl Ctx<'_, '_> {
     fn run_events(&mut self, now: u64) {
         while let Some(kind) = self.sys.sched.take_due(now) {
             match kind {
+                EventKind::Timer => {
+                    let s = &mut *self.sys;
+                    s.iflags |= s.timer.reload(now);
+                    s.sched.set(EventKind::Timer, s.timer.deadline());
+                }
+                EventKind::Serial => {
+                    self.serial_shift();
+                    self.schedule_serial();
+                }
                 EventKind::Ppu => self.sync_ppu(),
-                // Not scheduled yet: the timer and serial port still tick
-                // every M-cycle (ADR 0011 step 4); DMA and input in step 6,
-                // the APU in M6.
-                EventKind::Timer
-                | EventKind::Serial
-                | EventKind::Dma
-                | EventKind::Input
-                | EventKind::DivApu
-                | EventKind::AudioBuffer => {}
+                // Not scheduled yet: DMA and input in ADR 0011 step 6, the
+                // APU in M6.
+                EventKind::Dma | EventKind::Input | EventKind::DivApu | EventKind::AudioBuffer => {}
             }
         }
     }
@@ -428,22 +450,7 @@ impl Ctx<'_, '_> {
         match reg {
             0x00 => s.set_joypad(s.buttons, value),
             0x01 => s.serial.sb = value,
-            0x02 => {
-                s.serial.write_sc(value, cgb);
-                self.update_watch();
-            }
-            0x04 => {
-                let fell = self.hot.timer.write_div();
-                if fell & s.serial.clock_bit != 0 {
-                    self.serial_clock(fell);
-                }
-            }
-            0x05 => self.hot.timer.write_tima(value),
-            0x06 => self.hot.timer.write_tma(value),
-            0x07 => {
-                self.hot.timer.write_tac(value);
-                self.update_watch();
-            }
+            0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
             0x0F => s.iflags = value & INT_MASK,
             // Sound: plain storage until M6.
             0x10..=0x3F => self.mem.io[reg] = value,
@@ -540,20 +547,22 @@ impl Bus for Ctx<'_, '_> {
 
     fn stop(&mut self) -> bool {
         // STOP resets DIV (Pan Docs: FF04 - DIV).
-        let fell = self.hot.timer.write_div();
-        if fell & self.sys.serial.clock_bit != 0 {
-            self.serial_clock(fell);
-        }
+        self.div_reset();
         if !self.sys.cgb_mode || self.sys.key1 & 0x01 == 0 {
             return false;
         }
         // CGB speed switch (Pan Docs: FF4D - KEY1): the armed bit clears,
         // the speed toggles, and the CPU stops for 2050 M-cycles, during
-        // which DIV does not tick. TODO(M5): the exact pause length and
+        // which DIV does not tick (the timer freezes its counter, and the
+        // overflow window with it). TODO(M5): the exact pause length and
         // the PPU access freeze during it.
         self.sys.key1 = 0;
         let h = &mut self.hot;
         h.mcycle = if h.mcycle == 4 { 2 } else { 4 };
+        let (now, pause) = (self.clock(), 2050 * self.hot.mcycle as u64);
+        self.sys.timer.speed_switch(now, pause);
+        self.schedule_timer();
+        self.schedule_serial();
         for _ in 0..2050 {
             self.hot.budget -= self.hot.mcycle;
             if self.hot.budget <= 0 {
@@ -570,7 +579,7 @@ impl Bus for Ctx<'_, '_> {
 
 /// A read as the CPU sees it at the current clock, without side effects
 /// (no read on this hardware has any). Shared by the CPU bus and
-/// [`Emulator::peek`]. `hot` is the live clock and timer: [`Ctx::hot`]
+/// [`Emulator::peek`]. `hot` is the live clock: [`Ctx::hot`]
 /// during a run call, [`Sys::hot`] otherwise.
 #[inline(always)]
 pub(crate) fn read(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
@@ -634,10 +643,7 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x00 => 0xC0 | sys.joyp_select | p1_lines(sys.buttons, sys.joyp_select),
         0x01 => sys.serial.sb,
         0x02 => sys.serial.read_sc(cgb),
-        0x04 => hot.timer.div(),
-        0x05 => hot.timer.tima,
-        0x06 => hot.timer.tma,
-        0x07 => 0xF8 | hot.timer.tac,
+        0x04..=0x07 => sys.timer.read(hot.clock(), reg),
         0x0F => 0xE0 | sys.iflags,
         // TODO(M6): sound register read masks.
         0x10..=0x3F => mem.io[reg],

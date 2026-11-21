@@ -15,17 +15,19 @@ Measurement: `RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core
 --release --target thumbv7em-none-eabihf --target-dir target/codesize`, then
 `nm -S -C --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
 on each object in the rlib. Sizes of same-named symbols (CGU copies) are
-summed. Measured numbers reproduce ADR 0008/0009 (`run` 37,064 B,
-`execute_cb` 15,702 B).
+summed. Sizes as of ADR 0011 step 4 (lazy timer: the tick is only the
+countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 37,064 | 39,000 |
-| `Cpu::execute_cb::<Ctx>` | 15,702 | 16,500 |
-| `Ctx::write_high` | 3,080 | 3,300 |
-| `bus::read_high` | 1,080 | 1,200 |
-| `Ctx::sync_ppu` | 482 | 520 |
+| `Cpu::run::<Ctx>` | 30,896 | 32,500 |
+| `Cpu::execute_cb::<Ctx>` | 13,870 | 14,600 |
+| `Ctx::write_high` | 2,880 | 3,050 |
+| `bus::read_high` | 1,104 | 1,160 |
+| `Ctx::sync_ppu` | 496 | 520 |
 | `Ctx::write_mapped` | 396 | 420 |
+| `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
+| `Timer::read` (cold) | 362 | 380 |
 
 Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the
@@ -52,9 +54,12 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,926,303,053 |
-| cgb_sound.gb | 922,727,228 |
-| cgb-acid2.gbc | 928,451,269 |
+| cpu_instrs.gb | 1,382,733,300 |
+| cgb_sound.gb | 622,018,571 |
+| cgb-acid2.gbc | 697,187,547 |
+
+(ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and
+928.5 M: -28.0%, -32.6% and -24.9%.)
 
 Run: `scripts/check-bench.sh`. Update the baseline:
 `scripts/check-bench.sh --update-baseline`.
