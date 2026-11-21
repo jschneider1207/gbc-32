@@ -1,0 +1,19 @@
+# Code-size budgets for hot gbc-core functions (thumbv7em-none-eabihf, release,
+# -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh; see
+# docs/perf.md "Code-size budgets".
+#
+# Format: <budget bytes> <exact demangled symbol name, as printed by nm -C>
+# Lines starting with '#' and blank lines are ignored.
+# Rules:
+#  - A symbol's size is the sum over all copies (CGU-local duplicates) of it.
+#  - A listed symbol that is not found is a failure (renamed or inlined away):
+#    update this file, do not delete the line to make the check pass.
+#  - Raising a budget is committed with the change that needs it, with the
+#    measured size and the reason in the commit body.
+# Initial budgets are the measured size plus about 5% headroom.
+39000 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+16500 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+3300 <gbc_core::bus::Ctx>::write_high
+1200 gbc_core::bus::read_high
+520 <gbc_core::bus::Ctx>::sync_ppu
+420 <gbc_core::bus::Ctx>::write_mapped
