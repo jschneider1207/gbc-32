@@ -8,6 +8,10 @@ pub const SCREEN_HEIGHT: usize = 144;
 
 /// A frame buffer: 160x144 RGB555 pixels (see [`rgb555`](crate::rgb555)),
 /// row-major, top-left first. Supplied by the caller on every run call.
+/// Swap buffers only after a run call reports
+/// [`Events::FRAME_READY`](crate::Events::FRAME_READY); see
+/// [`Emulator::run_until`](crate::Emulator::run_until) for why, and for
+/// what happens when the LCD is turned off mid-frame.
 pub type Frame = [u16; SCREEN_WIDTH * SCREEN_HEIGHT];
 
 /// RGB555 white, the color of a blank (LCD off) screen.

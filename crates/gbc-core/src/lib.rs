@@ -6,8 +6,8 @@
 //!
 //! # Usage (std caller)
 //!
-//! [`Emulator`] is large, so build it directly in its final location with
-//! [`Emulator::init`] rather than on the stack:
+//! [`Emulator`] is about 49 KiB, so build it directly in its final location
+//! with [`Emulator::init`] rather than on the stack:
 //!
 //! ```
 //! use gbc_core::{Config, Emulator, Events, Frame, WHITE, cart_ram_size};
@@ -24,9 +24,64 @@
 //! assert!(result.events.contains(Events::FRAME_READY));
 //! ```
 //!
-//! On the MCU, the emulator lives in a `static` of type
-//! `MaybeUninit<Emulator<'static>>` (placed in a no-init RAM section) and
-//! is initialized with [`Emulator::init`] at startup.
+//! ## Owning a `Box<Emulator>`
+//!
+//! `init` returns a reference that borrows the `Box<MaybeUninit<_>>`. To
+//! store the emulator as a plain `Box<Emulator>` (e.g. in a struct), convert
+//! the box after `init`. The core has no `alloc`, so it cannot do this
+//! itself; this is the one `unsafe` line a std front end needs:
+//!
+//! ```
+//! use gbc_core::Emulator;
+//!
+//! fn boxed_emulator() -> Box<Emulator<'static>> {
+//!     let mut slot = Box::<Emulator<'static>>::new_uninit();
+//!     Emulator::init(&mut slot);
+//!     // SAFETY: `Emulator::init` fully initialized the value in `slot`.
+//!     unsafe { slot.assume_init() }
+//! }
+//! # let _ = boxed_emulator();
+//! ```
+//!
+//! A stored emulator still borrows its ROM and cartridge RAM for `'a`.
+//! A front end that switches games at run time typically uses
+//! `Emulator<'static>` with buffers from `Box::leak` (one per buffer, for
+//! the life of the program) and moves them between games with
+//! [`Emulator::eject`] and [`Emulator::load`], which always hand the
+//! buffers back.
+//!
+//! # Usage (MCU)
+//!
+//! The emulator lives in a `static mut MaybeUninit<Emulator<'static>>`
+//! (ideally in a no-init RAM section, which keeps its image out of flash
+//! and `.data`) and is initialized once at startup. A plain `static` can't
+//! hand out `&mut`; in edition 2024 take a raw pointer with `&raw mut`
+//! instead of a reference to the `static mut`:
+//!
+//! ```
+//! use core::mem::MaybeUninit;
+//! use gbc_core::{Config, Emulator};
+//!
+//! static mut EMU: MaybeUninit<Emulator<'static>> = MaybeUninit::uninit();
+//! static mut SAVE_RAM: [u8; 0x2_0000] = [0; 0x2_0000];
+//!
+//! fn main() {
+//!     // SAFETY: runs once, at startup, before anything else can reach
+//!     // these statics, so these are the only references to them ever
+//!     // created.
+//!     let (emu, save_ram) = unsafe { (&mut *(&raw mut EMU), &mut *(&raw mut SAVE_RAM)) };
+//!     let emu = Emulator::init(emu);
+//!     let rom: &'static [u8] = &[0; 0x8000]; // memory-mapped flash on the MCU
+//!     emu.load(rom, save_ram, Config::default()).unwrap();
+//! }
+//! ```
+//!
+//! Alternatively, a "static cell" (a `static` holding an `UnsafeCell` and
+//! an atomic taken-flag, as in the `static_cell` crate, in the firmware not
+//! the core) gives out the `&'static mut` once without `static mut`. Either
+//! way, each buffer is borrowed exactly once for the program's life; to
+//! switch games, get the buffers back with [`Emulator::eject`] (or from the
+//! result of `load`) and pass them to the next `load`.
 
 #![no_std]
 
@@ -46,7 +101,9 @@ use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
 
 pub use apu::StereoSample;
-pub use cart::{LoadError, MIN_ROM_SIZE, RtcState, RtcTime, cart_ram_size};
+pub use cart::{
+    CartBuffers, LoadError, LoadErrorKind, MIN_ROM_SIZE, RtcState, RtcTime, cart_ram_size,
+};
 pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
 pub use events::Events;
@@ -93,8 +150,13 @@ pub struct Emulator<'a> {
     hw: Hw<'a>,
 }
 
-/// Everything except the large RAM arrays. Small enough (well under 1 KiB)
-/// to build on the stack.
+/// Everything except the large RAM arrays. `Emulator::init` builds this on
+/// the stack, so it must stay small: under 1 KiB, checked by a test. The
+/// limit protects the MCU, whose stack is a few KiB and is shared with
+/// interrupt handlers. It is not tight: per-scanline PPU buffers, APU state
+/// and mapper registers fit with room to spare. Anything large and made
+/// only of integers belongs in `Memory` instead, which is zero-filled in
+/// place.
 struct Hw<'a> {
     cpu: Cpu,
     ppu: Ppu,
@@ -125,16 +187,17 @@ impl Hw<'_> {
     }
 }
 
-impl Default for Emulator<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<'a> Emulator<'a> {
-    /// A powered-off emulator with no cartridge. `const`, so it can
-    /// initialize a `static`, but note that this builds the whole (large)
-    /// value: prefer [`Emulator::init`] for heap or no-init statics.
+    /// A powered-off emulator with no cartridge, for `const` and `static`
+    /// initializers only (evaluated at compile time).
+    ///
+    /// Do not call this at run time: it builds the whole ~49 KiB value on
+    /// the stack, and `Box::new(Emulator::new())` does too before copying.
+    /// Use [`Emulator::init`] instead. (There is deliberately no `Default`
+    /// impl for the same reason.) A `static` initialized with `new()` is
+    /// also stored in flash and copied to RAM at startup, which a no-init
+    /// `MaybeUninit` static avoids.
+    #[allow(clippy::new_without_default)] // Deliberate: see above.
     pub const fn new() -> Self {
         Self {
             mem: Memory::new(),
@@ -145,12 +208,14 @@ impl<'a> Emulator<'a> {
     /// Initializes `slot` in place to the same state as [`Emulator::new`]
     /// and returns it, without building a large temporary on the stack.
     ///
-    /// std callers keep a `Box<MaybeUninit<Emulator>>` from
-    /// `Box::new_uninit()` and use the returned reference (see the crate
-    /// example). No `unsafe` is needed on their side: `Emulator` has no
-    /// destructor, so dropping the box as `MaybeUninit` is fine. On the MCU,
-    /// pass a `static` `MaybeUninit<Emulator<'static>>` in a no-init RAM
-    /// section, which keeps the emulator's image out of flash and `.data`.
+    /// std callers either keep the `Box<MaybeUninit<Emulator>>` from
+    /// `Box::new_uninit()` and use the returned reference (no `unsafe`;
+    /// `Emulator` has no destructor, so dropping the box as `MaybeUninit`
+    /// is fine), or convert it to a `Box<Emulator>` with `assume_init`
+    /// after this call (sound, because this call initializes every byte
+    /// that matters; see the crate docs). On the MCU, pass a `static mut`
+    /// `MaybeUninit<Emulator<'static>>` in a no-init RAM section through
+    /// `&raw mut` (crate docs, "Usage (MCU)").
     pub fn init(slot: &mut MaybeUninit<Self>) -> &mut Self {
         // Compile-time guard: this exhaustive pattern stops compiling if a
         // field is added to `Emulator`, because the writes below must cover
@@ -168,7 +233,8 @@ impl<'a> Emulator<'a> {
         // `Memory` equal to `Memory::new()`; `write_bytes` initializes it
         // without a stack temporary. `hw` is small and written normally.
         // `mem` and `hw` are all of `Emulator`'s fields (checked above), so
-        // the value is fully initialized and `assume_init_mut` is sound.
+        // the value is fully initialized (padding aside, which needs no
+        // initialization) and `assume_init_mut` is sound.
         unsafe {
             addr_of_mut!((*p).mem).write_bytes(0, 1);
             addr_of_mut!((*p).hw).write(Hw::new());
@@ -180,17 +246,51 @@ impl<'a> Emulator<'a> {
     ///
     /// `cart_ram` must hold at least [`cart_ram_size`]`(rom)` bytes; the
     /// caller owns it, loads it from the save file beforehand and persists
-    /// it (see [`Emulator::cart_ram`]). On error the emulator is unchanged.
+    /// it (see [`Emulator::cart_ram`]). Only the first `cart_ram_size(rom)`
+    /// bytes are used, so a larger buffer (e.g. one static buffer sized
+    /// for the largest game) behaves exactly like one of the header's size.
+    ///
+    /// Returns the previously inserted cartridge's buffers, if any, so a
+    /// game switch never loses them (same as calling [`Emulator::eject`]
+    /// first). On error the emulator is unchanged (the previous cartridge
+    /// stays inserted) and the error hands back `rom` and `cart_ram`.
     pub fn load(
         &mut self,
         rom: &'a [u8],
         cart_ram: &'a mut [u8],
         config: Config,
-    ) -> Result<(), LoadError> {
-        self.hw.cart = Cart::new(rom, cart_ram)?;
+    ) -> Result<Option<CartBuffers<'a>>, LoadError<'a>> {
+        let cart = Cart::new(rom, cart_ram)?;
+        let previous = core::mem::replace(&mut self.hw.cart, cart).into_buffers();
         self.hw.config = config;
         self.reset();
-        Ok(())
+        Ok(previous)
+    }
+
+    /// Removes the cartridge and returns its buffers: the ROM and the whole
+    /// cartridge RAM buffer as passed to [`Emulator::load`] (not trimmed to
+    /// the header size). Save [`Emulator::cart_ram`] (and
+    /// [`Emulator::rtc_state`]) first if needed.
+    ///
+    /// Afterwards the emulator is in the state [`Emulator::init`] leaves it
+    /// in: powered off, no cartridge, default settings (stop events, held
+    /// buttons and palettes are cleared). Returns `None`, changing nothing,
+    /// if no cartridge is inserted.
+    pub fn eject(&mut self) -> Option<CartBuffers<'a>> {
+        if !self.hw.cart.is_loaded() {
+            return None;
+        }
+        self.mem.clear();
+        core::mem::replace(&mut self.hw, Hw::new())
+            .cart
+            .into_buffers()
+    }
+
+    /// Changes the DMG compatibility palettes without a reset. Takes effect
+    /// from the next pixel drawn.
+    #[inline]
+    pub fn set_dmg_palettes(&mut self, palettes: DmgPalettes) {
+        self.hw.config.dmg_palettes = palettes;
     }
 
     /// Power cycle: the post-boot state (no boot ROM is run; registers are
@@ -222,13 +322,15 @@ impl<'a> Emulator<'a> {
 
     /// Runs until a frame is ready, or for [`FRAME_CLOCKS`] base clocks if
     /// none completes (LCD off), or until an earlier stop event. Same as
-    /// `run_cycles(FRAME_CLOCKS, ..)`.
+    /// `run_cycles(FRAME_CLOCKS, ..)`. See [`Emulator::run_until`] for the
+    /// frame buffer rules.
     pub fn run_frame(&mut self, frame: &mut Frame, audio: &mut [StereoSample]) -> RunResult {
         self.run_cycles(u64::from(FRAME_CLOCKS), frame, audio)
     }
 
     /// Runs for at least `clocks` base clocks, or until a stop event. Same
-    /// as `run_until(self.clock() + clocks, ..)`.
+    /// as `run_until(self.clock() + clocks, ..)`. See [`Emulator::run_until`]
+    /// for the frame buffer rules.
     pub fn run_cycles(
         &mut self,
         clocks: u64,
@@ -248,9 +350,27 @@ impl<'a> Emulator<'a> {
     /// overshoot never accumulates. Returns immediately if `target` has
     /// already passed.
     ///
-    /// `frame` receives pixels as they are drawn; it holds a complete frame
-    /// when the result contains [`Events::FRAME_READY`]. Audio samples are
-    /// written from `audio[0]` on; see [`RunResult::audio_samples`].
+    /// # Frame buffer
+    ///
+    /// `frame` receives pixels as they are drawn (line by line); it holds a
+    /// complete frame when the result contains [`Events::FRAME_READY`],
+    /// which ends the call. Pass the same buffer to every call until then:
+    /// swap buffers (double buffering) **only right after a `FRAME_READY`
+    /// result**. Swapping at any other point leaves the top of the frame in
+    /// one buffer and the rest in the other, so neither holds a whole frame.
+    ///
+    /// If the game turns the LCD off mid-frame, the partly drawn frame is
+    /// abandoned: no `FRAME_READY` is reported for it and the buffer's
+    /// contents are unspecified. While the LCD is off
+    /// ([`Emulator::lcd_enabled`] is false) no frames complete and the
+    /// screen should be shown as white ([`WHITE`]); keep showing that until
+    /// the next `FRAME_READY` after the LCD is turned back on. The buffer
+    /// may be swapped while the LCD is off, as nothing is being drawn.
+    ///
+    /// # Audio
+    ///
+    /// Audio samples are written from `audio[0]` on; see
+    /// [`RunResult::audio_samples`].
     pub fn run_until(
         &mut self,
         target: u64,
@@ -274,7 +394,8 @@ impl<'a> Emulator<'a> {
     }
 
     /// Executes one instruction (or interrupt dispatch, or one idle M-cycle
-    /// while halted, stopped or locked up).
+    /// while halted, stopped or locked up). The frame buffer rules of
+    /// [`Emulator::run_until`] apply.
     pub fn step(&mut self, frame: &mut Frame, audio: &mut [StereoSample]) -> RunResult {
         let start = self.hw.clock;
         let events = self.step_inner(frame, audio);
@@ -328,10 +449,13 @@ impl<'a> Emulator<'a> {
 
     // --- Cartridge state for the caller to persist. ---
 
-    /// The cartridge RAM, for saving while the emulator holds the borrow.
+    /// The cartridge RAM, for saving while the emulator holds the borrow:
+    /// exactly [`cart_ram_size`]`(rom)` bytes (the header size), whatever
+    /// the length of the buffer passed to [`Emulator::load`]. Empty if no
+    /// cartridge is inserted.
     #[inline]
     pub fn cart_ram(&self) -> &[u8] {
-        self.hw.cart.ram
+        self.hw.cart.ram()
     }
 
     /// The MBC3 RTC state, or `None` if the cartridge has no RTC.
@@ -375,15 +499,19 @@ mod tests {
 
     #[test]
     fn hw_is_small_enough_to_build_on_the_stack() {
-        // `Emulator::init` builds `Hw` on the stack; only `Memory` is big.
-        assert!(size_of::<Hw<'_>>() < 512, "{}", size_of::<Hw<'_>>());
+        // `Emulator::init` builds `Hw` on the stack; only `Memory` is big
+        // (see the `Hw` docs for the limit).
+        assert!(size_of::<Hw<'_>>() < 1024, "{}", size_of::<Hw<'_>>());
         assert!(size_of::<Memory>() > 48 * 1024);
     }
 
     #[test]
     fn init_matches_new() {
-        let a = Emulator::new();
+        // Evaluated at compile time, so nothing large is built on the stack.
+        static A: Emulator<'static> = Emulator::new();
+        let a = &A;
         let b = Emulator::init(Box::leak(Box::new_uninit()));
+        assert!(a.mem == b.mem);
         assert_eq!(a.registers(), b.registers());
         assert_eq!(a.clock(), b.clock());
         assert_eq!(a.lcd_enabled(), b.lcd_enabled());
@@ -407,12 +535,120 @@ mod tests {
     }
 
     #[test]
-    fn load_error_leaves_emulator_unchanged() {
+    fn memory_zero_init_equals_cleared_state() {
+        // `init` zero-fills `Memory` in place; that must equal both
+        // `Memory::new()` and what `reset` (via `Memory::clear`) produces
+        // after the RAM has been dirtied.
+        let fresh = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = emulator();
+        emu.mem.wram.fill(0x5A);
+        emu.mem.vram.fill(0xA5);
+        emu.mem.oam.fill(1);
+        emu.mem.hram.fill(2);
+        emu.reset();
+        assert!(emu.mem == fresh.mem);
+        static NEW: Memory = Memory::new();
+        assert!(fresh.mem == NEW);
+    }
+
+    #[test]
+    fn load_error_returns_buffers_and_leaves_emulator_unchanged() {
         let emu = emulator();
         let tiny = vec![0u8; 16].leak();
-        let err = emu.load(tiny, &mut [], Config::default());
-        assert_eq!(err, Err(LoadError::RomTooSmall { len: 16 }));
+        let ram = vec![0u8; 3].leak();
+        let err = emu.load(tiny, ram, Config::default()).unwrap_err();
+        assert_eq!(err.kind, LoadErrorKind::RomTooSmall { len: 16 });
+        let (rom, ram) = err.into_buffers();
+        assert_eq!((rom.len(), ram.len()), (16, 3));
         assert_eq!(emu.peek(0x0100), 0xAB);
+
+        // RAM buffer too small for the header.
+        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x149] = 0x03;
+        let err = emu.load(rom, ram, Config::default()).unwrap_err();
+        assert_eq!(
+            err.kind,
+            LoadErrorKind::CartRamTooSmall {
+                needed: 0x8000,
+                len: 3
+            }
+        );
+        assert_eq!(err.cart_ram.len(), 3);
+        assert_eq!(emu.peek(0x0100), 0xAB);
+    }
+
+    #[test]
+    fn eject_returns_buffers_and_allows_reload() {
+        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x100] = 0xAB;
+        rom[0x149] = 0x02; // 8 KiB
+        let ram = vec![0u8; 0x8000].leak(); // larger than needed
+        ram[0] = 0x5A;
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        assert!(emu.eject().is_none());
+        assert!(emu.load(rom, ram, Config::default()).unwrap().is_none());
+        let mut fb = frame();
+        let _ = emu.run_cycles(1000, &mut fb, &mut []);
+
+        let (rom, ram) = emu.eject().unwrap();
+        // The whole buffer comes back, not the trimmed one.
+        assert_eq!((rom.len(), ram.len()), (MIN_ROM_SIZE, 0x8000));
+        assert_eq!(ram[0], 0x5A);
+        // Back to the freshly initialized state.
+        assert_eq!(emu.clock(), 0);
+        assert!(!emu.lcd_enabled());
+        assert_eq!(emu.peek(0x0100), 0xFF);
+        assert!(emu.cart_ram().is_empty());
+        assert!(emu.eject().is_none());
+
+        // The same buffers load again; a second load hands back the first.
+        assert!(emu.load(rom, ram, Config::default()).unwrap().is_none());
+        assert_eq!(emu.peek(0x0100), 0xAB);
+        let rom2 = vec![0u8; MIN_ROM_SIZE].leak();
+        let (old_rom, old_ram) = emu.load(rom2, &mut [], Config::default()).unwrap().unwrap();
+        assert_eq!(old_rom[0x100], 0xAB);
+        assert_eq!(old_ram.len(), 0x8000);
+        assert_eq!(emu.peek(0x0100), 0x00);
+    }
+
+    #[test]
+    fn cart_ram_is_trimmed_to_header_size() {
+        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x149] = 0x02; // 8 KiB
+        let ram = vec![0u8; 0x2_0000].leak();
+        ram[0x2000] = 0x77;
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, ram, Config::default()).unwrap();
+        assert_eq!(emu.cart_ram().len(), 0x2000);
+        // Nothing past the header size is visible to the game.
+        assert_eq!(emu.peek(0xA000), 0x00);
+    }
+
+    #[test]
+    fn unknown_ram_size_code_loads_without_ram() {
+        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x147] = 0x03; // MBC1+RAM+BATTERY
+        rom[0x149] = 0x42;
+        let ram = vec![0u8; 0x2000].leak();
+        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        emu.load(rom, ram, Config::default()).unwrap();
+        assert!(emu.cart_ram().is_empty());
+        assert_eq!(emu.peek(0xA000), 0xFF);
+    }
+
+    #[test]
+    fn set_dmg_palettes_does_not_reset() {
+        let emu = emulator();
+        let mut fb = frame();
+        let _ = emu.run_cycles(1000, &mut fb, &mut []);
+        let clock = emu.clock();
+        let p = DmgPalettes {
+            bg: [1, 2, 3, 4],
+            ..DmgPalettes::GRAYSCALE
+        };
+        emu.set_dmg_palettes(p);
+        assert_eq!(emu.hw.config.dmg_palettes, p);
+        assert_eq!(emu.clock(), clock);
     }
 
     #[test]

@@ -17,7 +17,7 @@ impl Emulator<'_> {
         match addr {
             0x0000..=0x7FFF => self.hw.cart.rom.get(a).copied().unwrap_or(0xFF),
             0x8000..=0x9FFF => self.mem.vram[a - 0x8000],
-            0xA000..=0xBFFF => self.hw.cart.ram.get(a - 0xA000).copied().unwrap_or(0xFF),
+            0xA000..=0xBFFF => self.hw.cart.ram().get(a - 0xA000).copied().unwrap_or(0xFF),
             0xC000..=0xDFFF => self.mem.wram[a - 0xC000],
             // Echo RAM mirrors C000-DDFF (Pan Docs: Memory Map).
             0xE000..=0xFDFF => self.mem.wram[a - 0xE000],
