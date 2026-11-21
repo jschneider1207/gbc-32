@@ -578,6 +578,9 @@ mod tests {
         events: Events,
         /// IF bits set at the end of the M-cycle that reads this address.
         irq_on_read: Option<(u16, u8)>,
+        /// IF bits set at the end of the M-cycle that makes the log this
+        /// long.
+        irq_at_log: Option<(usize, u8)>,
     }
 
     impl TestBus {
@@ -591,6 +594,7 @@ mod tests {
                 iflags: 0,
                 events: Events::EMPTY,
                 irq_on_read: None,
+                irq_at_log: None,
             }
         }
     }
@@ -604,14 +608,17 @@ mod tests {
             {
                 self.iflags |= bits;
             }
+            self.irq_at_log();
             v
         }
         fn write(&mut self, addr: u16, value: u8) {
             self.mem[usize::from(addr)] = value;
             self.log.push((addr, value, 'w'));
+            self.irq_at_log();
         }
         fn idle(&mut self) {
             self.log.push((0, 0, '-'));
+            self.irq_at_log();
         }
         fn interrupt_enable(&self) -> u8 {
             self.ie
@@ -624,6 +631,16 @@ mod tests {
         }
         fn event(&mut self, event: Events) {
             self.events |= event;
+        }
+    }
+
+    impl TestBus {
+        fn irq_at_log(&mut self) {
+            if let Some((n, bits)) = self.irq_at_log
+                && self.log.len() == n
+            {
+                self.iflags |= bits;
+            }
         }
     }
 
@@ -786,6 +803,30 @@ mod tests {
                 assert_eq!(bus.log[1], (0x101, 0x3C, 'r'));
                 assert_eq!(cpu.regs.a, 1);
             }
+        }
+    }
+
+    #[test]
+    fn dispatch_absorbs_a_retrigger_until_its_last_mcycle() {
+        // The timer IRQ fires again at the end of M-cycle n of the 5 of
+        // the dispatch. The IF bit is cleared in the last M-cycle (SameBoy
+        // `GB_cpu_run`), so a re-fire up to then is absorbed; one after
+        // the dispatch stays pending (gambatte
+        // `tima/tc00_irq_late_retrigger_*`).
+        for n in 1..=6 {
+            let mut bus = TestBus::new(&[0x00], 0x200);
+            bus.ie = 0x04;
+            bus.iflags = 0x04;
+            bus.irq_at_log = Some((n, 0x04));
+            let mut cpu = cpu_at(0x200);
+            cpu.set_ime(true);
+            cpu.step(&mut bus);
+            assert_eq!(cpu.regs.pc, 0x50);
+            assert_eq!(bus.log.len(), 5);
+            if n == 6 {
+                bus.idle();
+            }
+            assert_eq!(bus.iflags, if n <= 5 { 0 } else { 0x04 }, "n={n}");
         }
     }
 

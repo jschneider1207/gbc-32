@@ -354,7 +354,11 @@ impl Cpu {
     /// low, jump). IE is sampled after the high byte is pushed and IF after
     /// the low byte, so a push that overwrites IE (SP = 0) or a change of
     /// IF in between can cancel the dispatch; PC is then 0000 (Mooneye
-    /// `ie_push`; SameBoy `GB_cpu_run`).
+    /// `ie_push`; SameBoy `GB_cpu_run`). The chosen IF bit is cleared only
+    /// in the last M-cycle (SameBoy: 2 T-cycles into it), so the same
+    /// source firing again by the end of the dispatch is absorbed (gambatte
+    /// `tima/tc00_irq_late_retrigger_2`); at M-cycle granularity (ADR
+    /// 0008) that is after the final M-cycle's events.
     fn dispatch<B: Bus>(&mut self, bus: &mut B) {
         self.ime = false;
         self.ei_pending = false;
@@ -368,6 +372,7 @@ impl Cpu {
         bus.write(sp, pc as u8);
         self.regs.sp = sp;
         let pending = ie & bus.interrupt_flags() & INT_MASK;
+        bus.idle();
         if pending == 0 {
             self.regs.pc = 0x0000;
         } else {
@@ -375,7 +380,6 @@ impl Cpu {
             bus.set_interrupt_flags(bus.interrupt_flags() & !(1 << bit));
             self.regs.pc = 0x0040 + 8 * bit as u16;
         }
-        bus.idle();
     }
 
     /// HALT (opcode 76), after its fetch.
