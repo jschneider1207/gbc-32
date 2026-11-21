@@ -177,7 +177,9 @@ Docs "Timer obscure behaviour", Timer overflow behavior. SameBoy
 ### Serial bit clock and DIV-APU
 - **Serial**, while a transfer runs on the internal clock:
   - deadline = `clock_of(next_fall(k, sc(now)))`, with k = 8, or 3 for the
-    CGB fast clock (as today; SameBoy `GB_serial_master_edge`);
+    CGB fast clock (as today; SameBoy `GB_serial_master_edge`).
+    *Superseded 2026-11-21 by the flip-flop phase; see the resolution note
+    under Consequences;*
   - set on SC writes, after each bit, after a DIV write and after a speed
     switch;
   - one event per bit.
@@ -325,6 +327,27 @@ These must not put work back into the tick.
   - whether disabling the timer ticks TIMA on CGB (Pan Docs vs SameBoy);
   - the serial clock's phase after a DIV reset (SameBoy toggles a master
     clock on bit 7 edges, we use bit 8 falls).
+
+  **Resolved 2026-11-21** (M2 hardware review):
+  - **Q1, TAC disable on CGB: keep SameBoy's rule (disabling ticks TIMA
+    when the selected bit was 1).** Mooneye `acceptance/timer/rapid_toggle`
+    is verified on CGB hardware and needs that tick. Switching to the Pan
+    Docs rule fails rapid_toggle and raises the gambatte `tima/*cgb04c*`
+    failures from 3 to 17 (1 to 15 after the IF-clear fix, 782b89e). SameBoy's own comment (`timing.c`, ~563-567)
+    credits the CGB difference to GiiBiiAdvance and says it "was not
+    tested or implemented", so the Pan Docs rule has no hardware test
+    behind it that we know of.
+  - **Q2, serial phase: resolved by moving to SameBoy's master flip-flop**
+    (`GB_serial_master_edge`, `GB_IO_SC` write; commit b58c196). It toggles
+    on every fall of counter bit 7 (bit 2 fast) and shifts on its 1 -> 0
+    edge; an SC write forces it to 0 (shifting a running transfer's bit if
+    it was 1); a DIV reset toggles it only if bit 7 (bit 2) was set. This
+    supersedes the `next_fall(k)` formula in "Serial bit clock" above;
+    the deadline is still computed from the clock: the flip-flop is
+    counter bit k+1 XOR a stored phase, so the next shift is the next
+    counter value where it goes 1 -> 0 (`serial.rs` docs). Gambatte
+    `serial/*cgb04c*`: 39/46 -> 44/46, and 46/46 with the IF-clear timing
+    fix (782b89e).
 
 ### Public API
 No change. `Emulator::step` keeps its documented one-M-cycle idle step (via

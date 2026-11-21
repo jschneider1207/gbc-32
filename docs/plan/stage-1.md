@@ -57,7 +57,7 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
   - [x] Reload-window rules in the eager timer (0f3d68a), kept afterwards as a test-only reference model
   - [x] Lazy timer and serial clock (4b81a49), differential test against the eager model; rebaseline the benchmark and size budgets (keep timer I/O out of line so `write_high`/`read_high` stay in budget)
   - [x] HALT/STOP/lockup/power-off jump to the next deadline (84c7744)
-  - [ ] Open hardware questions (ADR 0011): does disabling the timer tick TIMA on CGB (Pan Docs vs SameBoy); serial clock phase after a DIV reset
+  - [x] Open hardware questions (ADR 0011): does disabling the timer tick TIMA on CGB (Pan Docs vs SameBoy); serial clock phase after a DIV reset. Resolved in ADR 0011 (2026-11-21): keep SameBoy's tick; serial via the master flip-flop (b58c196)
 - [x] HALT (3ee75c7): IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
 - [x] DIV/TIMA with the falling-edge behavior, TMA reload windows (0f3d68a)
 - [x] OAM DMA timing and bus conflicts (7bdaee2, 75b12ad) (DMA conflicts put state into the CPU read path, so `peek` needs its own side-effect-free path; consider driving DMA through `next_event`)
