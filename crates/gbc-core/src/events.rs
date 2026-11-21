@@ -40,8 +40,9 @@ impl Events {
     /// [`Emulator::set_stop_events`](crate::Emulator::set_stop_events): the
     /// caller must consume the frame or audio buffer before the core
     /// overwrites it, and a locked CPU needs attention.
-    pub const ALWAYS_STOP: Self =
-        Self::FRAME_READY.union(Self::AUDIO_BUFFER_FULL).union(Self::CPU_LOCKED);
+    pub const ALWAYS_STOP: Self = Self::FRAME_READY
+        .union(Self::AUDIO_BUFFER_FULL)
+        .union(Self::CPU_LOCKED);
 }
 
 #[cfg(test)]
