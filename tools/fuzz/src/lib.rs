@@ -34,7 +34,9 @@ pub enum Profile {
 }
 
 /// The target functions: `(name, function)`.
-pub const TARGETS: [(&str, fn(&[u8])); 3] =
+pub type Target = fn(&[u8]);
+
+pub const TARGETS: [(&str, Target); 3] =
     [("load", fuzz_load), ("run", fuzz_run), ("rtc", fuzz_rtc)];
 
 pub fn fuzz_load(data: &[u8]) {
@@ -310,7 +312,7 @@ fn scenario(data: &[u8], profile: Profile) {
 pub struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -318,10 +320,10 @@ impl Rng {
         z ^ (z >> 31)
     }
     fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
+        self.next_u64() % n
     }
     fn byte(&mut self) -> u8 {
-        self.next() as u8
+        self.next_u64() as u8
     }
 }
 
@@ -365,7 +367,7 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
     }
     // Cycles field (offset 20): cap some inputs short.
     if rng.below(3) == 0 {
-        v[20..22].copy_from_slice(&((rng.next() % 600) as u16).to_le_bytes());
+        v[20..22].copy_from_slice(&((rng.next_u64() % 600) as u16).to_le_bytes());
     }
     let body_len = rng.below(3000) as usize;
     let mut i = 0;
@@ -377,14 +379,14 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
                     0 => rng.below(0x8000) as u16,
                     1 => 0xA000 + rng.below(0x2000) as u16,
                     2 => 0xFF00 + rng.below(0x100) as u16,
-                    _ => rng.next() as u16,
+                    _ => rng.next_u64() as u16,
                 };
                 v.extend_from_slice(&[0x3E, rng.byte(), 0xEA, addr as u8, (addr >> 8) as u8]);
                 i += 5;
             }
             // LD A,(nn)
             5 | 6 => {
-                let addr = rng.next() as u16;
+                let addr = rng.next_u64() as u16;
                 v.extend_from_slice(&[0xFA, addr as u8, (addr >> 8) as u8]);
                 i += 3;
             }
@@ -400,4 +402,32 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
         }
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_is_deterministic() {
+        let a: Vec<_> = (0..8).map(|_| generate(&mut Rng(42))).collect();
+        assert!(a.windows(2).all(|w| w[0] == w[1]));
+        let mut rng = Rng(42);
+        assert_ne!(generate(&mut rng), generate(&mut rng));
+    }
+
+    #[test]
+    fn targets_survive_a_few_inputs() {
+        let mut rng = Rng(1);
+        for _ in 0..6 {
+            let input = generate(&mut rng);
+            for (_, f) in TARGETS {
+                f(&input);
+            }
+        }
+        for (_, f) in TARGETS {
+            f(&[]);
+            f(&[0xFF; 200]);
+        }
+    }
 }

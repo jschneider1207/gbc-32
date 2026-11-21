@@ -1,0 +1,37 @@
+[package]
+name = "gbc-fuzz-libfuzzer"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a workspace member: needs nightly and cargo-fuzz (docs/fuzzing.md).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fuzz = { path = ".." }
+
+[[bin]]
+name = "load"
+path = "fuzz_targets/load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run"
+path = "fuzz_targets/run.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtc"
+path = "fuzz_targets/rtc.rs"
+test = false
+doc = false
+bench = false

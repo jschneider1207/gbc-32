@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use gbc_fuzz::{CTRL_LEN, Rng, TARGETS, generate};
 
-const DEFAULT_SEED: u64 = 0x6BC_32_F022;
+const DEFAULT_SEED: u64 = 0x0006_BC32_F022;
 const DEFAULT_COUNT: u64 = 5000;
 
 fn fail(name: &str, origin: &str, input: &[u8]) -> ExitCode {
