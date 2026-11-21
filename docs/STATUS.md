@@ -16,8 +16,7 @@
 
 ## Needs human
 
-- **ADR 0003 (target CGB revision C) is Proposed.** Work proceeds on this
-  assumption unless you override it.
+None.
 
 ## Environment
 

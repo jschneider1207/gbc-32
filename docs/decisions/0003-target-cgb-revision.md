@@ -1,6 +1,6 @@
 # 0003: Emulate CPU CGB revision C
 
-- Status: Proposed (human may override)
+- Status: Accepted (confirmed by human 2026-11-21)
 - Date: 2026-11-21
 
 ## Context
@@ -18,6 +18,12 @@ publish expected results for specific revisions. We need one target.
 ## Decision
 Target CPU CGB C. It has the widest reference coverage (Mealybug, Gambatte,
 AGE `cgbBC*`, Blargg). The few CGB-E-only SameSuite APU tests are tier `stretch`.
+
+Alternatives considered: B (fails Blargg `cgb_sound` on real hardware),
+D (only Mealybug references), E (gains the E-only SameSuite APU tests but
+loses Mealybug and Gambatte references), 0/A (rare, almost no references).
+Revisions are not configurable: one fixed target avoids per-revision code
+paths that games never need.
 
 ## Consequences
 Games don't depend on the differences between C and E, so no player-visible
