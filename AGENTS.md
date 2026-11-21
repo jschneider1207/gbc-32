@@ -138,6 +138,11 @@ cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter 'b
 - When a milestone's acceptance passes, run the milestone review (see
   Independent review below) and fix the confirmed findings. Then update the
   baseline (`--update-baseline`), commit it, and tag the commit `stage1-m<N>`.
+- Stage only your own files, by explicit path (`git add <paths>`). Never
+  use `git add -A`, `git add .`, `git add -u` or `git commit -a`: other
+  agents and the human work in the same tree at the same time, and
+  sweeping in their unfinished files mislabels history and can break
+  `main`. Check `git diff --cached --stat` before committing.
 - Don't push, force-push, rewrite history, or delete tags.
 
 ## Independent review
