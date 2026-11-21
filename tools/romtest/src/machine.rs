@@ -147,6 +147,10 @@ pub enum End {
     /// time passed, or [`MAX_STALLED_CALLS`] in a row returned events
     /// without time passing.
     NoProgress,
+    /// The input change at clock `at` could only be handed to the machine
+    /// at `now`, after its M-cycle (its queue was full until then), so it
+    /// can't land on time. The run stops there.
+    InputLate { at: u64, now: u64 },
 }
 
 impl End {
@@ -157,6 +161,7 @@ impl End {
             End::Timeout => "timeout",
             End::Locked => "cpu_locked",
             End::NoProgress => "no_progress",
+            End::InputLate { .. } => "input_late",
         }
     }
 }
@@ -228,12 +233,21 @@ pub fn run<M: Machine + ?Sized>(
     // Input changes before `next_input` have been handed to the machine.
     let mut next_input = 0;
     let mut stalled_calls = 0u32;
-    let end = loop {
+    let end = 'run: loop {
         let now = core_call(|| m.clock())?;
         // Hand the machine every change its queue takes. It applies each
-        // on its exact M-cycle, wherever run calls end (ADR 0012); one
-        // whose time has passed applies now.
+        // on its exact M-cycle, wherever run calls end (ADR 0012).
         while let Some(&(at, buttons)) = plan.input.get(next_input) {
+            if at < now {
+                // Its M-cycle has passed (more changes fell inside one run
+                // call's overshoot than the queue holds): the machine
+                // would apply it late, so the run can't count. One after
+                // the exit limit is never needed.
+                if at < limit {
+                    break 'run End::InputLate { at, now };
+                }
+                break;
+            }
             if !core_call(|| m.set_buttons_at(at, buttons))? {
                 break;
             }
@@ -793,7 +807,7 @@ mod tests {
         // A queue of one: each change is handed over once the previous
         // one has applied, and still lands on its exact clock. Changes
         // closer together than one run call's overshoot can't all be
-        // queued; the late one applies when the run returns.
+        // queued: the run stops, failing, rather than apply one late.
         let input = [
             entry(4000, 8000, Buttons::A),
             entry(6000, 10000, Buttons::B),
@@ -803,7 +817,15 @@ mod tests {
         let mut m = FakeMachine::new(vec![]);
         m.step = 12;
         m.pending_cap = 1;
-        run_fake(&mut m, &plan);
+        let st = run_fake(&mut m, &plan);
+        assert_eq!(
+            st.end,
+            Some(End::InputLate {
+                at: 20002,
+                now: 20004
+            })
+        );
+        assert_eq!(st.clock, 20004);
         assert_eq!(
             m.button_log,
             [
@@ -813,9 +835,21 @@ mod tests {
                 (8000, Buttons::B),
                 (10000, Buttons::EMPTY),
                 (20000, Buttons::START),
-                (20004, Buttons::EMPTY),
             ]
         );
+        // A change after the exit limit is never needed: one that the
+        // last run call overshoots doesn't fail the run. FRAME + 6 is
+        // still waiting for the queue when the run ends at 71000.
+        let input = [
+            entry(FRAME - 500, FRAME + 5, Buttons::A),
+            entry(FRAME + 6, FRAME + 100, Buttons::B),
+        ];
+        let plan = RunPlan::new(Exit::RunFrames { frames: 1 }, &input);
+        let mut m = FakeMachine::new(vec![]);
+        m.step = 1000;
+        m.pending_cap = 1;
+        let st = run_fake(&mut m, &plan);
+        assert_eq!((st.end, st.clock), (Some(End::Completed), 71000));
     }
 
     #[test]

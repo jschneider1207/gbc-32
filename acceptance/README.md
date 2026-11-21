@@ -68,11 +68,19 @@ Top level: `roms_release` (must equal `test-roms/.version`, else exit 2),
 
 `input` is a list of `{ at_s, press, hold_s }`. Each entry presses every
 button in `press` (`a`, `b`, `select`, `start`, `up`, `down`, `left`,
-`right`) at emulated time `at_s` and releases them at `at_s + hold_s`. Times
-are rounded down to the nearest M-cycle. Overlapping entries combine: a
-button is held while any entry is holding it. Each change lands on its
-M-cycle, wherever run calls end (the core's scheduled button changes,
-ADR 0012).
+`right`) at emulated time `at_s` and releases them at `at_s + hold_s`. Each
+time is converted to base clocks and rounded down to a multiple of 4 clocks
+(a normal-speed M-cycle), at any CPU speed. The core then lands the change
+at the start of the M-cycle that clock falls in, on the M-cycle grid in
+effect at that time (2 clocks per M-cycle in double speed). Overlapping
+entries combine: a button is held while any entry is holding it. Each change
+lands on its M-cycle, wherever run calls end (the core's scheduled button
+changes, ADR 0012). The core queues a few changes ahead; if a change's clock
+has already passed when the runner can hand it over (more changes inside one
+run call than the queue holds), the run stops there and the ROM is a `crash`
+("input at clock ... could not be scheduled on its M-cycle"). It is never
+applied late. A change at or after the exit limit is not needed and never
+fails a run.
 
 For every ROM matched by every group in the manifest, the runner:
 
@@ -127,7 +135,7 @@ represented exactly in RGB555. The runner converts RGB555 to RGB888 with
 | `pass` | All checks passed | pass |
 | `fail` | At least one check failed | fail |
 | `timeout` | The `ld_b_b` exit never happened | fail |
-| `crash` | Panic, or the CPU locked up on an invalid opcode | fail |
+| `crash` | Panic, the CPU locked up on an invalid opcode, or an input change could not be applied on its M-cycle | fail |
 | `unsupported` | The runner doesn't implement this check kind yet | fail |
 | `no-reference` | Expected PNG missing | excluded |
 

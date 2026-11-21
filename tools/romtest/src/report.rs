@@ -70,7 +70,9 @@ pub fn rom_status(outcome: &Outcome, checks: &[CheckStatus]) -> Status {
     let any = |s: CheckStatus| checks.contains(&s);
     match outcome {
         Outcome::LoadError(_) | Outcome::Panic(_) => return Status::Crash,
-        Outcome::Ran(End::Locked | End::NoProgress) => return Status::Crash,
+        Outcome::Ran(End::Locked | End::NoProgress | End::InputLate { .. }) => {
+            return Status::Crash;
+        }
         Outcome::Ran(End::Timeout) => return Status::Timeout,
         Outcome::Ran(End::Completed | End::LdBB) => {}
     }
@@ -722,6 +724,8 @@ pub mod tests {
             rom_status(&Outcome::Ran(End::NoProgress), &[C::Pass]),
             Status::Crash
         );
+        let late = End::InputLate { at: 2, now: 4 };
+        assert_eq!(rom_status(&Outcome::Ran(late), &[C::Pass]), Status::Crash);
         assert_eq!(
             rom_status(&Outcome::Panic("x".into()), &[C::Skipped]),
             Status::Crash

@@ -35,11 +35,23 @@ the held buttons at emulated time `clock` (base clocks).
   The deadline depends on the M-cycle length, so the speed switch resets
   it (`Sys::schedule_inputs` in `Ctx::stop`) before the pause. Without
   that, a change scheduled in double speed for after a switch back to a
-  normal-speed grid at 2 mod 4 would land 2 clocks late, and one scheduled
-  in normal speed for after a switch to double speed 2 clocks early. If
-  `d` falls inside the pause or is already past when the grid changes, it
-  lands at the next boundary (the earliest one possible). Cost: a
-  subtraction where the deadline is set, all off the tick.
+  normal-speed grid at 2 mod 4 would land late (test
+  `scheduled_input_rounds_down_on_the_grid_after_a_speed_switch`). For a
+  switch to double speed the stale deadline is only early: the handler
+  rounds with the live M-cycle, so it would wake at a boundary with
+  nothing due and land the change on its own one anyway (checked by a
+  brute force over the clocks after the pause; the reset keeps the
+  deadline exact rather than relying on that). `d` is computed on the new
+  grid even when it falls inside the switch's pause: the pause idles one
+  deadline at a time and runs `boundary()` at each, so the change lands
+  on `d` during the pause and sets IF bit 4 there
+  (`scheduled_input_inside_the_speed_switch_pause_lands_on_its_mcycle`).
+  Only if `d` is before the switch's clock (already past when the grid
+  changes, e.g. double to normal speed at `T` with `clock = T + 2`, whose
+  normal-speed M-cycle starts at `T - 2`) does it land at the first
+  boundary after the switch, `T + 4`
+  (`scheduled_input_already_past_after_a_speed_switch_lands_next`). Cost:
+  a subtraction where the deadline is set, all off the tick.
 - **Past clocks apply now.** If `d <= clock()`, i.e. `clock < clock() +
   mcycle`, the call behaves exactly like `set_buttons(buttons)` and always
   succeeds. Between run calls the clock is on an M-cycle boundary and
@@ -55,10 +67,17 @@ the held buttons at emulated time `clock` (base clocks).
   - the joypad interrupt (a P10-P13 line going low, `p1_interrupt`) sets
     IF bit 4 at `d`: visible to IF reads and HALT's check from `d`, and to
     the interrupt check at the next instruction boundary.
-- **Same-boundary changes collapse.** All changes due at one boundary are
-  applied as one transition to the last of them: nothing can sample P1
-  between them, so a press and release inside one M-cycle raises no
-  interrupt.
+- **Same-boundary changes collapse (a modelling choice).** All changes
+  due at one boundary are applied as one transition to the last of them,
+  so a press and release inside one M-cycle raises no interrupt. No CPU
+  access can sample P1 between them, but whether the hardware's
+  interrupt edge detector would catch such a glitch is not established;
+  we don't claim this is hardware-exact. SameBoy differs: `GB_set_key_state`
+  calls `GB_update_joyp`, which sets IF on every falling edge at once,
+  however close together the changes are.
+- **`u64::MAX` is refused.** It is the empty-slot sentinel (`NEVER`), so a
+  change there would hold a slot and never fire; `set_buttons_at` returns
+  `false` for it.
 - **Interactions.**
   - `set_buttons` is `set_buttons_at(clock(), ..)`: it applies now and
     leaves pending changes queued.
@@ -90,11 +109,14 @@ the held buttons at emulated time `clock` (base clocks).
 
 ### romtest
 The runner hands the machine every change its queue takes before each run
-call (past ones apply at once) and runs to the exit limit. When the queue
-is full it runs to the earliest queued change, so the queue drains and is
-refilled. Only more than four changes inside one run call's overshoot can
-still be late; no stage 1 group comes close (at most 6 changes, 0.1 s
-apart).
+call and runs to the exit limit. When the queue is full it runs to the
+earliest queued change, so the queue drains and is refilled. Only more
+than four changes inside one run call's overshoot (up to ~8200 clocks in
+a speed-switch pause) can still be late. The runner never hands over a
+change whose clock (before the exit limit) has already passed: the run
+ends as `crash` with the detail "input at clock <t> could not be
+scheduled on its M-cycle (queue limit) ...". No stage 1 group comes close
+(at most 6 changes, 0.1 s apart).
 
 ## Consequences
 - Button changes in acceptance runs land on their M-cycle, independent of

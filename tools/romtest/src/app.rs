@@ -513,6 +513,10 @@ fn run_job(
         Outcome::Ran(End::NoProgress) => {
             format!("emulator stopped advancing at clock {}", st.clock)
         }
+        Outcome::Ran(End::InputLate { at, now }) => format!(
+            "input at clock {at} could not be scheduled on its M-cycle \
+             (queue limit): handed over at clock {now}"
+        ),
         Outcome::Ran(End::Timeout) => match group.exit {
             Exit::LdBB { timeout_s } => format!("no LD B,B within {timeout_s} s"),
             _ => String::new(),
