@@ -9,18 +9,23 @@
 
 ## Next up
 
-1. M0: install the Rust toolchain (blocked, see Needs human), then create the
-   workspace per `docs/architecture.md`
+1. M0: create the workspace per `docs/architecture.md` and pin the toolchain in
+   `rust-toolchain.toml` (rustup is installed, see below)
 2. M0: `gbc-core` skeleton building for host and `thumbv7em-none-eabihf`
 3. M0: `romtest` per `acceptance/README.md`, then commit the initial baseline
 
 ## Needs human
 
-- **Rust toolchain:** `cargo`/`rustc` are not installed. Either install
-  rustup yourself (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-  or tell the agent it may install it (user-level, `~/.cargo`).
 - **ADR 0003 (target CGB revision C) is Proposed.** Work proceeds on this
   assumption unless you override it.
+
+## Environment
+
+- Rust via **rustup** (user-level, `~/.rustup` and `~/.cargo`), not asdf:
+  rust 1.100.0 stable, components clippy and rustfmt, target
+  `thumbv7em-none-eabihf`. Pin the exact version in `rust-toolchain.toml`.
+- Host C compiler: gcc 13.3 (`cc`). The machine is WSL2 Ubuntu 24.04.
+- `python3` through asdf has no version set. Use `/usr/bin/python3` (3.12) for one-off scripts.
 
 ## Blockers
 
