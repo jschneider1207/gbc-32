@@ -61,24 +61,24 @@ impl Outcome {
 
 /// The ROM's status from how the run ended and its check results.
 ///
-/// A missing reference PNG comes first: the ROM can't be graded, and
-/// whether it is excluded from the score then depends only on the files in
-/// `test-roms/`, never on what the emulator did (so the score's denominator
-/// doesn't shift as the emulator improves). Next crash and timeout, then a
-/// failed check, then an unsupported one.
+/// Precedence (ADR 0007 amendments): crash/timeout > fail > no-reference >
+/// unsupported > pass. `no-reference` (excluded from the score) applies
+/// only when everything else that could be evaluated passed, so a missing
+/// PNG can never hide a crash, a timeout or another failing check.
 pub fn rom_status(outcome: &Outcome, checks: &[CheckStatus]) -> Status {
     let any = |s: CheckStatus| checks.contains(&s);
-    if any(CheckStatus::NoReference) {
-        return Status::NoReference;
-    }
     match outcome {
         Outcome::LoadError(_) | Outcome::Panic(_) => return Status::Crash,
         Outcome::Ran(End::Locked | End::NoProgress) => return Status::Crash,
         Outcome::Ran(End::Timeout) => return Status::Timeout,
         Outcome::Ran(End::Completed | End::LdBB) => {}
     }
+    // `Skipped` only appears when the ROM didn't run (already a crash);
+    // count it as a failure in case that ever changes.
     if any(CheckStatus::Fail) || any(CheckStatus::Skipped) {
         Status::Fail
+    } else if any(CheckStatus::NoReference) {
+        Status::NoReference
     } else if any(CheckStatus::Unsupported) {
         Status::Unsupported
     } else {
@@ -295,26 +295,65 @@ pub struct Regression {
     pub group: String,
     pub rom: String,
     pub was: Status,
-    pub now: Status,
+    /// `None`: the `(group, ROM)` has no result any more (serialized as
+    /// `"missing"`).
+    #[serde(serialize_with = "serialize_now")]
+    pub now: Option<Status>,
 }
 
-/// Every result whose baseline status is `pass` and whose current status
-/// isn't. Only the results that ran are compared, so a partial run checks
-/// only what it ran.
-pub fn regressions(baseline: Option<&Baseline>, results: &[RomResult]) -> Vec<Regression> {
+impl Regression {
+    pub fn now_name(&self) -> &'static str {
+        self.now.map_or("missing", Status::name)
+    }
+}
+
+fn serialize_now<S: serde::Serializer>(now: &Option<Status>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(now.map_or("missing", Status::name))
+}
+
+/// Regressions: every baseline entry with status `pass` whose current
+/// status isn't `pass`, or which has no current result although
+/// `in_scope(group, rom)` says the selection covers it (the ROM was
+/// removed, excluded or renamed, or its group was). In a full run every
+/// baseline entry is in scope; a partial run checks only its selection.
+pub fn regressions(
+    baseline: Option<&Baseline>,
+    results: &[RomResult],
+    in_scope: &dyn Fn(&str, &str) -> bool,
+) -> Vec<Regression> {
     let Some(b) = baseline else {
         return Vec::new();
     };
-    results
+    let mut out: Vec<Regression> = results
         .iter()
         .filter(|r| r.status != Status::Pass && b.status(&r.group, &r.rom) == Some(Status::Pass))
         .map(|r| Regression {
             group: r.group.clone(),
             rom: r.rom.clone(),
             was: Status::Pass,
-            now: r.status,
+            now: Some(r.status),
         })
-        .collect()
+        .collect();
+    let ran: std::collections::HashSet<(&str, &str)> = results
+        .iter()
+        .map(|r| (r.group.as_str(), r.rom.as_str()))
+        .collect();
+    for (group, roms) in &b.results {
+        for (rom, &status) in roms {
+            if status == Status::Pass
+                && !ran.contains(&(group.as_str(), rom.as_str()))
+                && in_scope(group, rom)
+            {
+                out.push(Regression {
+                    group: group.clone(),
+                    rom: rom.clone(),
+                    was: Status::Pass,
+                    now: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Results in the `--gate` tier that don't pass.
@@ -465,7 +504,7 @@ impl Report<'_> {
                     r.group,
                     r.rom,
                     r.was.name(),
-                    r.now.name()
+                    r.now_name()
                 );
             }
             md.push('\n');
@@ -601,17 +640,26 @@ pub mod tests {
             rom_status(&ran, &[C::Pass, C::NoReference]),
             Status::NoReference
         );
-        assert_eq!(
-            rom_status(&ran, &[C::Fail, C::NoReference]),
-            Status::NoReference
-        );
-        // A missing reference wins even over timeout and crash.
+        // A missing reference never hides a failure, timeout or crash:
+        // crash/timeout > fail > no-reference > unsupported > pass.
+        assert_eq!(rom_status(&ran, &[C::Fail, C::NoReference]), Status::Fail);
+        assert_eq!(rom_status(&ran, &[C::NoReference, C::Fail]), Status::Fail);
         let timeout = Outcome::Ran(End::Timeout);
-        assert_eq!(rom_status(&timeout, &[C::NoReference]), Status::NoReference);
+        assert_eq!(rom_status(&timeout, &[C::NoReference]), Status::Timeout);
+        assert_eq!(
+            rom_status(&timeout, &[C::Fail, C::NoReference]),
+            Status::Timeout
+        );
         let panic = Outcome::Panic("x".into());
         assert_eq!(
             rom_status(&panic, &[C::Skipped, C::NoReference]),
-            Status::NoReference
+            Status::Crash
+        );
+        let locked = Outcome::Ran(End::Locked);
+        assert_eq!(rom_status(&locked, &[C::NoReference]), Status::Crash);
+        assert_eq!(
+            rom_status(&Outcome::LoadError("x".into()), &[C::NoReference]),
+            Status::Crash
         );
         assert_eq!(
             rom_status(&Outcome::Ran(End::LdBB), &[C::Pass]),
@@ -689,19 +737,38 @@ pub mod tests {
             // h/a.gb didn't run (partial run): not compared.
             result("new", Tier::Must, "a.gb", Status::Fail),
         ];
-        let r = regressions(Some(&b), &now);
+        // h/a.gb is out of this run's scope.
+        let scope = |g: &str, _: &str| g != "h";
+        let r = regressions(Some(&b), &now, &scope);
         assert_eq!(
             r,
             [Regression {
                 group: "g".into(),
                 rom: "b.gb".into(),
                 was: Status::Pass,
-                now: Status::NoReference
+                now: Some(Status::NoReference)
             }]
         );
-        assert!(regressions(None, &now).is_empty());
+        assert!(regressions(None, &now, &scope).is_empty());
+
+        // In scope (e.g. a full run), a passing key with no result is a
+        // regression; a missing non-passing key (g/c.gb below) is not.
+        let all = |_: &str, _: &str| true;
+        let r = regressions(Some(&b), &now[..2], &all);
+        let missing: Vec<_> = r
+            .iter()
+            .map(|r| (r.group.as_str(), r.rom.as_str(), r.now_name()))
+            .collect();
+        assert_eq!(
+            missing,
+            [("g", "b.gb", "no-reference"), ("h", "a.gb", "missing")]
+        );
+        let json = serde_json::to_value(&r[1]).unwrap();
+        assert_eq!(json["now"], "missing");
+        assert_eq!(json["was"], "pass");
+
         b.results.clear();
-        assert!(regressions(Some(&b), &now).is_empty());
+        assert!(regressions(Some(&b), &now, &all).is_empty());
     }
 
     #[test]
@@ -749,7 +816,7 @@ pub mod tests {
             group: "g".into(),
             rom: "a".into(),
             was: Status::Pass,
-            now: Status::Fail,
+            now: Some(Status::Fail),
         };
         assert!(
             may_update_baseline(&[r])

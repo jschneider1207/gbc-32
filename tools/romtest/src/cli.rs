@@ -17,6 +17,8 @@ usage: romtest --manifest <path> [options]
   --gate <tier>         exit 1 unless every selected ROM in this tier passes (must, should, stretch)
   --jobs <n>            parallel ROM runs (default: number of CPU cores)
   --update-baseline     write acceptance/results/<manifest>.json (full runs only; refused on regressions)
+  --roms-dir <path>     read test ROMs from here instead of test-roms/ (for testing the runner;
+                        still verified against acceptance/test-roms.sha256)
   -h, --help            show this help
 
 Exit codes: 0 ok, 1 regressions or gate failures, 2 runner error.";
@@ -30,6 +32,7 @@ pub struct Args {
     pub gate: Option<Tier>,
     pub jobs: Option<usize>,
     pub update_baseline: bool,
+    pub roms_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -70,6 +73,7 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Command, Strin
         };
         match flag.as_str() {
             "--manifest" => set_once(&mut manifest, PathBuf::from(value()?), &flag)?,
+            "--roms-dir" => set_once(&mut out.roms_dir, PathBuf::from(value()?), &flag)?,
             "--filter" => set_once(&mut out.filter, Glob::new(&value()?)?, &flag)?,
             "--group" => out.groups.push(value()?),
             "--only-check" => {
@@ -146,8 +150,11 @@ mod tests {
             "must",
             "--jobs",
             "3",
+            "--roms-dir",
+            "/tmp/r",
         ])
         .unwrap();
+        assert_eq!(a.roms_dir, Some(PathBuf::from("/tmp/r")));
         assert_eq!(a.manifest, PathBuf::from("m.toml"));
         assert_eq!(a.filter.unwrap().as_str(), "mooneye/**");
         assert_eq!(a.groups, ["a", "b"]);

@@ -2,6 +2,10 @@
 //! (ADR 0007). The runner drives a [`Machine`]; the real one is
 //! `gbc_core::Emulator`, and tests use a scriptable fake so the runner's
 //! logic can be tested without a working CPU.
+//!
+//! Every call into the emulator goes through [`core_call`], the panic
+//! boundary: a panic inside the core becomes [`CoreFailure::Panic`] (status
+//! `crash`), while a panic in the runner's own code propagates (exit 2).
 
 use gbc_core::{
     Buttons, Config, DmgPalettes, Emulator, Events, Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH,
@@ -20,7 +24,9 @@ pub trait Machine {
     fn clock(&self) -> u64;
     fn registers(&self) -> Registers;
     fn serial_byte(&self) -> u8;
-    fn lcd_enabled(&self) -> bool;
+    /// Whether the screen shows white: the LCD is off, or was turned off
+    /// and no frame has completed since.
+    fn screen_blank(&self) -> bool;
 }
 
 impl Machine for Emulator<'_> {
@@ -42,9 +48,25 @@ impl Machine for Emulator<'_> {
     fn serial_byte(&self) -> u8 {
         Emulator::serial_byte(self)
     }
-    fn lcd_enabled(&self) -> bool {
-        Emulator::lcd_enabled(self)
+    fn screen_blank(&self) -> bool {
+        Emulator::screen_blank(self)
     }
+}
+
+/// Why the emulator didn't run to an exit. Both count as `crash`: the ROM
+/// files are hash-verified before anything runs, so a load error is the
+/// emulator's fault too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoreFailure {
+    /// The core rejected the ROM.
+    Load(String),
+    /// The core panicked (message and location).
+    Panic(String),
+}
+
+/// Calls into the emulator core: the only place where panics are caught.
+pub fn core_call<R>(f: impl FnOnce() -> R) -> Result<R, CoreFailure> {
+    crate::panics::catch_panic(f).map_err(CoreFailure::Panic)
 }
 
 /// The "common palette" of the reference screenshots
@@ -142,7 +164,8 @@ pub struct RunState {
     pub frames: u64,
     pub clock: u64,
     pub registers: Option<Registers>,
-    pub lcd_enabled_at_exit: bool,
+    /// [`Machine::screen_blank`] at exit.
+    pub screen_blank_at_exit: bool,
 }
 
 pub fn new_frame() -> Box<Frame> {
@@ -154,38 +177,48 @@ pub fn new_frame() -> Box<Frame> {
 
 impl RunState {
     /// The final frame (acceptance/README.md, "Checks"): the last fully
-    /// drawn frame, or solid white if the LCD is off at exit or no frame
-    /// was completed.
+    /// drawn frame, or solid white if no frame was completed or the screen
+    /// is blank at exit. The screen is blank while the LCD is off and also
+    /// after it is turned back on, until the next completed frame
+    /// (`gbc_core::Emulator::run_until`), so a frame drawn before an
+    /// off/on cycle is never the final frame.
     pub fn final_frame(&self) -> Box<Frame> {
         match &self.last_frame {
-            Some(f) if self.lcd_enabled_at_exit => f.clone(),
+            Some(f) if !self.screen_blank_at_exit => f.clone(),
             _ => new_frame(),
         }
     }
 }
 
 /// Runs `m` (already loaded) according to `plan`, recording into `st`.
-pub fn run<M: Machine + ?Sized>(m: &mut M, plan: &RunPlan, st: &mut RunState) {
+/// Only the `Machine` calls are inside the panic boundary.
+pub fn run<M: Machine + ?Sized>(
+    m: &mut M,
+    plan: &RunPlan,
+    st: &mut RunState,
+) -> Result<(), CoreFailure> {
     let ld_b_b = plan.exit.is_ld_b_b();
     let limit = plan.exit.limit_clocks();
     let mut stop = Events::SERIAL_TX;
     if ld_b_b {
         stop |= Events::LD_B_B;
     }
-    m.set_stop_events(stop);
-    m.set_buttons(Buttons::EMPTY);
+    core_call(|| {
+        m.set_stop_events(stop);
+        m.set_buttons(Buttons::EMPTY);
+    })?;
 
     let mut fb = new_frame();
     let mut next_input = 0;
     let end = loop {
-        let now = m.clock();
+        let now = core_call(|| m.clock())?;
         // Apply input changes once the clock has reached them (runs end on
         // instruction boundaries, so this is the first boundary >= at).
         while let Some(&(at, buttons)) = plan.input.get(next_input) {
             if at > now {
                 break;
             }
-            m.set_buttons(buttons);
+            core_call(|| m.set_buttons(buttons))?;
             next_input += 1;
         }
         if now >= limit {
@@ -195,9 +228,9 @@ pub fn run<M: Machine + ?Sized>(m: &mut M, plan: &RunPlan, st: &mut RunState) {
             .input
             .get(next_input)
             .map_or(limit, |&(at, _)| at.min(limit));
-        let events = m.run_until(target, &mut fb);
+        let events = core_call(|| m.run_until(target, &mut fb))?;
         if events.contains(Events::SERIAL_TX) {
-            st.serial.push(m.serial_byte());
+            st.serial.push(core_call(|| m.serial_byte())?);
         }
         if events.contains(Events::FRAME_READY) {
             match &mut st.last_frame {
@@ -212,29 +245,38 @@ pub fn run<M: Machine + ?Sized>(m: &mut M, plan: &RunPlan, st: &mut RunState) {
         if ld_b_b && events.contains(Events::LD_B_B) {
             break End::LdBB;
         }
-        if events.is_empty() && m.clock() == now {
+        if events.is_empty() && core_call(|| m.clock())? == now {
             break End::NoProgress;
         }
     };
     st.end = Some(end);
-    st.clock = m.clock();
-    st.registers = Some(m.registers());
-    st.lcd_enabled_at_exit = m.lcd_enabled();
+    (st.clock, st.registers, st.screen_blank_at_exit) =
+        core_call(|| (m.clock(), Some(m.registers()), m.screen_blank()))?;
+    Ok(())
 }
 
-/// Runs a ROM on the real core. `Err` is a load error (counted as a crash).
-pub fn run_core(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), String> {
+/// Runs a ROM on the real core.
+pub fn run_core(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), CoreFailure> {
+    let load = |e: &dyn std::fmt::Display| CoreFailure::Load(e.to_string());
+    let ram_size = core_call(|| cart_ram_size(rom))?.map_err(|e| load(&e))?;
     // ROM and cart RAM outlive the emulator, which borrows them.
-    let mut cart_ram = vec![0u8; cart_ram_size(rom).map_err(|e| e.to_string())?];
+    let mut cart_ram = vec![0u8; ram_size];
     let mut slot = Box::<Emulator>::new_uninit();
-    let emu = Emulator::init(&mut slot);
+    let slot_ref = &mut slot;
+    let emu = core_call(move || Emulator::init(slot_ref))?;
     let config = Config {
         dmg_palettes: common_palette(),
     };
-    emu.load(rom, &mut cart_ram, config)
-        .map_err(|e| e.to_string())?;
-    run(emu, plan, st);
-    Ok(())
+    let ram = &mut cart_ram[..];
+    let emu_ref = &mut *emu;
+    core_call(move || {
+        emu_ref
+            .load(rom, ram, config)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    })?
+    .map_err(|e| load(&e))?;
+    run(emu, plan, st)
 }
 
 #[cfg(test)]
@@ -258,7 +300,9 @@ pub mod fake {
 
     /// Advances in 4-clock steps (or `step` clocks); completes a frame
     /// (filled with the frame number) every `FRAME_CLOCKS` while the LCD is
-    /// on; fires scripted actions at given clocks.
+    /// on; fires scripted actions at given clocks. Like the core, turning
+    /// the LCD off abandons the frame in progress and blanks the screen
+    /// until the next completed frame.
     pub struct FakeMachine {
         pub clock: u64,
         pub step: u64,
@@ -272,6 +316,7 @@ pub mod fake {
         pub serial: u8,
         frame_clock: u64,
         frames: u16,
+        blanked: bool,
         stalled: bool,
         locked: bool,
     }
@@ -290,6 +335,7 @@ pub mod fake {
                 serial: 0,
                 frame_clock: 0,
                 frames: 0,
+                blanked: false,
                 stalled: false,
                 locked: false,
             }
@@ -315,7 +361,13 @@ pub mod fake {
                         ev |= Events::CPU_LOCKED;
                     }
                     Action::Panic => panic!("fake emulator panic at {at}"),
-                    Action::LcdOff => self.lcd = false,
+                    Action::LcdOff => {
+                        if self.lcd {
+                            self.blanked = true;
+                            self.frame_clock = 0;
+                        }
+                        self.lcd = false;
+                    }
                     Action::LcdOn => self.lcd = true,
                     Action::Stall => self.stalled = true,
                 }
@@ -325,6 +377,7 @@ pub mod fake {
                 if self.frame_clock >= u64::from(FRAME_CLOCKS) {
                     self.frame_clock -= u64::from(FRAME_CLOCKS);
                     self.frames += 1;
+                    self.blanked = false;
                     frame.fill(self.frames);
                     ev |= Events::FRAME_READY;
                 }
@@ -361,8 +414,8 @@ pub mod fake {
         fn serial_byte(&self) -> u8 {
             self.serial
         }
-        fn lcd_enabled(&self) -> bool {
-            self.lcd
+        fn screen_blank(&self) -> bool {
+            self.blanked || !self.lcd
         }
     }
 }
@@ -382,7 +435,7 @@ mod tests {
 
     fn run_fake(m: &mut FakeMachine, plan: &RunPlan) -> RunState {
         let mut st = RunState::default();
-        run(m, plan, &mut st);
+        run(m, plan, &mut st).unwrap();
         st
     }
 
@@ -476,19 +529,93 @@ mod tests {
         let mut m = FakeMachine::new(vec![(FRAME * 3 / 2, Action::LcdOff)]);
         let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
         assert_eq!(st.frames, 1);
-        assert!(!st.lcd_enabled_at_exit);
+        assert!(st.screen_blank_at_exit);
         assert!(st.final_frame().iter().all(|&p| p == WHITE));
 
         let mut m = FakeMachine::new(vec![]);
         let st = run_fake(&mut m, &plan(Exit::LdBB { timeout_s: 0.001 }));
         assert_eq!(st.frames, 0);
         assert!(st.final_frame().iter().all(|&p| p == WHITE));
+    }
 
-        // LCD turned off and back on: the last completed frame counts.
-        let mut m = FakeMachine::new(vec![(FRAME / 2, Action::LcdOff), (FRAME, Action::LcdOn)]);
+    #[test]
+    fn final_frame_after_lcd_off_and_on() {
+        // Off and on again within one run call after the last FRAME_READY,
+        // with no frame since: the LCD is on at exit, but the screen is
+        // still white (gbc_core::Emulator::run_until), so the final frame
+        // is white, not the frame drawn before the LCD went off.
+        let script = vec![
+            (2 * FRAME + 100, Action::LcdOff),
+            (2 * FRAME + 1000, Action::LcdOn),
+        ];
+        let mut m = FakeMachine::new(script);
         let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
-        assert!(st.frames >= 1);
-        assert!(st.final_frame().iter().all(|&p| p == st.frames as u16));
+        assert_eq!(st.frames, 2);
+        assert!(m.lcd);
+        assert!(st.screen_blank_at_exit);
+        assert!(st.final_frame().iter().all(|&p| p == WHITE));
+
+        // A frame completed after the LCD came back on: that frame counts.
+        // The PPU restarts at line 0, so it completes a frame after LcdOn.
+        let script = vec![(FRAME / 2, Action::LcdOff), (FRAME, Action::LcdOn)];
+        let mut m = FakeMachine::new(script);
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
+        assert_eq!(st.frames, 2);
+        assert!(!st.screen_blank_at_exit);
+        assert!(st.final_frame().iter().all(|&p| p == 2));
+    }
+
+    #[test]
+    fn core_panics_are_core_failures() {
+        let mut m = FakeMachine::new(vec![(4000, Action::Serial(b'x')), (5000, Action::Panic)]);
+        let mut st = RunState::default();
+        let r = run(&mut m, &plan(Exit::RunS { seconds: 1.0 }), &mut st);
+        match r {
+            Err(CoreFailure::Panic(msg)) => assert!(msg.contains("fake emulator panic at 5000")),
+            other => panic!("{other:?}"),
+        }
+        // Output before the panic survives.
+        assert_eq!(st.serial, b"x");
+        assert_eq!(st.end, None);
+    }
+
+    #[test]
+    fn input_with_ld_b_b_exit_and_serial_stops() {
+        // Serial stops, input changes and the LD B,B exit interleave: every
+        // byte is collected, inputs still apply at their times, and the run
+        // ends at LD B,B (not at the timeout or the next input).
+        let mut script: Vec<(u64, Action)> = b"ab"
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| (3000 + 2000 * i as u64, Action::Serial(b)))
+            .collect();
+        script.push((9000, Action::LdBB));
+        let input = [
+            entry(2000, 4000, Buttons::START),
+            entry(8000, 20000, Buttons::A),
+        ];
+        let plan = RunPlan::new(Exit::LdBB { timeout_s: 1.0 }, &input);
+        let mut m = FakeMachine::new(script);
+        m.step = 12;
+        let st = run_fake(&mut m, &plan);
+        assert_eq!(st.end, Some(End::LdBB));
+        assert_eq!(st.serial, b"ab");
+        assert_eq!(st.clock, 9012);
+        assert_eq!(
+            m.button_log,
+            [
+                (0, Buttons::EMPTY),
+                (2004, Buttons::START),
+                (4008, Buttons::EMPTY),
+                (8004, Buttons::A),
+            ]
+        );
+        // A serial byte in the same step as LD B,B is still collected.
+        let script = vec![(600, Action::Serial(b'z')), (604, Action::LdBB)];
+        let mut m = FakeMachine::new(script);
+        m.step = 8;
+        let st = run_fake(&mut m, &RunPlan::new(Exit::LdBB { timeout_s: 1.0 }, &[]));
+        assert_eq!((st.end, st.serial.as_slice()), (Some(End::LdBB), &b"z"[..]));
     }
 
     fn entry(at: u64, release: u64, b: Buttons) -> InputEntry {
@@ -563,7 +690,11 @@ mod tests {
         run_core(&rom, &plan(Exit::RunFrames { frames: 2 }), &mut st).unwrap();
         assert_eq!(st.end, Some(End::Completed));
         assert_eq!(st.clock, 2 * FRAME);
+        assert!(!st.screen_blank_at_exit);
         let mut st = RunState::default();
-        assert!(run_core(&rom[..100], &plan(Exit::RunFrames { frames: 1 }), &mut st).is_err());
+        assert!(matches!(
+            run_core(&rom[..100], &plan(Exit::RunFrames { frames: 1 }), &mut st),
+            Err(CoreFailure::Load(_))
+        ));
     }
 }

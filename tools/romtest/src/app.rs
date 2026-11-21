@@ -1,7 +1,7 @@
 //! Ties it together: manifest → selection → parallel runs → checks →
 //! outputs, baseline and exit code.
 
-use std::cell::{Cell, RefCell};
+use std::ffi::OsString;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -10,15 +10,61 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crate::checks::{self, CheckResult, Ctx};
-use crate::cli::Args;
-use crate::machine::{End, RunPlan, RunState};
+use crate::cli::{self, Args};
+use crate::integrity::{self, RomHashes};
+use crate::machine::{CoreFailure, End, RunPlan, RunState};
 use crate::manifest::{self, Check, Exit, Manifest};
 use crate::report::{
     self, Baseline, GateResult, Outcome, Report, RomResult, Selection, rom_status,
 };
 
-/// Runs one ROM on an emulator. `Err` is a load error (status `crash`).
-pub type Backend = dyn Fn(&[u8], &RunPlan, &mut RunState) -> Result<(), String> + Sync;
+/// Runs one ROM on an emulator. Only the calls into the emulator core are
+/// inside the panic boundary (`machine::core_call`); `Err` is the core
+/// rejecting the ROM or panicking (status `crash`). A panic that escapes
+/// is a runner bug (exit 2).
+pub type Backend = dyn Fn(&[u8], &RunPlan, &mut RunState) -> Result<(), CoreFailure> + Sync;
+
+/// The whole program behind `main`: parses `argv`, runs, and maps every
+/// failure to an exit code. Usage errors, runner errors and panics outside
+/// the emulator core are all exit 2, never 1.
+pub fn main_with(
+    argv: impl IntoIterator<Item = OsString>,
+    root: &Path,
+    backend: &Backend,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let args = match cli::parse(argv) {
+            Ok(cli::Command::Run(args)) => args,
+            Ok(cli::Command::Help) => {
+                let _ = writeln!(out, "{}", cli::USAGE);
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
+        let mut paths = Paths::new(root, &args.manifest)?;
+        if let Some(dir) = &args.roms_dir {
+            paths.roms_dir = dir.clone();
+        }
+        run(&args, &paths, backend, out)
+    }));
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(e)) => {
+            let _ = writeln!(err, "romtest: error: {e}");
+            let _ = writeln!(
+                err,
+                "romtest: runner error, exit 2 (results are not meaningful)"
+            );
+            2
+        }
+        Err(_) => {
+            let _ = writeln!(err, "romtest: internal error (panic in the runner), exit 2");
+            2
+        }
+    }
+}
 
 /// Where the runner reads and writes.
 #[derive(Clone, Debug)]
@@ -29,6 +75,8 @@ pub struct Paths {
     pub out_dir: PathBuf,
     /// `acceptance/results/<manifest>.json`, next to the manifest.
     pub baseline: PathBuf,
+    /// `acceptance/test-roms.sha256`, next to the manifest.
+    pub rom_hashes: PathBuf,
     /// The manifest file name without extension (e.g. `stage1`).
     pub stem: String,
 }
@@ -48,6 +96,7 @@ impl Paths {
             roms_dir: root.join("test-roms"),
             out_dir: root.join("target").join("acceptance"),
             baseline: dir.join("results").join(format!("{stem}.json")),
+            rom_hashes: dir.join(integrity::FILE_NAME),
             stem,
         })
     }
@@ -78,7 +127,52 @@ pub fn run(
     let files = manifest::list_files(&paths.roms_dir)?;
     let resolved = manifest::resolve(&manifest, &files)
         .map_err(|e| format!("{}: {e}", args.manifest.display()))?;
-    let baseline = load_baseline(&paths.baseline)?;
+    let n_jobs = args
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+
+    // Nothing runs until test-roms/ matches the committed integrity list.
+    let hash_start = Instant::now();
+    let rom_hashes = integrity::load(&paths.rom_hashes)?;
+    let verified = integrity::verify(
+        &rom_hashes,
+        &manifest.roms_release,
+        &paths.roms_dir,
+        &files,
+        resolved.iter().flatten().map(String::as_str),
+        n_jobs,
+    )?;
+    let hash_time = hash_start.elapsed();
+
+    let baseline = match load_baseline(&paths.baseline)? {
+        Some(b) if b.roms_release != manifest.roms_release => {
+            if !args.update_baseline {
+                return Err(format!(
+                    "{} is for roms_release {:?}, but the manifest is {:?} \
+                     (rewrite it with --update-baseline)",
+                    paths.baseline.display(),
+                    b.roms_release,
+                    manifest.roms_release
+                ));
+            }
+            // A baseline from another release can't be compared; it is
+            // rewritten below.
+            let _ = writeln!(
+                out,
+                "romtest: baseline is for {:?}; not comparing, rewriting it",
+                b.roms_release
+            );
+            None
+        }
+        b => b,
+    };
+    if args.gate.is_some() && !args.update_baseline && baseline.is_none() {
+        return Err(format!(
+            "no baseline at {}: create one with --update-baseline \
+             (--gate needs it to check for regressions)",
+            paths.baseline.display()
+        ));
+    }
 
     let plans: Vec<RunPlan> = manifest
         .groups
@@ -102,9 +196,6 @@ pub fn run(
     std::fs::create_dir_all(&paths.out_dir)
         .map_err(|e| format!("creating {}: {e}", paths.out_dir.display()))?;
 
-    let n_jobs = args
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     let selection = Selection {
         filter: args.filter.as_ref().map(|f| f.as_str().to_owned()),
         groups: args.groups.clone(),
@@ -117,13 +208,22 @@ pub fn run(
         jobs.len(),
         selection.describe()
     );
+    let _ = writeln!(
+        out,
+        "romtest: verified {} test-roms files ({:.1} MB) against {} in {:.2} s",
+        verified.files,
+        verified.bytes as f64 / 1e6,
+        paths.rom_hashes.display(),
+        hash_time.as_secs_f64()
+    );
 
-    let mut results = execute(&jobs, &manifest, paths, backend, n_jobs)?;
+    let mut results = execute(&jobs, &manifest, paths, &rom_hashes, backend, n_jobs)?;
     results.sort_by(|a, b| (a.group_index, &a.rom).cmp(&(b.group_index, &b.rom)));
     let wall = wall_start.elapsed();
 
     let summary = report::summarize(&results);
-    let regressions = report::regressions(baseline.as_ref(), &results);
+    let in_scope = |group: &str, rom: &str| selected(&manifest, args, group, rom);
+    let regressions = report::regressions(baseline.as_ref(), &results, &in_scope);
     let gate = args.gate.map(|tier| {
         let failures = report::gate_failures(&results, tier).len();
         GateResult {
@@ -204,6 +304,23 @@ fn load_baseline(path: &Path) -> Result<Option<Baseline>, String> {
     }
 }
 
+/// Whether `(group, rom)` is inside the `--group`/`--filter`/`--only-check`
+/// selection. Used for baseline entries, whose ROM or group may no longer
+/// exist: a group that is not in the manifest counts as selected unless
+/// `--group` leaves it out.
+fn selected(manifest: &Manifest, args: &Args, group: &str, rom: &str) -> bool {
+    let group_ok = args.groups.is_empty() || args.groups.iter().any(|g| g == group);
+    let rom_ok = args.filter.as_ref().is_none_or(|f| f.matches(rom));
+    let checks_ok = args.only_check.is_none_or(|kind| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.id == group)
+            .is_none_or(|g| g.checks.iter().any(|c| c.kind() == kind))
+    });
+    group_ok && rom_ok && checks_ok
+}
+
 /// Applies `--group`, `--filter` and `--only-check`.
 fn select<'a>(
     manifest: &'a Manifest,
@@ -248,9 +365,20 @@ fn execute(
     jobs: &[Job<'_>],
     manifest: &Manifest,
     paths: &Paths,
+    rom_hashes: &RomHashes,
     backend: &Backend,
     n_jobs: usize,
 ) -> Result<Vec<RomResult>, String> {
+    /// Stops the other workers if this one unwinds (a runner bug; the
+    /// panic itself reaches `main_with` when the scope joins).
+    struct AbortOnPanic<'a>(&'a AtomicBool);
+    impl Drop for AbortOnPanic<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+    }
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].plan.exit.limit_clocks()));
     let next = AtomicUsize::new(0);
@@ -260,10 +388,11 @@ fn execute(
     std::thread::scope(|s| {
         for _ in 0..n_jobs.min(jobs.len()) {
             s.spawn(|| {
+                let _guard = AbortOnPanic(&abort);
                 while !abort.load(Ordering::Relaxed) {
                     let k = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&i) = order.get(k) else { break };
-                    match run_job(&jobs[i], manifest, paths, backend) {
+                    match run_job(&jobs[i], manifest, paths, rom_hashes, backend) {
                         Ok(r) => results.lock().expect("results lock").push(r),
                         Err(e) => {
                             abort.store(true, Ordering::Relaxed);
@@ -284,6 +413,7 @@ fn run_job(
     job: &Job<'_>,
     manifest: &Manifest,
     paths: &Paths,
+    rom_hashes: &RomHashes,
     backend: &Backend,
 ) -> Result<RomResult, String> {
     let start = Instant::now();
@@ -294,12 +424,12 @@ fn run_job(
 
     let mut st = RunState::default();
     let outcome =
-        match catch_panic(|| backend(&rom, job.plan, &mut st)) {
-            Ok(Ok(())) => Outcome::Ran(st.end.ok_or_else(|| {
+        match backend(&rom, job.plan, &mut st) {
+            Ok(()) => Outcome::Ran(st.end.ok_or_else(|| {
                 format!("internal error: {} ended without an exit reason", job.rom)
             })?),
-            Ok(Err(e)) => Outcome::LoadError(e),
-            Err(msg) => Outcome::Panic(msg),
+            Err(CoreFailure::Load(e)) => Outcome::LoadError(e),
+            Err(CoreFailure::Panic(msg)) => Outcome::Panic(msg),
         };
 
     let detail = match &outcome {
@@ -337,18 +467,19 @@ fn run_job(
             registers: st.registers,
             final_frame: &frame,
             failure_pngs: &failed,
+            listed: &|p| rom_hashes.contains(p),
         };
         job.checks
             .iter()
             .map(|&(i, c)| checks::evaluate(c, i, &ctx))
             .collect::<Result<_, _>>()?
     } else {
-        // The emulator never reached an exit, but a missing reference is
-        // still reported (it decides the status; see `rom_status`).
+        // The emulator never reached an exit (status crash); a missing
+        // reference is still reported in the check results.
         job.checks
             .iter()
             .map(|&(_, c)| checks::not_run(c, &paths.roms_dir, &job.rom))
-            .collect()
+            .collect::<Result<_, _>>()?
     };
     let statuses: Vec<_> = check_results.iter().map(|c| c.status).collect();
     let status = rom_status(&outcome, &statuses);
@@ -382,7 +513,7 @@ fn print_summary(out: &mut dyn Write, rep: &Report<'_>, have_baseline: bool, bas
                 r.group,
                 r.rom,
                 r.was.name(),
-                r.now.name()
+                r.now_name()
             );
         }
     } else if have_baseline {
@@ -458,44 +589,8 @@ fn fmt_pct(s: Option<f64>) -> String {
     s.map_or("n/a".into(), |s| format!("{:.1}%", s * 100.0))
 }
 
-// ------------------------------------------------------- panic capture ---
-
-thread_local! {
-    static CAPTURING: Cell<bool> = const { Cell::new(false) };
-    static LAST_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Installs a panic hook that records panics inside [`catch_panic`]
-/// (message and location) instead of printing them; other panics go to the
-/// default hook.
-pub fn install_panic_hook() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if CAPTURING.with(Cell::get) {
-            LAST_PANIC.with(|p| *p.borrow_mut() = Some(info.to_string().replace('\n', " ")));
-        } else {
-            default(info);
-        }
-    }));
-}
-
-/// Runs `f`, turning a panic into `Err(message)`.
-fn catch_panic<R>(f: impl FnOnce() -> R) -> Result<R, String> {
-    LAST_PANIC.with(|p| p.borrow_mut().take());
-    CAPTURING.with(|c| c.set(true));
-    let r = catch_unwind(AssertUnwindSafe(f));
-    CAPTURING.with(|c| c.set(false));
-    r.map_err(|payload| {
-        LAST_PANIC
-            .with(|p| p.borrow_mut().take())
-            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "panic with a non-string payload".into())
-    })
-}
-
 /// The real backend.
-pub fn core_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), String> {
+pub fn core_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), CoreFailure> {
     crate::machine::run_core(rom, plan, st)
 }
 

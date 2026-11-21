@@ -14,6 +14,7 @@ gbc-core = { path = "../../crates/gbc-core" }
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 toml = "1.2.2"
 
 [dev-dependencies]

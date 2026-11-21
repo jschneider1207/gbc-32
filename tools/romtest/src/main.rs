@@ -3,51 +3,37 @@
 //! Exit codes: 0 = ran, no regressions, `--gate` tier passing; 1 = ran, but
 //! regressions or gate failures; 2 = runner error (results meaningless).
 
+// Emulator panics are caught per ROM and become `crash`; with
+// `panic = "abort"` one would kill the whole run instead.
+#[cfg(not(panic = "unwind"))]
+compile_error!(
+    "romtest must be built with panic = \"unwind\" (acceptance/README.md, \"Statuses\"): \
+     it catches emulator panics per ROM"
+);
+
 mod app;
 mod checks;
 mod cli;
 mod glob;
+mod integrity;
 mod machine;
 mod manifest;
+mod panics;
 mod report;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    app::install_panic_hook();
-    // Any panic outside a ROM run is a runner bug: exit 2, never 1.
-    let code = std::panic::catch_unwind(real_main).unwrap_or_else(|_| {
-        eprintln!("romtest: internal error (panic)");
-        2
-    });
+    panics::install_hook();
+    let code = app::main_with(
+        std::env::args_os().skip(1),
+        &workspace_root(),
+        &app::core_backend,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    );
     ExitCode::from(code)
-}
-
-fn real_main() -> u8 {
-    let args = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(cli::Command::Run(args)) => args,
-        Ok(cli::Command::Help) => {
-            println!("{}", cli::USAGE);
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("romtest: {e}");
-            return 2;
-        }
-    };
-    let result = app::Paths::new(&workspace_root(), &args.manifest).and_then(|paths| {
-        let mut out = std::io::stdout().lock();
-        app::run(&args, &paths, &app::core_backend, &mut out)
-    });
-    match result {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("romtest: error: {e}");
-            eprintln!("romtest: runner error, exit 2 (results are not meaningful)");
-            2
-        }
-    }
 }
 
 /// The workspace root (`test-roms/` and `target/` live there), found from

@@ -451,10 +451,12 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
             screenshot: Some(s),
             ..
         } => {
-            // Validate the template now; ROM-specific values come later.
-            let probe = expand_template(&s, "d/e", "x");
-            if s.is_empty() || probe.starts_with('/') || probe.split('/').any(|p| p == "..") {
-                return Err(format!("bad screenshot path {s:?}"));
+            // Validate the template now, for a ROM in a subdirectory and
+            // for one at the test-roms/ root (empty `{dir}`); expansion
+            // checks again for every ROM.
+            for (dir, stem) in [("d/e", "x"), ("", "x")] {
+                expand_template(&s, dir, stem)
+                    .map_err(|e| format!("bad screenshot path {s:?}: {e}"))?;
             }
             if s.replace("{dir}", "")
                 .replace("{stem}", "")
@@ -486,9 +488,44 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
     })
 }
 
-/// Expands `{dir}` and `{stem}` for a ROM at `dir/stem.ext`.
-pub fn expand_template(template: &str, dir: &str, stem: &str) -> String {
-    template.replace("{dir}", dir).replace("{stem}", stem)
+/// Expands `{dir}` and `{stem}` for a ROM at `dir/stem.ext` (`dir` is
+/// empty for a ROM at the root of `test-roms/`; then `{dir}/` expands to
+/// nothing, so `{dir}/{stem}.png` is `stem.png`, not `/stem.png`). The
+/// result must be a path inside `test-roms/`: anything absolute, with an
+/// empty or `..` segment, or empty is an error (a runner error, exit 2).
+pub fn expand_template(template: &str, dir: &str, stem: &str) -> Result<String, String> {
+    // One pass, so text inside `dir` or `stem` is never expanded again.
+    let mut out = String::with_capacity(template.len() + dir.len() + stem.len());
+    let mut rest = template;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(r) = rest.strip_prefix("{dir}") {
+            out.push_str(dir);
+            rest = r;
+            if dir.is_empty() {
+                rest = rest.strip_prefix('/').unwrap_or(rest);
+            }
+        } else if let Some(r) = rest.strip_prefix("{stem}") {
+            out.push_str(stem);
+            rest = r;
+        } else {
+            out.push('{');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    let bad = out.is_empty()
+        || out.starts_with('/')
+        || out.starts_with('\\')
+        || Path::new(&out).has_root()
+        || out.split('/').any(|seg| seg.is_empty() || seg == "..");
+    if bad {
+        return Err(format!(
+            "{template:?} expands to {out:?}, which is not a relative path inside test-roms/"
+        ));
+    }
+    Ok(out)
 }
 
 // ----------------------------------------------------------- resolution ---
@@ -865,9 +902,51 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
 
     #[test]
     fn template_expansion() {
+        let x = |t: &str, d: &str, s: &str| expand_template(t, d, s);
         assert_eq!(
-            expand_template("{dir}/{stem}-cgbBCE.png", "age/m3", "m3-bg"),
+            x("{dir}/{stem}-cgbBCE.png", "age/m3", "m3-bg").unwrap(),
             "age/m3/m3-bg-cgbBCE.png"
         );
+        // A ROM at the test-roms/ root: `{dir}` is empty and the path stays
+        // relative.
+        assert_eq!(x("{dir}/{stem}.png", "", "t").unwrap(), "t.png");
+        assert_eq!(x("refs/{dir}/{stem}.png", "", "t").unwrap(), "refs/t.png");
+        assert_eq!(x("{dir}{stem}.png", "", "t").unwrap(), "t.png");
+        // Expanded text is not expanded again.
+        assert_eq!(
+            x("{dir}/{stem}.png", "{stem}", "t").unwrap(),
+            "{stem}/t.png"
+        );
+        // Anything that leaves test-roms/ is rejected.
+        for (t, d) in [
+            ("/{stem}.png", ""),
+            ("/{dir}/{stem}.png", ""),
+            ("{dir}/../{stem}.png", "a"),
+            ("../{stem}.png", "a"),
+            ("{dir}//{stem}.png", "a"),
+            ("{dir}", ""),
+        ] {
+            let e = x(t, d, "t").unwrap_err();
+            assert!(e.contains("not a relative path"), "{t:?} {d:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn screenshot_templates_are_validated_for_root_roms_too() {
+        // The parse-time probe covers a ROM in a subdirectory and one at
+        // the root: `{dir}` alone is fine for the first, empty for the second.
+        let e = err(&group(
+            &MIN.replace("fibonacci = true", "screenshot = \"{dir}/../x.png\""),
+        ));
+        assert!(e.contains("bad screenshot path"), "{e}");
+        let e = err(&group(
+            &MIN.replace("fibonacci = true", "screenshot = \"{dir}\""),
+        ));
+        assert!(e.contains("bad screenshot path"), "{e}");
+        parse(&group(&MIN.replace(
+            "fibonacci = true",
+            "screenshot = \"{dir}/{stem}.png\"",
+        )))
+        .unwrap();
     }
 }

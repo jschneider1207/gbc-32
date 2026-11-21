@@ -1,4 +1,4 @@
-//! Path globs for maniflet expanded = expand_braces(pattern).map_err(|e| format!("bad glob {pattern:?}: {e}"))?;st `roms`/`exclude` and `--filter`
+//! Path globs for manifest `roms`/`exclude` and `--filter`
 //! (acceptance/README.md, "Manifest schema"):
 //!
 //! - `*` matches any run of characters within one path segment (not `/`),

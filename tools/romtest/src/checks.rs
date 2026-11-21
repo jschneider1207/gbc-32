@@ -60,12 +60,13 @@ impl CheckResult {
 }
 
 /// The result for a check whose ROM never reached an exit (load error or
-/// panic): `no-reference` for a screenshot whose PNG is missing, otherwise
-/// `skipped`.
-pub fn not_run(check: &Check, roms_dir: &Path, rom: &str) -> CheckResult {
+/// panic, so the ROM's status is `crash`): `no-reference` for a screenshot
+/// whose PNG is missing (for information), otherwise `skipped`. `Err` is a
+/// runner error (a bad expanded path).
+pub fn not_run(check: &Check, roms_dir: &Path, rom: &str) -> Result<CheckResult, String> {
     if let Check::Screenshot(template) = check {
         let (dir, stem) = dir_and_stem(rom);
-        let reference = expand_template(template, dir, stem);
+        let reference = expand_template(template, dir, stem)?;
         if !roms_dir.join(&reference).exists() {
             let mut r = CheckResult::new(
                 check,
@@ -73,10 +74,10 @@ pub fn not_run(check: &Check, roms_dir: &Path, rom: &str) -> CheckResult {
                 format!("{reference} not found"),
             );
             r.reference = Some(reference);
-            return r;
+            return Ok(r);
         }
     }
-    CheckResult::new(check, CheckStatus::Skipped, String::new())
+    Ok(CheckResult::new(check, CheckStatus::Skipped, String::new()))
 }
 
 /// An 8-bit RGB image, row-major.
@@ -206,6 +207,9 @@ pub struct Ctx<'a> {
     /// Where to write failure images: `(actual, diff)` paths for this
     /// check, relative to the output root, or `None` to skip writing.
     pub failure_pngs: &'a dyn Fn(usize) -> Option<(PathBuf, String, String)>,
+    /// Whether a path (relative to `roms_dir`) is in the integrity list
+    /// (and therefore hash-verified). A check may only load listed files.
+    pub listed: &'a dyn Fn(&str) -> bool,
 }
 
 /// The ROM's directory and file stem, for `{dir}` and `{stem}`.
@@ -273,15 +277,22 @@ fn screenshot(
     ctx: &Ctx<'_>,
 ) -> Result<CheckResult, String> {
     let (dir, stem) = dir_and_stem(ctx.rom);
-    let reference = expand_template(template, dir, stem);
+    let reference = expand_template(template, dir, stem)?;
     let path = ctx.roms_dir.join(&reference);
     let mut result = match std::fs::read(&path) {
+        // A listed PNG can't be missing here (the integrity check runs
+        // first), so this is a reference that upstream doesn't provide.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => CheckResult::new(
             check,
             CheckStatus::NoReference,
             format!("{reference} not found"),
         ),
         Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        Ok(_) if !(ctx.listed)(&reference) => {
+            return Err(format!(
+                "reference {reference} is not in the test-roms integrity list, so it can't be trusted"
+            ));
+        }
         Ok(bytes) => {
             let expected =
                 decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
@@ -340,6 +351,10 @@ mod tests {
         None
     }
 
+    fn all_listed(_: &str) -> bool {
+        true
+    }
+
     fn ctx<'a>(roms_dir: &'a Path, rom: &'a str, serial: &'a [u8], frame: &'a Frame) -> Ctx<'a> {
         Ctx {
             roms_dir,
@@ -348,6 +363,7 @@ mod tests {
             registers: Some(Registers::default()),
             final_frame: frame,
             failure_pngs: &no_pngs,
+            listed: &all_listed,
         }
     }
 
@@ -489,6 +505,33 @@ mod tests {
         std::fs::write(dir.path().join("bad.png"), b"not a png").unwrap();
         let c3 = Check::Screenshot("bad.png".into());
         assert!(evaluate(&c3, 0, &ctx(dir.path(), "t.gb", b"", &frame)).is_err());
+
+        // So is a reference that isn't in the integrity list.
+        let mut cx = ctx(dir.path(), "suite/sub/t.gb", b"", &frame);
+        let only_small = |p: &str| p == "small.png";
+        cx.listed = &only_small;
+        let e = evaluate(&c, 0, &cx).unwrap_err();
+        assert!(e.contains("not in the test-roms integrity list"), "{e}");
+    }
+
+    #[test]
+    fn screenshot_for_a_rom_at_the_root() {
+        // `{dir}` is empty for a ROM directly in test-roms/: the reference
+        // is `t.png`, not the absolute `/t.png`.
+        let dir = tempfile::tempdir().unwrap();
+        let frame = new_frame();
+        write_ref(dir.path(), "t.png", &frame_to_rgb(&frame));
+        let c = Check::Screenshot("{dir}/{stem}.png".into());
+        let r = evaluate(&c, 0, &ctx(dir.path(), "t.gb", b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.reference.as_deref(), Some("t.png"));
+        let r = not_run(&c, dir.path(), "u.gb").unwrap();
+        assert_eq!(r.reference.as_deref(), Some("u.png"));
+        assert_eq!(r.status, CheckStatus::NoReference);
+        // A path that escapes test-roms/ is a runner error.
+        let c = Check::Screenshot("{dir}/../{stem}.png".into());
+        assert!(evaluate(&c, 0, &ctx(dir.path(), "t.gb", b"", &frame)).is_err());
+        assert!(not_run(&c, dir.path(), "a/t.gb").is_err());
     }
 
     #[test]
@@ -533,6 +576,161 @@ mod tests {
             decode_png(&pal).unwrap().data,
             [[0, 0, 0], [0x7B, 0xFF, 0x31], [0, 0x63, 0xC6]]
         );
+    }
+
+    /// Encodes a `w`x`h` PNG; `setup` adjusts the encoder.
+    fn encode_with(
+        w: u32,
+        h: u32,
+        color: png::ColorType,
+        depth: png::BitDepth,
+        data: &[u8],
+        setup: impl FnOnce(&mut png::Encoder<'_, &mut Vec<u8>>),
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(color);
+        enc.set_depth(depth);
+        setup(&mut enc);
+        let mut wr = enc.write_header().unwrap();
+        wr.write_image_data(data).unwrap();
+        wr.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn decodes_16_bit_pngs() {
+        // 16-bit samples are reduced to their high byte.
+        let rgb16 = encode_with(
+            2,
+            1,
+            png::ColorType::Rgb,
+            png::BitDepth::Sixteen,
+            &[
+                0x12, 0x34, 0xAB, 0xCD, 0xFF, 0xFF, 0, 0, 0x80, 0x7F, 0x01, 0xFF,
+            ],
+            |_| {},
+        );
+        assert_eq!(
+            decode_png(&rgb16).unwrap().data,
+            [[0x12, 0xAB, 0xFF], [0, 0x80, 0x01]]
+        );
+        let gray16 = encode_with(
+            1,
+            2,
+            png::ColorType::Grayscale,
+            png::BitDepth::Sixteen,
+            &[0x7B, 0x00, 0xFF, 0xFF],
+            |_| {},
+        );
+        assert_eq!(decode_png(&gray16).unwrap().data, [[0x7B; 3], [0xFF; 3]]);
+    }
+
+    #[test]
+    fn decodes_gray_alpha_pngs() {
+        let ga = encode_with(
+            2,
+            1,
+            png::ColorType::GrayscaleAlpha,
+            png::BitDepth::Eight,
+            &[0x63, 0x00, 0xC6, 0xFF],
+            |_| {},
+        );
+        let img = decode_png(&ga).unwrap();
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.data, [[0x63; 3], [0xC6; 3]]);
+    }
+
+    #[test]
+    fn decodes_indexed_pngs_with_transparency() {
+        // tRNS makes EXPAND produce RGBA; alpha is dropped, colors kept.
+        let pal = encode_with(
+            2,
+            2,
+            png::ColorType::Indexed,
+            png::BitDepth::Eight,
+            &[0, 1, 2, 0],
+            |e| {
+                e.set_palette(vec![0xFF, 0xFF, 0xFF, 0x94, 0x39, 0x39, 0, 0, 0]);
+                e.set_trns(vec![0x00, 0x80]);
+            },
+        );
+        assert_eq!(
+            decode_png(&pal).unwrap().data,
+            [[0xFF; 3], [0x94, 0x39, 0x39], [0; 3], [0xFF; 3]]
+        );
+    }
+
+    /// zlib stream with stored (uncompressed) deflate blocks.
+    fn zlib_stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        let chunks: Vec<&[u8]> = data.chunks(0xFFFF).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            out.push(u8::from(i + 1 == chunks.len()));
+            let len = c.len() as u16;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(c);
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in data {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn decodes_interlaced_pngs() {
+        // The png encoder can't interlace, so build the Adam7 passes by
+        // hand (filter type 0 on every row). A distinct color per pixel
+        // catches any row or column mix-up in de-interlacing.
+        let pixel = |x: usize, y: usize| [x as u8, y as u8, ((x * 7 + y) % 251) as u8];
+        const PASSES: [(usize, usize, usize, usize); 7] = [
+            (0, 0, 8, 8),
+            (4, 0, 8, 8),
+            (0, 4, 4, 8),
+            (2, 0, 4, 4),
+            (0, 2, 2, 4),
+            (1, 0, 2, 2),
+            (0, 1, 1, 2),
+        ];
+        let mut raw = Vec::new();
+        for (x0, y0, dx, dy) in PASSES {
+            for y in (y0..H).step_by(dy) {
+                raw.push(0); // filter: none
+                for x in (x0..W).step_by(dx) {
+                    raw.extend_from_slice(&pixel(x, y));
+                }
+            }
+        }
+        let mut info = png::Info::with_size(W as u32, H as u32);
+        info.color_type = png::ColorType::Rgb;
+        info.bit_depth = png::BitDepth::Eight;
+        info.interlaced = true;
+        let mut out = Vec::new();
+        let mut wr = png::Encoder::with_info(&mut out, info)
+            .unwrap()
+            .write_header()
+            .unwrap();
+        wr.write_chunk(png::chunk::IDAT, &zlib_stored(&raw))
+            .unwrap();
+        wr.finish().unwrap();
+
+        let interlaced = png::Decoder::new(Cursor::new(&out[..]))
+            .read_info()
+            .unwrap()
+            .info()
+            .interlaced;
+        assert!(interlaced, "the test image must actually be interlaced");
+        let img = decode_png(&out).unwrap();
+        assert_eq!((img.width, img.height), (W, H));
+        for y in 0..H {
+            for x in 0..W {
+                assert_eq!(img.data[y * W + x], pixel(x, y), "({x}, {y})");
+            }
+        }
     }
 
     #[test]
