@@ -10,6 +10,7 @@ don't count.
 |---|---|---|
 | `acceptance/*.toml` (manifests) | Human | Read only. Propose changes in `docs/STATUS.md` → "Needs human". |
 | Expected screenshots in `test-roms/` | Upstream | Never modify. |
+| `acceptance/test-roms.sha256` (integrity list) | Human | Read only. Regenerated with `scripts/hash-test-roms.sh` only when the human pins a new test-ROM release, never to make a run pass. |
 | `acceptance/results/*.json` (baselines) | Agent | Update only via `--update-baseline`, which refuses if anything regressed. |
 | Runner implementation (`tools/romtest`) | Agent | Change freely, as long as it still follows this contract. |
 
@@ -22,9 +23,22 @@ cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter <g
 - `--filter <glob>`: run only the ROMs whose path matches the glob. This selects every group containing that path (e.g. all three rtc3test groups). For development and milestone checks; the gate never uses it.
 - `--group <id>`: run only the named group (can be repeated).
 - `--only-check <kind>`: evaluate only checks of that kind (`serial`, `screenshot`, ...); ignore the rest. For milestone checks that come before a subsystem exists (e.g. M1 serial output before the PPU). The gate never uses it.
-- `--gate <tier>`: fail if any ROM in that tier doesn't pass.
+- `--gate <tier>`: fail if any ROM in that tier doesn't pass (`no-reference` counts as not passing). Requires a baseline (exit 2 without one). Combined with `--filter`, `--group` or `--only-check`, only the selected ROMs (and checks) in that tier are scored; milestone acceptance commands rely on this, and the gate script never passes a selection. A gated tier with no selected ROM is exit 2, not a vacuous pass.
 - `--jobs N`: run ROMs in parallel. Defaults to the number of CPU cores. Each ROM still runs on its own single-threaded emulator instance.
 - `--update-baseline`: write the committed baseline. Refused if any ROM regressed, or if combined with `--filter`, `--group` or `--only-check`. The baseline must always cover the whole manifest. If no baseline exists yet, this creates one.
+- `--allow-removed`: only together with `--update-baseline`. Drops baseline entries whose `(group, ROM)` no longer exists in the manifest, printing each one. Still refused on any other regression.
+- `--roms-dir <path>`: use another copy of the test ROMs instead of `test-roms/` (for testing the runner). It is verified against the integrity list exactly like `test-roms/`.
+- `-h`/`--help`: prints usage and exits 0 only as the sole argument; combined with anything else it is a usage error (exit 2).
+
+### Integrity of `test-roms/`
+
+`acceptance/test-roms.sha256` lists the SHA-256 of every file under
+`test-roms/` with a `# release: <version>` header. Before running anything,
+the runner checks that the list's release equals `roms_release`, that every
+listed file exists and matches, and that every ROM matched by a manifest
+glob is listed. Every ROM and reference PNG is hashed again from the exact
+bytes loaded. Any mismatch, missing file or unlisted file is exit 2. This
+stops a deleted or altered ROM or PNG from silently changing results.
 
 ### Exit codes
 
@@ -32,7 +46,7 @@ cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter <g
 |---|---|
 | 0 | Ran successfully; no regressions; `--gate` tier (if given) all passing |
 | 1 | Ran successfully, but there are regressions or the `--gate` tier has failures |
-| 2 | Runner error: bad manifest, missing ROM, I/O failure, or an internal bug. The results are meaningless. |
+| 2 | Runner error: bad manifest, missing ROM, integrity-list mismatch, I/O failure, `--gate` without a baseline, a baseline from another `roms_release` (unless `--update-baseline`), a usage error, or an internal bug (a panic in the runner's own code, as opposed to inside the emulator core). The results are meaningless. |
 
 The gate treats 1 and 2 differently, so a broken runner can never look like
 ROMs simply failing.
@@ -56,7 +70,9 @@ Top level: `roms_release` (must equal `test-roms/.version`, else exit 2),
 button in `press` (`a`, `b`, `select`, `start`, `up`, `down`, `left`,
 `right`) at emulated time `at_s` and releases them at `at_s + hold_s`. Times
 are rounded down to the nearest M-cycle. Overlapping entries combine: a
-button is held while any entry is holding it.
+button is held while any entry is holding it. (Until stage 1 M2 adds
+scheduled input changes to the core, a change lands at the first
+instruction boundary at or after its M-cycle.)
 
 For every ROM matched by every group in the manifest, the runner:
 
@@ -84,7 +100,7 @@ results.
 | Key | Passes when |
 |---|---|
 | `serial = "text"` | Bytes written to the serial port (SB/SC transfers) contain `text`. |
-| `screenshot = "path"` | The final frame matches the PNG exactly. `{dir}` and `{stem}` expand to the ROM's directory and file stem. Missing PNG → `no-reference`. The **final frame** is the last fully drawn 160×144 frame before exit (completed at the start of VBlank). If the LCD is off at exit, the frame is solid white. |
+| `screenshot = "path"` | The final frame matches the PNG exactly. `{dir}` and `{stem}` expand to the ROM's directory and file stem. Missing PNG → `no-reference`. The **final frame** is the last fully drawn 160×144 frame before exit (completed at the start of VBlank). The frame is solid white while the screen is blank: if the LCD is off at exit, if it was turned off since the last completed frame, if no frame has completed, or if the only frame completed since the LCD was turned back on is the first one (hardware doesn't display that frame; SameBoy `frame_skip`). |
 | `fibonacci = true` | B=3, C=5, D=8, E=13, H=21, L=34 at exit. |
 | `gambatte = true` | Gambatte rules from the file name: `_out<hex>` → on-screen hex pattern, `_outaudio0/1` → silence/sound, sibling `.png` → screenshot. See the upstream `testrunner.cpp` (pokemon-speedrunning/gambatte-core @ d819bad196). |
 
@@ -115,6 +131,12 @@ represented exactly in RGB555. The runner converts RGB555 to RGB888 with
 | `unsupported` | The runner doesn't implement this check kind yet | fail |
 | `no-reference` | Expected PNG missing | excluded |
 
+When several apply, precedence is `crash`/`timeout` > `fail` >
+`unsupported` > `no-reference` > `pass`. So a missing PNG never hides a
+crash, a timeout or another failing or unsupported check: `no-reference`
+applies only when every other check passed. A ROM whose `load` is rejected
+by the core, or whose emulator stops advancing time, is a `crash`.
+
 The runner must catch panics per ROM, so host builds need unwinding panics.
 Don't set `panic = "abort"` in workspace profiles used by `romtest`.
 
@@ -135,12 +157,24 @@ tier score = passed / (total - no_reference)
 overall    = (3·must + 2·should + 1·stretch) / 6       (tier scores, 0–100%)
 ```
 
+If a tier has no scored ROM (a partial run, or a tier that is entirely
+`no-reference`), its score is undefined, and `overall` sums `weight × score`
+over the tiers that have one, divided by the sum of their weights. With
+every tier scored, this is exactly the formula above.
+
 ### Regressions
 
 Any `(group id, ROM)` whose baseline status is `pass` and whose current
 status is anything else is a **regression**. The runner prints regressions
 first and exits 1 if there are any. With `--filter`, `--group` or
 `--only-check`, only the ROMs and checks that actually ran are compared.
+
+A baseline entry with no current result also counts as a regression (shown
+as `<status> -> missing`):
+- In a full run (no selection), every baseline entry is in scope, whatever
+  its status. Such entries can only be dropped with
+  `--update-baseline --allow-removed`.
+- In a partial run, an in-scope entry whose baseline status was `pass`.
 
 ### Runtime
 
@@ -159,9 +193,12 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
 2. `cargo clippy --workspace --all-targets -- -D warnings` is clean
 3. `cargo test --workspace` passes
 4. `gbc-core` builds for `thumbv7em-none-eabihf`, which enforces `no_std`
-   because that target has no `std`. Separately, `alloc` is forbidden:
-   no `extern crate alloc` anywhere in `crates/gbc-core/src`. Test code may
-   use `std` as long as it's inside `#[cfg(test)]`.
+   because that target has no `std`. Separately, `alloc` is forbidden
+   anywhere in `crates/gbc-core/src` (a whitespace- and line-break-tolerant
+   search for `extern crate alloc`, `use alloc` and `alloc::`), and
+   `crates/gbc-core/tests/hard_rules.rs` must exist and pass: `std` only
+   inside `#[cfg(test)]` modules, no `#[path]` or `include!`, `#![no_std]`
+   present, and no dependencies of any kind in the core's `Cargo.toml`.
 5. The runner exits 0 with `--gate must` on the full manifest: every `must`
    ROM passes and there are no regressions against
    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a

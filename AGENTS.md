@@ -46,8 +46,9 @@ missed.
 
 **Escalate**: add it to the "Needs human" list in `docs/STATUS.md`, then
 continue with other work. Stop only if nothing else is unblocked.
-- Any change to `acceptance/*.toml`, the gate scripts, or expected
-  screenshots, including "this test is wrong, exclude it"
+- Any change to `acceptance/*.toml`, `acceptance/test-roms.sha256`, the
+  gate scripts, or expected screenshots, including "this test is wrong,
+  exclude it"
 - Changes to stage scope, goals in `README.md`, or an Accepted ADR's decision
 - Adding a dependency to `gbc-core`
 - Declaring a **stage** complete (milestones close automatically when their gate passes)

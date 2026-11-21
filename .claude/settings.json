@@ -19,7 +19,13 @@
     ],
     "ask": [
       "Edit(/acceptance/*.toml)",
-      "Edit(/scripts/gate-*.sh)"
+      "Edit(/acceptance/test-roms.sha256)",
+      "Edit(/scripts/gate-*.sh)",
+      "Edit(/scripts/hash-test-roms.sh)",
+      "Bash(./scripts/hash-test-roms.sh*)",
+      "Bash(scripts/hash-test-roms.sh*)",
+      "Bash(bash scripts/hash-test-roms.sh*)",
+      "Bash(bash ./scripts/hash-test-roms.sh*)"
     ],
     "deny": [
       "Bash(git push *)",
