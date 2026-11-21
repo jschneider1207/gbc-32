@@ -366,6 +366,9 @@ impl<'a> Emulator<'a> {
     /// screen should be shown as white ([`WHITE`]); keep showing that until
     /// the next `FRAME_READY` after the LCD is turned back on. The buffer
     /// may be swapped while the LCD is off, as nothing is being drawn.
+    /// [`Emulator::screen_blank`] says whether that white screen is
+    /// showing; unlike polling `lcd_enabled` after each call, it also
+    /// catches the LCD going off and back on within one call.
     ///
     /// # Audio
     ///
@@ -439,6 +442,18 @@ impl<'a> Emulator<'a> {
     #[inline]
     pub fn lcd_enabled(&self) -> bool {
         self.hw.ppu.lcd_enabled()
+    }
+
+    /// Whether the screen is blank (white, [`WHITE`]): true while the LCD
+    /// is off, and after it is turned back on until the next
+    /// [`Events::FRAME_READY`]. When false, the screen shows the frame of
+    /// the last `FRAME_READY` (if there was one since the last load or
+    /// reset). The flag is set when the LCD is turned off and cleared when
+    /// a frame completes, so it is exact even if the LCD went off and on
+    /// again within a single run call (see [`Emulator::run_until`]).
+    #[inline]
+    pub fn screen_blank(&self) -> bool {
+        self.hw.ppu.screen_blank()
     }
 
     /// Whether the CPU has locked up on an invalid opcode.
@@ -682,6 +697,34 @@ mod tests {
         let r = emu.run_cycles(100_000, &mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
         assert_eq!(emu.clock(), u64::from(FRAME_CLOCKS));
+    }
+
+    #[test]
+    fn screen_stays_blank_from_lcd_off_until_the_next_frame() {
+        let emu = emulator();
+        let mut fb = frame();
+        assert!(!emu.screen_blank());
+        let _ = emu.run_cycles(1000, &mut fb, &mut []);
+        emu.hw.ppu.write_lcdc(0x11); // LCD off
+        assert!(emu.screen_blank());
+        let r = emu.run_cycles(u64::from(FRAME_CLOCKS) * 2, &mut fb, &mut []);
+        assert!(r.events.is_empty());
+        emu.hw.ppu.write_lcdc(0x91); // back on: still blank
+        assert!(emu.lcd_enabled());
+        assert!(emu.screen_blank());
+        // The PPU restarts at line 0, so the next frame takes a full frame.
+        let start = emu.clock();
+        let r = emu.run_cycles(100_000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::FRAME_READY);
+        assert_eq!(emu.clock() - start, u64::from(FRAME_CLOCKS));
+        assert!(!emu.screen_blank());
+        // Writes that keep the LCD on don't blank it.
+        emu.hw.ppu.write_lcdc(0x93);
+        assert!(!emu.screen_blank());
+        // Off and on again with no frame in between: blank.
+        emu.hw.ppu.write_lcdc(0x13);
+        emu.hw.ppu.write_lcdc(0x93);
+        assert!(emu.screen_blank());
     }
 
     #[test]

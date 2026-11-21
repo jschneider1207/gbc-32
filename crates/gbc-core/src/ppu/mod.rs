@@ -21,6 +21,9 @@ pub(crate) struct Ppu {
     pub(crate) lcdc: u8,
     /// Base clocks into the current frame.
     frame_clock: u32,
+    /// The LCD was turned off and no frame has completed since
+    /// ([`Emulator::screen_blank`](crate::Emulator::screen_blank)).
+    blanked: bool,
 }
 
 impl Ppu {
@@ -28,6 +31,7 @@ impl Ppu {
         Self {
             lcdc: 0,
             frame_clock: 0,
+            blanked: false,
         }
     }
 
@@ -40,6 +44,25 @@ impl Ppu {
     #[inline]
     pub(crate) const fn lcd_enabled(&self) -> bool {
         self.lcdc & 0x80 != 0
+    }
+
+    /// See [`Emulator::screen_blank`](crate::Emulator::screen_blank).
+    #[inline]
+    pub(crate) const fn screen_blank(&self) -> bool {
+        self.blanked || !self.lcd_enabled()
+    }
+
+    /// A CPU write to LCDC (FF40). Turning the LCD off abandons the frame
+    /// in progress and blanks the screen until the next completed frame;
+    /// the PPU restarts at line 0 when it is turned back on (Pan Docs:
+    /// LCDC.7 - LCD enable).
+    #[allow(dead_code)] // Used by the bus from M1 on.
+    pub(crate) fn write_lcdc(&mut self, value: u8) {
+        if self.lcd_enabled() && value & 0x80 == 0 {
+            self.blanked = true;
+            self.frame_clock = 0;
+        }
+        self.lcdc = value;
     }
 
     /// Advances the PPU by `clocks` base clocks (the PPU does not change
@@ -55,6 +78,7 @@ impl Ppu {
         if self.frame_clock >= FRAME_CLOCKS {
             self.frame_clock -= FRAME_CLOCKS;
             frame.fill(WHITE);
+            self.blanked = false;
             return Events::FRAME_READY;
         }
         Events::EMPTY
