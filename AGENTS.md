@@ -94,6 +94,10 @@ docs/reference/       distilled hardware notes with sources
 logs/                 session logs (append-only, not read by default)
 ```
 
+Hardware design (Stages 3–4) lives in a separate, human-led repo:
+`../gbc-32-hardware`. Read it only when firmware work depends on a board
+decision; `docs/firmware-interface.md` there is the contract. Never modify it.
+
 ## Commands
 
 ```

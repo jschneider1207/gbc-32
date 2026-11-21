@@ -60,6 +60,8 @@ Port the core to the NUCLEO-H753ZI with the X-NUCLEO-GFX02Z1 shield.
 
 ### 3. Prototype PCB
 
+Hardware design lives in a separate repo, `../gbc-32-hardware`.
+
 Design, fabricate, and test a first custom board based on what stage 2 taught us.
 
 - Select the MCU, display, and supporting hardware

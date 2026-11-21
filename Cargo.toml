@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/gbc-core", "crates/gbc-desktop", "tools/romtest"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+# Panics must unwind: romtest catches them per ROM (acceptance/README.md).
+# Never set `panic = "abort"` in these profiles.
+[profile.release]
+debug = "line-tables-only"
