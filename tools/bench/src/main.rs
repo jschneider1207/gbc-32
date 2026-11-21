@@ -1,7 +1,8 @@
 //! Runs one ROM headless for a fixed number of emulated clocks.
 //!
-//! Usage: `bench <rom> <emulated-seconds>` (or `bench --fingerprint`, see
-//! fingerprint.rs). It is meant to run under
+//! Usage: `bench <rom | synth:<name>> <emulated-seconds>` (synthetic ROMs:
+//! synth.rs), or `bench --fingerprint` (fingerprint.rs). It is meant to run
+//! under
 //! `valgrind --tool=callgrind --toggle-collect=bench::run_emulation`
 //! (scripts/check-bench.sh), so only the emulation loop is counted: process
 //! startup, ROM loading and setup are not. No clocks or randomness: the
@@ -17,6 +18,7 @@ use gbc_core::{
 };
 
 mod fingerprint;
+mod synth;
 
 /// `bench --fingerprint [--seconds N] [--root DIR]`.
 fn fingerprint_main(args: &[String]) -> ExitCode {
@@ -26,10 +28,14 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
     while let Some(a) = it.next() {
         let v = it.next();
         match (a.as_str(), v) {
-            ("--seconds", Some(v)) if v.parse::<u64>().is_ok() => secs = v.parse().unwrap_or(3),
+            // At least 1 s: a shorter run (0 runs nothing) would make
+            // nearly any two builds look identical.
+            ("--seconds", Some(v)) if v.parse::<u64>().is_ok_and(|s| s >= 1) => {
+                secs = v.parse().unwrap_or(3);
+            }
             ("--root", Some(v)) => root = v.clone(),
             _ => {
-                eprintln!("usage: bench --fingerprint [--seconds N] [--root DIR]");
+                eprintln!("usage: bench --fingerprint [--seconds N (>= 1)] [--root DIR]");
                 return ExitCode::from(2);
             }
         }
@@ -60,18 +66,31 @@ fn main() -> ExitCode {
         return fingerprint_main(&args[2..]);
     }
     let [_, path, secs] = &args[..] else {
-        eprintln!("usage: bench <rom> <emulated-seconds>");
+        eprintln!("usage: bench <rom | synth:<name>> <emulated-seconds>");
         return ExitCode::from(2);
     };
     let Ok(secs) = secs.parse::<u64>() else {
         eprintln!("bad seconds: {secs}");
         return ExitCode::from(2);
     };
-    let rom = match std::fs::read(path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{path}: {e}");
-            return ExitCode::from(2);
+    let rom = if let Some(name) = path.strip_prefix("synth:") {
+        match synth::build(name) {
+            Some(r) => r,
+            None => {
+                eprintln!(
+                    "unknown synthetic ROM {name} (have: {})",
+                    synth::NAMES.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        match std::fs::read(path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                return ExitCode::from(2);
+            }
         }
     };
     let ram_size = match cart_ram_size(&rom) {

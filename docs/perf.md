@@ -51,7 +51,7 @@ layouts (check-bench Ir vs the pre-DMA baseline; `run` on thumbv7em):
 Earlier 7bdaee2 measurements: a flag test with an out-of-line call per
 read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
 50,376 B. With the chosen layout `run` is back under the pre-DMA
-30,920 B and its 32,500 B budget is restored.
+30,920 B; its budget is now 30,000 B (`perf/code-size-budgets.txt`).
 
 Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the
@@ -97,20 +97,35 @@ ROM list or durations also needs a baseline update in the same commit.
 
 ## Behavior fingerprint
 
-`bench --fingerprint [--seconds N] [--root DIR]` (N defaults to 3, root to
-`test-roms`) prints one line per ROM, `<16-hex FNV-1a hash> <path>`, sorted by
-path, so two builds can be compared bit for bit (ADR 0011 "Verification").
-Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`, `misc` and
-`emulator-only`, `blargg`, `age-test-roms`, `same-suite` and `cgb-acid2`;
-a ROM that fails to load prints `LOAD-ERROR <path>`. Each ROM runs on the
-only supported model (CGB C, default palettes) in 456-clock `run_until`
-chunks with `LD_B_B` and `SERIAL_TX` stops on. After each chunk the hash folds
-the clock, the chunk's clocks and events, the CPU registers, the serial byte
-(on `SERIAL_TX`) and, via `peek`, SB SC DIV TIMA TMA TAC IF LY; at the end it
-folds WRAM `C000-DFFF` (the mapped bank only, since `peek` cannot switch
-banks). ROMs run in parallel; output order does not depend on it.
+`bench --fingerprint [--seconds N] [--root DIR]` (N defaults to 3 and must be
+at least 1, root to `test-roms`) prints one line per run, `<16-hex FNV-1a
+hash> <path>`, sorted by path, so two builds can be compared bit for bit (ADR
+0011 "Verification"). Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`,
+`misc` and `emulator-only`, `blargg`, `age-test-roms`, `same-suite`,
+`cgb-acid2`, `cgb-acid-hell`, `dmg-acid2`, `mealybug-tearoom-tests`,
+`rtc3test` and `mbc3-tester` (334 ROMs, each run twice: plain and
+`<path>#input`), plus the 3,154 gambatte `*cgb04c*` ROMs run once for N/8
+seconds: 3,822 runs, about 8 s wall on 8 threads at N=3. Fewer than 3,800
+runs (a missing or partial `test-roms/`) is an error; a ROM that fails to
+load prints `LOAD-ERROR <path>`. Each ROM runs on the only supported model
+(CGB C, default palettes) in 456-clock `run_until` chunks with `LD_B_B` and
+`SERIAL_TX` stops on. After each chunk the hash folds the clock, the chunk's
+clocks and events, the serial byte (on `SERIAL_TX`), the CPU registers and,
+via `peek`, all of FF00-FF7F (joypad, serial, timer, IF, APU with wave RAM,
+PPU and CGB registers) and IE; on `FRAME_READY` the frame buffer. At the end
+it folds VRAM 8000-9FFF, WRAM C000-DFFF, OAM with FEA0-FEFF and HRAM (all via
+`peek`, so only the mapped VRAM and WRAM banks), the whole cartridge RAM and
+the RTC state. Not covered, because the public API has no side-effect-free
+access: the unmapped VRAM bank and WRAM banks, and CGB palette RAM. The
+`#input` runs schedule a fixed press/release sequence with `set_buttons_at`
+(one change every 1/8 s, at clocks inside chunks), so the joypad and
+scheduled-input paths are covered. Runs are parallel; output order does not
+depend on it.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
 worktree and the working tree, runs both fingerprints with the same args,
-lists the differing ROMs and exits 0 only if none differ. Use it on commits
+lists the differing ROMs and exits 0 only if none differ. It warns loudly when
+the working tree has uncommitted changes under `crates/`, `tools/` or
+`Cargo.*` (the new side is the working tree, not HEAD), when the two sides
+have different run counts, and when ROMs fail to load. Use it on commits
 that restructure core timing, which must not change behavior.
