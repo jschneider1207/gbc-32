@@ -98,6 +98,7 @@ logs/                 session logs (append-only, not read by default)
 
 ```
 ./scripts/fetch-test-roms.sh                 # download pinned test ROMs into test-roms/
+./scripts/install-system-deps.sh --check     # desktop build deps present? (installing needs the human + sudo)
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p romtest --release -- --manifest acceptance/stage1.toml [--filter 'blargg/**']
