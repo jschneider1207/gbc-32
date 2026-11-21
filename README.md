@@ -11,6 +11,15 @@ Build a self-contained, playable Game Boy Color emulator on bare-metal STM32H7 h
 - NUCLEO-H753ZI (STM32H753ZI, Cortex-M7)
 - X-NUCLEO-GFX02Z1 display shield (2.2" QVGA TFT over 8-bit parallel/FMC, 64 Mbit QSPI NOR flash, joystick)
 
+## Quality and performance bar
+
+This is meant to be a fast, carefully engineered emulator built with current (2026) Rust practice, not just one that works.
+
+- **Performance target:** in the worst-case games (CGB double speed, heavy HDMA), the core alone uses **at most 50%** of an STM32H753 at 480 MHz, measured as CPU cycles per emulated frame in Stage 2. The rest is headroom for display, audio, input, and running at a lower clock to save battery on the handheld.
+- **Tracked continuously, not just at the end:** a deterministic benchmark (instruction counts under valgrind) runs in the gate from Stage 1 M2 on, so a slowdown of more than a few percent fails like any other regression. Hot functions have code-size budgets checked against the MCU build. Every performance claim cites a measurement.
+- **Engineering standard:** zero-cost abstractions, compile-time tables, no hidden panics or bounds checks in hot paths (verified in the generated assembly), no heap, no floats in the core, and a deterministic core.
+- **Robustness:** every untrusted input (ROM headers, save files, RTC state) is fuzzed, and the gate runs a short fuzz pass. Any `unsafe` code outside the core is confined, commented with its safety argument, and tested under Miri where it can run on a host.
+
 ## Approach
 
 The project proceeds in four stages. Each stage should be demonstrably working before the next begins.
