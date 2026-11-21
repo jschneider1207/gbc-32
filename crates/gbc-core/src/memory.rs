@@ -1,17 +1,22 @@
 //! Large internal RAM arrays.
 
-/// The big RAM blocks of the console, kept apart from the rest of the
-/// state so that [`Emulator::init`](crate::Emulator::init) can initialize
-/// them in place by zero-filling.
+/// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
+/// area and the I/O register backing store), about 49 KiB, provided by the
+/// caller and borrowed by [`Emulator`](crate::Emulator) (ADR 0009).
 ///
-/// INVARIANT: every field is a plain integer or an array of them, so the
-/// all-zero bit pattern is a valid value and equals [`Memory::new`].
-/// `Emulator::init` relies on this. It is enforced at compile time by
-/// [`Memory::ZERO_VALID`] (every field must implement [`ZeroValid`]) and
-/// tested against `new()` and `clear()` (lib.rs, `init_matches_new` and
-/// `memory_zero_init_equals_cleared_state`).
+/// [`Memory::new`] is a `const fn` whose value is all zero bytes, so a
+/// `static` initialized with it goes to `.bss` on the MCU: no image in
+/// flash, no copy at boot, nothing on the stack. On a PC, use
+/// `Box::new(Memory::new())`. The contents never need initializing by the
+/// caller: [`Emulator::new`](crate::Emulator::new) zero-fills them and
+/// `load`/`reset` write the post-boot values.
+///
+/// INVARIANT: every field is an integer array whose power-on value is
+/// zero; non-zero power-on values (e.g. post-boot I/O registers) are
+/// written by `reset`, not by `new`. Checked by the
+/// `memory_new_is_all_zero_bytes` test.
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) struct Memory {
+pub struct Memory {
     /// 8 banks of 4 KiB (CGB). Bank 0 at C000, banks 1-7 at D000 (SVBK).
     pub(crate) wram: [u8; 0x8000],
     /// 2 banks of 8 KiB (CGB, VBK).
@@ -29,44 +34,13 @@ pub(crate) struct Memory {
     pub(crate) io: [u8; 0x80],
 }
 
-/// Types for which the all-zero bit pattern is a valid value.
-///
-/// # Safety
-/// Implement only for types where all-zero bytes are a valid value
-/// (integers and arrays of them; not references or most enums).
-pub(crate) unsafe trait ZeroValid {}
-// SAFETY: every bit pattern is a valid integer.
-unsafe impl ZeroValid for u8 {}
-// SAFETY: as above.
-unsafe impl ZeroValid for u16 {}
-// SAFETY: as above.
-unsafe impl ZeroValid for u32 {}
-// SAFETY: an array of zero-valid elements is zero-valid.
-unsafe impl<T: ZeroValid, const N: usize> ZeroValid for [T; N] {}
-
 impl Memory {
-    /// Compile-time guard for the invariant: the exhaustive pattern stops
-    /// compiling when a field is added, and each field must be `ZeroValid`.
-    #[allow(dead_code)]
-    const ZERO_VALID: fn(&Memory) = |m| {
-        fn check<T: ZeroValid>(_: &T) {}
-        let Memory {
-            wram,
-            vram,
-            oam,
-            hram,
-            extra_oam,
-            io,
-        } = m;
-        check(wram);
-        check(vram);
-        check(oam);
-        check(hram);
-        check(extra_oam);
-        check(io);
-    };
-
-    pub(crate) const fn new() -> Self {
+    /// All zero bytes. Meant for `static` initializers (`.bss`) and
+    /// `Box::new(Memory::new())`; at run time in an unoptimized build the
+    /// value may be built on the stack first, which is fine on a PC but
+    /// not on the MCU. There is deliberately no `Default` impl.
+    #[allow(clippy::new_without_default)] // Deliberate: see above.
+    pub const fn new() -> Self {
         Self {
             wram: [0; 0x8000],
             vram: [0; 0x4000],
@@ -77,8 +51,9 @@ impl Memory {
         }
     }
 
-    /// Zero-fills in place (no large temporary on the stack). Power-on RAM
-    /// contents are not random here: the core is deterministic.
+    /// Zero-fills in place (no large temporary on the stack), giving the
+    /// same value as [`Memory::new`]. Power-on RAM contents are not random
+    /// here: the core is deterministic.
     pub(crate) fn clear(&mut self) {
         self.wram.fill(0);
         self.vram.fill(0);
@@ -86,5 +61,31 @@ impl Memory {
         self.hram.fill(0);
         self.extra_oam.fill(0);
         self.io.fill(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Memory;
+
+    #[test]
+    fn memory_new_is_all_zero_bytes() {
+        // Evaluated at compile time, as a `static` on the MCU would be.
+        static NEW: Memory = Memory::new();
+        // The exhaustive pattern stops compiling when a field is added, so
+        // each field must be listed (and checked) here.
+        let Memory {
+            wram,
+            vram,
+            oam,
+            hram,
+            extra_oam,
+            io,
+        } = &NEW;
+        let fields: [&[u8]; 6] = [wram, vram, oam, hram, extra_oam, io];
+        assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
+        // The fields cover every byte: no padding, nothing else.
+        let total: usize = fields.iter().map(|f| f.len()).sum();
+        assert_eq!(size_of::<Memory>(), total);
     }
 }

@@ -1,22 +1,35 @@
 //! Portable Game Boy Color emulator core: `no_std`, no `alloc`, no
-//! dependencies (ADR 0001). The caller provides every buffer and drives the
-//! emulator; the core never calls out. The API is described in ADR 0006.
+//! dependencies (ADR 0001), and no `unsafe` code (ADR 0009). The caller
+//! provides every buffer and drives the emulator; the core never calls
+//! out. The API is described in ADR 0006 (construction: ADR 0009).
 //!
 //! The emulated model is fixed: CPU CGB revision C (ADR 0003).
 //!
+//! # Construction
+//!
+//! The large RAM arrays (~49 KiB) are a separate type, [`Memory`], which
+//! the caller provides; [`Emulator`] itself is small (under 1 KiB plus a
+//! pointer) and borrows it, along with the cartridge ROM and RAM:
+//!
+//! - [`Memory::new`] is a `const fn` that is all zero bytes;
+//! - [`Emulator::new`]`(&'a mut Memory) -> Emulator<'a>` (powered off, no
+//!   cartridge; it zero-fills the memory, so its previous contents don't
+//!   matter);
+//! - [`Emulator::load`] inserts a cartridge and [`Emulator::eject`] hands
+//!   its buffers back.
+//!
 //! # Usage (std caller)
 //!
-//! [`Emulator`] is about 49 KiB, so build it directly in its final location
-//! with [`Emulator::init`] rather than on the stack:
+//! Put the `Memory` on the heap; the `Emulator` can live anywhere:
 //!
 //! ```
-//! use gbc_core::{Config, Emulator, Events, Frame, WHITE, cart_ram_size};
+//! use gbc_core::{Config, Emulator, Events, Frame, Memory, WHITE, cart_ram_size};
 //!
 //! let rom = vec![0u8; 0x8000]; // normally read from a file
 //! let mut cart_ram = vec![0u8; cart_ram_size(&rom).unwrap()];
 //!
-//! let mut slot = Box::<Emulator>::new_uninit();
-//! let emu = Emulator::init(&mut slot); // initialized in place on the heap
+//! let mut mem = Box::new(Memory::new());
+//! let mut emu = Emulator::new(&mut mem);
 //! emu.load(&rom, &mut cart_ram, Config::default()).unwrap();
 //!
 //! let mut frame: Box<Frame> = Box::new([WHITE; 160 * 144]);
@@ -24,66 +37,64 @@
 //! assert!(result.events.contains(Events::FRAME_READY));
 //! ```
 //!
-//! ## Owning a `Box<Emulator>`
-//!
-//! `init` returns a reference that borrows the `Box<MaybeUninit<_>>`. To
-//! store the emulator as a plain `Box<Emulator>` (e.g. in a struct), convert
-//! the box after `init`. The core has no `alloc`, so it cannot do this
-//! itself; this is the one `unsafe` line a std front end needs:
+//! An emulator stored in a long-lived struct borrows its memory, ROM and
+//! cartridge RAM for `'a`. A front end that switches games at run time
+//! typically uses `Emulator<'static>` with buffers from `Box::leak` (one
+//! per buffer, for the life of the program) and moves the cartridge
+//! buffers between games with [`Emulator::eject`] and
+//! [`Emulator::load`], which always hand them back:
 //!
 //! ```
-//! use gbc_core::Emulator;
+//! use gbc_core::{Emulator, Memory};
 //!
 //! fn boxed_emulator() -> Box<Emulator<'static>> {
-//!     let mut slot = Box::<Emulator<'static>>::new_uninit();
-//!     Emulator::init(&mut slot);
-//!     // SAFETY: `Emulator::init` fully initialized the value in `slot`.
-//!     unsafe { slot.assume_init() }
+//!     Box::new(Emulator::new(Box::leak(Box::new(Memory::new()))))
 //! }
 //! # let _ = boxed_emulator();
 //! ```
 //!
-//! A stored emulator still borrows its ROM and cartridge RAM for `'a`.
-//! A front end that switches games at run time typically uses
-//! `Emulator<'static>` with buffers from `Box::leak` (one per buffer, for
-//! the life of the program) and moves them between games with
-//! [`Emulator::eject`] and [`Emulator::load`], which always hand the
-//! buffers back.
-//!
 //! # Usage (MCU)
 //!
-//! The emulator lives in a `static mut MaybeUninit<Emulator<'static>>`
-//! (ideally in a no-init RAM section, which keeps its image out of flash
-//! and `.data`) and is initialized once at startup. A plain `static` can't
-//! hand out `&mut`; in edition 2024 take a raw pointer with `&raw mut`
-//! instead of a reference to the `static mut`:
+//! The memory is a `static`: `Memory::new()` is all zero bytes, so it goes
+//! to `.bss` (no image in flash, no copy at boot, nothing on the stack).
+//! The small `Emulator` can live on the stack of the main loop or in a
+//! static of its own. Getting the `&'static mut` borrows out of statics,
+//! exactly once, is the firmware's business, not the core's: for example a
+//! `static MEM: ConstStaticCell<Memory> = ConstStaticCell::new(Memory::new());`
+//! from the `static_cell` crate (whose `take()` returns the `&'static mut`
+//! once, and which is still all zeros, so still `.bss`), or a
+//! `static mut MEM: Memory = Memory::new();` reached through `&raw mut`
+//! with a small audited `unsafe` in the platform layer. The core's side is
+//! all safe:
 //!
 //! ```
-//! use core::mem::MaybeUninit;
-//! use gbc_core::{Config, Emulator};
+//! use gbc_core::{Buttons, Config, Emulator, Frame, Memory};
 //!
-//! static mut EMU: MaybeUninit<Emulator<'static>> = MaybeUninit::uninit();
-//! static mut SAVE_RAM: [u8; 0x2_0000] = [0; 0x2_0000];
-//!
-//! fn main() {
-//!     // SAFETY: runs once, at startup, before anything else can reach
-//!     // these statics, so these are the only references to them ever
-//!     // created.
-//!     let (emu, save_ram) = unsafe { (&mut *(&raw mut EMU), &mut *(&raw mut SAVE_RAM)) };
-//!     let emu = Emulator::init(emu);
-//!     let rom: &'static [u8] = &[0; 0x8000]; // memory-mapped flash on the MCU
+//! /// Firmware main loop. `mem` and `save_ram` come from statics, handed
+//! /// out once at startup; `rom` is memory-mapped flash.
+//! fn run(
+//!     mem: &'static mut Memory,
+//!     save_ram: &'static mut [u8],
+//!     rom: &'static [u8],
+//!     frame: &mut Frame,
+//! ) {
+//!     let mut emu = Emulator::new(mem);
 //!     emu.load(rom, save_ram, Config::default()).unwrap();
+//!     // Once per frame (the firmware's main loop):
+//!     emu.set_buttons(Buttons::EMPTY); // read from the GPIOs
+//!     let _ = emu.run_frame(frame, &mut []);
+//!     // To switch games, `emu.eject()` (or the result of `load`) hands
+//!     // back the ROM and `save_ram` for the next `load`.
 //! }
+//! # let mem = Box::leak(Box::new(Memory::new()));
+//! # let save = Box::leak(vec![0u8; 0x2_0000].into_boxed_slice());
+//! # let rom = Box::leak(vec![0u8; 0x8000].into_boxed_slice());
+//! # let mut frame: Box<Frame> = Box::new([0; 160 * 144]);
+//! # run(mem, save, rom, &mut frame);
 //! ```
-//!
-//! Alternatively, a "static cell" (a `static` holding an `UnsafeCell` and
-//! an atomic taken-flag, as in the `static_cell` crate, in the firmware not
-//! the core) gives out the `&'static mut` once without `static mut`. Either
-//! way, each buffer is borrowed exactly once for the program's life; to
-//! switch games, get the buffers back with [`Emulator::eject`] (or from the
-//! result of `load`) and pass them to the next `load`.
 
 #![no_std]
+#![forbid(unsafe_code)]
 
 mod apu;
 mod bitset;
@@ -98,9 +109,6 @@ mod ppu;
 mod serial;
 mod timer;
 
-use core::mem::MaybeUninit;
-use core::ptr::addr_of_mut;
-
 pub use apu::StereoSample;
 pub use cart::{
     CartBuffers, LoadError, LoadErrorKind, MIN_ROM_SIZE, RtcState, RtcTime, cart_ram_size,
@@ -109,6 +117,7 @@ pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
 pub use events::Events;
 pub use joypad::Buttons;
+pub use memory::Memory;
 pub use ppu::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH, WHITE};
 
 /// Direct access to the SM83 CPU, for instruction-level tests that drive it
@@ -121,7 +130,6 @@ pub mod sm83 {
 use bus::{Ctx, Sys};
 use cart::Cart;
 use cpu::Cpu;
-use memory::Memory;
 
 /// Base clock rate: 4,194,304 Hz. All times in this API ("clocks") are
 /// counted in base clocks, independent of CGB double-speed mode. One
@@ -146,27 +154,33 @@ pub struct RunResult {
 
 /// A Game Boy Color.
 ///
-/// `'a` is the lifetime of the cartridge ROM and RAM borrowed by
-/// [`Emulator::load`]. The frame buffer and audio buffer are passed to each
-/// run call instead, so the caller can swap them between calls (double
-/// buffering) and read them while the emulator is idle.
+/// `'a` is the lifetime of the [`Memory`] borrowed by [`Emulator::new`] and
+/// of the cartridge ROM and RAM borrowed by [`Emulator::load`]. The frame
+/// buffer and audio buffer are passed to each run call instead, so the
+/// caller can swap them between calls (double buffering) and read them
+/// while the emulator is idle.
+///
+/// The emulator itself is small (`Hw`, under 1 KiB, plus the borrows), so
+/// it can live on the stack, even on the MCU.
 pub struct Emulator<'a> {
-    // Exactly two fields; `Emulator::init` writes each one. See there
-    // before adding a field.
-    mem: Memory,
+    /// The large RAM arrays, provided by the caller (ADR 0009). Run calls
+    /// copy this pointer into the per-call `Ctx`, so the hot path reaches
+    /// memory through the context exactly as before the split.
+    mem: &'a mut Memory,
     hw: Hw<'a>,
 }
 
-/// Everything except the large RAM arrays. `Emulator::init` builds this on
-/// the stack, so it must stay small: under 1 KiB, checked by a test. The
-/// limit protects the MCU, whose stack is a few KiB and is shared with
-/// interrupt handlers. It is not tight: per-scanline PPU buffers, APU state
-/// and mapper registers fit with room to spare. Anything large and made
-/// only of integers belongs in `Memory` instead, which is zero-filled in
-/// place.
+/// Everything except the large RAM arrays, which live in [`Memory`]. It
+/// must stay small: under 1 KiB, checked by a test. The limit protects the
+/// MCU, whose stack is a few KiB and is shared with interrupt handlers, and
+/// where the `Emulator` (and so `Hw`) may live on the stack. It is not
+/// tight: per-scanline PPU buffers, APU state and mapper registers fit with
+/// room to spare. Anything large belongs in `Memory` instead, as a field
+/// whose power-on value is all zeros (non-zero post-boot values are
+/// written by `reset`).
 ///
 /// The CPU is kept apart from [`Sys`] (what its bus reaches) so a run call
-/// can borrow both mutably at once: `cpu.step(&mut Ctx { sys, mem, .. })`
+/// can borrow both mutably at once: `cpu.run(&mut Ctx { sys, mem, .. })`
 /// (ADR 0008).
 struct Hw<'a> {
     cpu: Cpu,
@@ -186,58 +200,17 @@ impl Hw<'_> {
 }
 
 impl<'a> Emulator<'a> {
-    /// A powered-off emulator with no cartridge, for `const` and `static`
-    /// initializers only (evaluated at compile time).
+    /// A powered-off emulator with no cartridge, using `mem` for its RAM.
     ///
-    /// Do not call this at run time: it builds the whole ~49 KiB value on
-    /// the stack, and `Box::new(Emulator::new())` does too before copying.
-    /// Use [`Emulator::init`] instead. (There is deliberately no `Default`
-    /// impl for the same reason.) A `static` initialized with `new()` is
-    /// also stored in flash and copied to RAM at startup, which a no-init
-    /// `MaybeUninit` static avoids.
-    #[allow(clippy::new_without_default)] // Deliberate: see above.
-    pub const fn new() -> Self {
-        Self {
-            mem: Memory::new(),
-            hw: Hw::new(),
-        }
-    }
-
-    /// Initializes `slot` in place to the same state as [`Emulator::new`]
-    /// and returns it, without building a large temporary on the stack.
-    ///
-    /// std callers either keep the `Box<MaybeUninit<Emulator>>` from
-    /// `Box::new_uninit()` and use the returned reference (no `unsafe`;
-    /// `Emulator` has no destructor, so dropping the box as `MaybeUninit`
-    /// is fine), or convert it to a `Box<Emulator>` with `assume_init`
-    /// after this call (sound, because this call initializes every byte
-    /// that matters; see the crate docs). On the MCU, pass a `static mut`
-    /// `MaybeUninit<Emulator<'static>>` in a no-init RAM section through
-    /// `&raw mut` (crate docs, "Usage (MCU)").
-    pub fn init(slot: &mut MaybeUninit<Self>) -> &mut Self {
-        // Compile-time guard: this exhaustive pattern stops compiling if a
-        // field is added to `Emulator`, because the writes below must cover
-        // every field.
-        let _: fn(&Self) = |e| {
-            let Self { mem: _, hw: _ } = e;
-        };
-
-        let p = slot.as_mut_ptr();
-        // SAFETY: `p` comes from a `&mut MaybeUninit<Self>`, so it is
-        // non-null, aligned and valid for writes of one `Self`. `addr_of_mut!`
-        // projects to the fields without creating references to
-        // uninitialized data. `Memory` contains only `u8` arrays (its
-        // documented invariant), so the all-zero bit pattern is a valid
-        // `Memory` equal to `Memory::new()`; `write_bytes` initializes it
-        // without a stack temporary. `hw` is small and written normally.
-        // `mem` and `hw` are all of `Emulator`'s fields (checked above), so
-        // the value is fully initialized (padding aside, which needs no
-        // initialization) and `assume_init_mut` is sound.
-        unsafe {
-            addr_of_mut!((*p).mem).write_bytes(0, 1);
-            addr_of_mut!((*p).hw).write(Hw::new());
-            slot.assume_init_mut()
-        }
+    /// `mem` is zero-filled in place, so its previous contents (e.g. from
+    /// an earlier emulator) don't matter and the result is always the same
+    /// state. That write is also why this is not a `const fn`: a `const`
+    /// initializer couldn't write to another static's memory anyway. The
+    /// `Memory` itself is the caller's: `Box::new(Memory::new())` on a PC, a
+    /// `static` (in `.bss`) on the MCU; see the crate docs.
+    pub fn new(mem: &'a mut Memory) -> Self {
+        mem.clear();
+        Self { mem, hw: Hw::new() }
     }
 
     /// Inserts a cartridge and powers on (see [`Emulator::reset`]).
@@ -270,7 +243,7 @@ impl<'a> Emulator<'a> {
     /// the header size). Save [`Emulator::cart_ram`] (and
     /// [`Emulator::rtc_state`]) first if needed.
     ///
-    /// Afterwards the emulator is in the state [`Emulator::init`] leaves it
+    /// Afterwards the emulator is in the state [`Emulator::new`] leaves it
     /// in: powered off, no cartridge, default settings (stop events, held
     /// buttons and palettes are cleared). Returns `None`, changing nothing,
     /// if no cartridge is inserted.
@@ -299,7 +272,7 @@ impl<'a> Emulator<'a> {
     pub fn reset(&mut self) {
         self.mem.clear();
         let sys = &mut self.hw.sys;
-        sys.reset(&mut self.mem);
+        sys.reset(self.mem);
         self.hw.cpu.reset(sys.cart.rom, sys.cgb_mode);
     }
 
@@ -417,7 +390,7 @@ impl<'a> Emulator<'a> {
         }
         let stop = Events::ALWAYS_STOP | *stop_on;
         let mut ctx = Ctx::new(
-            &mut self.mem,
+            self.mem,
             sys,
             frame,
             audio,
@@ -528,16 +501,22 @@ mod tests {
         rom[0x100] = 0xAB;
         rom[0x7FFF] = 0xE9;
         let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         emu
+    }
+
+    /// A powered-off emulator with its own heap `Memory`, as a desktop
+    /// front end builds it. Leaks both, which keeps lifetimes trivial.
+    pub(crate) fn fresh() -> &'static mut Emulator<'static> {
+        Box::leak(Box::new(Emulator::new(Box::leak(Box::new(Memory::new())))))
     }
 
     /// A CPU write to an I/O register, through the bus (no M-cycle).
     fn write_lcdc(emu: &mut Emulator, value: u8) {
         let mut fb = frame();
         let mut ctx = Ctx::new(
-            &mut emu.mem,
+            emu.mem,
             &mut emu.hw.sys,
             &mut fb,
             &mut [],
@@ -555,25 +534,29 @@ mod tests {
     }
 
     #[test]
-    fn hw_is_small_enough_to_build_on_the_stack() {
-        // `Emulator::init` builds `Hw` on the stack; only `Memory` is big
-        // (see the `Hw` docs for the limit).
+    fn emulator_is_small_enough_for_the_stack() {
+        // Only `Memory` is big (see the `Hw` docs for the limit).
         assert!(size_of::<Hw<'_>>() < 1024, "{}", size_of::<Hw<'_>>());
+        assert!(size_of::<Emulator<'_>>() < 1024 + 16);
         assert!(size_of::<Memory>() > 48 * 1024);
     }
 
     #[test]
-    fn init_matches_new() {
-        // Evaluated at compile time, so nothing large is built on the stack.
-        static A: Emulator<'static> = Emulator::new();
-        let a = &A;
-        let b = Emulator::init(Box::leak(Box::new_uninit()));
-        assert!(a.mem == b.mem);
+    fn new_clears_memory_it_is_given() {
+        // A `Memory` reused from another emulator gives the same state as a
+        // fresh one.
+        let a = fresh();
+        let mem = Box::leak(Box::new(Memory::new()));
+        mem.wram.fill(0x5A);
+        mem.vram.fill(0xA5);
+        mem.io.fill(4);
+        let b = Emulator::new(mem);
+        assert!(*a.mem == *b.mem);
+        static NEW: Memory = Memory::new();
+        assert!(*b.mem == NEW);
         assert_eq!(a.registers(), b.registers());
         assert_eq!(a.clock(), b.clock());
         assert_eq!(a.lcd_enabled(), b.lcd_enabled());
-        assert!(b.mem.wram.iter().all(|&x| x == 0));
-        assert!(b.mem.vram.iter().all(|&x| x == 0));
         for addr in 0..=0xFFFF {
             assert_eq!(a.peek(addr), b.peek(addr), "{addr:#06x}");
         }
@@ -592,12 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn memory_zero_init_equals_cleared_state() {
-        // `init` zero-fills `Memory` in place; that must equal both
-        // `Memory::new()` and what `Memory::clear` (used by `reset`)
-        // produces after the RAM has been dirtied. `reset` then writes the
-        // post-boot values of the stub I/O registers.
-        let fresh = Emulator::init(Box::leak(Box::new_uninit()));
+    fn memory_new_equals_cleared_state() {
+        // `Memory::new()` is all zeros; that must equal what
+        // `Memory::clear` (used by `new`, `reset` and `eject`) produces
+        // after the RAM has been dirtied. `reset` then writes the post-boot
+        // values of the stub I/O registers.
+        let fresh = fresh();
         let emu = emulator();
         emu.mem.wram.fill(0x5A);
         emu.mem.vram.fill(0xA5);
@@ -606,13 +589,13 @@ mod tests {
         emu.mem.extra_oam.fill(3);
         emu.mem.io.fill(4);
         emu.mem.clear();
-        assert!(emu.mem == fresh.mem);
+        assert!(*emu.mem == *fresh.mem);
         emu.mem.wram.fill(0x5A);
         emu.reset();
         assert!(emu.mem.wram == fresh.mem.wram);
         assert_eq!(emu.peek(0xFF47), 0xFC); // BGP after boot
         static NEW: Memory = Memory::new();
-        assert!(fresh.mem == NEW);
+        assert!(*fresh.mem == NEW);
     }
 
     #[test]
@@ -648,7 +631,7 @@ mod tests {
         rom[0x149] = 0x02; // 8 KiB
         let ram = vec![0u8; 0x8000].leak(); // larger than needed
         ram[0] = 0x5A;
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         assert!(emu.eject().is_none());
         assert!(emu.load(rom, ram, Config::default()).unwrap().is_none());
         let mut fb = frame();
@@ -681,7 +664,7 @@ mod tests {
         rom[0x149] = 0x02; // 8 KiB
         let ram = vec![0u8; 0x2_0000].leak();
         ram[0x2000] = 0x77;
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         assert_eq!(emu.cart_ram().len(), 0x2000);
         // Nothing past the header size is visible to the game.
@@ -694,7 +677,7 @@ mod tests {
         rom[0x147] = 0x03; // MBC1+RAM+BATTERY
         rom[0x149] = 0x42;
         let ram = vec![0u8; 0x2000].leak();
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         assert!(emu.cart_ram().is_empty());
         assert_eq!(emu.peek(0xA000), 0xFF);
@@ -799,9 +782,9 @@ mod tests {
 
     #[test]
     fn lcd_on_from_power_off_skips_the_first_frame_too() {
-        // The LCD was never on since `init`: turning it on still hides the
+        // The LCD was never on since `new`: turning it on still hides the
         // first frame.
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         let mut fb = frame();
         assert!(emu.screen_blank());
         write_lcdc(emu, 0x91);
@@ -816,7 +799,7 @@ mod tests {
     #[test]
     fn short_rom_loads_and_reads_ff_past_its_end() {
         let rom = vec![0x11u8; MIN_ROM_SIZE].leak();
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         rom[0x147] = 0;
         rom[0x149] = 0;
         emu.load(rom, &mut [], Config::default()).unwrap();
@@ -840,7 +823,7 @@ mod tests {
         rom[0x147] = 0x10; // MBC3+TIMER+RAM+BATTERY
         rom[0x149] = 0x03;
         let ram = vec![0u8; 0x8000].leak();
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         assert_eq!(emu.rtc_state(), Some(RtcState::default()));
         let t = RtcTime {
@@ -983,7 +966,7 @@ mod tests {
         rom[0x149] = 0x02;
         let ram = vec![0u8; 0x2000].leak();
         ram[0] = 0x5A;
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         let mut fb = frame();
         let _ = emu.run_cycles(1000, &mut fb, &mut []);
@@ -998,7 +981,7 @@ mod tests {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x100..0x100 + program.len()].copy_from_slice(program);
         rom[0x143] = cgb_flag;
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         emu
     }
@@ -1024,7 +1007,7 @@ mod tests {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x134..0x13A].copy_from_slice(b"TETRIS");
         rom[0x14B] = 0x01;
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         let sum = b"TETRIS".iter().fold(0u8, |s, &x| s.wrapping_add(x));
         assert_eq!(emu.registers().b, sum);
@@ -1033,7 +1016,7 @@ mod tests {
         rom[0x134] = 0x58;
         rom[0x14B] = 0x33;
         rom[0x144..0x146].copy_from_slice(b"01");
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         let r = emu.registers();
         assert_eq!((r.b, r.h, r.l), (0x58, 0x99, 0x1A));

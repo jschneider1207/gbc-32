@@ -8,8 +8,8 @@
 //! `crash`), while a panic in the runner's own code propagates (exit 2).
 
 use gbc_core::{
-    Buttons, Config, DmgPalettes, Emulator, Events, Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH,
-    WHITE, cart_ram_size, rgb888_to_555,
+    Buttons, Config, DmgPalettes, Emulator, Events, Frame, Memory, Registers, SCREEN_HEIGHT,
+    SCREEN_WIDTH, WHITE, cart_ram_size, rgb888_to_555,
 };
 
 use crate::manifest::{Exit, InputEntry};
@@ -275,16 +275,16 @@ pub fn run<M: Machine + ?Sized>(
 pub fn run_core(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), CoreFailure> {
     let load = |e: &dyn std::fmt::Display| CoreFailure::Load(e.to_string());
     let ram_size = core_call(|| cart_ram_size(rom))?.map_err(|e| load(&e))?;
-    // ROM and cart RAM outlive the emulator, which borrows them.
+    // Memory, ROM and cart RAM outlive the emulator, which borrows them.
     let mut cart_ram = vec![0u8; ram_size];
-    let mut slot = Box::<Emulator>::new_uninit();
-    let slot_ref = &mut slot;
-    let emu = core_call(move || Emulator::init(slot_ref))?;
+    let mut mem = Box::new(Memory::new());
+    let mem_ref = &mut *mem;
+    let mut emu = core_call(move || Emulator::new(mem_ref))?;
     let config = Config {
         dmg_palettes: common_palette(),
     };
     let ram = &mut cart_ram[..];
-    let emu_ref = &mut *emu;
+    let emu_ref = &mut emu;
     core_call(move || {
         emu_ref
             .load(rom, ram, config)
@@ -292,7 +292,7 @@ pub fn run_core(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
             .map_err(|e| e.to_string())
     })?
     .map_err(|e| load(&e))?;
-    run(emu, plan, st)
+    run(&mut emu, plan, st)
 }
 
 #[cfg(test)]

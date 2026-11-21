@@ -652,7 +652,7 @@ impl Emulator<'_> {
     /// ([`MIN_ROM_SIZE`](crate::MIN_ROM_SIZE)).
     pub fn peek(&self, addr: u16) -> u8 {
         let sys = &self.hw.sys;
-        read(&self.mem, sys, &sys.hot, addr)
+        read(self.mem, sys, &sys.hot, addr)
     }
 }
 
@@ -667,7 +667,7 @@ mod tests {
     /// An emulator with `rom` loaded and a RAM buffer of the header's size.
     fn load(rom: &'static [u8]) -> &'static mut Emulator<'static> {
         let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
-        let emu = Emulator::init(Box::leak(Box::new_uninit()));
+        let emu = crate::tests::fresh();
         emu.load(rom, ram, Config::default()).unwrap();
         emu
     }
