@@ -18,3 +18,4 @@ Rules:
 - Test suite how-tos: `test-roms/<suite>/game-boy-test-roms-howto.md`
 - STM32H742/743/750/753 reference manual RM0433 (Stage 2)
 - X-NUCLEO-GFX02Z1 user manual (Stage 2)
+- STM32H723/733/725/735/730 reference manual RM0468, STM32H735xG datasheet DS13312, and errata sheet ES0491 (Stage 3+, custom board MCU STM32H735IGK6)

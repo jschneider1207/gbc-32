@@ -64,7 +64,22 @@ Hardware design lives in a separate repo, `../gbc-32-hardware`.
 
 Design, fabricate, and test a first custom board based on what stage 2 taught us.
 
-- Select the MCU, display, and supporting hardware
+**MCU: STM32H735IGK6** (Cortex-M7, up to 550 MHz, 1 MB flash, 564 KB RAM, UFBGA176+25). This is a different chip from the NUCLEO-H753ZI used in stage 2. The emulator core doesn't change, but the custom board needs its own platform layer rather than a copy of the dev-board one. The board-side contract is `../gbc-32-hardware/docs/firmware-interface.md`, and the hardware rationale is in that repo's `docs/decisions/`. Differences from the dev board:
+
+- **Reference manual:** RM0468 (STM32H723/733/725/735/730) instead of RM0433. Peripherals are largely shared, but register-level details differ, as do the device crate and HAL selection.
+- **Power and clocks:** the core is supplied from the on-chip SMPS, where the Nucleo uses the LDO, so the supply configuration at boot is different. 520 MHz runs at VOS0; 550 MHz also needs `CPU_FREQ_BOOST` (SYSCFG_UR18), which turns off ECC on ITCM/DTCM. The AXI/AHB maximum is 275 MHz (DS13312 Table 13).
+- **Memory map:** 564 KB of internal RAM split differently: 128 KB DTCM, 64 KB ITCM, 192 KB that can be shared between ITCM and AXI, and further AXI/AHB SRAM. The L1 caches are larger (32 KB I + 32 KB D). Linker scripts and the memory placement tuned in stage 2 need redoing, so treat the stage 2 cache tuning as a starting point.
+- **ROM location:** the active game is copied from eMMC into 32 MiB of external FMC SDRAM at load time, and the core gets a `&'static [u8]` over it, where stage 2 used memory-mapped QSPI NOR. This needs:
+  - FMC SDRAM initialisation;
+  - an MPU region marking the SDRAM as normal, cacheable memory;
+  - unaligned access disabled for code that reads the FMC region, because unaligned reads there are unsupported (erratum ES0491 §2.7.3). The compiler can merge byte reads into unaligned halfword reads, so this is a build setting, not just a coding rule.
+
+  The core's ROM interface is unchanged.
+- **New drivers that stage 2 doesn't have:** SDMMC for eMMC (ROM library and saves) and USB upload of ROMs. The display and audio parts are also new: neither the panel, its interface (FMC parallel vs LTDC) nor the audio DAC/amplifier is the same as on the dev setup. The dev-board display is only a stand-in.
+
+Stage 2 on the NUCLEO-H753ZI still applies: it proves the core runs at full speed on a Cortex-M7, and its QSPI NOR ROM reads are a conservative proxy for SDRAM.
+
+- Select the display and supporting hardware
 - eMMC storage for loading ROMs and storing save files
 - Dedicated audio DAC/amplifier driving onboard speakers
 - Schematic, layout, and first fabrication run
