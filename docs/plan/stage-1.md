@@ -50,8 +50,10 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 
 - [ ] M-cycle-accurate memory access timing (ADR 0002)
 - [ ] Interrupt dispatch timing, HALT bug, IE/IF behavior
+- [ ] Decide first: lazy, event-scheduled timer (DIV from the clock; TIMA overflow, serial bit clock and DIV-APU as scheduled events) vs. the eager per-M-cycle tick, which costs ~25% of host time (M1 perf review). Record in an ADR before building M2 timing on it
+- [ ] HALT: IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
 - [ ] DIV/TIMA with the falling-edge behavior, TMA reload windows
-- [ ] OAM DMA timing and bus conflicts
+- [ ] OAM DMA timing and bus conflicts (DMA conflicts put state into the CPU read path, so `peek` needs its own side-effect-free path; consider driving DMA through `next_event`)
 - [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
 
 **Acceptance:** `romtest --filter 'mooneye-test-suite/acceptance/{timer,instr,interrupts,oam_dma}/**' --gate must`
@@ -62,6 +64,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 
 - [ ] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts
 - [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
+- [ ] Event deadlines: a small fixed array (timer, PPU mode/STAT, APU buffer) with `next_event = min`, recomputed only when a deadline changes; STAT and LYC writes must sync the PPU and reschedule (M1 reviews)
 - [ ] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
 - [ ] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review)
@@ -86,6 +89,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 ## M5: CGB features
 
 - [ ] Double speed (KEY1/STOP), VRAM/WRAM banking
+- [ ] STOP accuracy: DIV/TIMA/serial frozen in STOP, wake-up only on a selected P1 line, DIV reset rules, 2-byte STOP (Pan Docs "Using the STOP instruction"; M1 hardware review 6)
 - [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
 - [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
@@ -119,6 +123,9 @@ The human checks interactive play.
 
 - [ ] Fix issues found in the real-game checklist
 - [ ] Bring `should`-tier scores up where cheap
+- [ ] Code size: re-measure `execute`/`execute_cb` on thumbv7em (68 KB at M1, more than the H753's fixed 64 KB ITCM; the H735 ITCM can be configured up to 256 KB). Target <= 40 KB, e.g. by moving rare read regions out of line (M1 perf review 1)
+- [ ] Unaligned ROM reads: the Stage 3 MCU (STM32H735) does not support unaligned reads from the FMC SDRAM that holds the ROM (ES0491 2.7.3). `-C target-feature=+strict-align` is unstable on Rust 1.100 (warns, slated to become a hard error, rust-lang/rust#162235), so ensure at code level that ROM bytes are never merged into wider loads (e.g. one ROM-read function using byte reads LLVM can't combine) and add a disassembly check; record in an ADR
+- [ ] ROM placement hook for the MCU front ends (e.g. caller-supplied per-bank slices so bank 0 and the current bank can sit in internal SRAM) only if Stage 2 measurements show ROM fetch misses matter (M1 perf review 5)
 - [ ] Benchmark: headless emulated frames/second on desktop for a fixed set of ROMs; record host cycles per emulated frame as the baseline for Stage 2
 
 **Acceptance:** `./scripts/gate-stage1.sh` exits 0.
