@@ -73,7 +73,7 @@ under "Blockers", then move on to something else. Don't loop.
 
 ## Hard rules
 
-- **`gbc-core` is `no_std` with no `alloc`.** No heap, no floats in hot
+- **`gbc-core` is `no_std` with no `alloc` and no `unsafe`** (`#![forbid(unsafe_code)]`, ADR 0009; an exception needs the human). No heap, no floats in hot
   paths unless measured, and no platform code. Inputs (ROM, save RAM, audio
   and video buffers) are provided by the caller.
 - **No cheating the tests.** Never detect test ROMs (by title, hash or
@@ -210,7 +210,7 @@ every turn, so:
 ## Code conventions
 
 - Rust stable, edition 2024. Toolchain pinned in `rust-toolchain.toml`.
-- `unsafe` only with a `// SAFETY:` comment, and only where measured
+- Outside `gbc-core`: `unsafe` only with a `// SAFETY:` comment, and only where measured
   performance requires it or for hardware access.
 - Comments explain hardware behavior and *why*, with a source where it
   helps (e.g. `// Pan Docs: STAT IRQ blocking`).
