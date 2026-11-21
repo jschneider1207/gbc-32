@@ -2,7 +2,15 @@
 //! against `gbc_core::sm83::Cpu` on a flat 64 KiB RAM bus, checking the
 //! final registers, IME/EI state and memory, and the bus activity of every
 //! M-cycle (address, data and read/write for accesses; an internal cycle
-//! where the test has none). Skips with a message if the data is missing.
+//! where the test has none).
+//!
+//! Data integrity: every file is hashed (SHA-256, from the exact bytes
+//! that are parsed) and checked against the committed list
+//! `tools/sm83-tests/sm83-v1.sha256`, written by
+//! `scripts/fetch-sm83-tests.sh` from the hash-checked tarball. A changed,
+//! missing or extra file fails the test. If the data directory is absent
+//! the test prints SKIPPED and passes, unless `GBC_REQUIRE_TEST_DATA=1`
+//! is set, in which case it fails (for gates that must not skip).
 //!
 //! Format notes (from the suite's README and data): each case starts with
 //! PC at the opcode, and its `cycles` list starts with the opcode fetch.
@@ -11,11 +19,19 @@
 //! until it has used as many M-cycles as the case lists (HALT and STOP
 //! cases list idle cycles after the instruction).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gbc_core::sm83::{Bus, Cpu, Registers};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+/// `sha256sum` output for `test-data/sm83/v1/*.json`: "<hex>  <file name>".
+const HASHES: &str = include_str!("../sm83-v1.sha256");
+
+/// Set to 1 to fail instead of skipping when the data is missing.
+const REQUIRE_ENV: &str = "GBC_REQUIRE_TEST_DATA";
 
 /// One M-cycle as listed: address pins, data pins, "r-m" / "-wm" / "---".
 type RawCycle = (Option<u16>, Option<u8>, String);
@@ -168,9 +184,36 @@ struct FileResult {
     first_failure: Option<String>,
 }
 
-fn run_file(path: &Path) -> FileResult {
+/// The expected SHA-256 (lowercase hex) of each data file, by file name.
+fn expected_hashes() -> BTreeMap<&'static str, &'static str> {
+    HASHES
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (hash, name) = l
+                .split_once("  ")
+                .unwrap_or_else(|| panic!("bad line in sm83-v1.sha256: {l:?}"));
+            (name, hash)
+        })
+        .collect()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Runs one file, after checking its hash against `want`.
+fn run_file(path: &Path, want: &str) -> FileResult {
     let name = path.file_stem().unwrap().to_string_lossy().into_owned();
     let text = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let got = hex(&Sha256::digest(&text));
+    assert_eq!(
+        got,
+        want,
+        "{}: SHA-256 doesn't match tools/sm83-tests/sm83-v1.sha256; re-fetch with \
+         scripts/fetch-sm83-tests.sh",
+        path.display()
+    );
     let cases: Vec<Case> =
         serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut bus = FlatBus {
@@ -207,7 +250,14 @@ fn data_dir() -> PathBuf {
 #[test]
 fn sm83_single_step_tests() {
     let dir = data_dir();
+    let required = std::env::var(REQUIRE_ENV).is_ok_and(|v| v == "1");
     let Ok(entries) = std::fs::read_dir(&dir) else {
+        assert!(
+            !required,
+            "SM83 single-step tests not found in {} and {REQUIRE_ENV}=1; run \
+             scripts/fetch-sm83-tests.sh",
+            dir.display()
+        );
         eprintln!(
             "SKIPPED: SM83 single-step tests not found in {}; run scripts/fetch-sm83-tests.sh",
             dir.display()
@@ -219,11 +269,28 @@ fn sm83_single_step_tests() {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     files.sort();
+
+    // Exactly the files in the hash list: none missing, none extra.
+    let hashes = expected_hashes();
     // 244 base opcodes (256 minus CB and the 11 invalid ones) + 256 CB.
-    assert_eq!(
-        files.len(),
-        500,
-        "unexpected number of test files in {}",
+    assert_eq!(hashes.len(), 500, "sm83-v1.sha256 should list 500 files");
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    let missing: Vec<&str> = hashes
+        .keys()
+        .copied()
+        .filter(|k| !names.iter().any(|n| n == k))
+        .collect();
+    let extra: Vec<&String> = names
+        .iter()
+        .filter(|n| !hashes.contains_key(n.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "test data in {} doesn't match tools/sm83-tests/sm83-v1.sha256 (missing {missing:?}, \
+         extra {extra:?}); re-fetch with scripts/fetch-sm83-tests.sh",
         dir.display()
     );
 
@@ -237,7 +304,7 @@ fn sm83_single_step_tests() {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(path) = files.get(i) else { break };
-                        out.push(run_file(path));
+                        out.push(run_file(path, hashes[names[i].as_str()]));
                     }
                     out
                 })

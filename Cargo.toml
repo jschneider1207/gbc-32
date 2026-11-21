@@ -18,3 +18,8 @@ undocumented_unsafe_blocks = "deny"
 # Never set `panic = "abort"` in these profiles.
 [profile.release]
 debug = "line-tables-only"
+
+# The SM83 test data (161 MB) is hashed on every `cargo test`; unoptimized
+# SHA-256 would add seconds to the dev loop.
+[profile.dev.package.sha2]
+opt-level = 3
