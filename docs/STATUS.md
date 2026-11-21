@@ -5,30 +5,32 @@
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
 - **Milestone:** M2 (timing, interrupts, timers, OAM DMA). M1 is tagged `stage1-m1`.
-- **Last updated:** 2026-11-21, end of session 03 (`logs/2026-11-21-03-m1-close-quality-bar.md`)
+- **Last updated:** 2026-11-21, session 04 (`logs/2026-11-21-04-adr0011-event-scheduled-timer.md`)
 
 ## Next up
 
-1. **ADR 0011 implementation**, in the order listed in the M2 plan:
-   - event table + PPU on it;
-   - fingerprint tooling;
-   - the reload window in the eager timer, kept afterwards as a test-only
-     reference;
-   - the lazy timer and serial clock with a differential test;
-   - halted/idle jumps to the next deadline.
+ADR 0011 steps 1-5 are done (lazy event-scheduled timer/serial, HALT idles
+to the next deadline). The M2 acceptance subset now passes 17/17, but M2
+plan tasks remain; finish them before the milestone review and tag.
 
-   Read `docs/decisions/0011-event-scheduled-timer.md` first. It is
-   detailed, with measured numbers from a throwaway prototype. Each step
-   is new emulation/timing logic, so use the most capable model.
-   - When it lands, rebaseline the benchmark and size budgets in the same
-     commit, with the numbers in the commit body (ADR 0010).
-   - The prototype went over the `write_high`/`read_high` size budgets.
-     Keep the timer I/O out of line.
-2. The rest of M2: HALT tasks, OAM DMA, scheduled inputs at M-cycle
-   resolution, and `hard_rules` hardening (M1 API review, low).
-3. **M2 acceptance subset:** 15/17 must pass. Failing:
-   `timer/tima_write_reloading` and `timer/tma_write_reloading` (the TIMA
-   reload window, ADR 0011 step 3).
+1. **HALT tasks** (`cpu/mod.rs`): IME=1 with an interrupt pending at HALT's
+   check re-executes HALT (`Cpu::halt()`, rewind PC, `TODO(M2)` there);
+   `EI; HALT`; CGB +1 M-cycle wake-up latency (one `bus.idle()` in the
+   wake-up branch of `step_not_running`'s `Mode::Halted` arm). Changes
+   behavior: expect fingerprint diffs, explain each.
+2. **OAM DMA** timing and bus conflicts, on a `Dma` deadline with lazy
+   progress (ADR 0011 "OAM DMA and scheduled inputs"); `peek` stays
+   conflict-free; measure any `read` cost with `check-bench`.
+3. **`set_buttons_at`** (Input deadline), romtest switched to it.
+4. ADR 0011 open hardware questions (CGB timer-disable tick; serial phase
+   after DIV reset). Also check the two unticked top M2 items (memory
+   access timing, interrupt dispatch/HALT bug/IE-IF) against what's done.
+5. **Milestone close:** reviews per AGENTS.md (hardware correctness, test
+   integrity, performance/portability: the hot path changed), fix, then
+   `--update-baseline` and tag `stage1-m2`.
+
+Every new test is mutation-checked (AGENTS.md): break the code, see it fail.
+Verification tools: `scripts/diff-fingerprint.sh <rev>` (295 ROMs, ~7 s).
 
 ## Needs human
 
@@ -56,6 +58,8 @@ Context on earlier human decisions:
     `docs/fuzzing.md`).
 - **valgrind** 3.22.0. Benchmark Ir counts are tied to it and the pinned
   toolchain; a change to either is a rebaseline commit.
+- **Human rule (session 04):** a test counts only once it has been seen to
+  fail against broken code (AGENTS.md).
 - **SM83 single-step data:** `scripts/fetch-sm83-tests.sh` →
   `test-data/sm83/`. Set `GBC_REQUIRE_TEST_DATA=1` locally.
 - **Desktop system libraries:** installed. WSL2 Ubuntu 24.04, no `jq`.
@@ -71,19 +75,18 @@ None.
 
 ## Acceptance snapshot
 
-As of 8e9bae8. The committed baseline is the M1 one (f2c7098). The gate
-fails only at the last step (must-tier ROMs), as expected mid-stage:
-fmt, clippy, tests, no-alloc, code size, the benchmark and fuzzing all
-pass. The full gate takes about 1 min with the valgrind benchmark.
+As of 84c7744. The committed romtest baseline is still M1's (f2c7098); the
+only status changes against it are `timer/tima_write_reloading` and
+`timer/tma_write_reloading` (fail → pass).
 
 | Tier | Pass | Fail | Timeout | Crash | Unsupported | No reference |
 |---|---|---|---|---|---|---|
-| must (86) | 42 | 42 | 2 | 0 | 0 | 0 |
+| must (86) | 44 | 40 | 2 | 0 | 0 | 0 |
 | should (40) | 2 | 30 | 8 | 0 | 0 | 0 |
 | stretch (3268) | 1 | 107 | 2 | 10 | 3144 | 4 |
 
-Performance (`docs/perf.md`):
-- Benchmark Ir over 20 emulated s: cpu_instrs 1,926,303,053, cgb_sound
-  922,727,228, cgb-acid2 928,451,269.
-- Code size: `Cpu::run::<Ctx>` 37,064 B (budget 39,000), `execute_cb`
-  15,702 B (budget 16,500).
+Performance (`docs/perf.md`, baseline updated in 84c7744):
+- Benchmark Ir over 20 emulated s: cpu_instrs 1,382,484,838, cgb_sound
+  622,018,571, cgb-acid2 13,094,335 (was 1,926 M / 923 M / 928 M at M1).
+- Code size: `Cpu::run::<Ctx>` 30,896 B (budget 32,500), `execute_cb`
+  13,870 B (budget 14,600).
