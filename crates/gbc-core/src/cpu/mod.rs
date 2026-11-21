@@ -122,6 +122,13 @@ pub trait Bus {
     fn idle_halted(&mut self) {
         self.idle();
     }
+    /// The CPU has just halted: HALT, with nothing pending, after its
+    /// fetch M-cycle. Free. The emulator pauses OAM DMA here (SameBoy
+    /// `GB_dma_run` returns while halted).
+    fn halt_begin(&mut self) {}
+    /// A halted CPU wakes up: called at the start of the wake-up M-cycle
+    /// (the CGB +1 idle before the next fetch or the dispatch). Free.
+    fn halt_end(&mut self) {}
     /// The IE register (FFFF). Free: no M-cycle.
     fn interrupt_enable(&self) -> u8;
     /// The IF register (FF0F), low 5 bits significant. Free: no M-cycle.
@@ -311,6 +318,7 @@ impl Cpu {
                 // IE & IF, then advances 4 clocks while halted, then takes
                 // either branch. See docs/reference/halt.md.
                 if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                    bus.halt_end();
                     bus.idle();
                     self.mode = Mode::Running;
                     Some(1)
@@ -386,6 +394,7 @@ impl Cpu {
     fn halt<B: Bus>(&mut self, bus: &mut B) {
         if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK == 0 {
             self.mode = Mode::Halted;
+            bus.halt_begin();
         } else if !self.ime {
             self.mode = Mode::HaltBug;
         } else {

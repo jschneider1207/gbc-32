@@ -9,6 +9,8 @@
 //! `Hot::dma` is set (`Ctx::read_during_dma`), so the conflict rules cost
 //! the normal path one flag test.
 
+use crate::schedule::NEVER;
+
 /// Bytes per transfer: one per M-cycle.
 pub(crate) const LEN: u8 = 0xA0;
 
@@ -28,6 +30,9 @@ pub(crate) struct OamDma {
     pub(crate) end: u64,
     /// Bytes written to OAM so far.
     pub(crate) copied: u8,
+    /// While the CPU is halted: the clock the transfer paused at (it makes
+    /// no progress past it), else `NEVER`. See `Ctx::dma_pause`.
+    pub(crate) paused: u64,
 }
 
 impl OamDma {
@@ -38,6 +43,7 @@ impl OamDma {
             block_from: 0,
             end: 0,
             copied: 0,
+            paused: NEVER,
         }
     }
 

@@ -620,6 +620,7 @@ impl Ctx<'_, '_> {
             block_from: if restart { now } else { start },
             end,
             copied: 0,
+            paused: NEVER,
         };
         self.hot.dma = 0xFE00;
         self.sys.sched.set(EventKind::Dma, end);
@@ -632,7 +633,8 @@ impl Ctx<'_, '_> {
     /// restart, the end of a run call and the `Dma` deadline.
     fn dma_sync(&mut self, now: u64) {
         let d = self.sys.dma;
-        let due = d.due(now, self.hot.mcycle as u64);
+        // Paused while halted: no progress past the pause.
+        let due = d.due(now.min(d.paused), self.hot.mcycle as u64);
         for i in d.copied..due {
             let src = d.base + u16::from(i);
             // CGB: a source at E000-FFFF reads FF (SameBoy `GB_dma_run`).
@@ -672,6 +674,46 @@ impl Ctx<'_, '_> {
                 }
             }
         }
+    }
+
+    /// HALT during a transfer: the DMA makes no progress while the CPU is
+    /// halted (SameBoy `GB_dma_run` returns early while `halted`, and
+    /// `GB_advance_cycles` overwrites `dma_cycles`, so the halted cycles
+    /// are dropped, not banked). Called at the end of HALT's fetch
+    /// M-cycle, whose own step still counts. OAM stays blocked (the
+    /// transfer is still active) and the `Dma` deadline is cleared, so the
+    /// halted skip doesn't stop at it. `docs/reference/oam-dma.md`.
+    #[inline(never)]
+    fn dma_pause(&mut self) {
+        let now = self.clock();
+        if now >= self.sys.dma.end {
+            return;
+        }
+        self.dma_sync(now);
+        self.sys.dma.paused = now;
+        self.sys.sched.set(EventKind::Dma, NEVER);
+        self.reschedule();
+    }
+
+    /// The wake-up from HALT, at the start of the wake-up M-cycle: the
+    /// transfer resumes there. SameBoy drops every halted M-cycle,
+    /// including the wake-up one, then takes exactly one step on wake-up
+    /// (`GB_cpu_run`: `dma_cycles = 4; GB_dma_run`): the same count, by the
+    /// next CPU access, as resuming one M-cycle early. Everything still
+    /// ahead moves out by the paused time.
+    #[inline(never)]
+    fn dma_resume(&mut self) {
+        let now = self.clock();
+        let d = &mut self.sys.dma;
+        let shift = now - d.paused;
+        if d.block_from > d.paused {
+            d.block_from += shift;
+        }
+        d.start += shift;
+        d.end += shift;
+        d.paused = NEVER;
+        self.sys.sched.set(EventKind::Dma, d.end);
+        self.reschedule();
     }
 
     /// A speed switch during a transfer: the remaining bytes keep their
@@ -790,6 +832,18 @@ impl Bus for Ctx<'_, '_> {
 
     fn stop_wakeup(&self) -> bool {
         !self.sys.buttons.is_empty()
+    }
+
+    fn halt_begin(&mut self) {
+        if self.hot.dma != 0 {
+            self.dma_pause();
+        }
+    }
+
+    fn halt_end(&mut self) {
+        if self.sys.dma.paused != NEVER {
+            self.dma_resume();
+        }
     }
 }
 
@@ -1318,8 +1372,14 @@ mod dma_tests {
     /// A CGB-mode emulator with the LCD off (no PPU deadline), OAM filled
     /// with 55, C100+i = C200+i = i ^ A5 and ROM 4000+i = i ^ 3C.
     fn setup() -> &'static mut Emulator<'static> {
+        setup_with(&[])
+    }
+
+    /// [`setup`] with `program` at 0100 (the entry point).
+    fn setup_with(program: &[u8]) -> &'static mut Emulator<'static> {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x143] = 0x80;
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
         for i in 0..0xA0 {
             rom[0x4000 + i] = i as u8 ^ 0x3C;
         }
@@ -1496,8 +1556,10 @@ mod dma_tests {
         assert!(emu.mem.oam.iter().all(|&b| b == 0xFF));
     }
 
+    /// Without HALT (STOP, lockup: not paused, `docs/reference/oam-dma.md`)
+    /// the idle skip stops at the `Dma` deadline like any other.
     #[test]
-    fn halted_skip_stops_at_the_dma_deadline() {
+    fn unhalted_skip_stops_at_the_dma_deadline() {
         let emu = setup();
         with_ctx(emu, |ctx| {
             let t0 = ctx.clock();
@@ -1508,5 +1570,97 @@ mod dma_tests {
             assert_eq!(ctx.hot.dma, 0);
             assert_eq!(ctx.mem.oam[0x9F], 0x9F ^ 0xA5);
         });
+    }
+
+    /// HALT in M-cycle 10 of a transfer, 50 halted M-cycles, wake-up. The
+    /// transfer makes no progress while halted, OAM stays blocked, and the
+    /// end moves out by the paused time (SameBoy `GB_dma_run`).
+    #[test]
+    fn halt_pauses_the_transfer() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 10);
+            ctx.read(0x0100); // HALT's fetch: its step counts
+            ctx.halt_begin();
+            let f = ctx.clock();
+            assert_eq!(ctx.sys.dma.copied, 10);
+            assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), NEVER);
+            for _ in 0..50 {
+                ctx.idle();
+                ctx.dma_sync(ctx.clock());
+                assert_eq!(ctx.sys.dma.copied, 10);
+                assert_eq!(ctx.hot.dma, 0xFE00);
+                assert_eq!(read(ctx.mem, ctx.sys, &ctx.hot, 0xFE00), 0xFF);
+                assert_eq!(read(ctx.mem, ctx.sys, &ctx.hot, 0xFE9F), 0xFF);
+            }
+            assert_eq!(ctx.mem.oam[10], 0x55);
+            // The wake-up M-cycle: pushed out by 50 M-cycles.
+            ctx.halt_end();
+            assert_eq!(ctx.clock(), f + 50 * 4);
+            let end = t0 + (162 + 50) * 4;
+            assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), end);
+            ctx.idle();
+            ctx.dma_sync(ctx.clock());
+            assert_eq!(ctx.sys.dma.copied, 11);
+            while ctx.clock() < end - 4 {
+                ctx.idle();
+            }
+            assert_eq!(ctx.hot.dma, 0xFE00);
+            ctx.idle();
+            assert_eq!((ctx.clock(), ctx.hot.dma), (end, 0));
+        });
+        assert!((0..0xA0).all(|i| emu.mem.oam[i] == i as u8 ^ 0xA5));
+    }
+
+    /// The halted skip passes the (cleared) `Dma` deadline: a paused
+    /// transfer is no deadline (ADR 0011).
+    #[test]
+    fn halted_skip_passes_the_dma_deadline() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 3);
+            ctx.halt_begin();
+            ctx.idle_halted();
+            assert!(ctx.clock() > t0 + 1_000_000);
+            assert_eq!(ctx.hot.dma, 0xFE00);
+            ctx.dma_sync(ctx.clock());
+            assert_eq!(ctx.sys.dma.copied, 2);
+        });
+    }
+
+    /// The CPU's hooks: `LD A,C1; LDH (46),A; HALT`, 40 halted M-cycles, an
+    /// IRQ with IME off, then `LD A,(D000)`, which conflicts with the WRAM
+    /// source and reads the byte being transferred. SameBoy: the HALT's
+    /// fetch M-cycle steps (byte 0), the halted ones including the wake-up
+    /// M-cycle don't, the wake-up takes one step (byte 1), and the three
+    /// M-cycles before the read step (bytes 2-4).
+    #[test]
+    fn wake_up_takes_one_dma_step() {
+        let emu = setup_with(&[0x3E, 0xC1, 0xE0, 0x46, 0x76, 0xFA, 0x00, 0xD0, 0x18, 0xFE]);
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let Emulator { mem, hw } = emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        let cpu = &mut hw.cpu;
+        cpu.set_ime(false);
+        ctx.sys.ie = 0x01;
+        ctx.sys.iflags = 0;
+        cpu.step(&mut ctx);
+        cpu.step(&mut ctx);
+        let w = ctx.clock() - 4;
+        cpu.step(&mut ctx);
+        assert!(cpu.halted());
+        assert_eq!(ctx.clock(), w + 8);
+        for _ in 0..40 {
+            ctx.idle();
+        }
+        ctx.sys.iflags = 0x01;
+        cpu.step(&mut ctx); // wake-up M-cycle, LD A,(D000)
+        assert!(!cpu.halted());
+        assert_eq!(cpu.registers().a, 4 ^ 0xA5);
+        assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), w + (162 + 40) * 4);
     }
 }

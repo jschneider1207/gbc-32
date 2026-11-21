@@ -75,6 +75,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 ## M3: PPU (DMG-compatibility rendering) + screenshots
 
 - [ ] OAM DMA as the PPU sees it (Pan Docs "OAM DMA bus conflicts": objects off-screen in mode 2, the word being written in mode 3); sync DMA progress before PPU OAM reads (`docs/reference/oam-dma.md`)
+- [ ] Confirm OAM DMA pausing in HALT (M2 review H4, SameBoy model) against gambatte `oamdma/oamdmasrc80_halt_*` and `mgb_oam_dma_halt_sprites` once STAT IRQs exist; a halted DMA blocks the mode-2 OAM scan on CGB C (SameBoy `add_object_from_index`)
 - [ ] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts
 - [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
 - [ ] Event deadlines: a small fixed array (timer, PPU mode/STAT, APU buffer) with `next_event = min`, recomputed only when a deadline changes; STAT and LYC writes must sync the PPU and reschedule (M1 reviews)

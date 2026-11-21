@@ -1076,6 +1076,12 @@ mod tests {
         fn stop_wakeup(&self) -> bool {
             self.0.stop_wakeup()
         }
+        fn halt_begin(&mut self) {
+            self.0.halt_begin();
+        }
+        fn halt_end(&mut self) {
+            self.0.halt_end();
+        }
         fn run_done(&self) -> bool {
             self.0.run_done()
         }
@@ -1100,8 +1106,14 @@ mod tests {
     /// speed) by `run_until` calls with odd targets, once with the
     /// skip-to-deadline idling and once one M-cycle at a time, and checks
     /// that every call ends on the same clock with the same events and
-    /// state. Returns the number of wake-ups (LD B,B after the HALT).
+    /// state. With `dma`, each HALT follows an OAM DMA start from C100, so
+    /// the transfer pauses in the HALT (and OAM must match too). Returns
+    /// the number of wake-ups (LD B,B after the HALT).
     fn halted_skip_matches_per_mcycle(ie: u8, tac: u8, double: bool) -> usize {
+        halted_skip_matches_per_mcycle_dma(ie, tac, double, false)
+    }
+
+    fn halted_skip_matches_per_mcycle_dma(ie: u8, tac: u8, double: bool, dma: bool) -> usize {
         let mut program = vec![];
         if double {
             // LD A,01; LDH (4D),A; STOP
@@ -1111,8 +1123,16 @@ mod tests {
             0x3E, tac, 0xE0, 0x07, // LD A,tac; LDH (07),A
             0x3E, ie, 0xE0, 0xFF, // LD A,ie; LDH (FF),A (IME stays off)
             0xAF, 0xE0, 0x0F, // XOR A; LDH (0F),A
-            0x76, 0x40, // HALT; LD B,B
-            0x18, 0xF9, // JR -7 (back to XOR A)
+        ]);
+        if dma {
+            // LD A,C1; LDH (46),A
+            program.extend_from_slice(&[0x3E, 0xC1, 0xE0, 0x46]);
+        }
+        program.extend_from_slice(&[
+            0x76,
+            0x40, // HALT; LD B,B
+            0x18,
+            if dma { 0xF5 } else { 0xF9 }, // JR back to XOR A
         ]);
         let a = with_program(&program, 0x80);
         let b = with_program(&program, 0x80);
@@ -1129,6 +1149,9 @@ mod tests {
             assert_eq!(a.clock(), b.clock());
             assert_eq!(a.registers(), b.registers());
             assert_eq!(a.hw.cpu.halted(), b.hw.cpu.halted());
+            assert_eq!(a.mem.oam, b.mem.oam);
+            let (da, db) = (&a.hw.sys.dma, &b.hw.sys.dma);
+            assert_eq!((da.start, da.end, da.copied), (db.start, db.end, db.copied));
             for reg in [0xFF04, 0xFF05, 0xFF0F, 0xFF41, 0xFF44] {
                 assert_eq!(a.peek(reg), b.peek(reg), "{reg:#06x}");
             }
@@ -1154,6 +1177,13 @@ mod tests {
         // No IRQ enabled: every call ends at its run target, mid-skip.
         assert_eq!(halted_skip_matches_per_mcycle(0x00, 0x05, false), 0);
         assert_eq!(halted_skip_matches_per_mcycle(0x00, 0x05, true), 0);
+        // An OAM DMA paused in each HALT (the skip passes its deadline).
+        assert!(halted_skip_matches_per_mcycle_dma(0x04, 0x05, false, true) > 10);
+        assert!(halted_skip_matches_per_mcycle_dma(0x04, 0x04, true, true) >= 2);
+        assert_eq!(
+            halted_skip_matches_per_mcycle_dma(0x00, 0x05, false, true),
+            0
+        );
     }
 
     #[test]

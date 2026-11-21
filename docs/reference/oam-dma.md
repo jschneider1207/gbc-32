@@ -33,6 +33,44 @@ one was not yet in its last M-cycle (SameBoy: `dma_restarting = dest !=
 start delay. A write in the old transfer's last M-cycle is a fresh start.
 Mooneye `acceptance/oam_dma_restart`.
 
+## HALT pauses the transfer
+While the CPU is halted the DMA makes no progress, and the halted M-cycles
+are dropped, not caught up. Source: SameBoy master (MIT): `GB_dma_run`
+(`Core/memory.c`) returns early while `halted || stopped`, and
+`GB_advance_cycles` (`Core/timing.c`) overwrites `dma_cycles` on every call,
+so the halted cycles are lost. Hardware evidence: gambatte
+`oamdma/oamdmasrc80_halt_m2irq_read8000` expects 81 on dmg08 and cgb04c (it
+reads source byte 31 after ~33 running and ~90 halted M-cycles); it needs
+STAT mode-2 IRQs, so it is an M3 check.
+- **Where it starts:** HALT's own fetch M-cycle still steps (SameBoy
+  `halt()` advances it with `halted` still false); the pause starts at the
+  end of it, when the CPU halts. A HALT that doesn't halt (an interrupt
+  pending, the HALT bug) pauses nothing.
+- **The start delay is frozen too:** its step (SameBoy `dma_current_dest`
+  0xFF -> 0) is a `GB_dma_run` step like the others.
+- **OAM stays blocked:** the transfer is still active (`GB_is_dma_active`:
+  `dest != 0xA1`). The CPU can't access anything while halted; for the PPU,
+  SameBoy (`display.c` `add_object_from_index`) makes a halted DMA block
+  the mode-2 OAM scan on CGB-0 to CGB-D (so on CGB C), i.e. no objects:
+  M3.
+- **Wake-up:** on CGB SameBoy samples IE & IF, advances the +1 wake-up
+  M-cycle still halted (dropped too, `docs/reference/halt.md`), then sets
+  `dma_cycles = 4` and runs exactly one step (`GB_cpu_run`, both the IME = 0
+  and the dispatch branch), before the next fetch or the dispatch. So by the
+  next CPU access the transfer has done every step up to the end of HALT's
+  fetch M-cycle plus one: as if it resumed at the start of the wake-up
+  M-cycle, which is what we do (`Ctx::dma_resume`). Only the PPU could see
+  the step's position inside that M-cycle.
+- **STOP:** SameBoy pauses it as well (`stopped`; `leave_stop_mode` takes one
+  step), but our STOP is an M5 stub, so it is not paused yet.
+- **Speed-switch pause:** in SameBoy the CPU is `halted` through
+  `speed_switch_halt_countdown` (no IRQ pending), so the DMA pauses; that
+  halt ends inside `GB_advance_cycles` with no extra wake-up step. Ours
+  rescales instead (`dma_rescale`); M5 replaces it.
+- **Lockup:** SameBoy's `ill` sets `halted` with IE = 0, so a transfer
+  freezes forever. That is SameBoy's way to model a hung CPU, not a
+  hardware claim; we keep the DMA running. Unverified.
+
 ## CPU accesses during a transfer (CGB C)
 - **OAM (FE00-FEFF):** reads FF from M-cycle 2 (or from the restart) to
   the end; writes are dropped for the whole transfer, start delay included
@@ -74,10 +112,13 @@ Mooneye `acceptance/oam_dma_restart`.
   The PPU does not read OAM yet.
 - `peek` and the DMA's own source reads use the plain `read` with the flag
   cleared: no conflicts, OAM as it is.
-- HALT/STOP idle skips stop at the `Dma` deadline like any other.
-- DMA continues through HALT (SameBoy defers the copies while halted but
-  catches up with the same timing; nothing can observe the difference
-  until the PPU reads OAM).
+- HALT pauses the lazy model: at the halt (`Ctx::dma_pause`) the bytes due
+  are copied, `OamDma::paused` caps the progress at that clock, and the
+  `Dma` deadline is cleared, so the halted skip (ADR 0011) passes it. At
+  wake-up (`Ctx::dma_resume`) `start`, `end` (and a pending `block_from`)
+  move out by the paused time and the deadline is set again. The CPU calls
+  `Bus::halt_begin`/`halt_end`; nothing is added per M-cycle.
+- The STOP and lockup idle skips stop at the `Dma` deadline like any other.
 
 ## Unverified
 - A speed switch during a transfer: the remaining bytes keep their M-cycle
