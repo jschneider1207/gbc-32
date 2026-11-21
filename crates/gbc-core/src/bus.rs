@@ -21,6 +21,7 @@ use crate::apu::StereoSample;
 use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK};
+use crate::dma::{self, Conflict, OamDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
@@ -72,6 +73,8 @@ pub(crate) struct Sys<'a> {
     /// Scheduled button changes; the earliest is the `Input` deadline
     /// (ADR 0012).
     pub(crate) inputs: InputQueue,
+    /// The last OAM DMA transfer; running while `Hot::dma` is set.
+    pub(crate) dma: OamDma,
 }
 
 impl Sys<'_> {
@@ -80,6 +83,7 @@ impl Sys<'_> {
             hot: Hot::new(),
             sched: Schedule::new(),
             inputs: InputQueue::new(),
+            dma: OamDma::new(),
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
@@ -197,6 +201,13 @@ pub(crate) struct Hot {
     /// The clock at which `budget` reaches 0. At most `i32::MAX` clocks
     /// ahead of the clock it was set at, so `budget` always fits.
     deadline: u64,
+    /// FE00 while an OAM DMA transfer runs (from the FF46 write to its
+    /// `Dma` deadline), else 0. CPU reads dispatch on `addr | dma`, so
+    /// during a transfer every address goes to `read_high` and the
+    /// conflict path, at one OR per access (ADR 0011: conflicts in the
+    /// access, not the tick). Writes test it in the out-of-line
+    /// `write_mapped`.
+    pub(crate) dma: u16,
 }
 
 impl Hot {
@@ -205,6 +216,7 @@ impl Hot {
             budget: 0,
             mcycle: 4,
             deadline: 0,
+            dma: 0,
         }
     }
 
@@ -212,6 +224,13 @@ impl Hot {
     #[inline]
     pub(crate) fn clock(&self) -> u64 {
         self.deadline.wrapping_sub(self.budget as i64 as u64)
+    }
+
+    /// This clock with [`Self::dma`] clear: reads through it are
+    /// conflict-free (`peek`, the DMA's own reads).
+    #[inline]
+    pub(crate) fn without_dma(&self) -> Self {
+        Self { dma: 0, ..*self }
     }
 }
 
@@ -246,6 +265,10 @@ pub(crate) struct Ctx<'r, 'a> {
 
 impl Drop for Ctx<'_, '_> {
     fn drop(&mut self) {
+        // Bring OAM up to the clock, so it is exact between run calls.
+        if self.hot.dma != 0 {
+            self.dma_sync(self.clock());
+        }
         self.sys.hot = self.hot;
     }
 }
@@ -420,8 +443,12 @@ impl Ctx<'_, '_> {
                 }
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
-                // Not scheduled yet: DMA in ADR 0011 step 6, the APU in M6.
-                EventKind::Dma | EventKind::DivApu | EventKind::AudioBuffer => {}
+                EventKind::Dma => {
+                    self.dma_sync(now);
+                    self.hot.dma = 0;
+                }
+                // Not scheduled yet: the APU in M6.
+                EventKind::DivApu | EventKind::AudioBuffer => {}
             }
         }
     }
@@ -440,6 +467,7 @@ impl Ctx<'_, '_> {
     }
 
     /// Catches the PPU up to the current clock and reschedules.
+    #[inline(never)]
     fn sync_ppu(&mut self) {
         let now = self.clock();
         let s = &mut *self.sys;
@@ -450,8 +478,20 @@ impl Ctx<'_, '_> {
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
-    #[inline]
+    /// During an OAM DMA transfer it takes the conflict path: one flag
+    /// test, here rather than at every inlined write site (ADR 0011:
+    /// conflicts in the access, not the tick).
+    #[inline(never)]
     pub(crate) fn write_mapped(&mut self, addr: u16, value: u8) {
+        if self.hot.dma != 0 {
+            return self.write_during_dma(addr, value);
+        }
+        self.write_to(addr, value);
+    }
+
+    /// [`Self::write_mapped`] without the conflict path.
+    #[inline(always)]
+    fn write_to(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         match addr >> 13 {
             0..=3 => self.sys.cart.write_rom(addr, value),
@@ -464,6 +504,7 @@ impl Ctx<'_, '_> {
     }
 
     /// FE00-FFFF.
+    #[inline(never)]
     fn write_high(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         match addr {
@@ -473,6 +514,16 @@ impl Ctx<'_, '_> {
             0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
             0xFFFF => self.sys.ie = value,
             _ => {}
+        }
+    }
+
+    /// FF00-FFFF, as `write_high` without a transfer.
+    fn write_ff(&mut self, addr: u16, value: u8) {
+        let a = usize::from(addr);
+        match addr {
+            0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
+            0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
+            _ => self.sys.ie = value,
         }
     }
 
@@ -523,15 +574,99 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// OAM DMA (FF46). Stub: copies all 160 bytes at once. TODO(M2): one
-    /// byte per M-cycle, the start delay and bus conflicts.
+    /// FF46: starts an OAM DMA transfer from `value << 8` (Pan Docs: OAM
+    /// DMA Transfer). The FF46 write's M-cycle and the next one are the
+    /// start delay; byte `i` is transferred in the M-cycle `2 + i` after the
+    /// write's. A write while a transfer is running restarts it: the old
+    /// one stops, but keeps CPU OAM reads blocked through the new start
+    /// delay unless it was in its last M-cycle (SameBoy `GB_IO_DMA`,
+    /// `dma_restarting`; Mooneye `oam_dma_restart`).
     fn oam_dma(&mut self, value: u8) {
         self.mem.io[0x46] = value;
-        let src = u16::from(value) << 8;
-        for i in 0..0xA0u16 {
-            let v = read(self.mem, self.sys, &self.hot, src.wrapping_add(i));
-            self.mem.oam[usize::from(i)] = v;
+        let now = self.clock();
+        let m = self.hot.mcycle as u64;
+        let restart = self.hot.dma != 0 && {
+            self.dma_sync(now);
+            now + m < self.sys.dma.end
+        };
+        let start = now + 2 * m;
+        let end = start + u64::from(dma::LEN) * m;
+        self.sys.dma = OamDma {
+            base: u16::from(value) << 8,
+            start,
+            block_from: if restart { now } else { start },
+            end,
+            copied: 0,
+        };
+        self.hot.dma = 0xFE00;
+        self.sys.sched.set(EventKind::Dma, end);
+        self.reschedule();
+    }
+
+    /// Copies the OAM DMA bytes due by the CPU access at `now` (an M-cycle
+    /// boundary). Called before anything can observe OAM or change a
+    /// source byte not yet copied: a CPU write during the transfer, a
+    /// restart, the end of a run call and the `Dma` deadline.
+    fn dma_sync(&mut self, now: u64) {
+        let d = self.sys.dma;
+        let due = d.due(now, self.hot.mcycle as u64);
+        for i in d.copied..due {
+            let src = d.base + u16::from(i);
+            // CGB: a source at E000-FFFF reads FF (SameBoy `GB_dma_run`).
+            self.mem.oam[usize::from(i)] = if src >= 0xE000 {
+                0xFF
+            } else {
+                read(self.mem, self.sys, &self.hot.without_dma(), src)
+            };
         }
+        self.sys.dma.copied = d.copied.max(due);
+    }
+
+    /// A CPU write while an OAM DMA transfer runs: OAM writes are dropped
+    /// for the whole transfer, start delay included (SameBoy
+    /// `write_high_memory`), and the rest follows [`dma::conflict`] for
+    /// CGB C (SameBoy `GB_write_memory`). The transfer is synced first,
+    /// because the write may change a source byte or its mapping.
+    #[inline(never)]
+    fn write_during_dma(&mut self, addr: u16, value: u8) {
+        let now = self.clock();
+        self.dma_sync(now);
+        if addr >= 0xFE00 {
+            if addr >= 0xFF00 {
+                self.write_ff(addr, value);
+            }
+            return;
+        }
+        match dma_conflict(&self.sys.dma, now, self.hot.mcycle, addr) {
+            (Conflict::None, _) => self.write_to(addr, value),
+            (Conflict::Open, _) => {}
+            (Conflict::Wram(a), _) => self.write_to(a, value),
+            (Conflict::Dma, i) => {
+                // CGB C: the OAM byte just written is cleared when the
+                // DMA reads below A000 (SameBoy: `oam[dest - 1] = 0`).
+                if self.sys.dma.base < 0xA000 {
+                    self.mem.oam[usize::from(i)] = 0;
+                }
+            }
+        }
+    }
+
+    /// A speed switch during a transfer: the remaining bytes keep their
+    /// M-cycle count at the new M-cycle length `m`, from `now`.
+    /// Unverified on hardware (`docs/reference/oam-dma.md`).
+    fn dma_rescale(&mut self, now: u64, old_m: u64, m: u64) {
+        self.dma_sync(now);
+        let d = &mut self.sys.dma;
+        let k = u64::from(d.copied);
+        // M-cycles from `now` to the access that counts byte `k` (or the end).
+        let left = (d.start + k * old_m).saturating_sub(now) / old_m;
+        let start = (now + left * m).saturating_sub(k * m);
+        if d.block_from > now {
+            d.block_from = start;
+        }
+        d.start = start;
+        d.end = start + u64::from(dma::LEN) * m;
+        self.sys.sched.set(EventKind::Dma, d.end);
     }
 }
 
@@ -590,6 +725,10 @@ impl Bus for Ctx<'_, '_> {
         // overflow window with it). TODO(M5): the exact pause length and
         // the PPU access freeze during it.
         self.sys.key1 = 0;
+        if self.hot.dma != 0 {
+            let m = self.hot.mcycle as u64;
+            self.dma_rescale(self.clock(), m, 6 - m);
+        }
         let h = &mut self.hot;
         h.mcycle = if h.mcycle == 4 { 2 } else { 4 };
         let (now, pause) = (self.clock(), 2050 * self.hot.mcycle as u64);
@@ -634,19 +773,57 @@ impl Bus for Ctx<'_, '_> {
 /// A read as the CPU sees it at the current clock, without side effects
 /// (no read on this hardware has any). Shared by the CPU bus and
 /// [`Emulator::peek`]. `hot` is the live clock: [`Ctx::hot`]
-/// during a run call, [`Sys::hot`] otherwise.
+/// during a run call, [`Sys::hot`] otherwise. While an OAM DMA transfer
+/// runs, every address goes to `read_high` and the conflict path
+/// ([`Hot::dma`]); `peek` and the DMA's own reads clear it
+/// ([`Hot::without_dma`]).
 #[inline(always)]
 pub(crate) fn read(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
-    match addr >> 13 {
+    let key = addr | hot.dma;
+    match key >> 13 {
         0..=3 => sys.cart.read_rom(addr),
         4 => mem.vram[(sys.vram_off | (a & 0x1FFF)) & 0x3FFF],
         5 => sys.cart.read_ram(addr),
         6 => wram(mem, sys, a),
         // E000-FDFF: echo of C000-DDFF (Pan Docs: Memory Map).
-        _ if addr < 0xFE00 => wram(mem, sys, a),
+        _ if key < 0xFE00 => wram(mem, sys, a),
         _ => read_high(mem, sys, hot, addr),
     }
+}
+
+/// The conflict for a CPU access to `addr` (below FE00) at `now` during
+/// the transfer `d`, and the index of the byte being transferred. No
+/// conflict in the start delay.
+fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) {
+    if now < d.start {
+        return (Conflict::None, 0);
+    }
+    let i = ((now - d.start) / mcycle as u64) as u8;
+    (dma::conflict(d.base, d.base + u16::from(i), addr), i)
+}
+
+/// A CPU read while an OAM DMA transfer runs (`Hot::dma`): OAM reads FF
+/// (Pan Docs: OAM DMA bus conflicts; SameBoy `read_high_memory`), HRAM and
+/// I/O are unaffected, and the rest follows [`dma::conflict`]. Side-effect
+/// free, like [`read`].
+#[inline(never)]
+fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
+    let now = hot.clock();
+    let plain = hot.without_dma();
+    if addr >= 0xFE00 {
+        if addr < 0xFF00 && now >= sys.dma.block_from {
+            return 0xFF;
+        }
+        return read_high(mem, sys, &plain, addr);
+    }
+    let addr = match dma_conflict(&sys.dma, now, hot.mcycle, addr) {
+        (Conflict::None, _) => addr,
+        (Conflict::Open, _) => return 0xFF,
+        (Conflict::Wram(a), _) => a,
+        (Conflict::Dma, i) => sys.dma.base + u16::from(i),
+    };
+    read(mem, sys, &plain, addr)
 }
 
 /// C000-DFFF and its echo: bank 0, then the SVBK bank.
@@ -678,6 +855,9 @@ fn extra_oam_index(a: usize) -> usize {
 
 /// FE00-FFFF.
 fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
+    if hot.dma != 0 {
+        return read_during_dma(mem, sys, hot, addr);
+    }
     let a = usize::from(addr);
     match addr {
         0xFE00..=0xFE9F => mem.oam[a & 0xFF],
@@ -735,7 +915,8 @@ impl Emulator<'_> {
     /// ([`MIN_ROM_SIZE`](crate::MIN_ROM_SIZE)).
     pub fn peek(&self, addr: u16) -> u8 {
         let sys = &self.hw.sys;
-        read(self.mem, sys, &sys.hot, addr)
+        // Conflict-free: the memory as it is, OAM included, during a DMA.
+        read(self.mem, sys, &sys.hot.without_dma(), addr)
     }
 }
 
@@ -1096,5 +1277,210 @@ mod tests {
         ] {
             assert_eq!(emu.peek(reg), v, "{reg:#06x}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dma_tests {
+    //! OAM DMA timing, blocking and CGB C conflicts (`docs/reference/oam-dma.md`).
+    extern crate std;
+    use super::*;
+    use crate::{Config, Frame};
+    use std::boxed::Box;
+    use std::vec;
+
+    /// A CGB-mode emulator with the LCD off (no PPU deadline), OAM filled
+    /// with 55, C100+i = C200+i = i ^ A5 and ROM 4000+i = i ^ 3C.
+    fn setup() -> &'static mut Emulator<'static> {
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x143] = 0x80;
+        for i in 0..0xA0 {
+            rom[0x4000 + i] = i as u8 ^ 0x3C;
+        }
+        let emu = crate::tests::fresh();
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        emu.mem.oam.fill(0x55);
+        for i in 0..0x200 {
+            emu.mem.wram[0x100 + i] = i as u8 ^ 0xA5;
+        }
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        ctx.write_mapped(0xFF40, 0x11);
+        drop(ctx);
+        emu
+    }
+
+    /// Runs `f` with a run-call context on `emu`.
+    fn with_ctx(emu: &mut Emulator, f: impl FnOnce(&mut Ctx)) {
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let Emulator { mem, hw } = emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        f(&mut ctx);
+    }
+
+    /// Idles until the next access is at `t0 + n` M-cycles.
+    fn idle_to(ctx: &mut Ctx, t0: u64, n: u64) {
+        while ctx.clock() < t0 + 4 * n {
+            ctx.idle();
+        }
+        assert_eq!(ctx.clock(), t0 + 4 * n);
+    }
+
+    #[test]
+    fn start_delay_blocking_and_end() {
+        let emu = setup();
+        let mut t0 = 0;
+        with_ctx(emu, |ctx| {
+            t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1); // M-cycle 0
+            assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), t0 + 162 * 4);
+            // M-cycle 1, the start delay: OAM is readable and untouched.
+            assert_eq!(ctx.read(0xFE00), 0x55);
+            // M-cycle 2: byte 0 transferred, OAM blocked; HRAM is not.
+            assert_eq!(ctx.read(0xFE00), 0xFF);
+            assert_eq!(ctx.read(0xFEA5), 0xFF);
+            ctx.write(0xFF80, 0x12);
+            assert_eq!(ctx.read(0xFF80), 0x12);
+            // OAM writes are dropped.
+            ctx.write(0xFE30, 0x99);
+            ctx.write(0xFEA0, 0x99);
+            idle_to(ctx, t0, 10);
+        });
+        // Between run calls OAM is synced to the clock: bytes 0-8 are in
+        // (byte 8 counts from the access at M-cycle 10), the rest are not.
+        // `peek` sees OAM as it is, without FF or conflicts.
+        assert_eq!(emu.peek(0xFE00), 0xA5);
+        assert_eq!(emu.peek(0xFE08), 8 ^ 0xA5);
+        assert_eq!(emu.peek(0xFE09), 0x55);
+        assert_eq!(emu.peek(0xC000), emu.mem.wram[0]);
+        assert_eq!(emu.peek(0xC105), 5 ^ 0xA5);
+        with_ctx(emu, |ctx| {
+            idle_to(ctx, t0, 161);
+            // The last transfer M-cycle: still blocked.
+            assert_eq!(ctx.read(0xFE9F), 0xFF);
+            // M-cycle 162: done.
+            assert_eq!(ctx.hot.dma, 0);
+            assert_eq!(ctx.read(0xFE9F), 0x9F ^ 0xA5);
+            assert_eq!(ctx.read(0xFEA0), 0);
+            ctx.write(0xFE30, 0x99);
+            assert_eq!(ctx.read(0xFE30), 0x99);
+        });
+        for (i, &b) in emu.mem.oam.iter().enumerate() {
+            if i != 0x30 {
+                assert_eq!(b, i as u8 ^ 0xA5, "{i:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn restart_keeps_oam_blocked_through_the_new_delay() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 20);
+            ctx.write(0xFF46, 0xC2); // M-cycle 20
+            // The new start delay: the old transfer still blocks OAM.
+            assert_eq!(ctx.read(0xFE00), 0xFF);
+            assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), t0 + (20 + 162) * 4);
+            // The new transfer from C200.
+            idle_to(ctx, t0, 20 + 162);
+            assert_eq!(ctx.read(0xFE00), 0xA5);
+            assert_eq!(ctx.mem.oam[0x9F], 0x9F ^ 0xA5);
+        });
+    }
+
+    #[test]
+    fn restart_in_the_last_mcycle_is_a_fresh_start() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 161);
+            ctx.write(0xFF46, 0xC1); // the old transfer's last M-cycle
+            assert_eq!(ctx.read(0xFE10), 0x10 ^ 0xA5);
+            assert_eq!(ctx.read(0xFE10), 0xFF);
+        });
+    }
+
+    #[test]
+    fn wram_source_conflicts() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            // The start delay: no conflict.
+            assert_eq!(ctx.read(0xC000), ctx.mem.wram[0]);
+            idle_to(ctx, t0, 7);
+            // WRAM reads see the DMA's byte (M-cycle 7: byte 5, C105); ROM
+            // and VRAM are free.
+            assert_eq!(ctx.read(0xD000), 5 ^ 0xA5);
+            assert_eq!(ctx.read(0x4001), 1 ^ 0x3C);
+            // The address the DMA reads next is not a conflict.
+            assert_eq!(ctx.read(0xC108), 8 ^ 0xA5); // M-cycle 9: byte 7
+            // WRAM writes are dropped.
+            let before = ctx.mem.wram[0x10];
+            ctx.write(0xC010, 0x77);
+            assert_eq!(ctx.mem.wram[0x10], before);
+            // A VRAM write is free.
+            ctx.write(0x8000, 0x66);
+            assert_eq!(ctx.mem.vram[0], 0x66);
+        });
+    }
+
+    #[test]
+    fn rom_source_conflicts() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0x40);
+            idle_to(ctx, t0, 4);
+            // External bus: the DMA's byte (M-cycle 4: byte 2, 4002).
+            assert_eq!(ctx.read(0x0150), 2 ^ 0x3C);
+            // WRAM: redirected to the DMA's bank half (bit 12 clear).
+            ctx.mem.wram[0x123] = 0x42;
+            assert_eq!(ctx.read(0xD123), 0x42);
+            ctx.write(0xD124, 0x43); // M-cycle 6, goes to C124
+            assert_eq!(ctx.mem.wram[0x124], 0x43);
+            // An external-bus write is dropped and clears the OAM byte
+            // just transferred (byte 5; CGB C).
+            ctx.write(0x2000, 0x05); // M-cycle 7
+            assert_eq!(ctx.mem.oam[5], 0);
+            assert_eq!(ctx.mem.oam[4], 4 ^ 0x3C);
+            assert_eq!(ctx.sys.cart.read_rom(0x4000), 0x3C); // bank unchanged
+            // VRAM is free.
+            ctx.mem.vram[5] = 0x31;
+            assert_eq!(ctx.read(0x8005), 0x31);
+        });
+    }
+
+    #[test]
+    fn high_source_reads_ff_and_opens_the_external_bus() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xFE);
+            idle_to(ctx, t0, 3);
+            assert_eq!(ctx.read(0x0150), 0xFF);
+            ctx.mem.wram[0x1456] = 0x24;
+            assert_eq!(ctx.read(0xC456), 0x24); // FE00: bit 12 set, D456
+            idle_to(ctx, t0, 162);
+        });
+        assert!(emu.mem.oam.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn halted_skip_stops_at_the_dma_deadline() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            assert_eq!(ctx.hot.dma, 0xFE00);
+            ctx.idle_halted();
+            assert_eq!(ctx.clock(), t0 + 162 * 4);
+            assert_eq!(ctx.hot.dma, 0);
+            assert_eq!(ctx.mem.oam[0x9F], 0x9F ^ 0xA5);
+        });
     }
 }

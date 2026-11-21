@@ -20,14 +20,23 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 30,896 | 32,500 |
-| `Cpu::execute_cb::<Ctx>` | 13,870 | 14,600 |
-| `Ctx::write_high` | 2,880 | 3,050 |
-| `bus::read_high` | 1,104 | 1,160 |
+| `Cpu::run::<Ctx>` | 32,560 | 34,200 |
+| `Cpu::execute_cb::<Ctx>` | 14,126 | 14,600 |
+| `Ctx::write_high` | 160 | 170 |
+| `Ctx::write_io` | 1,180 | 1,240 |
+| `bus::read_high` | 992 | 1,160 |
 | `Ctx::sync_ppu` | 496 | 520 |
-| `Ctx::write_mapped` | 396 | 420 |
+| `Ctx::write_mapped` | 420 | 440 |
 | `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
+
+OAM DMA (M2) grew `Cpu::run` by 1,640 B (+5.3%): every inlined read ORs
+`Hot::dma` into its address dispatch (the cheapest of three measured
+variants: a flag test with an out-of-line call per read was +1,224 B for
+reads alone but +2,008 B with writes, and LLVM re-inlined `write_io`; see
+the commit). Writes test the flag in the out-of-line `write_mapped`, which
+is now `#[inline(never)]`; `write_high` and `sync_ppu` are
+`#[inline(never)]` to keep their earlier out-of-line shape.
 
 Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the

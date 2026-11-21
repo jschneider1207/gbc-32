@@ -102,6 +102,7 @@ mod bus;
 mod cart;
 mod config;
 mod cpu;
+mod dma;
 mod events;
 mod joypad;
 mod memory;
