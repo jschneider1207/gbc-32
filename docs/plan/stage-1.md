@@ -56,6 +56,11 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
 - [ ] OAM DMA timing and bus conflicts (DMA conflicts put state into the CPU read path, so `peek` needs its own side-effect-free path; consider driving DMA through `next_event`)
 - [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
 
+- [ ] Quality-bar tooling in the gate (README "Quality and performance bar": the benchmark runs in the gate from M2 on):
+  - [ ] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
+  - [ ] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate
+  - [ ] Short, deterministic fuzz pass in the gate over untrusted inputs: ROM header/`load`, save RAM, `set_rtc_state`
+
 **Acceptance:** `romtest --filter 'mooneye-test-suite/acceptance/{timer,instr,interrupts,oam_dma}/**' --gate must`
 exits 0. Some top-level Mooneye acceptance tests depend on LY/VBlank timing or
 OAM access windows, so the full `mooneye-acceptance` group is required in M3.
