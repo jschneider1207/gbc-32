@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(rustup *)",
+      "Bash(./scripts/*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git status *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git rev-parse *)",
+      "Bash(git ls-files *)",
+      "Edit(/**)"
+    ],
+    "ask": [
+      "Edit(/acceptance/*.toml)",
+      "Edit(/scripts/gate-*.sh)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(sudo *)",
+      "Bash(git tag -d *)",
+      "Bash(git tag --delete *)",
+      "Bash(git branch -D *)",
+      "Edit(/test-roms/**)"
+    ]
+  }
+}
