@@ -4,3 +4,6 @@
 blargg/cpu_instrs/cpu_instrs.gb 20 1388020611
 blargg/cgb_sound/cgb_sound.gb 20 606760080
 cgb-acid2/cgb-acid2.gbc 20 12961034
+synth:event-storm 2 519429543
+synth:dma-storm 3 384933620
+synth:halt-irq 10 121080725

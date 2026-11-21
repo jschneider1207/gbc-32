@@ -1,4 +1,39 @@
-# Performance
+# PerformanceROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/cpu_instrs.gb`
+(CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
+The test ROMs are read from `$TEST_ROMS` (default `test-roms/`).
+
+Three synthetic ROMs cover paths those miss. `tools/bench` builds them in
+memory (`bench synth:<name> <secs>`, hand-assembled SM83 in
+`tools/bench/src/synth.rs`, 32 KiB, valid header and checksums; no ROM files
+in git):
+
+- `synth:event-storm` (2 s): CGB speed switch (KEY1 + STOP), then in double
+  speed TIMA at 262 kHz with TMA=FF (an overflow every 8 clocks) and the
+  serial port re-armed on the CGB fast internal clock after every transfer.
+  Per emulated second: about 923k scheduler `boundary` calls (the event
+  table; `run_events` is inlined there), 49,885 SC writes, 1 `Bus::stop`
+  (the speed switch).
+- `synth:dma-storm` (3 s): OAM DMA from C000 restarted every ~170 M-cycles
+  while the CPU runs from ROM, copying ROM bytes to WRAM. Per second:
+  731k `read_during_dma`, 120k `write_during_dma`, 120k `dma_sync` calls.
+- `synth:halt-irq` (10 s): HALT woken by the timer IRQ (TIMA at 262 kHz
+  from TMA=F0, every 256 clocks), RETI handler. Per second: about 16.4k
+  wakeups (`boundary` calls, and 32.7k `step_not_running` and 2-byte IRQ
+  pushes).
+
+Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
+the callgrind output of a 1 s run.
+
+Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
+
+| ROM | Ir |
+|---|---|
+| cpu_instrs.gb | 1,388,020,611 |
+| cgb_sound.gb | 606,760,080 |
+| cgb-acid2.gbc | 12,961,034 |
+| synth:event-storm (2 s) | 519,429,543 |
+| synth:dma-storm (3 s) | 384,933,620 |
+| synth:halt-irq (10 s) | 121,080,725 |
 
 ## Code-size budgets
 

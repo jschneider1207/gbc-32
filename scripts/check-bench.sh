@@ -24,6 +24,10 @@ BENCHES=(
   "blargg/cpu_instrs/cpu_instrs.gb 20"
   "blargg/cgb_sound/cgb_sound.gb 20"
   "cgb-acid2/cgb-acid2.gbc 20"
+  # Synthetic ROMs (tools/bench/src/synth.rs): paths the ROMs above miss.
+  "synth:event-storm 2"
+  "synth:dma-storm 3"
+  "synth:halt-irq 10"
 )
 
 update=0
