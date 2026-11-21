@@ -133,3 +133,83 @@ or tampered setup to look like a pass. Changes:
   that is empty, absolute, or has an empty or `..` segment is exit 2, and
   manifest parsing probes each template for both a subdirectory ROM and a
   root ROM.
+
+### 2026-11-21: M0 milestone-close review
+
+The M0 milestone-close reviews found more gaps. Changes:
+
+- **Vanished baseline entries are regressions in a full run.** In a run
+  without `--filter`, `--group` or `--only-check` (with or without
+  `--gate`), every baseline `(group, ROM)` with no current result is a
+  regression whatever its baseline status, printed as `<status> ->
+  missing` (e.g. `timeout -> missing`), and the run exits 1. Previously
+  only `pass` entries were checked, so a failing ROM could leave the
+  baseline silently through a manifest edit. `--update-baseline` is
+  refused while any such entry exists. The only way to drop entries is
+  `--update-baseline --allow-removed` (`--allow-removed` alone is a usage
+  error), which prints every removed key, records them in the results JSON
+  (`removed_from_baseline`) and Markdown, and still refuses on any other
+  regression. Partial runs are unchanged: they compare only what is in
+  scope, and an in-scope `pass` entry with no result is a regression
+  (`pass -> missing`).
+- **Status precedence is now crash/timeout > fail > unsupported >
+  no-reference > pass.** `unsupported` is scored as a failure, so a ROM
+  with a missing PNG and an unsupported check (e.g. a Gambatte ROM before
+  M5) counts as `unsupported`, not as excluded. `no-reference` applies only
+  when every other check passed.
+- **`-h`/`--help` exits 0 only as the sole argument.** With any other
+  argument it is a usage error (exit 2), so a command line with a stray
+  `--help` can't look like a successful run.
+- **Loaded bytes are hashed.** The up-front check could pass and the file
+  change before a job read it. Now every ROM and reference PNG a run reads
+  is hashed again from exactly the bytes read and compared with the
+  in-memory integrity list (exit 2 on a mismatch or an unlisted file). The
+  up-front pass still hashes every listed file, which keeps
+  "every listed file exists and matches" a once-per-run guarantee
+  independent of the selection. The extra cost is small, so both passes
+  are kept rather than skipping files that will be loaded: on the full
+  stage 1 manifest (v7.0, 8 jobs) the up-front pass hashes 5101 files
+  (176.9 MB) in 0.29 s, and the load-time checks hash 3439 loads
+  (137.8 MB) in 1.09 s of CPU summed over the 8 workers (about 0.14 s of
+  wall time) out of a 9.7 s run.
+- **No-progress guard catches stalled time with events.** A run call that
+  returns without advancing the clock and with no event was already
+  `crash` (`no_progress`). Now `MAX_STALLED_CALLS` (1000) consecutive run
+  calls without a clock advance are also `crash`, even if every call
+  reports events (e.g. a core stuck reporting `SERIAL_TX`), so such a core
+  can't spin until the ld_b_b timeout or forever. Every real run call
+  executes at least one instruction, so the bound is generous.
+- **Final frame after the LCD is turned on.** The core no longer displays
+  the first frame after an LCD enable (ADR 0006 amendment, "M0 hardware
+  review"): `screen_blank()` stays true through that `FRAME_READY`, so the
+  runner's final frame stays white until the second frame. The fake
+  machine mirrors this, and fires `FRAME_READY` at the start of VBlank
+  (65,664 clocks into each 70,224-clock frame) like the core.
+- **Hard rules are tested beyond the gate's grep.**
+  `crates/gbc-core/tests/hard_rules.rs` tokenizes every file under
+  `crates/gbc-core/src` (comments and literals removed, so whitespace and
+  line breaks don't matter) and fails on `extern crate alloc|std` or a
+  path rooted at `std`/`alloc` outside test code, on any `#[path]` (also
+  in `cfg_attr`) or `include!`, on a missing `#![no_std]`, and on any
+  entry in a dependency table of `crates/gbc-core/Cargo.toml` (dev and
+  build dependencies included). Test code is, conservatively, only the
+  body of an inline `#[cfg(test)] mod name { ... }`; `#[cfg(test)]` on
+  any other item does not exempt it.
+
+Deliberate interpretations of acceptance/README.md, recorded so they are
+not mistaken for bugs:
+
+- **`--gate` with a selection scores only the selection.** Combined with
+  `--filter`, `--group` or `--only-check`, `--gate <tier>` fails only on
+  selected ROMs (and, with `--only-check`, on the selected checks) in
+  that tier. The plan's milestone acceptance commands rely on this (e.g.
+  M1: `--group … --only-check serial --gate must`). The gate script never
+  passes a selection, so the stage gate always scores the whole manifest.
+  A `--gate` tier with no selected ROM is a usage error, not a vacuous
+  pass.
+- **The overall score renormalizes the weights.** The README's `overall =
+  (3·must + 2·should + 1·stretch) / 6` is undefined when a tier has no
+  scored ROM (a partial run, or a tier whose ROMs are all `no-reference`).
+  The runner sums `weight × score` over the tiers that have a score and
+  divides by the sum of their weights; with every tier scored this is
+  exactly the README formula.
