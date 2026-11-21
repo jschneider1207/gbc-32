@@ -99,3 +99,55 @@ provisional until M4.
   at exit as solid white.
 - Any new top-level field in `Emulator` must go into `Memory` (if it is all
   integers) or `Hw`. The build fails until `init` accounts for it.
+
+## Amendments
+
+### 2026-11-21: returning cartridge buffers, trimming, palettes, construction
+
+An API review found that buffers lent to `load` could not be returned, and
+a few construction and documentation gaps. Changes:
+
+- **Buffers always come back.** `eject(&mut self) -> Option<CartBuffers<'a>>`
+  unloads the cartridge, returns the ROM and the RAM buffer, and puts the
+  emulator back in the state `init` leaves it in. `load` now returns
+  `Result<Option<CartBuffers<'a>>, LoadError<'a>>`: on success the previous
+  cartridge's buffers (if any), on failure a `LoadError { kind, rom,
+  cart_ram }` holding the caller's buffers (the emulator is unchanged). The
+  old error enum is now `LoadErrorKind`, which `cart_ram_size` returns.
+  Without this, switching games on the MCU would need a second `&'static
+  mut` to the same save buffer. `CartBuffers<'a>` is
+  `(&'a [u8], &'a mut [u8])`.
+- **Cartridge RAM is trimmed to the header size.** The cart keeps the whole
+  buffer but uses only `cart_ram_size(rom)` bytes, so `cart_ram()` and all
+  mapper behavior depend only on the header. `eject` (and the other paths
+  above) return the whole, untrimmed buffer, so a caller with one static
+  buffer sized for the largest game loses nothing. (Storing a trimmed slice
+  plus the remainder would need `unsafe` to rejoin them.)
+- **Unknown RAM size codes (0149) mean no RAM** instead of a load error,
+  as in SameBoy (`Core/mbc.c`, `GB_configure_cart`). `UnknownRamSize` is
+  gone.
+- **`set_dmg_palettes(DmgPalettes)`** changes palettes without the reset
+  `load` performs. `Config` is still passed to `load`.
+- **Owned box for std callers.** The core has no `alloc`, so it cannot
+  return a `Box`. The documented pattern is `Emulator::init(&mut slot)`
+  followed by `unsafe { slot.assume_init() }` (sound because `init` fully
+  initializes the value). Using the reference returned by `init` remains
+  the no-`unsafe` option.
+- **No `Default` for `Emulator`.** It built the ~49 KiB value on the stack.
+  `const fn new()` is documented as for `const`/`static` initializers
+  only. The MCU example now uses `static mut MaybeUninit<Emulator<'static>>`
+  with `&raw mut` (edition 2024), or a static-cell pattern in the firmware.
+- **`Memory` all-zero invariant is enforced**: every field must implement
+  a crate-private `unsafe trait ZeroValid` (integers and arrays of them),
+  checked by an exhaustive pattern at compile time, and a test compares
+  zero-initialized memory with `Memory::new()` and with a dirtied-then-reset
+  emulator.
+- **`Hw` size limit raised from 512 bytes to 1 KiB.** `init` builds `Hw` on
+  the stack once; the limit exists to protect the MCU's small stack (a few
+  KiB, shared with interrupt handlers), and 1 KiB leaves room for PPU line
+  buffers, APU and mapper state without awkward splits.
+- **Frame buffer swapping is documented** on `run_until` and `Frame`: swap
+  only after a `FRAME_READY` result, or the frame is torn across two
+  buffers. If the LCD is turned off mid-frame, that frame is abandoned
+  without `FRAME_READY`, the buffer contents are unspecified, and the
+  screen should show white until the next `FRAME_READY`.

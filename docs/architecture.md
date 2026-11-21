@@ -36,9 +36,12 @@ docs in `crates/gbc-core/src/lib.rs` have a usage example.
 
 ```text
 Emulator<'a>                       // 'a = lifetime of the cartridge ROM/RAM borrows
-  const fn new() -> Self                            // powered off, no cartridge
+  const fn new() -> Self                            // powered off, no cartridge; const/static only
   fn init(&mut MaybeUninit<Self>) -> &mut Self      // same, built in place (no stack temporary)
-  fn load(&mut self, rom: &'a [u8], cart_ram: &'a mut [u8], Config) -> Result<(), LoadError>
+  fn load(&mut self, rom: &'a [u8], cart_ram: &'a mut [u8], Config)
+      -> Result<Option<CartBuffers<'a>>, LoadError<'a>>  // Ok: previous cart's buffers; Err: hands back rom/cart_ram
+  fn eject(&mut self) -> Option<CartBuffers<'a>>    // unload; back to the init state
+  fn set_dmg_palettes(&mut self, DmgPalettes)       // no reset
   fn reset(&mut self)                               // power cycle; cart RAM/RTC kept
   fn set_buttons(&mut self, Buttons)
   fn set_stop_events(&mut self, Events)             // opt-in stops: LD_B_B, SERIAL_TX
@@ -49,14 +52,20 @@ Emulator<'a>                       // 'a = lifetime of the cartridge ROM/RAM bor
   // debug: clock(), registers(), peek(addr), serial_byte(), lcd_enabled(), cpu_locked()
   // cartridge: cart_ram(), rtc_state(), set_rtc_state()
 RunResult { events: Events, clocks: u64, audio_samples: usize }
-cart_ram_size(rom) -> Result<usize, LoadError>
+cart_ram_size(rom) -> Result<usize, LoadErrorKind>
+type CartBuffers<'a> = (&'a [u8], &'a mut [u8])     // RAM buffer as passed (untrimmed)
+LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
+
 ```
 
 - **ROM:** a `&'a [u8]` borrowed from the caller. On the MCU this is the
   memory-mapped QSPI/eMMC-cached region (`'static`); on desktop, a `Vec`.
 - **Cartridge RAM:** a `&'a mut [u8]` owned by the caller, at least
-  `cart_ram_size(rom)` bytes (up to 128 KiB). The caller persists it, reading
-  it through `cart_ram()` while the emulator holds the borrow.
+  `cart_ram_size(rom)` bytes (up to 128 KiB). Only the header's size is
+  used; `cart_ram()` (the save file) is exactly that long. The caller
+  persists it, reading it through `cart_ram()` while the emulator holds the
+  borrow, and gets the whole buffer back from `eject`, a later `load`, or a
+  `LoadError`.
 - **RTC:** state is advanced by emulated time. The caller can read and write
   the RTC state (`rtc_state`/`set_rtc_state`) to save it or to sync it to
   wall-clock time on load.
