@@ -5,3 +5,5 @@
 *.sav
 # Build output
 /target/
+# Downloaded by scripts/fetch-sm83-tests.sh
+/test-data/

@@ -1,0 +1,17 @@
+[package]
+name = "sm83-tests"
+description = "Runs the SM83 single-step CPU tests against gbc-core's CPU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The JSON parser lives here, not in gbc-core, which must stay
+# dependency-free (AGENTS.md; crates/gbc-core/tests/hard_rules.rs).
+[dev-dependencies]
+gbc-core = { path = "../../crates/gbc-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

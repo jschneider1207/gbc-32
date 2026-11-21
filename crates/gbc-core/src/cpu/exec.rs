@@ -504,11 +504,8 @@ impl Cpu {
                 self.ei_pending = false;
             }
             0xFB => {
-                // EI: IME turns on after the next instruction. EI while
-                // already enabled changes nothing.
-                if !self.ime {
-                    self.ei_pending = true;
-                }
+                // EI: IME turns on after the next instruction.
+                self.ei_pending = true;
             }
             // D3 DB DD E3 E4 EB EC ED F4 FC FD.
             _ => self.lock(bus),

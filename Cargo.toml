@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gbc-core", "crates/gbc-desktop", "tools/romtest"]
+members = ["crates/gbc-core", "crates/gbc-desktop", "tools/romtest", "tools/sm83-tests"]
 
 [workspace.package]
 version = "0.1.0"
