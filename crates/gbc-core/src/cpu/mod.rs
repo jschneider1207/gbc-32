@@ -131,6 +131,11 @@ pub trait Bus {
     fn stop_wakeup(&self) -> bool {
         false
     }
+    /// Whether [`Cpu::run`] returns, checked after every step. Free. The
+    /// default (true) makes `run` a single step.
+    fn run_done(&self) -> bool {
+        true
+    }
 }
 
 /// What the CPU does on its next step.
@@ -230,12 +235,37 @@ impl Cpu {
         self.mode == Mode::Locked
     }
 
+    /// Executes steps (see [`Cpu::step`]) until [`Bus::run_done`] is true
+    /// after one; always at least one step.
+    ///
+    /// The emulator runs whole run calls through this, so the instruction
+    /// loop and the opcode dispatch are one function: registers are saved
+    /// and restored once per call, not once per instruction (ADR 0008,
+    /// amendments). Not `#[inline]`: one instance per bus type.
+    pub fn run<B: Bus>(&mut self, bus: &mut B) {
+        loop {
+            self.step_inline(bus);
+            if bus.run_done() {
+                break;
+            }
+        }
+    }
+
     /// Executes one instruction, or dispatches one interrupt, or idles for
     /// one M-cycle while halted, stopped, locked up or powered off.
     #[inline]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
-        if self.mode != Mode::Running && !self.step_not_running(bus) {
-            return;
+        self.step_inline(bus);
+    }
+
+    #[inline(always)]
+    fn step_inline<B: Bus>(&mut self, bus: &mut B) {
+        let mut pc_step = 1;
+        if self.mode != Mode::Running {
+            match self.step_not_running(bus) {
+                Some(step) => pc_step = step,
+                None => return,
+            }
         }
         if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
             self.dispatch(bus);
@@ -249,53 +279,52 @@ impl Cpu {
         }
         let pc = self.regs.pc;
         let op = bus.read(pc);
-        self.regs.pc = pc.wrapping_add(1);
+        self.regs.pc = pc.wrapping_add(pc_step);
+        // The only call site, so the 256-arm dispatch is inlined once.
         self.execute(op, bus);
     }
 
-    /// The step for every mode except `Running`. Returns true if the CPU
-    /// is running again and the caller should go on with a normal step.
+    /// The step for every mode except `Running`. Returns `None` if the
+    /// step is done (one idle M-cycle), or `Some(pc_step)` if the CPU is
+    /// running again and the caller should go on with a normal step whose
+    /// opcode fetch advances PC by `pc_step`.
     #[inline(never)]
-    fn step_not_running<B: Bus>(&mut self, bus: &mut B) -> bool {
+    fn step_not_running<B: Bus>(&mut self, bus: &mut B) -> Option<u16> {
         match self.mode {
-            Mode::Running => true,
+            Mode::Running => Some(1),
             Mode::Halted => {
                 // Any pending interrupt ends HALT, even with IME off (then
                 // execution just continues after HALT). TODO(M2): the
                 // exact wake-up latency (GBCTR: HALT; SameBoy).
                 if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
                     self.mode = Mode::Running;
-                    true
+                    Some(1)
                 } else {
                     bus.idle();
-                    false
+                    None
                 }
             }
             Mode::HaltBug => {
                 // HALT with IME off and an interrupt already pending: the CPU
                 // doesn't halt, and the next fetch fails to increment PC
-                // (Pan Docs: halt, "Halt bug"). No interrupt check here:
-                // IME was off at the HALT and only EI can turn it on, after
-                // a further instruction.
+                // (Pan Docs: halt, "Halt bug"). The normal step's interrupt
+                // and EI checks do nothing here: IME was off at the HALT,
+                // and EI's delay had already been applied before the HALT
+                // was fetched, so only a further EI can change IME.
+                debug_assert!(!self.ime && !self.ei_pending);
                 self.mode = Mode::Running;
-                if self.ei_pending {
-                    self.ei_pending = false;
-                    self.ime = true;
-                }
-                let op = bus.read(self.regs.pc);
-                self.execute(op, bus);
-                false
+                Some(0)
             }
             Mode::Stopped => {
                 bus.idle();
                 if bus.stop_wakeup() {
                     self.mode = Mode::Running;
                 }
-                false
+                None
             }
             Mode::Locked | Mode::Off => {
                 bus.idle();
-                false
+                None
             }
         }
     }

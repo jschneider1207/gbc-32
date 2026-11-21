@@ -49,8 +49,9 @@ macro_rules! dispatch_all {
 
 impl Cpu {
     /// Executes the instruction whose opcode was just fetched (PC already
-    /// points past it).
-    #[inline]
+    /// points past it). Always inlined into its one caller, the step in
+    /// [`Cpu::run`]'s loop (ADR 0008, amendments).
+    #[inline(always)]
     pub(super) fn execute<B: Bus>(&mut self, op: u8, bus: &mut B) {
         dispatch_all!(self, bus, op, op)
     }

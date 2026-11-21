@@ -5,13 +5,21 @@
 //! M-cycle, also in double speed, where the M-cycle is shorter). TIMA
 //! increments on a falling edge of one counter bit, selected by TAC and
 //! ANDed with the TAC enable bit. The serial port's bit clock is another
-//! bit of the same counter, so [`Timer::tick`] reports every bit that fell.
+//! bit of the same counter, so [`Timer::advance`] reports every bit that
+//! fell.
+//!
+//! The bus runs one M-cycle as [`Timer::finish_reload`] (if
+//! [`Timer::reload_pending`]), [`Timer::advance`], then [`Timer::edges`]
+//! for the bits that fell ([`Timer::tick`] is that sequence, for tests).
+//! The pieces are separate so the bus's per-M-cycle path touches only
+//! state it keeps in its run context (ADR 0008, amendments).
 //!
 //! M1 has the falling-edge model, including the DIV-write and TAC-write
 //! glitches and the one-M-cycle delay before the TMA reload and interrupt
 //! after an overflow. TODO(M2): writes to TIMA/TMA during the overflow and
 //! reload cycles (Pan Docs: "Timer overflow behavior").
 
+#[derive(Clone, Copy)]
 pub(crate) struct Timer {
     /// The internal 16-bit counter; DIV is its high byte.
     pub(crate) counter: u16,
@@ -47,21 +55,54 @@ impl Timer {
 
     /// One M-cycle. Returns the counter bits that fell (1 -> 0), for the
     /// serial clock, and ORs the timer interrupt into `iflags`.
-    #[inline(always)]
+    #[cfg(test)]
     pub(crate) fn tick(&mut self, iflags: &mut u8) -> u16 {
-        if self.reload {
-            self.reload = false;
-            self.tima = self.tma;
-            *iflags |= INT_TIMER;
+        if self.reload_pending() {
+            *iflags |= self.finish_reload();
         }
+        let fell = self.advance();
+        self.edges(fell);
+        fell
+    }
+
+    /// TIMA overflowed in the previous M-cycle: [`Timer::finish_reload`]
+    /// must run at the start of this one.
+    #[inline(always)]
+    pub(crate) fn reload_pending(&self) -> bool {
+        self.reload
+    }
+
+    /// The M-cycle after an overflow: TIMA = TMA. Returns the IF bit to
+    /// request.
+    #[inline]
+    pub(crate) fn finish_reload(&mut self) -> u8 {
+        self.reload = false;
+        self.tima = self.tma;
+        INT_TIMER
+    }
+
+    /// Advances the counter by one M-cycle (4 clocks) and returns the bits
+    /// that fell.
+    #[inline(always)]
+    pub(crate) fn advance(&mut self) -> u16 {
         let old = self.counter;
         let new = old.wrapping_add(4);
         self.counter = new;
-        let fell = old & !new;
+        old & !new
+    }
+
+    /// Increments TIMA if its selected bit is among the bits that `fell`.
+    #[inline]
+    pub(crate) fn edges(&mut self, fell: u16) {
         if fell & self.tima_bit != 0 {
             self.increment();
         }
-        fell
+    }
+
+    /// The counter bit TIMA counts falling edges of (0 when disabled).
+    #[inline]
+    pub(crate) fn tima_bit(&self) -> u16 {
+        self.tima_bit
     }
 
     #[inline]

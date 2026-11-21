@@ -8,6 +8,11 @@
 //! runs scheduled events (the PPU's VBlank) when the clock reaches
 //! `Sys::next_event`. The PPU is otherwise caught up only when one of its
 //! registers is written (ADR 0002).
+//!
+//! The per-M-cycle state ([`Hot`]: a clock countdown and the timer) is
+//! copied into the [`Ctx`] for the duration of a run call, so the tick
+//! reaches it through the one context pointer the CPU holds instead of
+//! through `Ctx::sys` (ADR 0008, amendments).
 
 use crate::apu::StereoSample;
 use crate::cart::Cart;
@@ -23,15 +28,14 @@ use crate::{Buttons, Emulator, Events};
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
 pub(crate) struct Sys<'a> {
-    /// Base clocks since the last load or reset.
-    pub(crate) clock: u64,
-    /// Base clocks per M-cycle: 4, or 2 in CGB double speed.
-    pub(crate) mcycle: u32,
+    /// The clock and timer between run calls. During a run call the live
+    /// copy is [`Ctx::hot`] (this one is stale until the `Ctx` is dropped),
+    /// so code running inside a call must use that one.
+    pub(crate) hot: Hot,
     /// The clock at which [`Ctx::run_events`] must next run (the PPU's
     /// next VBlank; `u64::MAX` if nothing is scheduled).
     pub(crate) next_event: u64,
     pub(crate) ppu: Ppu,
-    pub(crate) timer: Timer,
     pub(crate) serial: Serial,
     pub(crate) cart: Cart<'a>,
     pub(crate) config: Config,
@@ -59,11 +63,9 @@ pub(crate) struct Sys<'a> {
 impl Sys<'_> {
     pub(crate) const fn new() -> Self {
         Self {
-            clock: 0,
-            mcycle: 4,
+            hot: Hot::new(),
             next_event: u64::MAX,
             ppu: Ppu::new(),
-            timer: Timer::new(),
             serial: Serial::new(),
             cart: Cart::empty(),
             config: Config {
@@ -152,11 +154,60 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
     (0xFF47, 0xFC),
 ];
 
+/// The state the bus touches on every M-cycle: the clock, as a countdown,
+/// and the timer. Kept by value in [`Ctx`] during a run call and in
+/// [`Sys::hot`] between calls.
+///
+/// The clock is not counted directly. `budget` counts the base clocks
+/// left until `deadline` (the earlier of `Sys::next_event` and the run
+/// call's target), and the tick only subtracts the M-cycle length and
+/// tests the sign; the u64 clock is `deadline - budget`, exact at every
+/// point (ADR 0008, amendments).
+#[derive(Clone, Copy)]
+pub(crate) struct Hot {
+    /// Base clocks until `deadline`; zero or below when it has passed (by
+    /// less than one M-cycle).
+    budget: i32,
+    /// Base clocks per M-cycle: 4, or 2 in CGB double speed.
+    pub(crate) mcycle: i32,
+    /// The clock at which `budget` reaches 0. At most `i32::MAX` clocks
+    /// ahead of the clock it was set at, so `budget` always fits.
+    deadline: u64,
+    pub(crate) timer: Timer,
+    /// Counter bits whose falling edge needs work: the TIMA input bit and
+    /// the serial bit clock. One test per M-cycle covers both.
+    watch: u16,
+}
+
+impl Hot {
+    pub(crate) const fn new() -> Self {
+        Self {
+            budget: 0,
+            mcycle: 4,
+            deadline: 0,
+            timer: Timer::new(),
+            watch: 0,
+        }
+    }
+
+    /// Base clocks since the last load or reset.
+    #[inline]
+    pub(crate) fn clock(&self) -> u64 {
+        self.deadline.wrapping_sub(self.budget as i64 as u64)
+    }
+}
+
 /// The context of one run call: what the CPU's bus reaches, plus the
 /// caller's buffers and the events raised so far. The CPU gets one pointer
 /// to it, so a lazy PPU/APU catch-up on any bus access reaches the frame
 /// and audio buffers without threading them through every call (ADR 0008).
+///
+/// Built with [`Ctx::new`]; dropping it stores [`Ctx::hot`] back into
+/// [`Sys::hot`].
 pub(crate) struct Ctx<'r, 'a> {
+    /// The live per-M-cycle state, by value so the tick doesn't load
+    /// `sys` (copied from and back to `Sys::hot`).
+    pub(crate) hot: Hot,
     pub(crate) mem: &'r mut Memory,
     pub(crate) sys: &'r mut Sys<'a>,
     pub(crate) frame: &'r mut Frame,
@@ -166,42 +217,158 @@ pub(crate) struct Ctx<'r, 'a> {
     #[allow(dead_code)]
     pub(crate) audio_len: usize,
     pub(crate) events: Events,
+    /// Events that end the run call.
+    stop_on: Events,
+    /// The run call ends once the clock reaches this (`u64::MAX`: no
+    /// target, or already reached).
+    target: u64,
+    /// The run call ends after the current instruction ([`Bus::run_done`]).
+    pub(crate) done: bool,
+}
+
+impl Drop for Ctx<'_, '_> {
+    fn drop(&mut self) {
+        self.sys.hot = self.hot;
+    }
+}
+
+impl<'r, 'a> Ctx<'r, 'a> {
+    /// The context for a run call that ends when the clock reaches
+    /// `target` or an event in `stop_on` is raised.
+    pub(crate) fn new(
+        mem: &'r mut Memory,
+        sys: &'r mut Sys<'a>,
+        frame: &'r mut Frame,
+        audio: &'r mut [StereoSample],
+        stop_on: Events,
+        target: u64,
+    ) -> Self {
+        let mut ctx = Self {
+            hot: sys.hot,
+            mem,
+            sys,
+            frame,
+            audio,
+            audio_len: 0,
+            events: Events::EMPTY,
+            stop_on,
+            target,
+            done: false,
+        };
+        ctx.update_watch();
+        ctx.reschedule();
+        ctx
+    }
 }
 
 impl Ctx<'_, '_> {
-    /// Advances everything but the CPU by one M-cycle.
+    /// Base clocks since the last load or reset.
+    #[inline]
+    pub(crate) fn clock(&self) -> u64 {
+        self.hot.clock()
+    }
+
+    /// Advances everything but the CPU by one M-cycle: the timer (with the
+    /// serial clock it drives) and the clock countdown. Only `self.hot` is
+    /// touched unless something is due.
     #[inline(always)]
     fn tick(&mut self) {
-        let s = &mut *self.sys;
-        s.clock += u64::from(s.mcycle);
-        let fell = s.timer.tick(&mut s.iflags);
-        if fell & s.serial.clock_bit != 0 {
+        let h = &mut self.hot;
+        if h.timer.reload_pending() {
+            self.timer_reload();
+        }
+        let h = &mut self.hot;
+        let fell = h.timer.advance();
+        if fell & h.watch != 0 {
+            self.counter_edges(fell);
+        }
+        let h = &mut self.hot;
+        h.budget -= h.mcycle;
+        if h.budget <= 0 {
+            self.boundary();
+        }
+    }
+
+    /// The M-cycle after a TIMA overflow.
+    #[inline(never)]
+    fn timer_reload(&mut self) {
+        self.sys.iflags |= self.hot.timer.finish_reload();
+    }
+
+    /// Counter bits in `fell` that the timer or the serial port watch.
+    #[inline(never)]
+    fn counter_edges(&mut self, fell: u16) {
+        self.hot.timer.edges(fell);
+        if fell & self.sys.serial.clock_bit != 0 {
             self.serial_clock(fell);
         }
-        if self.sys.clock >= self.sys.next_event {
-            self.run_events();
-        }
+    }
+
+    /// Recomputes [`Hot::watch`] after the TIMA input or the serial clock
+    /// bit changes.
+    #[inline]
+    fn update_watch(&mut self) {
+        self.hot.watch = self.hot.timer.tima_bit() | self.sys.serial.clock_bit;
     }
 
     #[inline(never)]
     fn serial_clock(&mut self, fell: u16) {
         if self.sys.serial.clock(fell) {
             self.sys.iflags |= INT_SERIAL;
-            self.events |= Events::SERIAL_TX;
+            self.raise(Events::SERIAL_TX);
+        }
+        self.update_watch();
+    }
+
+    /// Records `events`, ending the run call after this instruction if
+    /// one of them is a stop event.
+    #[inline]
+    pub(crate) fn raise(&mut self, events: Events) {
+        self.events |= events;
+        if events.intersects(self.stop_on) {
+            self.done = true;
         }
     }
 
-    /// Scheduled work at `Sys::next_event`.
+    /// Sets the countdown to the earlier of `Sys::next_event` and the
+    /// target, capped at `i32::MAX` clocks ahead (reaching a capped
+    /// deadline just reschedules).
+    fn reschedule(&mut self) {
+        let now = self.clock();
+        let deadline = self.sys.next_event.min(self.target);
+        let ahead = deadline.saturating_sub(now).min(i32::MAX as u64);
+        self.hot.deadline = now + ahead;
+        self.hot.budget = ahead as i32;
+    }
+
+    /// The countdown reached zero: run what is due at the current clock
+    /// and set the next deadline.
     #[inline(never)]
+    fn boundary(&mut self) {
+        let now = self.clock();
+        if now >= self.sys.next_event {
+            self.run_events();
+        }
+        if now >= self.target {
+            self.target = u64::MAX;
+            self.done = true;
+        }
+        self.reschedule();
+    }
+
+    /// Scheduled work at `Sys::next_event`.
     fn run_events(&mut self) {
         self.sync_ppu();
     }
 
     /// Catches the PPU up to the current clock and reschedules.
     fn sync_ppu(&mut self) {
+        let now = self.clock();
         let s = &mut *self.sys;
-        self.events |= s.ppu.sync(s.clock, self.frame, &mut s.iflags);
+        let events = s.ppu.sync(now, self.frame, &mut s.iflags);
         s.next_event = s.ppu.next_event();
+        self.raise(events);
+        self.reschedule();
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
@@ -238,24 +405,32 @@ impl Ctx<'_, '_> {
         match reg {
             0x00 => s.set_joypad(s.buttons, value),
             0x01 => s.serial.sb = value,
-            0x02 => s.serial.write_sc(value, cgb),
+            0x02 => {
+                s.serial.write_sc(value, cgb);
+                self.update_watch();
+            }
             0x04 => {
-                let fell = s.timer.write_div();
+                let fell = self.hot.timer.write_div();
                 if fell & s.serial.clock_bit != 0 {
                     self.serial_clock(fell);
                 }
             }
-            0x05 => s.timer.tima = value,
-            0x06 => s.timer.tma = value,
-            0x07 => s.timer.write_tac(value),
+            0x05 => self.hot.timer.tima = value,
+            0x06 => self.hot.timer.tma = value,
+            0x07 => {
+                self.hot.timer.write_tac(value);
+                self.update_watch();
+            }
             0x0F => s.iflags = value & INT_MASK,
             // Sound: plain storage until M6.
             0x10..=0x3F => self.mem.io[reg] = value,
             0x40 => {
                 self.sync_ppu();
+                let now = self.clock();
                 let s = &mut *self.sys;
-                s.ppu.write_lcdc(s.clock, value);
+                s.ppu.write_lcdc(now, value);
                 s.next_event = s.ppu.next_event();
+                self.reschedule();
             }
             0x41 => s.ppu.write_stat(value),
             0x45 => s.ppu.lyc = value,
@@ -291,7 +466,7 @@ impl Ctx<'_, '_> {
         self.mem.io[0x46] = value;
         let src = u16::from(value) << 8;
         for i in 0..0xA0u16 {
-            let v = read(self.mem, self.sys, src.wrapping_add(i));
+            let v = read(self.mem, self.sys, &self.hot, src.wrapping_add(i));
             self.mem.oam[usize::from(i)] = v;
         }
     }
@@ -300,7 +475,7 @@ impl Ctx<'_, '_> {
 impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn read(&mut self, addr: u16) -> u8 {
-        let v = read(self.mem, self.sys, addr);
+        let v = read(self.mem, self.sys, &self.hot, addr);
         self.tick();
         v
     }
@@ -332,12 +507,17 @@ impl Bus for Ctx<'_, '_> {
     }
 
     fn event(&mut self, event: Events) {
-        self.events |= event;
+        self.raise(event);
+    }
+
+    #[inline(always)]
+    fn run_done(&self) -> bool {
+        self.done
     }
 
     fn stop(&mut self) -> bool {
         // STOP resets DIV (Pan Docs: FF04 - DIV).
-        let fell = self.sys.timer.write_div();
+        let fell = self.hot.timer.write_div();
         if fell & self.sys.serial.clock_bit != 0 {
             self.serial_clock(fell);
         }
@@ -349,11 +529,12 @@ impl Bus for Ctx<'_, '_> {
         // which DIV does not tick. TODO(M5): the exact pause length and
         // the PPU access freeze during it.
         self.sys.key1 = 0;
-        self.sys.mcycle = if self.sys.mcycle == 4 { 2 } else { 4 };
+        let h = &mut self.hot;
+        h.mcycle = if h.mcycle == 4 { 2 } else { 4 };
         for _ in 0..2050 {
-            self.sys.clock += u64::from(self.sys.mcycle);
-            if self.sys.clock >= self.sys.next_event {
-                self.run_events();
+            self.hot.budget -= self.hot.mcycle;
+            if self.hot.budget <= 0 {
+                self.boundary();
             }
         }
         true
@@ -366,9 +547,10 @@ impl Bus for Ctx<'_, '_> {
 
 /// A read as the CPU sees it at the current clock, without side effects
 /// (no read on this hardware has any). Shared by the CPU bus and
-/// [`Emulator::peek`].
+/// [`Emulator::peek`]. `hot` is the live clock and timer: [`Ctx::hot`]
+/// during a run call, [`Sys::hot`] otherwise.
 #[inline(always)]
-pub(crate) fn read(mem: &Memory, sys: &Sys, addr: u16) -> u8 {
+pub(crate) fn read(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
     match addr >> 13 {
         0..=3 => sys.cart.read_rom(addr),
@@ -377,7 +559,7 @@ pub(crate) fn read(mem: &Memory, sys: &Sys, addr: u16) -> u8 {
         6 => wram(mem, sys, a),
         // E000-FDFF: echo of C000-DDFF (Pan Docs: Memory Map).
         _ if addr < 0xFE00 => wram(mem, sys, a),
-        _ => read_high(mem, sys, addr),
+        _ => read_high(mem, sys, hot, addr),
     }
 }
 
@@ -409,12 +591,12 @@ fn extra_oam_index(a: usize) -> usize {
 }
 
 /// FE00-FFFF.
-fn read_high(mem: &Memory, sys: &Sys, addr: u16) -> u8 {
+fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
     match addr {
         0xFE00..=0xFE9F => mem.oam[a & 0xFF],
         0xFEA0..=0xFEFF => mem.extra_oam[extra_oam_index(a)],
-        0xFF00..=0xFF7F => read_io(mem, sys, a & 0x7F),
+        0xFF00..=0xFF7F => read_io(mem, sys, hot, a & 0x7F),
         0xFF80..=0xFFFE => mem.hram[a - 0xFF80],
         _ => sys.ie,
     }
@@ -422,26 +604,26 @@ fn read_high(mem: &Memory, sys: &Sys, addr: u16) -> u8 {
 
 /// FF00-FF7F by the low 7 address bits. Unused bits read 1; registers
 /// that don't exist (or are CGB-only, in DMG compatibility mode) read FF.
-fn read_io(mem: &Memory, sys: &Sys, reg: usize) -> u8 {
+fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
     let cgb = sys.cgb_mode;
     match reg {
         // P1/JOYP (Pan Docs: Joypad Input).
         0x00 => 0xC0 | sys.joyp_select | p1_lines(sys.buttons, sys.joyp_select),
         0x01 => sys.serial.sb,
         0x02 => sys.serial.read_sc(cgb),
-        0x04 => sys.timer.div(),
-        0x05 => sys.timer.tima,
-        0x06 => sys.timer.tma,
-        0x07 => 0xF8 | sys.timer.tac,
+        0x04 => hot.timer.div(),
+        0x05 => hot.timer.tima,
+        0x06 => hot.timer.tma,
+        0x07 => 0xF8 | hot.timer.tac,
         0x0F => 0xE0 | sys.iflags,
         // TODO(M6): sound register read masks.
         0x10..=0x3F => mem.io[reg],
         0x40 => sys.ppu.lcdc,
-        0x41 => sys.ppu.stat(sys.clock),
-        0x44 => sys.ppu.ly(sys.clock),
+        0x41 => sys.ppu.stat(hot.clock()),
+        0x44 => sys.ppu.ly(hot.clock()),
         0x45 => sys.ppu.lyc,
         0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
-        0x4D if cgb => 0x7E | sys.key1 | if sys.mcycle == 2 { 0x80 } else { 0 },
+        0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },
         0x4F if cgb => 0xFE | sys.vbk,
         0x68..=0x6B if cgb => mem.io[reg],
         0x70 if cgb => 0xF8 | sys.svbk,
@@ -469,7 +651,8 @@ impl Emulator<'_> {
     /// short ROM return 0xFF, as if it were padded to a full bank
     /// ([`MIN_ROM_SIZE`](crate::MIN_ROM_SIZE)).
     pub fn peek(&self, addr: u16) -> u8 {
-        read(&self.mem, &self.hw.sys, addr)
+        let sys = &self.hw.sys;
+        read(&self.mem, sys, &sys.hot, addr)
     }
 }
 
@@ -501,15 +684,45 @@ mod tests {
     fn write(emu: &mut Emulator, addr: u16, value: u8) {
         let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
         let Emulator { mem, hw } = emu;
-        let mut ctx = Ctx {
-            mem,
-            sys: &mut hw.sys,
-            frame: &mut fb,
-            audio: &mut [],
-            audio_len: 0,
-            events: Events::EMPTY,
-        };
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         ctx.write_mapped(addr, value);
+    }
+
+    #[test]
+    fn clock_countdown_is_capped_and_exact() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF40, 0x11); // LCD off: no event scheduled
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let start = emu.clock();
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        // Nothing due: the countdown is capped to fit an i32.
+        assert_eq!((ctx.hot.budget, ctx.clock()), (i32::MAX, start));
+        // Reaching a (capped) deadline mid-M-cycle just reschedules, and
+        // the clock stays exact across it.
+        ctx.hot.budget = 6;
+        ctx.hot.deadline = start + 6;
+        ctx.idle();
+        assert_eq!((ctx.hot.budget, ctx.clock()), (2, start + 4));
+        ctx.idle();
+        assert_eq!((ctx.hot.budget, ctx.clock()), (i32::MAX, start + 8));
+        assert!(!ctx.done);
+        drop(ctx);
+        assert_eq!(emu.clock(), start + 8);
+
+        // A target ends the call at the first M-cycle boundary at or after
+        // it.
+        let now = emu.clock();
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, now + 13);
+        for _ in 0..3 {
+            ctx.idle();
+        }
+        assert!(!ctx.done);
+        ctx.idle();
+        assert!(ctx.done);
+        assert_eq!(ctx.clock(), now + 16);
+        assert_eq!(ctx.hot.budget, i32::MAX);
     }
 
     #[test]

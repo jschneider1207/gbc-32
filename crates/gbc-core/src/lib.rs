@@ -338,7 +338,7 @@ impl<'a> Emulator<'a> {
         frame: &mut Frame,
         audio: &mut [StereoSample],
     ) -> RunResult {
-        let target = self.hw.sys.clock.saturating_add(clocks);
+        let target = self.hw.sys.hot.clock().saturating_add(clocks);
         self.run_until(target, frame, audio)
     }
 
@@ -394,9 +394,11 @@ impl<'a> Emulator<'a> {
         self.run(None, frame, audio)
     }
 
-    /// The run loop: one step if `target` is `None`, else steps until the
+    /// The run call: one step if `target` is `None`, else steps until the
     /// clock reaches `target` or a stop event. Builds the per-call context
-    /// (ADR 0008) once; the CPU gets a pointer to it.
+    /// (ADR 0008) once; the CPU gets a pointer to it and runs the
+    /// instruction loop itself ([`Cpu::run`]) until the context reports
+    /// that the call is done.
     #[inline]
     fn run(
         &mut self,
@@ -405,30 +407,29 @@ impl<'a> Emulator<'a> {
         audio: &mut [StereoSample],
     ) -> RunResult {
         let Hw { cpu, sys, stop_on } = &mut self.hw;
+        let start = sys.hot.clock();
+        if target.is_some_and(|t| start >= t) {
+            return RunResult {
+                events: Events::EMPTY,
+                clocks: 0,
+                audio_samples: 0,
+            };
+        }
         let stop = Events::ALWAYS_STOP | *stop_on;
-        let start = sys.clock;
-        let mut ctx = Ctx {
-            mem: &mut self.mem,
+        let mut ctx = Ctx::new(
+            &mut self.mem,
             sys,
             frame,
             audio,
-            audio_len: 0,
-            events: Events::EMPTY,
-        };
-        match target {
-            None => cpu.step(&mut ctx),
-            Some(target) => {
-                while ctx.sys.clock < target {
-                    cpu.step(&mut ctx);
-                    if ctx.events.intersects(stop) {
-                        break;
-                    }
-                }
-            }
-        }
+            stop,
+            target.unwrap_or(u64::MAX),
+        );
+        // A single step: done before it starts, so `run` stops after one.
+        ctx.done = target.is_none();
+        cpu.run(&mut ctx);
         RunResult {
             events: ctx.events,
-            clocks: ctx.sys.clock - start,
+            clocks: ctx.clock() - start,
             audio_samples: ctx.audio_len,
         }
     }
@@ -438,7 +439,7 @@ impl<'a> Emulator<'a> {
     /// Base clocks since the last load or reset.
     #[inline]
     pub fn clock(&self) -> u64 {
-        self.hw.sys.clock
+        self.hw.sys.hot.clock()
     }
 
     /// The CPU registers.
@@ -535,14 +536,14 @@ mod tests {
     /// A CPU write to an I/O register, through the bus (no M-cycle).
     fn write_lcdc(emu: &mut Emulator, value: u8) {
         let mut fb = frame();
-        let mut ctx = Ctx {
-            mem: &mut emu.mem,
-            sys: &mut emu.hw.sys,
-            frame: &mut fb,
-            audio: &mut [],
-            audio_len: 0,
-            events: Events::EMPTY,
-        };
+        let mut ctx = Ctx::new(
+            &mut emu.mem,
+            &mut emu.hw.sys,
+            &mut fb,
+            &mut [],
+            Events::EMPTY,
+            u64::MAX,
+        );
         ctx.write_mapped(0xFF40, value);
     }
 
@@ -884,6 +885,86 @@ mod tests {
         assert_eq!(emu.clock(), target);
         // Frames are ready at VBLANK + k * FRAME_CLOCKS.
         assert_eq!(frames, (target - VBLANK) / u64::from(FRAME_CLOCKS) + 1);
+    }
+
+    /// Runs `program` (CGB mode) two ways, one `step` at a time and by
+    /// `run_until` calls with odd targets, and checks that every event
+    /// happens at the same clock and the end state is the same: the clock
+    /// countdown (ADR 0008, amendments) must be invisible.
+    fn run_calls_match_single_steps(program: &[u8], until: u64, expect: Events) {
+        let stops = Events::SERIAL_TX | Events::LD_B_B;
+        let a = with_program(program, 0x80);
+        let b = with_program(program, 0x80);
+        a.set_stop_events(stops);
+        b.set_stop_events(stops);
+        let mut fb = frame();
+        let mut steps = std::vec::Vec::new();
+        while a.clock() < until {
+            let start = a.clock();
+            let r = a.step(&mut fb, &mut []);
+            assert_eq!(r.clocks, a.clock() - start);
+            if !r.events.is_empty() {
+                steps.push((a.clock(), r.events));
+            }
+        }
+        let mut runs = std::vec::Vec::new();
+        let mut target = 1;
+        while b.clock() < until {
+            target = (target + 997).min(until);
+            let start = b.clock();
+            let r = b.run_until(target, &mut fb, &mut []);
+            assert_eq!(r.clocks, b.clock() - start);
+            if r.events.is_empty() {
+                assert!(b.clock() >= target);
+            } else {
+                runs.push((b.clock(), r.events));
+            }
+        }
+        let seen = steps.iter().fold(Events::EMPTY, |acc, &(_, e)| acc | e);
+        assert!(seen.contains(expect), "{seen:?}");
+        assert_eq!(steps, runs);
+        assert_eq!(a.clock(), b.clock());
+        assert_eq!(a.registers(), b.registers());
+        for reg in [0xFF02, 0xFF04, 0xFF05, 0xFF0F, 0xFF41, 0xFF44, 0xFF4D] {
+            assert_eq!(a.peek(reg), b.peek(reg), "{reg:#06x}");
+        }
+    }
+
+    #[test]
+    fn run_calls_match_single_steps_with_timer_serial_and_speed_switch() {
+        run_calls_match_single_steps(
+            &[
+                0x3E, 0x05, 0xE0, 0x07, // LD A,05; LDH (07),A: TIMA at 262144 Hz
+                0x3E, 0xFF, 0xE0, 0xFF, // LD A,FF; LDH (FF),A: IE (IME stays off)
+                0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A: arm the speed switch
+                0x10, 0x00, // STOP: double speed
+                0x3E, b'Z', 0xE0, 0x01, // LD A,'Z'; LDH (01),A
+                0x3E, 0x83, 0xE0, 0x02, // LD A,83; LDH (02),A: fast serial
+                0x04, 0x40, // INC B; LD B,B
+                0xF0, 0x05, 0xF0, 0x44, // LDH A,(05); LDH A,(44)
+                0x18, 0xF8, // JR -8 (back to INC B)
+            ],
+            3 * u64::from(FRAME_CLOCKS) + 12_345,
+            Events::FRAME_READY | Events::SERIAL_TX | Events::LD_B_B,
+        );
+    }
+
+    #[test]
+    fn run_calls_match_single_steps_with_halt_and_lcd_writes() {
+        run_calls_match_single_steps(
+            &[
+                0x3E, 0x04, 0xE0, 0x07, // LD A,04; LDH (07),A: TIMA at 4096 Hz
+                0x3E, 0x05, 0xE0, 0xFF, // LD A,05; LDH (FF),A: IE = timer, VBlank
+                0x76, 0x00, // HALT; NOP
+                0xAF, 0xE0, 0x0F, // XOR A; LDH (0F),A
+                0x3E, 0x11, 0xE0, 0x40, // LD A,11; LDH (40),A: LCD off
+                0x40, // LD B,B
+                0x3E, 0x91, 0xE0, 0x40, // LD A,91; LDH (40),A: LCD on
+                0x18, 0xF0, // JR -16 (back to HALT)
+            ],
+            5 * u64::from(FRAME_CLOCKS) + 777,
+            Events::FRAME_READY | Events::LD_B_B,
+        );
     }
 
     #[test]
