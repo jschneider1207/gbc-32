@@ -151,3 +151,13 @@ a few construction and documentation gaps. Changes:
   buffers. If the LCD is turned off mid-frame, that frame is abandoned
   without `FRAME_READY`, the buffer contents are unspecified, and the
   screen should show white until the next `FRAME_READY`.
+
+### 2026-11-21: `screen_blank()`
+
+Added `Emulator::screen_blank() -> bool`: true while the LCD is off, and
+after it is turned back on until the next `FRAME_READY`. It is a flag set
+when the LCD is turned off and cleared when a frame completes, so it is
+exact even when the LCD goes off and on within one run call, which polling
+`lcd_enabled()` after each call can miss. Front ends and `romtest` show
+white while it is true. (Requested by the romtest integrity review; see
+ADR 0007, amendments.) Additive only; nothing else in the API changed.

@@ -49,7 +49,7 @@ Emulator<'a>                       // 'a = lifetime of the cartridge ROM/RAM bor
   fn run_cycles(&mut self, clocks: u64, &mut Frame, &mut [StereoSample]) -> RunResult
   fn run_until (&mut self, clock: u64,  &mut Frame, &mut [StereoSample]) -> RunResult
   fn step      (&mut self,              &mut Frame, &mut [StereoSample]) -> RunResult
-  // debug: clock(), registers(), peek(addr), serial_byte(), lcd_enabled(), cpu_locked()
+  // debug: clock(), registers(), peek(addr), serial_byte(), lcd_enabled(), screen_blank(), cpu_locked()
   // cartridge: cart_ram(), rtc_state(), set_rtc_state()
 RunResult { events: Events, clocks: u64, audio_samples: usize }
 cart_ram_size(rom) -> Result<usize, LoadErrorKind>

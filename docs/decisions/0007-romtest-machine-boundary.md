@@ -57,3 +57,79 @@ the trait implementation honest.
   API changes, update the trait, its `Emulator` impl and the fake together.
 - Hand-assembled ROM tests can still be added later for core features. They
   complement this, but don't replace it.
+
+## Amendments
+
+### 2026-11-21: test integrity review
+
+An independent review of romtest's test integrity found ways for a broken
+or tampered setup to look like a pass. Changes:
+
+- **Integrity list for `test-roms/`.** `acceptance/test-roms.sha256` holds
+  the SHA-256 of every file under `test-roms/` (`sha256sum` format, sorted,
+  with a `# release: <version>` header line), written by
+  `scripts/hash-test-roms.sh` from the pinned release. Before anything
+  runs, romtest checks that the list's release equals the manifest's
+  `roms_release` (and so `.version`), that every listed file exists, that
+  every listed file hashes to its entry, and that every ROM matched by any
+  manifest glob is listed. A screenshot check may only load a listed PNG.
+  Any failure is exit 2. Without this, deleting a failing ROM made it stop
+  matching its glob, and deleting a reference PNG turned a failure into
+  `no-reference`; either way the gate could pass. Everything listed is
+  hashed on `--jobs` threads (5101 files, 177 MB for v7.0: 0.27 s on 8
+  threads), which is simpler than tracking what a selection would load and
+  still cheap. Regenerating the list is only for a new pinned release,
+  never to make a run pass. `--roms-dir <path>` points the runner at
+  another copy of the ROMs (still verified), for testing the runner.
+- **Status precedence: crash/timeout > fail > no-reference > unsupported >
+  pass.** Previously `no-reference` came first, so that the score's
+  denominator depended only on the files in `test-roms/`. That let a
+  missing PNG hide a crash, a timeout or another failing check, so it is
+  reversed: `no-reference` (excluded from the score) applies only when
+  every other check that could be evaluated passed or was also missing its
+  reference. A consequence is that the denominator can move as the
+  emulator improves (e.g. the five v7.0 mealybug ROMs without a CGB
+  reference count as `timeout` until they reach `LD B,B`, then become
+  `no-reference`). That is the price of never hiding a failure.
+- **Narrow panic boundary.** Only calls into the emulator core are inside
+  `catch_unwind` (`machine::core_call`: `cart_ram_size`, `init`, `load`,
+  and every `Machine` method in the run loop). A panic there becomes
+  `crash`, as does a load error (the ROM file is hash-verified, so
+  rejecting it is the emulator's fault). A panic in romtest's own code (the
+  input timeline, checks, allocation, the run loop's bookkeeping) is not
+  caught per ROM: it propagates out of the worker (which stops the other
+  workers) to `app::main_with`, which maps it to exit 2.
+  `#[cfg(not(panic = "unwind"))] compile_error!` stops a `panic = "abort"`
+  build of romtest.
+- **Baseline rules.**
+  - A baseline entry with status `pass` whose `(group, ROM)` is inside the
+    current selection (`--group`, `--filter`, `--only-check`; all of them
+    in a full run) but has no current result is a regression (`pass ->
+    missing`). This catches a ROM dropped by a manifest edit or a renamed
+    group. A group that is no longer in the manifest counts as selected
+    under `--only-check`, since its checks are unknown. Entries that were
+    not `pass` and have disappeared are just dropped by the next
+    `--update-baseline`.
+  - `--gate` without a baseline is exit 2 (create one with
+    `--update-baseline`); otherwise a missing file would silently disable
+    regression checking in the gate. `--update-baseline` still creates the
+    first baseline, also when combined with `--gate`.
+  - A baseline whose `roms_release` differs from the manifest is exit 2,
+    unless `--update-baseline` is given; then it is not compared and is
+    rewritten.
+- **Final frame after the LCD goes off.** The core documents that after
+  the LCD is turned off the screen shows white until the next
+  `FRAME_READY`, even if the LCD is back on by then. Polling
+  `lcd_enabled()` only at the runner's stop points missed an off/on cycle
+  within one run call, so the runner could report a frame from before the
+  LCD went off. The core now has `Emulator::screen_blank()` (a flag set
+  when the LCD is turned off and cleared when a frame completes; see the
+  ADR 0006 amendment), the `Machine` trait uses it instead of
+  `lcd_enabled`, and the final frame is white if the screen is blank at
+  exit or no frame completed.
+- **Root-directory ROMs.** `{dir}` is empty for a ROM directly in
+  `test-roms/`; `{dir}/` then expands to nothing, so `{dir}/{stem}.png` is
+  `stem.png` rather than the absolute `/stem.png`. Any expanded reference
+  that is empty, absolute, or has an empty or `..` segment is exit 2, and
+  manifest parsing probes each template for both a subdirectory ROM and a
+  root ROM.
