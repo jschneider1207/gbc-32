@@ -222,9 +222,12 @@ impl<'a> Emulator<'a> {
     /// for the largest game) behaves exactly like one of the header's size.
     ///
     /// Returns the previously inserted cartridge's buffers, if any, so a
-    /// game switch never loses them (same as calling [`Emulator::eject`]
-    /// first). On error the emulator is unchanged (the previous cartridge
-    /// stays inserted) and the error hands back `rom` and `cart_ram`.
+    /// game switch never loses them. Unlike [`Emulator::eject`] followed by
+    /// `load`, loading over a cartridge keeps the held buttons, stop events
+    /// and palettes (as [`Emulator::reset`] does); save the old cartridge's
+    /// [`Emulator::rtc_state`] first if needed. On error the emulator is
+    /// unchanged (the previous cartridge stays inserted) and the error
+    /// hands back `rom` and `cart_ram`.
     pub fn load(
         &mut self,
         rom: &'a [u8],
@@ -268,8 +271,12 @@ impl<'a> Emulator<'a> {
     /// Power cycle: the post-boot state (no boot ROM is run; registers are
     /// set as the CGB boot ROM leaves them) and the clock back to 0.
     /// Cartridge RAM and the RTC keep their contents; the held buttons and
-    /// stop events are kept.
+    /// stop events are kept. Without a cartridge this does nothing: the
+    /// emulator stays powered off, in the state [`Emulator::new`] leaves it.
     pub fn reset(&mut self) {
+        if !self.hw.sys.cart.is_loaded() {
+            return;
+        }
         self.mem.clear();
         let sys = &mut self.hw.sys;
         sys.reset(self.mem);
@@ -622,6 +629,16 @@ mod tests {
         );
         assert_eq!(err.cart_ram.len(), 3);
         assert_eq!(emu.peek(0x0100), 0xAB);
+    }
+
+    #[test]
+    fn reset_without_cartridge_does_nothing() {
+        let emu = fresh();
+        emu.reset();
+        assert_eq!(emu.clock(), 0);
+        assert!(!emu.lcd_enabled());
+        assert_eq!(emu.peek(0x0100), 0xFF);
+        assert!(emu.eject().is_none());
     }
 
     #[test]

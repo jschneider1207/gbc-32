@@ -60,6 +60,7 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
   - [ ] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
   - [ ] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate
   - [ ] Short, deterministic fuzz pass in the gate over untrusted inputs: ROM header/`load`, save RAM, `set_rtc_state`
+- [ ] `hard_rules` test hardening (M1 API review, low): lex `'\''` correctly (start at `q + 3`, add the case to the allow-test); require `#![forbid(unsafe_code)]` among lib.rs's leading crate attributes, not in a nested module; reject a `[lib] path`, a `build` key and a `build.rs` in gbc-core
 
 **Acceptance:** `romtest --filter 'mooneye-test-suite/acceptance/{timer,instr,interrupts,oam_dma}/**' --gate must`
 exits 0. Some top-level Mooneye acceptance tests depend on LY/VBlank timing or
@@ -86,6 +87,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] MBC1 (full), MBC2, MBC3 + RTC (on emulated time), MBC5 (incl. rumble bit ignored)
 - [ ] Cartridge header parsing, ROM/RAM size handling. Review gaps from M0: types without RAM (Pan Docs 0147) vs. a nonzero 0x149 code, MBC7 EEPROM size (SameBoy 0x100), HuC3 RTC; decide which are in scope
 - [ ] Save RAM and RTC state exposed through the core API (the caller owns persistence)
+- [ ] `load` over an MBC3 cartridge drops its `RtcState` silently (doc now says to save it first); consider returning it with the buffers (M1 API review, low)
 - [ ] `RtcState::advance_seconds(u64)` in the core with hardware rollover (out-of-range wrap, day carry, halt bit), so front ends can sync to wall-clock time correctly; document load-then-set_rtc_state order (review finding 8)
 
 **Acceptance:** groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
