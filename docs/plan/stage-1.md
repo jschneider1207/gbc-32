@@ -58,10 +58,10 @@ exits 0. (Their screenshot checks need the PPU and are covered in M3.)
   - [x] Lazy timer and serial clock (4b81a49), differential test against the eager model; rebaseline the benchmark and size budgets (keep timer I/O out of line so `write_high`/`read_high` stay in budget)
   - [x] HALT/STOP/lockup/power-off jump to the next deadline (84c7744)
   - [ ] Open hardware questions (ADR 0011): does disabling the timer tick TIMA on CGB (Pan Docs vs SameBoy); serial clock phase after a DIV reset
-- [ ] HALT: IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
+- [x] HALT (3ee75c7): IME=1 with an interrupt arriving during HALT's own fetch (return address; SameBoy `halt()` re-executes HALT), `EI; HALT`, and CGB wake-up latency +1 M-cycle (M1 hardware review 2, 5)
 - [x] DIV/TIMA with the falling-edge behavior, TMA reload windows (0f3d68a)
 - [ ] OAM DMA timing and bus conflicts (DMA conflicts put state into the CPU read path, so `peek` needs its own side-effect-free path; consider driving DMA through `next_event`)
-- [ ] Inputs at M-cycle resolution: the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
+- [x] Inputs at M-cycle resolution (ADR 0012, acffc11..aadd26b): the contract applies inputs at a time "rounded down to the nearest M-cycle", but `run_until` stops only on instruction boundaries. Add a scheduled button change (e.g. `set_buttons_at(clock, buttons)`) applied in the M-cycle tick and switch romtest to it (review finding 5)
 - [x] Quality-bar tooling in the gate (README "Quality and performance bar": the benchmark runs in the gate from M2 on):
   - [x] Deterministic instruction-count benchmark under valgrind (e.g. iai-callgrind) on fixed ROMs, committed baseline; the gate fails on a regression of more than a few percent
   - [x] Code-size budgets on thumbv7em (`-C target-cpu=cortex-m7`) for `Cpu::run::<Ctx>` and `execute_cb`, checked by the gate
