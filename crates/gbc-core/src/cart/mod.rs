@@ -229,13 +229,17 @@ enum Mapper {
     None,
     /// MBC1 (types 01-03). TODO(M4): MBC1M multicarts.
     Mbc1,
+    /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
+    Mbc5 { rumble: bool },
 }
 
 impl Mapper {
     fn from_header(cart_type: u8) -> Self {
         match cart_type {
             0x01..=0x03 => Self::Mbc1,
-            // TODO(M4): MBC2, MBC3, MBC5 and the rest; until then they
+            0x19..=0x1B => Self::Mbc5 { rumble: false },
+            0x1C..=0x1E => Self::Mbc5 { rumble: true },
+            // TODO(M4): MBC2, MBC3 and the rest; until then they
             // run as if they had no MBC.
             _ => Self::None,
         }
@@ -276,6 +280,10 @@ pub(crate) struct Cart<'a> {
     bank1: u8,
     bank2: u8,
     mode: u8,
+    /// MBC5 ROM bank, 9 bits (2000-2FFF is bits 0-7, 3000-3FFF bit 8) and
+    /// RAM bank (4 bits, 3 on rumble carts). Bank 0 is a real bank.
+    mbc5_rom: u16,
+    mbc5_ram: u8,
 }
 
 impl<'a> Cart<'a> {
@@ -295,6 +303,8 @@ impl<'a> Cart<'a> {
             bank1: 1,
             bank2: 0,
             mode: 0,
+            mbc5_rom: 1,
+            mbc5_ram: 0,
         }
     }
 
@@ -358,6 +368,8 @@ impl<'a> Cart<'a> {
         self.bank1 = 1;
         self.bank2 = 0;
         self.mode = 0;
+        self.mbc5_rom = 1;
+        self.mbc5_ram = 0;
         // Without an MBC there is no enable register.
         self.ram_enabled = self.mapper == Mapper::None;
         self.update_banks();
@@ -424,6 +436,20 @@ impl<'a> Cart<'a> {
                 }
                 self.update_banks();
             }
+            Mapper::Mbc5 { rumble } => {
+                // Pan Docs: MBC5. Registers decode on address bits 12-14.
+                match addr >> 12 {
+                    0 | 1 => self.ram_enabled = value & 0x0F == 0x0A,
+                    2 => self.mbc5_rom = (self.mbc5_rom & 0x100) | u16::from(value),
+                    3 => self.mbc5_rom = (self.mbc5_rom & 0xFF) | (u16::from(value & 1) << 8),
+                    // Pan Docs: on rumble carts bit 3 drives the motor, so the
+                    // RAM bank is 3 bits; SameBoy (Core/mbc.c, MBC5 RAM bank)
+                    // masks with 7 when `has_rumble`. Rumble itself is ignored.
+                    4 | 5 => self.mbc5_ram = value & if rumble { 0x07 } else { 0x0F },
+                    _ => {}
+                }
+                self.update_banks();
+            }
         }
     }
 
@@ -431,6 +457,7 @@ impl<'a> Cart<'a> {
     fn update_banks(&mut self) {
         let (lo, hi, ram) = match self.mapper {
             Mapper::None => (0, 1, 0),
+            Mapper::Mbc5 { .. } => (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram)),
             Mapper::Mbc1 => {
                 // Mode 1 also applies BANK2 to 0000-3FFF and to RAM (Pan
                 // Docs: MBC1, 6000-7FFF).
@@ -458,6 +485,7 @@ impl<'a> Cart<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     fn rom_with(cart_type: u8, ram_code: u8) -> [u8; MIN_ROM_SIZE] {
         let mut rom = [0u8; MIN_ROM_SIZE];
@@ -582,6 +610,88 @@ mod tests {
     #[test]
     fn empty_cart_has_no_buffers() {
         assert!(Cart::empty().into_buffers().is_none());
+    }
+
+    /// A ROM of `banks` 16 KiB banks whose bank `n` starts with `n as u8`
+    /// and has `n >> 8` at offset 1.
+    fn mbc5_rom(banks: usize, cart_type: u8) -> std::vec::Vec<u8> {
+        let mut rom = std::vec![0u8; banks * ROM_BANK];
+        for b in 0..banks {
+            rom[b * ROM_BANK] = b as u8;
+            rom[b * ROM_BANK + 1] = (b >> 8) as u8;
+        }
+        rom[HEADER_CART_TYPE] = cart_type;
+        rom[HEADER_RAM_SIZE] = 0x04; // 128 KiB: 16 banks
+        rom
+    }
+
+    #[test]
+    fn mbc5_rom_banking() {
+        let rom = mbc5_rom(512, 0x19);
+        let mut ram = [0u8; 0x2_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        let at = |c: &Cart, a| u16::from(c.read_rom(a)) | u16::from(c.read_rom(a + 1)) << 8;
+        // Power-on: bank 1.
+        assert_eq!(at(&c, 0x4000), 1);
+        // Bank 0 is selectable (not remapped to 1).
+        c.write_rom(0x2000, 0);
+        assert_eq!(at(&c, 0x4000), 0);
+        assert_eq!(at(&c, 0x0000), 0);
+        // 9th bit.
+        c.write_rom(0x2000, 0x23);
+        c.write_rom(0x3000, 1);
+        assert_eq!(at(&c, 0x4000), 0x123);
+        // Only bit 0 of the 3000 register counts.
+        c.write_rom(0x3FFF, 0xFE);
+        assert_eq!(at(&c, 0x4000), 0x023);
+        assert_eq!(c.mbc5_rom, 0x023);
+        c.write_rom(0x2FFF, 0xFF);
+        c.write_rom(0x3000, 1);
+        assert_eq!(at(&c, 0x4000), 0x1FF);
+        // 0000-3FFF stays on bank 0.
+        assert_eq!(at(&c, 0x0000), 0);
+    }
+
+    #[test]
+    fn mbc5_rom_bank_masks_to_rom_size() {
+        let rom = mbc5_rom(4, 0x19);
+        let mut ram = [0u8; 0x2_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x2000, 6); // 6 mod 4 = 2
+        assert_eq!(c.read_rom(0x4000), 2);
+        c.write_rom(0x3000, 1); // 0x106 mod 4 = 2
+        assert_eq!(c.read_rom(0x4000), 2);
+        c.write_rom(0x2000, 4); // bank 0 mirror
+        assert_eq!(c.read_rom(0x4000), 0);
+    }
+
+    #[test]
+    fn mbc5_ram_banking_and_enable() {
+        for (cart_type, mask) in [(0x1B, 0x0F), (0x1E, 0x07)] {
+            let rom = mbc5_rom(2, cart_type);
+            let mut ram = [0u8; 0x2_0000];
+            let mut c = Cart::new(&rom, &mut ram).unwrap();
+            // Disabled at power-on.
+            assert_eq!(c.read_ram(0xA000), 0xFF);
+            c.write_rom(0x0000, 0x0A);
+            for bank in 0..16u8 {
+                c.write_rom(0x4000, bank);
+                c.write_ram(0xA000, bank + 1);
+            }
+            // Rumble carts: bit 3 does not select a bank.
+            for bank in 0..16u8 {
+                c.write_rom(0x5FFF, bank);
+                let last = (0..16u8).rev().find(|b| b & mask == bank & mask).unwrap();
+                assert_eq!(c.read_ram(0xA000), last + 1, "{cart_type:#x} bank {bank}");
+            }
+            // Only a low nibble of A enables (and the 1000 half decodes too).
+            c.write_rom(0x0000, 0x00);
+            assert_eq!(c.read_ram(0xA000), 0xFF);
+            c.write_rom(0x1000, 0x1A);
+            assert_ne!(c.read_ram(0xA000), 0xFF);
+            c.write_rom(0x0000, 0x0B);
+            assert_eq!(c.read_ram(0xA000), 0xFF);
+        }
     }
 
     #[test]
