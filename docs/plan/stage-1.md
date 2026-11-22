@@ -74,8 +74,8 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 
 ## M3: PPU (DMG-compatibility rendering) + screenshots
 
-- [ ] OAM DMA as the PPU sees it (Pan Docs "OAM DMA bus conflicts": objects off-screen in mode 2, the word being written in mode 3); sync DMA progress before PPU OAM reads (`docs/reference/oam-dma.md`)
-- [ ] Confirm OAM DMA pausing in HALT (M2 review H4, SameBoy model) against gambatte `oamdma/oamdmasrc80_halt_*` and `mgb_oam_dma_halt_sprites` once STAT IRQs exist; a halted DMA blocks the mode-2 OAM scan on CGB C (SameBoy `add_object_from_index`)
+- [x] OAM DMA as the PPU sees it (Pan Docs "OAM DMA bus conflicts": objects off-screen in mode 2, the word being written in mode 3); sync DMA progress before PPU OAM reads (`docs/reference/oam-dma.md`) (c57dd2e: PPU sees each DMA step 2 dots early, fitted to gambatte `late_sp*` 30/30; scan, mode-3 fetch and STAT effects per SameBoy)
+- [x] Confirm OAM DMA pausing in HALT (M2 review H4, SameBoy model) against gambatte `oamdma/oamdmasrc80_halt_*` and `mgb_oam_dma_halt_sprites` once STAT IRQs exist; a halted DMA blocks the mode-2 OAM scan on CGB C (SameBoy `add_object_from_index`) (c57dd2e: `oamdmasrc80_halt_*` pass; `oamdma_late_halt_stat_2` needs the last step not held through HALT, a deviation from SameBoy; `mgb_oam_dma_halt_sprites` is MGB-only)
 - [x] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts (ADR 0014, f71dbce)
 - [x] Scanline renderer with catch-up on mid-line register writes (ADR 0002) (265a078; mid-line writes land per SameBoy CGB table)
 - [x] Event deadlines: the table exists since M2 (`schedule.rs`, ADR 0011; incremental minimum 2944113). Remaining: PPU mode/STAT deadlines on `EventKind::Ppu`; STAT and LYC writes must sync the PPU and reschedule (M1 reviews) (f71dbce)
@@ -110,6 +110,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
 - [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
+- [ ] OAM DMA CPU-side bus conflicts vs. hardware: ~70 gambatte `oamdma` ROMs (`busypush*`/`busypop*` etc.) fail because the SameBoy-derived CGB C conflict table differs from gambatte's cgb04c hardware results; decide which reference wins per case once romtest runs gambatte ROMs. Also add a unit test for the FF46 write -> PPU sync call in the bus (c57dd2e review notes)
 - [ ] CGB vs. DMG-compatibility mode selection from the header
 - [ ] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results
 

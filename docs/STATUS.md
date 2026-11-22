@@ -16,11 +16,21 @@ M3 acceptance passes (verified at 745b06a: the seven M3 groups, 52/52 ROMs,
   f71dbce; mooneye-acceptance-ppu 7/7, mooneye-cgb-misc 4/4), VRAM/OAM
   blocking (22eccab), renderer (53c0c37..7f53075) wired in (265a078).
   Must 66/86, should 24/40, stretch 12 (before the M3 baseline update).
-- Running: OAM DMA as the PPU sees it + gambatte HALT-DMA confirmation
-  (plan M3, the two unticked tasks).
-- Then: milestone review (hardware correctness, test integrity, and
+- Done: OAM DMA as the PPU sees it + gambatte HALT-DMA confirmation
+  (c57dd2e; gambatte oamdma 331 -> 347, no manifest change). Two
+  deliberate deviations from SameBoy fitted to gambatte hardware ROMs: the
+  PPU sees DMA steps 2 dots early; the last step is not held through HALT.
+  All M3 plan tasks are ticked; M3 must gate verified at c57dd2e.
+- Next: milestone review (hardware correctness, test integrity, and
   performance: the hot path changed), fix confirmed high/medium,
-  `--update-baseline`, tag `stage1-m3`, session log 05.
+  `--update-baseline`, tag `stage1-m3`, session log 05 (cover sessions
+  05 work above: 4 implementation agents, ADRs 0013/0014).
+  Review range: `stage1-m2..HEAD`. Point the hardware reviewer at the two
+  SameBoy deviations and the renderer choices noted in code comments.
+- Token cost: the human flagged M3 as token-heavy (timing agent ~523k,
+  DMA agent ~494k). Keep briefs on must-tier scope, cap review findings,
+  use cheaper models for already-specified fixes, and pipe romtest/bench
+  output through tail/grep.
 
 Must failures left after M3 are all later milestones: mbc3-tester and
 rtc3test x3 (MBC3/RTC not implemented, M4; the renderer draws them
