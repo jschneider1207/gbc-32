@@ -162,9 +162,16 @@ checks = [{ screenshot = "rtc3test/rtc3test-sub-second-writes-cgb.png" }]
 id = "mbc3-tester"
 tier = "must"
 roms = ["mbc3-tester/mbc3-tester.gb"]
-exit = { run_frames = 40 }
-# reference recolored #7BFF4A -> #7BFF31 to match the common palette (human-approved 2026-11-22; scripts/recolor-reference.exs)
-checks = [{ screenshot = "references/mbc3-tester/mbc3-tester-cgb.png", sha256 = "675e149713d775e09b7ae9506bb6639ffb6925c8e0cdd53ac183cdd9bc2de86c" }]
+# 41, not upstream's 40 (human-approved 2026-11-22): the result first appears
+# at 40.59 frames (70,224-clock units from the post-boot handover); the ROM
+# spends ~45,600 clocks with the LCD off copying graphics and checks ~6.7
+# banks per VBlank. Upstream's "40 frames" likely counts frames drawn; no
+# core or runner bug (investigation 2026-11-22).
+exit = { run_frames = 41 }
+# The upstream PNG draws DMG BG color 2 as #7BFF4A; the common palette
+# (acceptance/README.md "Colors") is #7BFF31. Recolored in memory, exactly
+# 3,825 pixels (human-approved 2026-11-22; README "Recolored references").
+checks = [{ screenshot = "mbc3-tester/mbc3-tester-cgb.png", recolor = { from = "#7BFF4A", to = "#7BFF31", count = 3825 } }]
 
 # -------------------------------------------------------------- should ---
 
