@@ -163,7 +163,8 @@ id = "mbc3-tester"
 tier = "must"
 roms = ["mbc3-tester/mbc3-tester.gb"]
 exit = { run_frames = 40 }
-checks = [{ screenshot = "mbc3-tester/mbc3-tester-cgb.png" }]
+# reference recolored #7BFF4A -> #7BFF31 to match the common palette (human-approved 2026-11-22; scripts/recolor-reference.exs)
+checks = [{ screenshot = "references/mbc3-tester/mbc3-tester-cgb.png", sha256 = "675e149713d775e09b7ae9506bb6639ffb6925c8e0cdd53ac183cdd9bc2de86c" }]
 
 # -------------------------------------------------------------- should ---
 
