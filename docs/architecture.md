@@ -6,7 +6,7 @@ the structure changes. The reasons behind decisions belong in
 
 > Status: the workspace and the core's public API (ADR 0006) are concrete as
 > of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
-> PPU mode timing as of M3 (ADR 0014; pixels not drawn yet); the APU is
+> PPU mode timing and the DMG-compatibility renderer as of M3 (ADR 0014); the APU is
 > still a skeleton. Targets (dev board, then custom
 > board) as of 2026-11-21.
 
@@ -190,7 +190,9 @@ cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/
 bus.rs      * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), memory map, I/O, peek
 timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clock, TIMA reload as the Timer event, serial edge clocks
   reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
-ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows; later renderer, palettes
+ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
+  objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
+  render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
 apu/        * StereoSample; later channels, frame sequencer, mixer
 dma.rs        OAM DMA (instant-copy stub in bus.rs until M2), GDMA/HDMA
 cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1; later MBC2/3(+RTC)/5
@@ -272,9 +274,10 @@ Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
 `SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
 "OBJ penalty algorithm"), as `LineTiming` with the per-pixel stalls so
 `Ppu::mode3_pixel(now)` can say which pixel is being drawn. Objects come
-from a private OAM scan (`select_objects`, to be replaced by the renderer's
-`objects.rs`), skipped for lines a cached object-line map (`ObjectLines`,
-invalidated by `Ppu::oam_written` on CPU and DMA OAM writes) shows empty.
+from one OAM scan per line (`objects.rs`, `LineObjects::scan`) that feeds
+both the stalls and the renderer, skipped for lines a cached object-line
+map (`ObjectLines`, invalidated by `Ppu::oam_written` on CPU and DMA OAM
+writes) shows empty, and on the first line after LCD enable (no OAM scan).
 
 Every PPU register write goes through `Ctx::write_ppu`: sync first, then
 the write (STAT in two phases one dot apart, LYC one dot into the M-cycle
@@ -283,9 +286,33 @@ and OAM accesses check `Ppu::vram_blocked`/`oam_blocked` out of line
 (`read_vram`, `Ctx::write_vram`, `read_oam`, `Ctx::write_oam`); `peek` and
 the OAM DMA's reads use `read::<false>` and see memory as it is.
 
-Renderer integration points (marked `RENDERER:` in the code): the `Latch`
-point (start the line: SCX, objects), the `End` point (draw the line up to
-pixel 160 into the frame), `Ppu::next_frame` (start of frame), and
-`Ctx::write_ppu` for SCY/SCX/BGP/OBP0/OBP1/WY/WX (draw up to
-`mode3_pixel(now)` before the write lands). `frame_done` fills the frame
-white until then.
+### Scanline renderer
+
+`ppu/render.rs`, driven by the PPU (`Ppu::renderer`); pixels go straight
+into the caller's `Frame` row by row. The `Latch` point starts the line
+(`Renderer::start_line`: SCX & 7, the line's objects in drawing order),
+the `End` point draws whatever of the line is left up to pixel 160
+(`Ppu::draw`), and `Ppu::next_frame` and LCD enable start a frame (window
+line counter and WY condition; the renderer's WY condition is the only
+copy, which the window stall reads too). `Ppu::drawn` counts the pixels
+of the current line already in the frame.
+
+Mid-line writes (ADR 0002 catch-up): `Ctx::write_ppu` for LCDC, SCY, SCX,
+BGP, OBP0, OBP1, WY and WX calls `Ppu::flush(at)` before the write lands,
+which draws the line up to `mode3_pixel(at)` with the old value. `at` is
+where the write lands in the M-cycle (SameBoy `cgb_conflict_map`, single
+speed): the access clock for LCDC/SCY/SCX/WY, one dot earlier for the
+palettes (CGB C), one dot later for WX. Drawing at the mode-3 end is exact
+for VRAM and OAM because the CPU can't write them during mode 3 (and OAM
+during mode 2, when the scan happens).
+
+Registers: LCDC lives in `Ppu`; SCY, SCX, WY, WX and the raw BGP/OBP0/OBP1
+stay in the `mem.io` backing store (reads unchanged on the bus path), and
+the renderer reads them through `Ppu::regs` when it draws. Colors are
+resolved when written (ADR 0013): `Ppu::colors` holds RGB555 tables, rebuilt
+on BGP/OBPx writes, at reset and by `Emulator::set_dmg_palettes`. Spans
+without object pixels go straight from tile bits to RGB555; others mix an
+index buffer with the object buffer. `frame_done` no longer writes the
+frame; `screen_blank` and the LCD-off rules are unchanged (ADR 0006
+amendments). Cost and code size: `docs/perf.md`. CGB-mode rendering
+(attributes, VRAM bank 1, CGB palettes, OAM-index priority) is M5.
