@@ -11,13 +11,13 @@
 #  - Raising a budget is committed with the change that needs it, with the
 #    measured size and the reason in the commit body.
 # Initial budgets are the measured size plus about 5% headroom.
-30000 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-13820 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
-170 <gbc_core::bus::Ctx>::write_high
+29150 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+13250 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+90 <gbc_core::bus::Ctx>::write_high
 930 <gbc_core::bus::Ctx>::write_io
-960 gbc_core::bus::read_high
+890 gbc_core::bus::read_high
 230 <gbc_core::bus::Ctx>::sync_ppu
-440 <gbc_core::bus::Ctx>::write_mapped
+480 <gbc_core::bus::Ctx>::write_mapped
 1620 <gbc_core::bus::Ctx>::write_timer_io
 380 <gbc_core::timer::Timer>::read
 # Event dispatch and DMA conflict paths (measured after the incremental
@@ -30,8 +30,16 @@
 # PPU mode timing (ADR 0014; measured 2720, 482, 412, 494, 1058 bytes):
 # the per-line event and its update-point walk, and the PPU register
 # writes moved out of write_io.
-2860 <gbc_core::ppu::Ppu>::sync
+3120 <gbc_core::ppu::Ppu>::sync
 510 <gbc_core::ppu::Ppu>::next_event
 440 <gbc_core::ppu::Ppu>::next_point
 520 <gbc_core::ppu::Ppu>::point_irq
 1110 <gbc_core::bus::Ctx>::write_ppu
+# CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
+# 304, 240 bytes): VRAM accesses leave the inlined bus path for these.
+230 gbc_core::bus::read_vram
+230 <gbc_core::bus::Ctx>::write_vram
+210 <gbc_core::ppu::Ppu>::vram_blocked
+300 gbc_core::bus::read_oam
+320 <gbc_core::bus::Ctx>::write_oam
+260 <gbc_core::ppu::Ppu>::oam_blocked

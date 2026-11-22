@@ -458,6 +458,54 @@ impl Ppu {
         }
     }
 
+    /// CPU access to VRAM is blocked at clock `now`: reads give FF and
+    /// writes are dropped during mode 3 (Pan Docs: Rendering, "VRAM
+    /// access"). CGB timing (SameBoy `vram_read_blocked` and
+    /// `vram_write_blocked`, the same on CGB): from the mode-3 STAT change
+    /// (first line after LCD enable: the pipeline start, or the STAT change
+    /// in double speed) to the mode-3 end (one dot later in double speed).
+    pub(crate) fn vram_blocked(&self, now: u64, double: bool) -> bool {
+        if !self.lcd_enabled() {
+            return false;
+        }
+        let a = self.at(now);
+        if a.line >= LINES {
+            return false;
+        }
+        let from = match (a.first, double) {
+            (false, _) => 84,
+            (true, false) => 91,
+            (true, true) => 86,
+        };
+        a.t >= from && a.t < self.mode3_end(now, a, double)
+    }
+
+    /// CPU access to OAM (FE00-FEFF) is blocked at clock `now`: reads give
+    /// FF and writes are dropped during the OAM scan and mode 3 (Pan Docs:
+    /// Rendering, "OAM access"). CGB C timing (SameBoy `oam_read_blocked`,
+    /// `oam_write_blocked`): writes from the line's first dot (double
+    /// speed: its third), reads from its fourth (double speed: its fifth),
+    /// both to the mode-3 end; on the first line after LCD enable, writes
+    /// from SameBoy's nominal 76 and reads from 78 (no OAM scan).
+    pub(crate) fn oam_blocked(&self, now: u64, double: bool, write: bool) -> bool {
+        if !self.lcd_enabled() {
+            return false;
+        }
+        let a = self.at(now);
+        if a.line >= LINES {
+            return false;
+        }
+        let from = match (a.first, write, double) {
+            (true, true, _) => 84,
+            (true, false, _) => 86,
+            (false, true, false) => 0,
+            (false, true, true) => 2,
+            (false, false, false) => 3,
+            (false, false, true) => 4,
+        };
+        a.t >= from && a.t < self.mode3_end(now, a, double)
+    }
+
     /// `mode_for_interrupt` at `a` (SameBoy): the mode source a STAT
     /// update at this position sees.
     fn mode_source(&self, now: u64, a: At, double: bool) -> u8 {
@@ -1331,6 +1379,76 @@ mod tests {
         assert_eq!(p.next_event(false), 4653);
         // Position 3 mod 4 at every M-cycle boundary, as after an enable.
         assert_eq!(POST_BOOT_POS % 4, 3);
+    }
+
+    #[test]
+    fn vram_and_oam_blocking_windows() {
+        let on = 1000;
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        let l5 = clock(on, 0, 5 * LINE);
+        r.sync(l5 + 300);
+        let p = &r.ppu;
+        let vram = |t: u64| p.vram_blocked(l5 + t, false);
+        assert_eq!(
+            [vram(83), vram(84), vram(255), vram(256)],
+            [false, true, true, false]
+        );
+        let oam = |t: u64, write| p.oam_blocked(l5 + t, false, write);
+        assert_eq!(
+            [
+                oam(0, true),
+                oam(2, false),
+                oam(3, false),
+                oam(255, false),
+                oam(256, true)
+            ],
+            [true, false, true, true, false]
+        );
+        // Double speed: one dot later at both ends.
+        assert_eq!(
+            [
+                p.oam_blocked(l5 + 1, true, true),
+                p.oam_blocked(l5 + 2, true, true)
+            ],
+            [false, true]
+        );
+        assert_eq!(
+            [
+                p.vram_blocked(l5 + 256, true),
+                p.vram_blocked(l5 + 257, true)
+            ],
+            [true, false]
+        );
+        // VBlank: free.
+        let l150 = clock(on, 0, 150 * LINE + 100);
+        r.sync(l150);
+        assert!(!r.ppu.vram_blocked(l150, false) && !r.ppu.oam_blocked(l150, false, true));
+        // The first line after LCD enable: OAM writes from SameBoy's 76,
+        // reads from 78 (mode 3), VRAM from the pipeline start.
+        let r = Rig::on_at(on, 0, 0xFF);
+        let first = |pos: u32| clock(on, 0, pos);
+        let p = &r.ppu;
+        assert_eq!(
+            [
+                p.oam_blocked(first(83), false, true),
+                p.oam_blocked(first(84), false, true)
+            ],
+            [false, true]
+        );
+        assert_eq!(
+            [
+                p.oam_blocked(first(85), false, false),
+                p.oam_blocked(first(86), false, false)
+            ],
+            [false, true]
+        );
+        assert_eq!(
+            [
+                p.vram_blocked(first(90), false),
+                p.vram_blocked(first(91), false)
+            ],
+            [false, true]
+        );
     }
 
     #[test]

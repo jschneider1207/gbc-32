@@ -28,19 +28,22 @@ Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,482,522,582 |
-| cgb_sound.gb | 709,805,227 |
-| cgb-acid2.gbc | 341,716,522 |
-| synth:event-storm (2 s) | 424,466,469 |
-| synth:dma-storm (3 s) | 405,698,738 |
-| synth:halt-irq (10 s) | 162,276,835 |
+| cpu_instrs.gb | 1,464,091,710 |
+| cgb_sound.gb | 709,309,963 |
+| cgb-acid2.gbc | 341,700,412 |
+| synth:event-storm (2 s) | 422,070,901 |
+| synth:dma-storm (3 s) | 399,047,786 |
+| synth:halt-irq (10 s) | 159,655,635 |
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
 mode 3, where the renderer will draw) plus STAT interrupt edges: from
 1,388.0 / 607.5 / 12.9 / 413.7 / 372.1 / 111.4 M (+6.8%, +16.8%, +274k Ir
 per frame on cgb-acid2, +2.6%, +9.0%, +45.7%). About 470 Ir per line event
 with no STAT source selected and no objects, 940 with sources and objects
-(cgb-acid2), dispatch included.
+(cgb-acid2), dispatch included. CPU VRAM/OAM blocking then moved VRAM
+accesses out of the inlined bus path (`read_vram`, `Ctx::write_vram`):
+`Cpu::run` 29,224 -> 27,760 B and -1.2% on cpu_instrs, -1.6% on dma-storm
+and halt-irq.
 
 The incremental event-table minimum (`schedule.rs`: the table is rescanned
 only when the earliest entry moves later or is taken; handlers re-arm
@@ -68,18 +71,21 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 28,560 | 30,000 |
-| `Cpu::execute_cb::<Ctx>` | 13,158 | 13,820 |
-| `Ctx::write_high` | 168 | 170 |
+| `Cpu::run::<Ctx>` | 27,760 | 29,150 |
+| `Cpu::execute_cb::<Ctx>` | 12,622 | 13,250 |
+| `Ctx::write_high` | 80 | 90 |
 | `Ctx::write_io` | 884 | 930 |
-| `bus::read_high` | 912 | 960 |
+| `bus::read_high` | 848 | 890 |
 | `Ctx::sync_ppu` | 214 | 230 |
-| `Ppu::sync` | 2,720 | 2,860 |
+| `Ppu::sync` | 2,976 | 3,120 |
 | `Ppu::next_event` | 482 | 510 |
 | `Ppu::next_point` | 412 | 440 |
 | `Ppu::point_irq` | 494 | 520 |
 | `Ctx::write_ppu` (PPU registers, out of `write_io`) | 1,058 | 1,110 |
-| `Ctx::write_mapped` | 428 | 440 |
+| `Ctx::write_mapped` | 460 | 480 |
+| `bus::read_vram`, `Ctx::write_vram` | 218, 216 | 230, 230 |
+| `bus::read_oam`, `Ctx::write_oam` | 280, 304 | 300, 320 |
+| `Ppu::vram_blocked`, `Ppu::oam_blocked` | 196, 240 | 210, 260 |
 | `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
 
@@ -131,9 +137,9 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,482,522,582 |
-| cgb_sound.gb | 709,805,227 |
-| cgb-acid2.gbc | 341,716,522 |
+| cpu_instrs.gb | 1,464,091,710 |
+| cgb_sound.gb | 709,309,963 |
+| cgb-acid2.gbc | 341,700,412 |
 
 (ADR 0014, PPU mode timing, took these from 1,388.0 M, 607.5 M and 12.9 M;
 see the table above.)

@@ -158,7 +158,7 @@ mod tests {
 
         fn check(&mut self, at: &str) {
             let c = &self.ctx;
-            let lazy_read = |reg: u8| read(c.mem, c.sys, &c.hot, 0xFF00 | u16::from(reg));
+            let lazy_read = |reg: u8| read::<true>(c.mem, c.sys, &c.hot, 0xFF00 | u16::from(reg));
             let mut fail = String::new();
             if c.clock() != self.eager.clock {
                 fail += &format!("clock {} vs eager {}; ", c.clock(), self.eager.clock);

@@ -608,7 +608,7 @@ impl Ctx<'_, '_> {
         let a = usize::from(addr);
         match (addr | self.hot.dma) >> 13 {
             0..=3 => self.sys.cart.write_rom(addr, value),
-            4 => self.mem.vram[(self.sys.vram_off | (a & 0x1FFF)) & 0x3FFF] = value,
+            4 => self.write_vram(addr, value),
             5 => self.sys.cart.write_ram(addr, value),
             6 => *wram_mut(self.mem, self.sys, a) = value,
             _ if self.hot.dma != 0 => self.write_during_dma(addr, value),
@@ -624,7 +624,7 @@ impl Ctx<'_, '_> {
         let a = usize::from(addr);
         match addr >> 13 {
             0..=3 => self.sys.cart.write_rom(addr, value),
-            4 => self.mem.vram[(self.sys.vram_off | (a & 0x1FFF)) & 0x3FFF] = value,
+            4 => self.write_vram(addr, value),
             5 => self.sys.cart.write_ram(addr, value),
             6 => *wram_mut(self.mem, self.sys, a) = value,
             _ if addr < 0xFE00 => *wram_mut(self.mem, self.sys, a) = value,
@@ -637,15 +637,48 @@ impl Ctx<'_, '_> {
     fn write_high(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         match addr {
-            0xFE00..=0xFE9F => {
-                self.mem.oam[a & 0xFF] = value;
-                self.sys.ppu.oam_written();
-            }
-            0xFEA0..=0xFEFF => self.mem.extra_oam[extra_oam_index(a)] = value,
+            0xFE00..=0xFEFF => self.write_oam(addr, value),
             0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
             0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
             0xFFFF => self.sys.ie = value,
             _ => {}
+        }
+    }
+
+    /// A CPU write to VRAM: dropped while the PPU blocks VRAM
+    /// ([`Ppu::vram_blocked`]). Out of line: the check needs the PPU's
+    /// position.
+    #[inline(never)]
+    fn write_vram(&mut self, addr: u16, value: u8) {
+        if self
+            .sys
+            .ppu
+            .vram_blocked(self.clock(), self.hot.mcycle == 2)
+        {
+            return;
+        }
+        let a = usize::from(addr);
+        self.mem.vram[(self.sys.vram_off | (a & 0x1FFF)) & 0x3FFF] = value;
+    }
+
+    /// A CPU write to FE00-FEFF: dropped while the PPU blocks OAM
+    /// ([`Ppu::oam_blocked`]), FEA0-FEFF included (Pan Docs: Memory Map,
+    /// "FEA0-FEFF range").
+    #[inline(never)]
+    fn write_oam(&mut self, addr: u16, value: u8) {
+        if self
+            .sys
+            .ppu
+            .oam_blocked(self.clock(), self.hot.mcycle == 2, true)
+        {
+            return;
+        }
+        let a = usize::from(addr);
+        if addr < 0xFEA0 {
+            self.mem.oam[a & 0xFF] = value;
+            self.sys.ppu.oam_written();
+        } else {
+            self.mem.extra_oam[extra_oam_index(a)] = value;
         }
     }
 
@@ -742,7 +775,7 @@ impl Ctx<'_, '_> {
             self.mem.oam[usize::from(i)] = if src >= 0xE000 {
                 0xFF
             } else {
-                read(self.mem, self.sys, &self.hot.without_dma(), src)
+                read::<false>(self.mem, self.sys, &self.hot.without_dma(), src)
             };
         }
         if due > d.copied {
@@ -843,7 +876,7 @@ impl Ctx<'_, '_> {
 impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn read(&mut self, addr: u16) -> u8 {
-        let v = read(self.mem, self.sys, &self.hot, addr);
+        let v = read::<true>(self.mem, self.sys, &self.hot, addr);
         self.tick();
         v
     }
@@ -960,11 +993,16 @@ impl Bus for Ctx<'_, '_> {
 /// ([`Hot::dma`]); `peek` and the DMA's own reads clear it
 /// ([`Hot::without_dma`]). Echo RAM is out of line in `read_high`, so
 /// the inlined dispatch has no compare beyond the region.
+///
+/// `CPU` selects the CPU's view, where the PPU blocks VRAM and OAM
+/// ([`read_vram`], [`read_oam`]); `peek` and the DMA's own reads use the
+/// raw memory (SameBoy: DMA reads ignore `vram_read_blocked`).
 #[inline(always)]
-pub(crate) fn read(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
+pub(crate) fn read<const CPU: bool>(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
     match (addr | hot.dma) >> 13 {
         0..=3 => sys.cart.read_rom(addr),
+        4 if CPU => read_vram(mem, sys, hot, addr),
         4 => mem.vram[(sys.vram_off | (a & 0x1FFF)) & 0x3FFF],
         5 => sys.cart.read_ram(addr),
         6 => wram(mem, sys, a),
@@ -1006,7 +1044,7 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
         (Conflict::Wram(a), _) => a,
         (Conflict::Dma, i) => sys.dma.base + u16::from(i),
     };
-    read(mem, sys, &plain, addr)
+    read::<true>(mem, sys, &plain, addr)
 }
 
 /// C000-DFFF and its echo: bank 0, then the SVBK bank.
@@ -1036,7 +1074,39 @@ fn extra_oam_index(a: usize) -> usize {
     ((a & 0xFF) & !0x18) - 0xA0
 }
 
-/// E000-FFFF, and every address during an OAM DMA transfer.
+/// A CPU read of VRAM: FF while the PPU blocks it ([`Ppu::vram_blocked`]).
+/// Out of line: the check needs the PPU's position.
+#[inline(never)]
+fn read_vram(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
+    if sys.ppu.vram_blocked(hot.clock(), hot.mcycle == 2) {
+        return 0xFF;
+    }
+    mem.vram[(sys.vram_off | (usize::from(addr) & 0x1FFF)) & 0x3FFF]
+}
+
+/// A CPU read of FE00-FEFF: FF while the PPU blocks OAM
+/// ([`Ppu::oam_blocked`]), FEA0-FEFF included.
+#[inline(never)]
+fn read_oam(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
+    if sys.ppu.oam_blocked(hot.clock(), hot.mcycle == 2, false) {
+        return 0xFF;
+    }
+    raw_oam(mem, addr)
+}
+
+/// FE00-FEFF as stored.
+#[inline]
+fn raw_oam(mem: &Memory, addr: u16) -> u8 {
+    let a = usize::from(addr);
+    if addr < 0xFEA0 {
+        mem.oam[a & 0xFF]
+    } else {
+        mem.extra_oam[extra_oam_index(a)]
+    }
+}
+
+/// E000-FFFF, and every address during an OAM DMA transfer (CPU only:
+/// `peek` reads FE00-FEFF itself).
 fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     if hot.dma != 0 {
         return read_during_dma(mem, sys, hot, addr);
@@ -1045,8 +1115,7 @@ fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     match addr {
         // E000-FDFF: echo of C000-DDFF (Pan Docs: Memory Map).
         0..=0xFDFF => wram(mem, sys, a),
-        0xFE00..=0xFE9F => mem.oam[a & 0xFF],
-        0xFEA0..=0xFEFF => mem.extra_oam[extra_oam_index(a)],
+        0xFE00..=0xFEFF => read_oam(mem, sys, hot, addr),
         0xFF00..=0xFF7F => read_io(mem, sys, hot, a & 0x7F),
         0xFF80..=0xFFFE => mem.hram[a - 0xFF80],
         _ => sys.ie,
@@ -1111,8 +1180,12 @@ impl Emulator<'_> {
     /// ([`MIN_ROM_SIZE`](crate::MIN_ROM_SIZE)).
     pub fn peek(&self, addr: u16) -> u8 {
         let sys = &self.hw.sys;
-        // Conflict-free: the memory as it is, OAM included, during a DMA.
-        read(self.mem, sys, &sys.hot.without_dma(), addr)
+        // Conflict-free: the memory as it is, OAM included, during a DMA,
+        // and VRAM/OAM whatever the PPU mode.
+        if (0xFE00..0xFF00).contains(&addr) {
+            return raw_oam(self.mem, addr);
+        }
+        read::<false>(self.mem, sys, &sys.hot.without_dma(), addr)
     }
 }
 
@@ -1120,7 +1193,7 @@ impl Emulator<'_> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::{Config, Frame, cart_ram_size};
+    use crate::{Config, FRAME_CLOCKS, Frame, cart_ram_size};
     use std::boxed::Box;
     use std::vec;
 
@@ -1257,6 +1330,41 @@ mod tests {
         write(emu, 0xFF68, 0x05);
         write(emu, 0xFF69, 0x12);
         assert_eq!((emu.peek(0xFF68), emu.peek(0xFF69)), (0x45, 0xFF));
+    }
+
+    /// CPU accesses to VRAM in mode 3 and to OAM in modes 2-3 are blocked;
+    /// `peek` and the OAM DMA's reads are not.
+    #[test]
+    fn ppu_blocks_cpu_vram_and_oam_access() {
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        emu.mem.vram[0] = 0x12;
+        emu.mem.oam[0] = 0x34;
+        // Line 5 of the first full frame, 120 dots in: mode 3.
+        let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
+        let _ = emu.run_until(line5 + 120, &mut fb, &mut []);
+        assert_eq!(emu.peek(0xFF41) & 3, 3);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0x8000), 0xFF);
+        assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFE00), 0xFF);
+        assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFEA0), 0xFF);
+        ctx.write_mapped(0x8000, 0x56);
+        ctx.write_mapped(0xFE00, 0x78);
+        assert_eq!((ctx.mem.vram[0], ctx.mem.oam[0]), (0x12, 0x34));
+        // An OAM DMA from VRAM reads it anyway.
+        assert_eq!(read::<false>(ctx.mem, ctx.sys, &ctx.hot, 0x8000), 0x12);
+        drop(ctx);
+        assert_eq!((emu.peek(0x8000), emu.peek(0xFE00)), (0x12, 0x34));
+        // HBlank of the same line: free.
+        let _ = emu.run_until(line5 + 300, &mut fb, &mut []);
+        assert_eq!(emu.peek(0xFF41) & 3, 0);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0x8000), 0x12);
+        ctx.write_mapped(0x8000, 0x56);
+        ctx.write_mapped(0xFE00, 0x78);
+        assert_eq!((ctx.mem.vram[0], ctx.mem.oam[0]), (0x56, 0x78));
     }
 
     /// The post-boot values Mooneye `misc/boot_hwio-C` and
@@ -1750,8 +1858,8 @@ mod dma_tests {
                 ctx.dma_sync(ctx.clock());
                 assert_eq!(ctx.sys.dma.copied, 10);
                 assert_eq!(ctx.hot.dma, 0xFE00);
-                assert_eq!(read(ctx.mem, ctx.sys, &ctx.hot, 0xFE00), 0xFF);
-                assert_eq!(read(ctx.mem, ctx.sys, &ctx.hot, 0xFE9F), 0xFF);
+                assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFE00), 0xFF);
+                assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFE9F), 0xFF);
             }
             assert_eq!(ctx.mem.oam[10], 0x55);
             // The wake-up M-cycle: pushed out by 50 M-cycles.
