@@ -1729,6 +1729,61 @@ mod tests {
         assert_eq!(emu.hw.sys.timer.sc(now), timer::POST_BOOT_COUNTER + now);
     }
 
+    /// Steps `emu` `n` instructions; returns (clock, PC, whether DIV was
+    /// reset since power-on, i.e. the timer counter isn't the post-boot
+    /// value plus the elapsed clocks).
+    fn steps_to(emu: &mut Emulator, n: usize) -> (u64, u16, bool) {
+        let mut fb = frame();
+        for _ in 0..n {
+            let _ = emu.step(&mut fb, &mut []);
+        }
+        let now = emu.clock();
+        let reset = emu.hw.sys.timer.sc(now) != timer::POST_BOOT_COUNTER + now;
+        (now, emu.hw.cpu.regs.pc, reset)
+    }
+
+    // SameBoy `stop()` branch 1 with an interrupt pending (branch 1 with
+    // nothing pending: `stop_with_a_button_held_neither_switches_nor_resets_div`;
+    // 2 and 3: the speed-switch tests above).
+    #[test]
+    fn stop_with_a_button_held_and_an_interrupt_pending_is_one_byte() {
+        // XOR A; LDH (00),A (both groups); INC A; LDH (FF),A; LDH (0F),A
+        // (IE = IF = VBlank, IME off); LDH (4D),A (KEY1 armed); STOP; LD
+        // B,B. A held: no DIV reset, no switch, no halt, and the byte after
+        // STOP is the next opcode.
+        let program = [
+            0xAF, 0xE0, 0x00, 0x3C, 0xE0, 0xFF, 0xE0, 0x0F, 0xE0, 0x4D, 0x10, 0x40,
+        ];
+        let emu = with_program(&program, 0x80);
+        emu.set_buttons(Buttons::A);
+        let (_, pc, reset) = steps_to(emu, 7);
+        assert_eq!(pc, 0x10B);
+        assert!(!reset);
+        assert!(!emu.hw.cpu.halted() && !emu.hw.cpu.stopped());
+        assert_eq!(emu.peek(0xFF4D) & 0x81, 0x01, "still armed");
+    }
+
+    #[test]
+    fn plain_stop_with_nothing_pending_is_two_bytes() {
+        // SameBoy `stop()` branch 4: STOP 00 with no button held, KEY1 not
+        // armed and IE & IF = 0: DIV reset, the second byte read (fetch
+        // 0-4, read 4-8), then STOP mode.
+        let emu = with_program(&[0x10, 0x00, 0x40], 0x80);
+        assert_eq!(steps_to(emu, 1), (8, 0x102, true));
+        assert!(emu.hw.cpu.stopped());
+        assert_eq!(emu.peek(0xFF4D) & 0x81, 0x00, "no switch");
+    }
+
+    #[test]
+    fn plain_stop_with_an_interrupt_pending_is_one_byte() {
+        // SameBoy `stop()` branch 5: LD A,01; LDH (FF),A; LDH (0F),A (IE =
+        // IF = VBlank, IME off); STOP: DIV reset, one byte (fetch 32-36),
+        // then STOP mode; the 40 after it is the next opcode.
+        let emu = with_program(&[0x3E, 0x01, 0xE0, 0xFF, 0xE0, 0x0F, 0x10, 0x40], 0x80);
+        assert_eq!(steps_to(emu, 4), (36, 0x107, true));
+        assert!(emu.hw.cpu.stopped());
+    }
+
     #[test]
     fn speed_switch_halt_pauses_oam_dma() {
         // A transfer from C000 starts, then the switch to double speed
@@ -2012,10 +2067,9 @@ mod tests {
             }
             clocks[i] = emu.clock();
             // The stopped step's check after its idle M-cycle ending at d
-            // sees the press; then the 00 after STOP (one byte here, a
-            // stub until the STOP-accuracy task) runs as a NOP, then LD
-            // B,B's fetch.
-            assert_eq!(emu.clock(), d + 8);
+            // sees the press; STOP read its 00 before stopping (nothing
+            // pending: two bytes), so LD B,B's fetch follows.
+            assert_eq!(emu.clock(), d + 4);
         }
         assert_eq!(clocks[0], clocks[1]);
     }

@@ -54,8 +54,27 @@ References, read for behavior:
   T-cycles late (the held DIV reset). With an interrupt pending there is
   no halt, and to double speed the CPU idles one M-cycle the timer doesn't
   count.
-- Plain STOP (no switch) stays one byte and stops until a button press;
-  making it two bytes is a separate task (SingleStepTests harness).
+- Plain STOP (no switch) follows the same length rule (see "STOP length")
+  and then stops until a button press (a stub until the STOP-accuracy
+  task).
+
+## STOP length
+Source: SameBoy `Core/sm83_cpu.c` `stop()`, which encodes the Pan Docs
+"Using the STOP instruction" flowchart (same author). With
+`pending = IE & IF & 1F != 0`, STOP is two bytes when nothing is pending
+and one byte when something is; the second byte is read (one M-cycle)
+before any pause. This holds on every path: button held (no DIV reset;
+halt if nothing pending), speed switch, and plain STOP mode. With one
+byte, the byte after STOP runs as the next opcode.
+
+SingleStepTests (`tools/sm83-tests`) expects STOP to be one byte in every
+case. The human's decision (2026-11-22, "keep pending cases only"): the
+harness runs the 10 cases with IE & IF & 1F != 0 (IE and IF from the
+case's flat RAM at FFFF and FF0F) and skips only those with nothing
+pending; core unit tests cover those (one per SameBoy branch). The harness
+pins the counts. As measured, no 10 case puts FFFF or FF0F in its RAM, so
+all 1000 are skipped and 0 run: STOP has no SingleStepTests coverage, only
+the unit tests.
 
 ## Consequences
 - Measured against main (ce1ac76), full stage1 manifest: gambatte

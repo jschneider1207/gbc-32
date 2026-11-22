@@ -287,6 +287,12 @@ impl Cpu {
         self.mode == Mode::Halted
     }
 
+    /// Whether the CPU is in STOP mode.
+    #[cfg(test)]
+    pub(crate) fn stopped(&self) -> bool {
+        self.mode == Mode::Stopped
+    }
+
     /// Whether the next step fetches an opcode: running (not halted,
     /// stopped, locked up or off) and no interrupt dispatch due. A pending
     /// VRAM DMA runs there (ADR 0017).
@@ -481,9 +487,10 @@ impl Cpu {
     ///   pending the CPU halts (a plain HALT), else it just continues.
     /// - KEY1 armed (CGB): the speed switch, then, with nothing pending,
     ///   the speed-switch halt ([`Mode::SpeedSwitch`]).
-    /// - Otherwise STOP mode: a one-byte stub until the STOP-accuracy task
-    ///   (the CPU idles until a button is pressed). That task brings the
-    ///   two-byte rule here too; SingleStepTests expects one byte.
+    /// - Otherwise STOP mode, entered after the second byte (if read). Until
+    ///   the STOP-accuracy task it is a stub: the CPU idles until a button
+    ///   is pressed. SingleStepTests expects STOP to be one byte even with
+    ///   nothing pending; its harness skips those cases (ADR 0020).
     ///
     /// Cold and out of line: it keeps `Cpu::run` small.
     #[cold]
@@ -491,17 +498,13 @@ impl Cpu {
     fn stop<B: Bus>(&mut self, bus: &mut B) {
         let pending = bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0;
         let kind = bus.stop_begin();
-        if kind == StopKind::Stop {
-            self.mode = Mode::Stopped;
-            return;
-        }
         if !pending {
             let pc = self.regs.pc;
             bus.read(pc);
             self.regs.pc = pc.wrapping_add(1);
         }
         match kind {
-            StopKind::Stop => {}
+            StopKind::Stop => self.mode = Mode::Stopped,
             StopKind::Switch => {
                 if bus.speed_switch(self.ime, pending) {
                     if pending {
