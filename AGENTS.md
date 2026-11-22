@@ -221,8 +221,15 @@ every turn, so:
 **Machine resources:** this runs in WSL2 on the human's own PC. Running
 out of RAM has crashed WSL and nearly the whole host before. Every `target/`
 directory is a full separate build.
-- Only one agent compiles at a time. Don't run build/test-heavy subagents
-  in parallel.
+- Parallel work is fine, but never use the whole machine. Across all
+  agents, at most 2 cargo builds or test runs at once (each capped at 4
+  jobs, see below). This counts background jobs inside one agent too, such
+  as a mutation loop running alongside a verify run.
+- The heaviest steps run alone, with no other build alongside them:
+  `check-bench.sh` (valgrind), `diff-fingerprint.sh` (it builds two extra
+  trees), and full gate runs.
+- Work that doesn't build (reviews, reading, docs) can run in parallel
+  freely.
 - Use a git worktree or scratch copy only when it's needed (mutation checks,
   isolating risky edits). Delete it, including its `target/`, when done.
 - Leave the `jobs` cap in `.cargo/config.toml` in place. Don't override it
