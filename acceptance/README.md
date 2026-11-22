@@ -144,6 +144,9 @@ from this contract. The rules:
   count, or a missing or unlisted PNG, is exit 2, never `no-reference`. So
   a new upstream release that changes the reference stops the run instead
   of passing against a stale recolor.
+- The PNG must contain no pixel of color `to`: a recolor relabels one color
+  and never merges two (a merge could make a blank frame match). A PNG that
+  already has a `to` pixel is exit 2.
 - The frame is then compared against the recolored image exactly, as for
   any screenshot. There is no other leniency.
 

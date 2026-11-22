@@ -250,3 +250,7 @@ The override mechanism was removed: `Check::PinnedScreenshot`, the
 `screenshot = "references/...", sha256 = ...` form (`sha256` is an
 unknown check key again), `acceptance/references/`,
 `scripts/recolor-reference.exs` and the README rows that a89713c added.
+
+Stricter rule, added the same day: the PNG must contain zero pixels of `to`
+(otherwise exit 2), so a recolor can only relabel one color and never merge
+two, which would let a blank frame match.

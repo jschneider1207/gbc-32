@@ -316,8 +316,17 @@ fn screenshot(
 
 /// Applies a counted recolor (acceptance/README.md, "Checks") to a decoded,
 /// verified reference: every pixel of color `from` becomes `to`. `Err` (a
-/// runner error, exit 2) unless exactly `count` pixels had color `from`.
+/// runner error, exit 2) unless exactly `count` pixels had color `from`
+/// and none had color `to`: a recolor relabels one color, it never merges
+/// two (a merge could turn a blank frame into a match).
 pub fn apply_recolor(reference: &str, img: &mut Rgb, r: &Recolor) -> Result<(), String> {
+    if img.data.contains(&r.to) {
+        return Err(format!(
+            "recolor of {reference}: the PNG already has pixels of {}; a recolor may only \
+             relabel a color absent from the reference",
+            hex_color(r.to)
+        ));
+    }
     let mut n = 0u64;
     for px in &mut img.data {
         if *px == r.from {

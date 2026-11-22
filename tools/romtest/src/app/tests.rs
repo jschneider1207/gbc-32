@@ -936,8 +936,9 @@ mod recolor {
     use super::*;
 
     const UPSTREAM: &str = "x/ref.png";
-    /// Pixels of `FROM` in the upstream reference; the rest is white.
-    const N: usize = 100;
+    /// Pixels of #7BFF4A in the upstream reference: all of them, so the
+    /// recolor to white (absent from the PNG) matches the white frame.
+    const N: usize = 160 * 144;
 
     /// A manifest with one group (`t/white.gb`, a white frame) checking
     /// against `UPSTREAM` with this recolor, plus an unrelated group.
@@ -964,10 +965,10 @@ checks = [{{ serial = "NO" }}]
         )
     }
 
-    /// White, except the first `N` pixels are #7BFF4A.
+    /// Solid #7BFF4A.
     fn upstream() -> Vec<u8> {
         let mut i = img(255);
-        i.data[..N].fill([0x7B, 0xFF, 0x4A]);
+        i.data.fill([0x7B, 0xFF, 0x4A]);
         encode_png(&i).unwrap()
     }
 
@@ -987,7 +988,7 @@ checks = [{{ serial = "NO" }}]
     #[test]
     fn applied_and_passes() {
         // Without the recolor, the N pixels differ.
-        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##);
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 23040 }"##);
         let (code, out, err) = go(&ws, &[]);
         assert_eq!(code, 0, "{out}{err}");
         let json = ws.json_of("r");
@@ -1001,13 +1002,61 @@ checks = [{{ serial = "NO" }}]
         assert_eq!(c["mismatched_pixels"], 0);
         assert_eq!(
             c["spec"],
-            r##"screenshot = "x/ref.png", recolor = { from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##
+            r##"screenshot = "x/ref.png", recolor = { from = "#7BFF4A", to = "#FFFFFF", count = 23040 }"##
+        );
+    }
+    #[test]
+    fn a_merge_into_an_existing_color_is_exit_2() {
+        // Half white, half #7BFF4A: recoloring green to white would merge
+        // the two colors (and a blank frame would then pass).
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##);
+        let mut i = img(255);
+        i.data[..100].fill([0x7B, 0xFF, 0x4A]);
+        ws.write(&format!("test-roms/{UPSTREAM}"), &encode_png(&i).unwrap());
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(
+            err.contains("the PNG already has pixels of #FFFFFF"),
+            "{err}"
         );
     }
 
     #[test]
+    fn an_unlisted_png_is_exit_2() {
+        let ws = Ws::new();
+        // On disk but not in the integrity list (write_raw skips the rehash).
+        ws.write_raw(&format!("test-roms/{UPSTREAM}"), &upstream());
+        ws.write_raw(
+            "acceptance/r.toml",
+            manifest(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 23040 }"##).as_bytes(),
+        );
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains(UPSTREAM), "{err}");
+    }
+
+    #[test]
+    fn deleted_mid_run_is_an_error_not_no_reference() {
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 23040 }"##);
+        let path = ws.root.join("test-roms").join(UPSTREAM);
+        // Deleted after the up-front checks, before the check loads it.
+        let tamper = |rom: &[u8], plan: &RunPlan, st: &mut RunState| {
+            let _ = std::fs::remove_file(&path);
+            fake_backend(rom, plan, st)
+        };
+        let args = Args {
+            manifest: ws.root.join("acceptance/r.toml"),
+            jobs: Some(1),
+            ..Default::default()
+        };
+        let paths = Paths::new(&ws.root, &args.manifest).unwrap();
+        let e = run(&args, &paths, &tamper, &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with("reading "), "{e}");
+    }
+
+    #[test]
     fn wrong_count_is_exit_2_whatever_the_selection() {
-        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 99 }"##);
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 23039 }"##);
         // Also when the recolored group isn't selected: every recolor in
         // the manifest is counted before anything runs.
         for sel in [&[][..], &["--group", "other"][..]] {
@@ -1016,7 +1065,7 @@ checks = [{{ serial = "NO" }}]
             assert!(
                 err.contains(
                     "checking recolored references before running: recolor of x/ref.png: \
-                     100 pixels are #7BFF4A, but the manifest's count is 99"
+                     23040 pixels are #7BFF4A, but the manifest's count is 23039"
                 ),
                 "{sel:?}: {err}"
             );
@@ -1025,7 +1074,7 @@ checks = [{{ serial = "NO" }}]
 
     #[test]
     fn to_must_be_a_contract_color() {
-        let ws = setup(r##"{ from = "#7BFF4A", to = "#FEFEFE", count = 100 }"##);
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FEFEFE", count = 23040 }"##);
         let (code, out, err) = go(&ws, &[]);
         assert_eq!(code, 2, "{out}{err}");
         assert!(
@@ -1039,8 +1088,7 @@ checks = [{{ serial = "NO" }}]
         // White is a contract color and the count is right: only the
         // from == to rule rejects this.
         let ws = setup(&format!(
-            r##"{{ from = "#FFFFFF", to = "#FFFFFF", count = {} }}"##,
-            160 * 144 - N
+            r##"{{ from = "#FFFFFF", to = "#FFFFFF", count = {N} }}"##
         ));
         let (code, out, err) = go(&ws, &[]);
         assert_eq!(code, 2, "{out}{err}");
@@ -1052,7 +1100,7 @@ checks = [{{ serial = "NO" }}]
 
     #[test]
     fn altered_upstream_is_an_integrity_failure() {
-        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##);
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 23040 }"##);
         // Altered on disk (not re-listed): the up-front integrity check.
         ws.write_raw(
             &format!("test-roms/{UPSTREAM}"),
