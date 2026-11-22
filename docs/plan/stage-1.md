@@ -83,7 +83,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Framebuffer output; screenshot comparison working in `romtest`
 - [ ] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review)
 - [ ] First line after LCD enable skips OAM scan (GBCTR, SameBoy); no manifest ROM covers it (the lcdon_* tests are excluded), so add a unit test
-- [ ] Before writing the PPU: decide the output pixel format and stride (STM32 LTDC wants RGB565 or ARGB1555; converting per palette entry at palette-write time is free on the hot path). Record it in an ADR (review finding 4)
+- [x] Before writing the PPU: decide the output pixel format and stride (ADR 0013: keep RGB555, stride 160, colors resolved at palette-write time; the platform converts while scaling) (review finding 4)
 - [ ] First headless performance benchmark recorded in `docs/perf.md` (the callgrind Ir gate exists since M1 close, ADR 0010; add PPU-heavy numbers once the renderer runs)
 
 **Acceptance:** groups `mooneye-acceptance`, `dmg-acid2-compat`, `blargg-cpu-instrs`,
