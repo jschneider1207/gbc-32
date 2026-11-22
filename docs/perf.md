@@ -44,21 +44,33 @@ in git):
   is 178 Ir per write: `Ppu::sync` 55, `flush` 35 (51k of the writes
   draw: 304 Ir each), the store, palette resolution and pair-table
   rebuild ~88.
+  Cheaper BCPD writes (2446bc2: resolve only the written color and patch
+  its 7 pair entries, `set_pair_color`; skip the flush unless the synced
+  PPU is in mode 3, `Ppu::drawing`): 293,807,294 Ir (-5.8%), 2.46 M Ir
+  per frame, 147 Ir per write. What is left is mostly the sync to the
+  write and `write_io` itself; the 34k mid-mode-3 writes per 2 s each
+  draw a span (~370 Ir).
 
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.
 
-Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
+Current numbers (Ir) and wall time (valgrind run of all eight, ~35 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,598,254,766 |
-| cgb_sound.gb | 843,030,554 |
-| cgb-acid2.gbc | 514,287,199 |
-| synth:event-storm (2 s) | 432,681,063 |
-| synth:dma-storm (3 s) | 418,133,062 |
-| synth:halt-irq (10 s) | 226,677,895 |
-| synth:worst-case (2 s) | 472,244,651 |
+| cpu_instrs.gb | 1,595,152,445 |
+| cgb_sound.gb | 840,971,582 |
+| cgb-acid2.gbc | 512,284,188 |
+| synth:event-storm (2 s) | 396,076,665 |
+| synth:dma-storm (3 s) | 417,936,928 |
+| synth:halt-irq (10 s) | 222,173,328 |
+| synth:worst-case (2 s) | 436,831,220 |
+| synth:cgb-raster (2 s) | 293,807,294 |
+
+At 0dec57e (perf/bench-baseline.txt). worst-case is 3.66 M Ir per
+emulated frame (119.455 frames in 2 s), 91% of the 4.02 M (50% of M7)
+line; cgb-raster 2.46 M. These tables lagged the baseline (worst-case
+472.2 M, event-storm 432.7 M before the event dispatch cuts below).
 
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
@@ -315,13 +327,13 @@ hash-checked against `acceptance/test-roms.sha256` first.
 ROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/cpu_instrs.gb`
 (CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
 
-Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
+Current numbers (Ir) at 0dec57e (the same runs as the table at the top):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,598,254,766 |
-| cgb_sound.gb | 843,030,554 |
-| cgb-acid2.gbc | 514,287,199 |
+| cpu_instrs.gb | 1,595,152,445 |
+| cgb_sound.gb | 840,971,582 |
+| cgb-acid2.gbc | 512,284,188 |
 
 (The scanline renderer took these from 1,464.1 M, 709.3 M and 341.7 M;
 ADR 0014, PPU mode timing, before it from 1,388.0 M, 607.5 M and 12.9 M;
