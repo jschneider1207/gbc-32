@@ -65,7 +65,7 @@ expected number of pixels change, all from one given color to another.
 |---|---|
 | 0 | Ran successfully; no regressions; `--gate` tier (if given) all passing |
 | 1 | Ran successfully, but there are regressions or the `--gate` tier has failures |
-| 2 | Runner error: bad manifest, missing ROM, integrity-list mismatch, I/O failure, `--gate` without a baseline, a baseline from another `roms_release` (unless `--update-baseline`), a usage error, or an internal bug (a panic in the runner's own code, as opposed to inside the emulator core). The results are meaningless. |
+| 2 | Runner error: bad manifest, missing ROM, integrity-list mismatch, a recolored reference whose `count` doesn't match, I/O failure, `--gate` without a baseline, a baseline from another `roms_release` (unless `--update-baseline`), a usage error, or an internal bug (a panic in the runner's own code, as opposed to inside the emulator core). The results are meaningless. |
 
 The gate treats 1 and 2 differently, so a broken runner can never look like
 ROMs simply failing.
@@ -129,6 +129,7 @@ results.
 | `serial = "text"` | Bytes written to the serial port (SB/SC transfers) contain `text`. |
 | `screenshot = "path"` | The final frame matches the PNG exactly. `{dir}` and `{stem}` expand to the ROM's directory and file stem. Missing PNG → `no-reference`. The **final frame** is the last fully drawn 160×144 frame before exit (completed at the start of VBlank). The frame is solid white while the screen is blank: if the LCD is off at exit, if it was turned off since the last completed frame, if no frame has completed, or if the only frame completed since the LCD was turned back on is the first one (hardware doesn't display that frame; SameBoy `frame_skip`). |
 | `screenshot = "references/...", sha256 = "<hex>"` | As `screenshot`, against a committed reference override pinned to that SHA-256 (see "Integrity of committed reference overrides"). Missing or altered → exit 2. |
+| `screenshot = "path", recolor = { from = "#RRGGBB", to = "#RRGGBB", count = N }` | As `screenshot`, against the same listed upstream PNG with one color replaced in memory: every pixel of color `from` becomes `to`. See "Recolored references" below. The PNG file is never changed. |
 | `fibonacci = true` | B=3, C=5, D=8, E=13, H=21, L=34 at exit. |
 | `gambatte = true` | Gambatte rules from the file name: `_out<hex>` → on-screen hex pattern, `_outaudio0/1` → silence/sound, sibling `.png` → screenshot. See the upstream `testrunner.cpp` (pokemon-speedrunning/gambatte-core @ d819bad196). |
 
@@ -140,6 +141,34 @@ results.
   used by the reference screenshots, not the real boot ROM palette.
 - Gambatte screenshots use Gambatte's own CGB formula (see
   `test-roms/gambatte/game-boy-test-roms-howto.md`).
+
+#### Recolored references
+
+A screenshot check may carry `recolor = { from = "#RRGGBB", to = "#RRGGBB",
+count = N }` for an upstream reference that draws one color differently
+from this contract. The rules:
+
+- The reference is still the listed upstream PNG in `test-roms/`, verified
+  against `acceptance/test-roms.sha256` like every other file. The recolor
+  is applied in memory to the bytes that passed that check, never written
+  to disk. Nothing else is loaded.
+- The path must be fixed (no `{dir}` or `{stem}`). `recolor` is only
+  allowed on a `screenshot` check, never on `gambatte` or any other kind.
+- `to` must be one of the contract colors above: the common palette's BG
+  shades `#000000 #0063C6 #7BFF31 #FFFFFF` or OBJ shades `#000000 #943939
+  #FF8484 #FFFFFF`. Any other `to`, `from == to`, a malformed color or a
+  `count` below 1 is a bad manifest (exit 2).
+- Exactly `count` pixels of the PNG must have color `from`. Before anything
+  runs, the runner checks every recolor in the manifest (whatever the
+  selection) and counts again whenever a check loads the PNG. Any other
+  count, or a missing or unlisted PNG, is exit 2, never `no-reference`. So
+  a new upstream release that changes the reference stops the run instead
+  of passing against a stale recolor.
+- The frame is then compared against the recolored image exactly, as for
+  any screenshot. There is no other leniency.
+
+Adding or changing a `recolor` in any group is a manifest change and needs
+the human, like any other change to `acceptance/*.toml`.
 
 The core always outputs RGB555. For DMG games, the caller chooses the
 compatibility palettes (BG, OBJ0, OBJ1) when it creates the emulator; this

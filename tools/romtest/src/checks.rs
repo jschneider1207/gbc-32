@@ -7,7 +7,7 @@ use gbc_core::{Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::Serialize;
 
 use crate::integrity::{self, Sha256Hash};
-use crate::manifest::{Check, CheckKind, expand_template};
+use crate::manifest::{Check, CheckKind, Manifest, Recolor, expand_template, hex_color};
 
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
@@ -65,7 +65,7 @@ impl CheckResult {
 /// whose PNG is missing (for information), otherwise `skipped`. `Err` is a
 /// runner error (a bad expanded path).
 pub fn not_run(check: &Check, roms_dir: &Path, rom: &str) -> Result<CheckResult, String> {
-    if let Check::Screenshot(template) = check {
+    if let Check::Screenshot(template, _) = check {
         let (dir, stem) = dir_and_stem(rom);
         let reference = expand_template(template, dir, stem)?;
         if !roms_dir.join(&reference).exists() {
@@ -258,7 +258,9 @@ pub fn evaluate(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckResul
             CheckStatus::Unsupported,
             "gambatte check not implemented yet".into(),
         ),
-        Check::Screenshot(template) => screenshot(check, template, index, ctx)?,
+        Check::Screenshot(template, recolor) => {
+            screenshot(check, template, recolor.as_ref(), index, ctx)?
+        }
         Check::PinnedScreenshot { path, sha256 } => {
             pinned_screenshot(check, path, sha256, index, ctx)?
         }
@@ -285,6 +287,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn screenshot(
     check: &Check,
     template: &str,
+    recolor: Option<&Recolor>,
     index: usize,
     ctx: &Ctx<'_>,
 ) -> Result<CheckResult, String> {
@@ -294,15 +297,24 @@ fn screenshot(
     let mut result = match std::fs::read(&path) {
         // A listed PNG can't be missing here (the integrity check runs
         // first), so this is a reference that upstream doesn't provide.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => CheckResult::new(
-            check,
-            CheckStatus::NoReference,
-            format!("{reference} not found"),
-        ),
+        // A recolor names a count in a specific upstream PNG, so a missing
+        // one is a runner error, never `no-reference`.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && recolor.is_none() => {
+            CheckResult::new(
+                check,
+                CheckStatus::NoReference,
+                format!("{reference} not found"),
+            )
+        }
         Err(e) => return Err(format!("reading {}: {e}", path.display())),
         Ok(bytes) => {
             (ctx.verify)(&reference, &bytes).map_err(|e| format!("reference {e}"))?;
-            compare(check, index, ctx, &bytes, &path)?
+            let mut expected =
+                decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
+            if let Some(r) = recolor {
+                apply_recolor(&reference, &mut expected, r)?;
+            }
+            compare(check, index, ctx, &expected)?
         }
     };
     result.reference = Some(reference);
@@ -323,22 +335,69 @@ fn pinned_screenshot(
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("reading committed reference {}: {e}", path.display()))?;
     integrity::check_pinned(rel, &bytes, sha256)?;
-    let mut result = compare(check, index, ctx, &bytes, &path)?;
+    let expected = decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
+    let mut result = compare(check, index, ctx, &expected)?;
     result.reference = Some(rel.to_owned());
     Ok(result)
 }
 
-/// Compares the final frame with verified reference PNG bytes.
+/// Applies a counted recolor (acceptance/README.md, "Checks") to a decoded,
+/// verified reference: every pixel of color `from` becomes `to`. `Err` (a
+/// runner error, exit 2) unless exactly `count` pixels had color `from`.
+pub fn apply_recolor(reference: &str, img: &mut Rgb, r: &Recolor) -> Result<(), String> {
+    let mut n = 0u64;
+    for px in &mut img.data {
+        if *px == r.from {
+            *px = r.to;
+            n += 1;
+        }
+    }
+    if n != r.count {
+        return Err(format!(
+            "recolor of {reference}: {n} pixels are {}, but the manifest's count is {}",
+            hex_color(r.from),
+            r.count
+        ));
+    }
+    Ok(())
+}
+
+/// Before anything runs: reads, verifies (`verify`, the integrity list)
+/// and recolors the reference of every recolored screenshot check in the
+/// manifest, whatever the selection. Missing, unlisted or a wrong count is
+/// `Err` (a runner error, exit 2). Each check recolors its own loaded copy
+/// again.
+pub fn verify_recolors(
+    manifest: &Manifest,
+    roms_dir: &Path,
+    verify: &VerifyFn<'_>,
+) -> Result<(), String> {
+    for check in manifest.groups.iter().flat_map(|g| &g.checks) {
+        if let Check::Screenshot(template, Some(r)) = check {
+            // Recolor paths are fixed (no `{dir}`/`{stem}`).
+            let reference = expand_template(template, "", "")?;
+            let path = roms_dir.join(&reference);
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            verify(&reference, &bytes).map_err(|e| format!("reference {e}"))?;
+            let mut img =
+                decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
+            apply_recolor(&reference, &mut img, r)?;
+        }
+    }
+    Ok(())
+}
+
+/// Compares the final frame with a verified (and possibly recolored)
+/// reference.
 fn compare(
     check: &Check,
     index: usize,
     ctx: &Ctx<'_>,
-    bytes: &[u8],
-    path: &Path,
+    expected: &Rgb,
 ) -> Result<CheckResult, String> {
-    let expected = decode_png(bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
     let actual = frame_to_rgb(ctx.final_frame);
-    let mismatched = count_mismatches(&actual, &expected);
+    let mismatched = count_mismatches(&actual, expected);
     let mut r = if mismatched == 0 {
         CheckResult::new(check, CheckStatus::Pass, String::new())
     } else {
@@ -352,7 +411,7 @@ fn compare(
         let mut r = CheckResult::new(check, CheckStatus::Fail, detail);
         if let Some((root, actual_rel, diff_rel)) = (ctx.failure_pngs)(index) {
             write_png(&root.join(&actual_rel), &actual)?;
-            write_png(&root.join(&diff_rel), &diff_image(&actual, &expected))?;
+            write_png(&root.join(&diff_rel), &diff_image(&actual, expected))?;
             r.actual_png = Some(actual_rel);
             r.diff_png = Some(diff_rel);
         }
@@ -488,7 +547,7 @@ mod tests {
         frame[0] = 0x001F; // red pixel top-left
         let expected = frame_to_rgb(&frame);
         write_ref(dir.path(), "suite/sub/t-cgb.png", &expected);
-        let c = Check::Screenshot("{dir}/{stem}-cgb.png".into());
+        let c = Check::Screenshot("{dir}/{stem}-cgb.png".into(), None);
 
         let r = evaluate(&c, 0, &ctx(dir.path(), "suite/sub/t.gb", b"", &frame)).unwrap();
         assert_eq!(r.status, CheckStatus::Pass);
@@ -534,14 +593,14 @@ mod tests {
                 data: vec![[255; 3]; 4],
             },
         );
-        let c2 = Check::Screenshot("small.png".into());
+        let c2 = Check::Screenshot("small.png".into(), None);
         let r = evaluate(&c2, 0, &ctx(dir.path(), "suite/sub/t.gb", b"", &frame)).unwrap();
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.detail.contains("2x2"));
 
         // A corrupt reference is a runner error.
         std::fs::write(dir.path().join("bad.png"), b"not a png").unwrap();
-        let c3 = Check::Screenshot("bad.png".into());
+        let c3 = Check::Screenshot("bad.png".into(), None);
         assert!(evaluate(&c3, 0, &ctx(dir.path(), "t.gb", b"", &frame)).is_err());
 
         // So is a reference that isn't in the integrity list.
@@ -565,7 +624,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let frame = new_frame();
         write_ref(dir.path(), "t.png", &frame_to_rgb(&frame));
-        let c = Check::Screenshot("{dir}/{stem}.png".into());
+        let c = Check::Screenshot("{dir}/{stem}.png".into(), None);
         let r = evaluate(&c, 0, &ctx(dir.path(), "t.gb", b"", &frame)).unwrap();
         assert_eq!(r.status, CheckStatus::Pass);
         assert_eq!(r.reference.as_deref(), Some("t.png"));
@@ -573,7 +632,7 @@ mod tests {
         assert_eq!(r.reference.as_deref(), Some("u.png"));
         assert_eq!(r.status, CheckStatus::NoReference);
         // A path that escapes test-roms/ is a runner error.
-        let c = Check::Screenshot("{dir}/../{stem}.png".into());
+        let c = Check::Screenshot("{dir}/../{stem}.png".into(), None);
         assert!(evaluate(&c, 0, &ctx(dir.path(), "t.gb", b"", &frame)).is_err());
         assert!(not_run(&c, dir.path(), "a/t.gb").is_err());
     }
@@ -785,7 +844,10 @@ mod tests {
 
     #[test]
     fn only_check_selection() {
-        let checks = [Check::Serial("x".into()), Check::Screenshot("y".into())];
+        let checks = [
+            Check::Serial("x".into()),
+            Check::Screenshot("y".into(), None),
+        ];
         assert_eq!(selected(&checks, None).len(), 2);
         let s = selected(&checks, Some(CheckKind::Screenshot));
         assert_eq!(s.len(), 1);

@@ -135,8 +135,10 @@ impl CheckKind {
 pub enum Check {
     /// Serial output must contain this text.
     Serial(String),
-    /// Path template of the expected PNG (`{dir}`, `{stem}`).
-    Screenshot(String),
+    /// Path template of the expected PNG (`{dir}`, `{stem}`), and an
+    /// optional counted recolor applied to it in memory (only with a fixed
+    /// path).
+    Screenshot(String, Option<Recolor>),
     /// A committed reference override (acceptance/README.md, "Committed
     /// reference overrides"): a fixed path relative to the manifest's
     /// directory, under `references/`, pinned to this SHA-256. It never
@@ -153,7 +155,7 @@ impl Check {
     pub fn kind(&self) -> CheckKind {
         match self {
             Check::Serial(_) => CheckKind::Serial,
-            Check::Screenshot(_) | Check::PinnedScreenshot { .. } => CheckKind::Screenshot,
+            Check::Screenshot(..) | Check::PinnedScreenshot { .. } => CheckKind::Screenshot,
             Check::Fibonacci => CheckKind::Fibonacci,
             Check::Gambatte => CheckKind::Gambatte,
         }
@@ -164,7 +166,14 @@ impl fmt::Display for Check {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Check::Serial(s) => write!(f, "serial = {s:?}"),
-            Check::Screenshot(s) => write!(f, "screenshot = {s:?}"),
+            Check::Screenshot(s, None) => write!(f, "screenshot = {s:?}"),
+            Check::Screenshot(s, Some(r)) => write!(
+                f,
+                "screenshot = {s:?}, recolor = {{ from = \"{}\", to = \"{}\", count = {} }}",
+                hex_color(r.from),
+                hex_color(r.to),
+                r.count
+            ),
             Check::PinnedScreenshot { path, sha256 } => {
                 write!(f, "screenshot = {path:?}, sha256 = {:?}", to_hex(sha256))
             }
@@ -172,6 +181,45 @@ impl fmt::Display for Check {
             Check::Gambatte => f.write_str("gambatte = true"),
         }
     }
+}
+
+/// A counted recolor of a screenshot reference (acceptance/README.md,
+/// "Checks"): every pixel of color `from` in the pinned upstream PNG
+/// becomes `to`, and exactly `count` pixels must have had color `from`
+/// (otherwise a runner error, exit 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recolor {
+    pub from: [u8; 3],
+    pub to: [u8; 3],
+    pub count: u64,
+}
+
+/// The only colors a recolor may produce: the "common palette" of
+/// acceptance/README.md, "Colors used for screenshot comparison" (BG
+/// `#000000 #0063C6 #7BFF31 #FFFFFF`, OBJ `#000000 #943939 #FF8484
+/// #FFFFFF`), each color once.
+pub const RECOLOR_TARGETS: [[u8; 3]; 6] = [
+    [0x00, 0x00, 0x00],
+    [0x00, 0x63, 0xC6],
+    [0x7B, 0xFF, 0x31],
+    [0xFF, 0xFF, 0xFF],
+    [0x94, 0x39, 0x39],
+    [0xFF, 0x84, 0x84],
+];
+
+/// `#RRGGBB`, uppercase.
+pub fn hex_color([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// Parses `#RRGGBB` (hex digits of either case).
+fn parse_color(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some([c(0)?, c(2)?, c(4)?])
 }
 
 /// One `input` entry, converted to base clocks (rounded down to an M-cycle).
@@ -259,8 +307,18 @@ struct RawCheck {
     screenshot: Option<String>,
     /// Only with `screenshot`: pins a committed reference override.
     sha256: Option<String>,
+    /// Only with a fixed `screenshot` path: a counted recolor.
+    recolor: Option<RawRecolor>,
     fibonacci: Option<bool>,
     gambatte: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRecolor {
+    from: String,
+    to: String,
+    count: i64,
 }
 
 /// TOML integers and floats are both accepted for times.
@@ -467,6 +525,9 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
     if c.sha256.is_some() {
         return Err("sha256 is only allowed together with screenshot".into());
     }
+    if c.recolor.is_some() && c.screenshot.is_none() {
+        return Err("recolor is only allowed together with screenshot".into());
+    }
     Ok(match c {
         RawCheck {
             serial: Some(s), ..
@@ -478,6 +539,7 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
         }
         RawCheck {
             screenshot: Some(s),
+            recolor,
             ..
         } => {
             // Validate the template now, for a ROM in a subdirectory and
@@ -502,7 +564,11 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
                     "screenshot path {s:?}: a committed reference under {REFERENCES_DIR} needs its sha256"
                 ));
             }
-            Check::Screenshot(s)
+            let recolor = match recolor {
+                None => None,
+                Some(r) => Some(parse_recolor(&s, r)?),
+            };
+            Check::Screenshot(s, recolor)
         }
         RawCheck {
             fibonacci: Some(f), ..
@@ -522,6 +588,39 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
         }
         _ => unreachable!("exactly one key is set"),
     })
+}
+
+/// A counted recolor (acceptance/README.md, "Checks"): only for a fixed
+/// screenshot path, `to` must be a contract color ([`RECOLOR_TARGETS`]),
+/// `from != to`, and `count` is at least 1.
+fn parse_recolor(path: &str, r: RawRecolor) -> Result<Recolor, String> {
+    let bad = |m: String| format!("screenshot {path:?}: recolor: {m}");
+    if path.contains(['{', '}']) {
+        return Err(bad("needs a fixed path (no {dir} or {stem})".into()));
+    }
+    let color = |name: &str, s: &str| {
+        parse_color(s).ok_or_else(|| bad(format!("{name} = {s:?} is not \"#RRGGBB\"")))
+    };
+    let (from, to) = (color("from", &r.from)?, color("to", &r.to)?);
+    if from == to {
+        return Err(bad(format!(
+            "from and to are the same color ({})",
+            hex_color(from)
+        )));
+    }
+    if !RECOLOR_TARGETS.contains(&to) {
+        let allowed: Vec<String> = RECOLOR_TARGETS.into_iter().map(hex_color).collect();
+        return Err(bad(format!(
+            "to = {} is not a contract color (one of {})",
+            hex_color(to),
+            allowed.join(" ")
+        )));
+    }
+    let count = u64::try_from(r.count)
+        .ok()
+        .filter(|&n| n >= 1)
+        .ok_or_else(|| bad(format!("count = {} must be at least 1", r.count)))?;
+    Ok(Recolor { from, to, count })
 }
 
 /// A committed reference override: a fixed path (no `{dir}`/`{stem}`)
@@ -738,7 +837,7 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
             g.checks,
             [
                 Check::Serial("Passed".into()),
-                Check::Screenshot("{dir}/{stem}.png".into()),
+                Check::Screenshot("{dir}/{stem}.png".into(), None),
                 Check::Fibonacci,
                 Check::Gambatte
             ]
@@ -827,6 +926,115 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
 
     /// A SHA-256 for pinned-screenshot cases.
     const H: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn parses_a_recolor() {
+        let body = MIN.replace(
+            "fibonacci = true",
+            r##"screenshot = "a/b.png", recolor = { from = "#7bff4a", to = "#7BFF31", count = 3825 }"##,
+        );
+        let c = &parse(&group(&body)).unwrap().groups[0].checks[0];
+        assert_eq!(c.kind(), CheckKind::Screenshot);
+        let r = Recolor {
+            from: [0x7B, 0xFF, 0x4A],
+            to: [0x7B, 0xFF, 0x31],
+            count: 3825,
+        };
+        assert_eq!(c, &Check::Screenshot("a/b.png".into(), Some(r)));
+        assert_eq!(
+            c.to_string(),
+            r##"screenshot = "a/b.png", recolor = { from = "#7BFF4A", to = "#7BFF31", count = 3825 }"##
+        );
+    }
+
+    /// `to` may only be a color of the contract's common palette
+    /// (acceptance/README.md, "Colors used for screenshot comparison"),
+    /// which is what the runner hands the core.
+    #[test]
+    fn recolor_targets_are_the_common_palette() {
+        let p = crate::machine::common_palette();
+        let mut want: Vec<[u8; 3]> =
+            p.bg.iter()
+                .chain(&p.obj0)
+                .chain(&p.obj1)
+                .map(|&c| crate::checks::rgb555_to_888(c))
+                .collect();
+        want.sort();
+        want.dedup();
+        let mut got = RECOLOR_TARGETS.to_vec();
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn rejects_bad_recolors() {
+        let rc = |path: &str, r: &str| {
+            MIN.replace(
+                "fibonacci = true",
+                &format!("screenshot = \"{path}\", recolor = {r}"),
+            )
+        };
+        let ok_path = "a/b.png";
+        let cases = [
+            (
+                rc(ok_path, r##"{ from = "#7BFF4A", to = "#7BFF4B", count = 1 }"##),
+                "to = #7BFF4B is not a contract color",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF31", to = "#7BFF31", count = 1 }"##),
+                "from and to are the same color",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF4A", to = "#7BFF31", count = 0 }"##),
+                "count = 0 must be at least 1",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF4A", to = "#7BFF31", count = -1 }"##),
+                "count = -1",
+            ),
+            (
+                rc(ok_path, r##"{ from = "7BFF4A", to = "#7BFF31", count = 1 }"##),
+                "is not \"#RRGGBB\"",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF4", to = "#7BFF31", count = 1 }"##),
+                "is not \"#RRGGBB\"",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF4A", to = "#7BFF3G", count = 1 }"##),
+                "is not \"#RRGGBB\"",
+            ),
+            (
+                rc(ok_path, r##"{ from = "#7BFF4A", to = "#7BFF31" }"##),
+                "count",
+            ),
+            (
+                rc(
+                    ok_path,
+                    r##"{ from = "#7BFF4A", to = "#7BFF31", count = 1, tolerance = 2 }"##,
+                ),
+                "tolerance",
+            ),
+            (
+                rc(
+                    "{dir}/{stem}.png",
+                    r##"{ from = "#7BFF4A", to = "#7BFF31", count = 1 }"##,
+                ),
+                "needs a fixed path",
+            ),
+            (
+                MIN.replace(
+                    "fibonacci = true",
+                    r##"gambatte = true, recolor = { from = "#7BFF4A", to = "#7BFF31", count = 1 }"##,
+                ),
+                "recolor is only allowed together with screenshot",
+            ),
+        ];
+        for (body, needle) in cases {
+            let e = err(&group(&body));
+            assert!(e.contains(needle), "{body}\n=> {e}\n(expected {needle:?})");
+        }
+    }
 
     #[test]
     fn rejects_bad_values() {

@@ -982,3 +982,156 @@ checks = [{{ screenshot = "references/x/white.png", sha256 = "{sha}" }}]
         "{e}"
     );
 }
+
+/// A counted recolor (acceptance/README.md, "Checks"): the listed upstream
+/// PNG is recolored in memory, and anything but the exact count (or a
+/// recolor the contract doesn't allow) is a runner error (exit 2).
+mod recolor {
+    use super::*;
+
+    const UPSTREAM: &str = "x/ref.png";
+    /// Pixels of `FROM` in the upstream reference; the rest is white.
+    const N: usize = 100;
+
+    /// A manifest with one group (`t/white.gb`, a white frame) checking
+    /// against `UPSTREAM` with this recolor, plus an unrelated group.
+    fn manifest(recolor: &str) -> String {
+        format!(
+            r#"
+roms_release = "v7.0"
+model = "cgb-c"
+
+[[group]]
+id = "recolored"
+tier = "must"
+roms = ["t/white.gb"]
+exit = {{ run_frames = 1 }}
+checks = [{{ screenshot = "{UPSTREAM}", recolor = {recolor} }}]
+
+[[group]]
+id = "other"
+tier = "must"
+roms = ["t/black.gb"]
+exit = {{ run_frames = 1 }}
+checks = [{{ serial = "NO" }}]
+"#
+        )
+    }
+
+    /// White, except the first `N` pixels are #7BFF4A.
+    fn upstream() -> Vec<u8> {
+        let mut i = img(255);
+        i.data[..N].fill([0x7B, 0xFF, 0x4A]);
+        encode_png(&i).unwrap()
+    }
+
+    fn setup(recolor: &str) -> Ws {
+        let ws = Ws::new();
+        ws.write(&format!("test-roms/{UPSTREAM}"), &upstream());
+        ws.write("acceptance/r.toml", manifest(recolor).as_bytes());
+        ws
+    }
+
+    fn go(ws: &Ws, extra: &[&str]) -> (u8, String, String) {
+        let mut argv = vec!["--manifest", "ws:acceptance/r.toml", "--jobs", "1"];
+        argv.extend_from_slice(extra);
+        ws.main(&argv)
+    }
+
+    #[test]
+    fn applied_and_passes() {
+        // Without the recolor, the N pixels differ.
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##);
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 0, "{out}{err}");
+        let json = ws.json_of("r");
+        assert_eq!(
+            statuses_of(&json)[0],
+            s("recolored", "t/white.gb", "pass"),
+            "{json}"
+        );
+        let c = &json["results"][0]["checks"][0];
+        assert_eq!(c["reference"], UPSTREAM);
+        assert_eq!(c["mismatched_pixels"], 0);
+        assert_eq!(
+            c["spec"],
+            r##"screenshot = "x/ref.png", recolor = { from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##
+        );
+    }
+
+    #[test]
+    fn wrong_count_is_exit_2_whatever_the_selection() {
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 99 }"##);
+        // Also when the recolored group isn't selected: every recolor in
+        // the manifest is counted before anything runs.
+        for sel in [&[][..], &["--group", "other"][..]] {
+            let (code, out, err) = go(&ws, sel);
+            assert_eq!(code, 2, "{sel:?}: {out}{err}");
+            assert!(
+                err.contains(
+                    "checking recolored references before running: recolor of x/ref.png: \
+                     100 pixels are #7BFF4A, but the manifest's count is 99"
+                ),
+                "{sel:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_must_be_a_contract_color() {
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FEFEFE", count = 100 }"##);
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(
+            err.contains("recolor: to = #FEFEFE is not a contract color"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn from_and_to_must_differ() {
+        // White is a contract color and the count is right: only the
+        // from == to rule rejects this.
+        let ws = setup(&format!(
+            r##"{{ from = "#FFFFFF", to = "#FFFFFF", count = {} }}"##,
+            160 * 144 - N
+        ));
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(
+            err.contains("recolor: from and to are the same color (#FFFFFF)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn altered_upstream_is_an_integrity_failure() {
+        let ws = setup(r##"{ from = "#7BFF4A", to = "#FFFFFF", count = 100 }"##);
+        // Altered on disk (not re-listed): the up-front integrity check.
+        ws.write_raw(
+            &format!("test-roms/{UPSTREAM}"),
+            &encode_png(&img(255)).unwrap(),
+        );
+        let (code, out, err) = go(&ws, &[]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains(UPSTREAM), "{err}");
+
+        // Altered after the up-front checks, before the check loads it:
+        // the loaded bytes are verified again.
+        ws.write_raw(&format!("test-roms/{UPSTREAM}"), &upstream());
+        let path = ws.root.join("test-roms").join(UPSTREAM);
+        let white = encode_png(&img(255)).unwrap();
+        let tamper = |rom: &[u8], plan: &RunPlan, st: &mut RunState| {
+            std::fs::write(&path, &white).unwrap();
+            fake_backend(rom, plan, st)
+        };
+        let args = Args {
+            manifest: ws.root.join("acceptance/r.toml"),
+            jobs: Some(1),
+            ..Default::default()
+        };
+        let paths = Paths::new(&ws.root, &args.manifest).unwrap();
+        let e = run(&args, &paths, &tamper, &mut Vec::new()).unwrap_err();
+        assert!(e.starts_with(&format!("reference {UPSTREAM}")), "{e}");
+    }
+}

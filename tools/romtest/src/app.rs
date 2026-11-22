@@ -150,6 +150,11 @@ pub fn run(
     // Committed reference overrides are pinned in the manifest itself.
     integrity::verify_pinned(&paths.manifest_dir, &manifest)
         .map_err(|e| format!("checking committed references before running: {e}"))?;
+    // Every recolored reference is checked (listed, its count exact) up front.
+    checks::verify_recolors(&manifest, &paths.roms_dir, &|p, b| {
+        rom_hashes.check_bytes(p, b)
+    })
+    .map_err(|e| format!("checking recolored references before running: {e}"))?;
     let hash_time = hash_start.elapsed();
 
     let baseline = match load_baseline(&paths.baseline)? {
