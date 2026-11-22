@@ -158,6 +158,7 @@ impl Sys<'_> {
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
+        self.ppu.resolve_palettes(mem, &self.config.dmg_palettes);
         // OPRI bit 0: the boot ROM selects coordinate priority (1) for
         // DMG compatibility mode, and leaves 0 (OAM index priority) in CGB
         // mode (Pan Docs: FF6C - OPRI; SameBoy Core/memory.c, OPRI write
@@ -558,6 +559,7 @@ impl Ctx<'_, '_> {
             0x40 => {
                 self.run_ppu_to(now);
                 let s = &mut *self.sys;
+                s.ppu.flush(now, self.mem, self.frame);
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem);
             }
@@ -584,14 +586,31 @@ impl Ctx<'_, '_> {
                 let s = &mut *self.sys;
                 s.ppu.write_lyc(at, value, &mut s.iflags, double);
             }
-            // SCY SCX BGP OBP0 OBP1 WY WX.
+            // SCY SCX BGP OBP0 OBP1 WY WX: the pixels already output in
+            // mode 3 are drawn with the old value first. Where in the
+            // M-cycle the write lands (SameBoy `cgb_conflict_map`,
+            // single speed): SCY, SCX and WY at the access
+            // (`GB_CONFLICT_READ_OLD`); the palettes one dot earlier on
+            // CGB C (`GB_CONFLICT_PALETTE_CGB`, `pending_cycles - 1`;
+            // Mealybug `m3_bgp_change`, `m3_obp0_change` CGB C
+            // screenshots); WX one dot later (`GB_CONFLICT_WRITE_CPU`).
+            // Double speed: at the access (a CPU cycle is half a dot
+            // there; approximation).
             _ => {
-                self.run_ppu_to(now);
-                // RENDERER: if `ppu.mode3_pixel(now)` is `Some((ly, x))`,
-                // draw line `ly` up to pixel `x` with the old value first.
+                let at = match reg {
+                    _ if double => now,
+                    0x47..=0x49 => now - 1,
+                    0x4B => now + 1,
+                    _ => now,
+                };
+                self.run_ppu_to(now.max(at));
+                let s = &mut *self.sys;
+                s.ppu.flush(at, self.mem, self.frame);
                 self.mem.io[reg] = value;
-                if reg == 0x4A {
-                    self.sys.ppu.check_wy_at(now, self.mem);
+                match reg {
+                    0x47..=0x49 => s.ppu.write_palette(reg, value, &s.config.dmg_palettes),
+                    0x4A => s.ppu.check_wy_at(now, self.mem),
+                    _ => {}
                 }
             }
         }
@@ -1330,6 +1349,78 @@ mod tests {
         write(emu, 0xFF68, 0x05);
         write(emu, 0xFF69, 0x12);
         assert_eq!((emu.peek(0xFF68), emu.peek(0xFF69)), (0x45, 0xFF));
+    }
+
+    /// A DMG-mode emulator whose BG is tile 0 (color 3) in even map
+    /// columns and tile 1 (color 0) in odd ones.
+    fn striped_bg() -> &'static mut Emulator<'static> {
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        emu.mem.vram[..16].fill(0xFF);
+        for col in 0..32 {
+            emu.mem.vram[0x1800 + col] = (col & 1) as u8;
+        }
+        emu
+    }
+
+    /// Runs `emu` to line position `t` of line `ly` in the first full
+    /// frame (an M-cycle boundary: `t` is 3 mod 4), writes `value` to
+    /// `reg` there, and runs past the line's end. Returns the line's
+    /// pixels.
+    fn write_in_mode3(emu: &mut Emulator, ly: usize, t: u64, reg: u16, value: u8) -> [u16; 160] {
+        let line = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 456 * ly as u64;
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(line + t, &mut fb, &mut []);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert_eq!(ctx.clock(), line + t);
+        ctx.write(reg, value);
+        while ctx.clock() < line + 400 {
+            ctx.idle();
+        }
+        drop(ctx);
+        fb.as_chunks::<160>().0[ly]
+    }
+
+    /// A BGP write in mode 3 changes the pixels from the one being output
+    /// one dot before the access on (SameBoy `GB_CONFLICT_PALETTE_CGB`,
+    /// CGB C); the ones before keep the old colors.
+    #[test]
+    fn mid_mode3_bgp_write_splits_the_line() {
+        let emu = striped_bg();
+        let gray = crate::DmgPalettes::GRAYSCALE.bg;
+        // No SCX fine scroll, no objects: pixel x is output at t = 96 + x.
+        // The write at t = 131 lands at 130: pixels 0-33 are out (34 at
+        // the access itself; both in a color-3 tile).
+        let row = write_in_mode3(emu, 5, 131, 0xFF47, 0x3C);
+        for (x, &p) in row.iter().enumerate() {
+            let color3 = (x / 8) % 2 == 0;
+            // BGP FC: color 3 -> shade 3; 3C: color 3 -> shade 0, color 0
+            // -> shade 0 either way.
+            let want = match (color3, x < 34) {
+                (true, true) => gray[3],
+                _ => gray[0],
+            };
+            assert_eq!(p, want, "x = {x}");
+        }
+    }
+
+    /// A SCX write in mode 3 moves the BG from the pixel being output at
+    /// the access on (`GB_CONFLICT_READ_OLD`).
+    #[test]
+    fn mid_mode3_scx_write_splits_the_line() {
+        let emu = striped_bg();
+        let gray = crate::DmgPalettes::GRAYSCALE.bg;
+        // The write at t = 151: pixels 0-54 are out with SCX = 0.
+        let row = write_in_mode3(emu, 7, 151, 0xFF43, 8);
+        for (x, &p) in row.iter().enumerate() {
+            let scx = if x < 55 { 0 } else { 8 };
+            let want = if ((x + scx) / 8) % 2 == 0 {
+                gray[3]
+            } else {
+                gray[0]
+            };
+            assert_eq!(p, want, "x = {x}");
+        }
     }
 
     /// CPU accesses to VRAM in mode 3 and to OAM in modes 2-3 are blocked;

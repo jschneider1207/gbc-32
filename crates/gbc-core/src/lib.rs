@@ -264,10 +264,12 @@ impl<'a> Emulator<'a> {
     }
 
     /// Changes the DMG compatibility palettes without a reset. Takes effect
-    /// from the next pixel drawn.
-    #[inline]
+    /// from the next pixel drawn (pixels are drawn lazily, so this can
+    /// include the rest of a line the PPU was in the middle of).
     pub fn set_dmg_palettes(&mut self, palettes: DmgPalettes) {
-        self.hw.sys.config.dmg_palettes = palettes;
+        let sys = &mut self.hw.sys;
+        sys.config.dmg_palettes = palettes;
+        sys.ppu.resolve_palettes(self.mem, &palettes);
     }
 
     /// Power cycle: the post-boot state (no boot ROM is run; registers are
@@ -783,6 +785,27 @@ mod tests {
         emu.set_dmg_palettes(p);
         assert_eq!(emu.hw.sys.config.dmg_palettes, p);
         assert_eq!(emu.clock(), clock);
+    }
+
+    /// The compatibility colors are resolved through BGP at `load` (reset)
+    /// and again by `set_dmg_palettes`: the blank BG (color 0, BGP FC:
+    /// shade 0) shows the BG palette's shade 0.
+    #[test]
+    fn frames_use_the_compatibility_palettes() {
+        let rom = vec![0u8; 0x8000].leak();
+        let emu = fresh();
+        let mut config = Config::default();
+        config.dmg_palettes.bg = [1, 2, 3, 4];
+        emu.load(rom, &mut [], config).unwrap();
+        let mut fb = frame();
+        let _ = emu.run_frame(&mut fb, &mut []);
+        assert!(fb.iter().all(|&p| p == 1));
+        emu.set_dmg_palettes(DmgPalettes {
+            bg: [5, 6, 7, 8],
+            ..DmgPalettes::GRAYSCALE
+        });
+        let _ = emu.run_frame(&mut fb, &mut []);
+        assert!(fb.iter().all(|&p| p == 5));
     }
 
     /// The first `FRAME_READY` after reset: the next frame's VBlank (line

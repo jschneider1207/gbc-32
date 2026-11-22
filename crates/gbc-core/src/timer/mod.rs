@@ -258,6 +258,9 @@ impl Timer {
     /// `GB_emulate_timer_glitch`). That includes disabling the timer:
     /// SameBoy ticks there; Pan Docs says CGBs don't (ADR 0011 open
     /// question, kept until a test decides).
+    // Out of line: keeps the code-size budgets of its callers independent
+    // of codegen-unit partitioning (it is not on a hot path).
+    #[inline(never)]
     pub(crate) fn write_tac(&mut self, now: u64, value: u8) {
         let new_bit = if value & 4 != 0 {
             TAC_BITS[usize::from(value & 3)]
@@ -288,6 +291,7 @@ impl Timer {
     /// Returns the counter before the write: its set bits all fall, which
     /// the caller applies to the serial bit clock (SameBoy
     /// `GB_set_internal_div_counter`: `triggers = div_counter & ~value`).
+    #[inline(never)] // See `write_tac`.
     pub(crate) fn write_div(&mut self, now: u64) -> u64 {
         let old = self.sc(now);
         let cycle_a = self.in_cycle_a(now);

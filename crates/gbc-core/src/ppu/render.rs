@@ -22,12 +22,31 @@
 //! - [`Colors`], updated when BGP/OBP0/OBP1 are written (colors are resolved
 //!   at palette-write time, ADR 0013).
 //!
-//! Cost per line (expected, not yet measured): 21 BG/window tile fetches
-//! (one map byte and two data bytes each, plus a ~10-operation bit spread),
-//! up to 10 object fetches (two data bytes, 8 conditional byte stores
-//! each), and one table lookup and compare per pixel to mix, with no
-//! per-pixel bounds checks (fixed-size arrays, masked indices, zipped
-//! iterators). Stack: a 160-byte index buffer.
+//! Cost per line: 21 BG/window tile fetches (one map byte and two data
+//! bytes each, plus two table lookups); spans without object pixels go
+//! straight from the tile bits to RGB555 (one lookup per pixel), others
+//! fill a 160-byte index buffer and mix it with the object buffer (up to
+//! 10 object fetches, 8 conditional byte stores each). No per-pixel
+//! bounds checks (fixed-size arrays, masked indices, zipped iterators).
+//! Measured (x86 Ir, `docs/perf.md`): about 1.5k Ir per BG-only line,
+//! 2.6k with objects and the window (cgb-acid2).
+//!
+//! Open hardware choices and the evidence (Mealybug tearoom CGB C
+//! screenshots, stretch tier):
+//! - Clearing LCDC.5 doesn't reset the WY condition (SameBoy; Pan Docs
+//!   says it does on GBC): resetting it fails `m2_win_en_toggle`, which
+//!   passes as is.
+//! - LCDC.0 clear keeps the window activation and line counter, color 0
+//!   through BGP: `m3_lcdc_bg_en_change`, `m3_lcdc_bg_en_change2` pass.
+//! - WX = 0 loses SCX & 7 pixels (Pan Docs). `m3_window_timing_wx_0` is
+//!   one pixel off on lines with SCX & 7 != 0, so the hardware rule has
+//!   one more step; unresolved.
+//! - Mid-line SCX writes keep the line-start SCX & 7 (Pan Docs).
+//!   `m3_scx_low_3_bits` differs at pixels 152-159, which this doesn't
+//!   model; unresolved.
+//! - Mid-line writes to the tile map/data selects, SCY and object
+//!   attributes take effect per pixel here, per fetch on hardware
+//!   (`m3_lcdc_*_change`, `m3_scy_change*` fail); M3 doesn't need it.
 
 use super::objects::{LineObjects, MAX_PER_LINE};
 use super::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -165,6 +184,9 @@ pub(crate) struct Renderer {
     /// Object pixels of the line, at screen x + 8: 0 = transparent, else
     /// bits 0-1 color (1-3), bits 2-4 palette, bit 7 OAM "behind BG".
     obj_buf: [u8; OBJ_BUF_LEN],
+    /// An object was fetched into `obj_buf` on this line (else it is all
+    /// transparent).
+    obj_fetched: bool,
 }
 
 impl Renderer {
@@ -181,6 +203,7 @@ impl Renderer {
             objects: LineObjects::EMPTY,
             order: [0; MAX_PER_LINE],
             obj_buf: [0; OBJ_BUF_LEN],
+            obj_fetched: false,
         }
     }
 
@@ -216,7 +239,11 @@ impl Renderer {
         self.window_active = false;
         self.objects = *objects;
         self.order = objects.priority_order();
-        self.obj_buf = [0; OBJ_BUF_LEN];
+        // The buffer is all transparent unless an object was fetched.
+        if self.obj_fetched {
+            self.obj_buf = [0; OBJ_BUF_LEN];
+            self.obj_fetched = false;
+        }
     }
 
     /// Draws pixels `[x0, x1)` of the current line into `row` with the
@@ -267,47 +294,6 @@ impl Renderer {
             }
         }
 
-        // BG/window color indices. With LCDC.0 clear (non-CGB mode) both
-        // show color 0, which still goes through BGP, and objects are drawn
-        // over them regardless of their priority bit (Pan Docs: LCDC.0;
-        // SameBoy `render_pixel_if_possible`: `bg_enabled = false` makes
-        // the pixel 0, then BGP applies). The window state above still
-        // advances: the fetcher runs, only the mixer blanks the pixels.
-        let mut bg = [0u8; W];
-        if lcdc & LCDC_BG_ON != 0 {
-            if x0 < win_from {
-                // BG pixel x is map column SCX + x; the fine part was
-                // latched at line start, the tile part is read per fetch.
-                let col = (regs.scx & 0xF8)
-                    .wrapping_add(self.fine_scx)
-                    .wrapping_add(x0 as u8);
-                let map = if lcdc & LCDC_BG_MAP != 0 {
-                    0x1C00
-                } else {
-                    0x1800
-                };
-                let y = self.ly.wrapping_add(regs.scy);
-                fill_tiles(&mut bg[x0..win_from], src.vram, lcdc, map, y, col);
-            }
-            if win_from < x1 {
-                let col = ((win_from - usize::from(self.window_start)) as u8)
-                    .wrapping_add(self.window_skip);
-                let map = if lcdc & LCDC_WIN_MAP != 0 {
-                    0x1C00
-                } else {
-                    0x1800
-                };
-                fill_tiles(
-                    &mut bg[win_from..x1],
-                    src.vram,
-                    lcdc,
-                    map,
-                    self.window_row,
-                    col,
-                );
-            }
-        }
-
         // Objects are fetched when the span reaches their first visible
         // pixel, in priority order; a pixel keeps the first opaque object
         // written to it. Fetching per span (not per line) keeps split and
@@ -325,18 +311,29 @@ impl Renderer {
             }
         }
 
-        // Mix. LCDC.1 is checked here, when pixels are output, not at the
-        // scan (CGB; SameBoy). An opaque object pixel is drawn unless its
-        // "behind BG" bit is set and the BG color index (before BGP) is
-        // non-zero (Pan Docs: OAM byte 3 bit 7).
-        let obj_on = lcdc & LCDC_OBJ_ON != 0;
+        // LCDC.1 is checked when pixels are output, not at the scan (CGB;
+        // SameBoy).
         let colors = src.colors;
+        if lcdc & LCDC_OBJ_ON == 0 || !self.obj_fetched {
+            // No object pixel in this span: tiles straight to colors, no
+            // mixing (most lines of most games).
+            let pal = &colors.bg[0];
+            self.bg_span(&mut row[x0..x1], x0, win_from, regs, src, |c| {
+                pal[usize::from(c & 3)]
+            });
+            return;
+        }
+
+        // Mix. An opaque object pixel is drawn unless its "behind BG" bit
+        // is set and the BG color index (before BGP) is non-zero (Pan
+        // Docs: OAM byte 3 bit 7).
+        let mut bg = [0u8; W];
+        self.bg_span(&mut bg[x0..x1], x0, win_from, regs, src, |c| c);
         let pixels = row[x0..x1]
             .iter_mut()
             .zip(&bg[x0..x1])
             .zip(&self.obj_buf[x0 + 8..x1 + 8]);
         for ((out, &b), &o) in pixels {
-            let o = if obj_on { o } else { 0 };
             *out = if o != 0 && (b & 3 == 0 || o & ATTR_BEHIND_BG == 0) {
                 colors.obj[usize::from(o >> 2) & 7][usize::from(o & 3)]
             } else {
@@ -345,8 +342,58 @@ impl Renderer {
         }
     }
 
+    /// BG/window pixels `[x0, x0 + out.len())` as `f(color index)`, the
+    /// window from `win_from` on. With LCDC.0 clear (non-CGB mode) both
+    /// show color 0, which still goes through BGP, and objects are drawn
+    /// over them regardless of their priority bit (Pan Docs: LCDC.0;
+    /// SameBoy `render_pixel_if_possible`: `bg_enabled = false` makes the
+    /// pixel 0, then BGP applies). The window state still advances: the
+    /// fetcher runs, only the mixer blanks the pixels.
+    #[inline(always)]
+    fn bg_span<T: Copy>(
+        &self,
+        out: &mut [T],
+        x0: usize,
+        win_from: usize,
+        regs: &Regs,
+        src: &Sources,
+        f: impl Fn(u8) -> T + Copy,
+    ) {
+        let lcdc = regs.lcdc;
+        if lcdc & LCDC_BG_ON == 0 {
+            out.fill(f(0));
+            return;
+        }
+        let (bg, win) = out.split_at_mut((win_from - x0).min(out.len()));
+        if !bg.is_empty() {
+            // BG pixel x is map column SCX + x; the fine part was latched
+            // at line start, the tile part is read per fetch.
+            let col = (regs.scx & 0xF8)
+                .wrapping_add(self.fine_scx)
+                .wrapping_add(x0 as u8);
+            let map = if lcdc & LCDC_BG_MAP != 0 {
+                0x1C00
+            } else {
+                0x1800
+            };
+            let y = self.ly.wrapping_add(regs.scy);
+            fill_tiles(bg, src.vram, lcdc, map, y, col, f);
+        }
+        if !win.is_empty() {
+            let col =
+                ((win_from - usize::from(self.window_start)) as u8).wrapping_add(self.window_skip);
+            let map = if lcdc & LCDC_WIN_MAP != 0 {
+                0x1C00
+            } else {
+                0x1800
+            };
+            fill_tiles(win, src.vram, lcdc, map, self.window_row, col, f);
+        }
+    }
+
     /// Decodes one object's row into the object buffer.
     fn fetch_object(&mut self, src: &Sources, lcdc: u8, index: u8, y: u8, x: u8) {
+        self.obj_fetched = true;
         let base = usize::from(index) % 40 * 4;
         let tile = src.oam[base + 2];
         let flags = src.oam[base + 3];
@@ -386,10 +433,19 @@ impl Renderer {
     }
 }
 
-/// Fills `out` with BG/window color indices from the 32x32 tile map at
+/// Fills `out` with `f(color index)` of the BG/window pixels from the 32x32 tile map at
 /// `map` (VRAM offset), map pixel row `y`, starting at map pixel column
 /// `col` and wrapping at 256.
-fn fill_tiles(mut out: &mut [u8], vram: &[u8; 0x4000], lcdc: u8, map: usize, y: u8, mut col: u8) {
+#[inline(always)]
+fn fill_tiles<T: Copy>(
+    mut out: &mut [T],
+    vram: &[u8; 0x4000],
+    lcdc: u8,
+    map: usize,
+    y: u8,
+    mut col: u8,
+    f: impl Fn(u8) -> T,
+) {
     let map_row = map | (usize::from(y >> 3) << 5);
     let row_offset = usize::from(y & 7) << 1;
     while !out.is_empty() {
@@ -400,9 +456,16 @@ fn fill_tiles(mut out: &mut [u8], vram: &[u8; 0x4000], lcdc: u8, map: usize, y: 
         w <<= 2 * c;
         let n = (8 - c).min(out.len());
         let (head, rest) = core::mem::take(&mut out).split_at_mut(n);
-        for p in head {
-            *p = (w >> 14) as u8;
-            w <<= 2;
+        if let Ok(tile) = <&mut [T; 8]>::try_from(&mut *head) {
+            // A whole tile: fixed trip count, unrolled.
+            for (i, p) in tile.iter_mut().enumerate() {
+                *p = f((w >> (14 - 2 * i)) as u8 & 3);
+            }
+        } else {
+            for p in head {
+                *p = f((w >> 14) as u8);
+                w <<= 2;
+            }
         }
         out = rest;
         col = col.wrapping_add(n as u8);
@@ -430,11 +493,23 @@ const fn spread(b: u8) -> u16 {
     (x | (x << 1)) & 0x5555
 }
 
+/// [`spread`] of every byte (512 bytes of flash): one load per bit plane
+/// instead of ~10 operations.
+static SPREAD: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = spread(i as u8);
+        i += 1;
+    }
+    t
+};
+
 /// Interleaves a tile row's two bit planes (Pan Docs: Tile Data) into 2-bit
 /// color indices, leftmost pixel in bits 15-14.
 #[inline]
-const fn decode(lo: u8, hi: u8) -> u16 {
-    spread(lo) | (spread(hi) << 1)
+fn decode(lo: u8, hi: u8) -> u16 {
+    SPREAD[usize::from(lo)] | (SPREAD[usize::from(hi)] << 1)
 }
 
 #[cfg(test)]

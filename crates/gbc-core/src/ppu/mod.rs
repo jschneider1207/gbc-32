@@ -1,7 +1,7 @@
 //! Picture processing unit: mode timing, LY/LYC, the STAT interrupt and
-//! the VBlank interrupt (ADR 0002, ADR 0014). Pixels are not drawn yet: a
-//! white frame completes at the start of each VBlank. The scanline
-//! renderer plugs in at the points marked `RENDERER:` below.
+//! the VBlank interrupt (ADR 0002, ADR 0014), and the scanline renderer
+//! (`render.rs`, objects from `objects.rs`). A frame completes at the
+//! start of each VBlank.
 //!
 //! # Model (ADR 0014)
 //! The PPU is lazy. LY, the STAT mode and coincidence bits and the
@@ -9,8 +9,10 @@
 //! read; nothing runs per mode change. The PPU runs (`Ppu::sync`) only:
 //! - at its `EventKind::Ppu` deadline ([`Ppu::next_event`]): the next STAT
 //!   interrupt edge, the VBlank interrupt, or the end of a visible line's
-//!   mode 3 (where the renderer will draw the line);
-//! - before a CPU write to a PPU register (the bus syncs first).
+//!   mode 3 (where the renderer draws the rest of the line);
+//! - before a CPU write to a PPU register (the bus syncs first, and for
+//!   the registers the picture depends on, draws the current line up to
+//!   the pixel being output: [`Ppu::flush`]).
 //!
 //! A sync walks the *update points* (below) between the last sync and now
 //! in order, keeping the STAT interrupt line exact. There are 3-5 per
@@ -64,12 +66,11 @@
 
 use crate::memory::Memory;
 use crate::schedule::NEVER;
-use crate::{Events, FRAME_CLOCKS};
+use crate::{DmgPalettes, Events, FRAME_CLOCKS};
+use objects::LineObjects;
+use render::{Colors, Regs, Renderer, Sources};
 
-// Scanline renderer and OAM scan (M3); not wired into the timing yet.
-#[allow(dead_code)]
 mod objects;
-#[allow(dead_code)]
 mod render;
 
 pub const SCREEN_WIDTH: usize = 160;
@@ -271,12 +272,16 @@ pub(crate) struct Ppu {
     /// STAT bit 2 while the LCD is off: kept from when it was turned off
     /// (Mooneye `acceptance/ppu/stat_lyc_onoff`).
     lyc_flag_off: bool,
-    /// WY matched LY on a line of this frame with the window enabled
-    /// (SameBoy `wy_check`). TODO: the renderer keeps its own copy until
-    /// integration merges them.
-    wy_triggered: bool,
     /// The mode-3 timing of the current (or last) visible line.
     line: LineTiming,
+    /// Pixels `0..drawn` of the line `line` describes are in the frame.
+    drawn: u8,
+    /// Per-frame and per-line drawing state; also the one copy of the WY
+    /// condition, which the mode-3 window penalty reads too.
+    renderer: Renderer,
+    /// BGP/OBP0/OBP1 resolved to RGB555 through the compatibility palettes
+    /// when written (ADR 0013).
+    colors: Colors,
     /// Which lines have objects, so the OAM scan of the others is skipped.
     objects: ObjectLines,
     /// The screen shows white
@@ -312,8 +317,10 @@ impl Ppu {
                 lyc: false,
             },
             lyc_flag_off: false,
-            wy_triggered: false,
             line: LineTiming::NONE,
+            drawn: 0,
+            renderer: Renderer::new(),
+            colors: Colors::new(),
             objects: ObjectLines::STALE,
             blanked: false,
             skip_frame: false,
@@ -728,16 +735,14 @@ impl Ppu {
             }
             match pt {
                 Pt::Latch => self.latch(l, self.first_frame && l == 0, mem),
-                Pt::End => {
-                    // RENDERER: draw the rest of line `l` (pixels up to
-                    // 160) into `frame`. VRAM, OAM and the palettes are
-                    // blocked for the CPU during mode 3, so drawing here
-                    // sees what the hardware saw; register writes during
-                    // mode 3 flush up to `mode3_pixel` first (bus).
-                }
+                // The rest of line `l` (to pixel 160). VRAM, OAM and the
+                // palettes are blocked for the CPU during mode 3, so
+                // drawing here sees what the hardware saw; register writes
+                // during mode 3 flushed the pixels before them already.
+                Pt::End => self.draw(l as u8, 160, mem, frame),
                 Pt::VBlank => {
                     *iflags |= INT_VBLANK;
-                    events |= self.frame_done(frame);
+                    events |= self.frame_done();
                 }
                 _ => {}
             }
@@ -754,14 +759,14 @@ impl Ppu {
     fn next_frame(&mut self) {
         self.frame_start = self.frame_start.wrapping_add(u64::from(FRAME));
         self.first_frame = false;
-        // SameBoy resets the WY condition after line 153.
-        self.wy_triggered = false;
-        // RENDERER: start_frame().
+        // The window line counter and the WY condition restart (SameBoy
+        // resets them after line 153).
+        self.renderer.start_frame();
     }
 
-    /// The frame is complete (VBlank). White until the renderer draws.
-    fn frame_done(&mut self, frame: &mut Frame) -> Events {
-        frame.fill(WHITE);
+    /// The frame is complete (VBlank): every visible line has been drawn
+    /// at its mode-3 end.
+    fn frame_done(&mut self) -> Events {
         if self.skip_frame {
             self.skip_frame = false;
         } else {
@@ -774,9 +779,68 @@ impl Ppu {
     /// window's vertical condition for the rest of the frame (Pan Docs:
     /// Window, "WY condition").
     fn check_wy(&mut self, l: u32, mem: &Memory) {
-        if self.lcdc & 0x20 != 0 && u32::from(mem.io[0x4A]) == l {
-            self.wy_triggered = true;
+        let regs = self.regs(mem);
+        self.renderer.check_wy(l as u8, &regs);
+    }
+
+    /// The registers the renderer reads: LCDC here, the others in the
+    /// I/O backing store (written by the bus after it has flushed).
+    #[inline]
+    fn regs(&self, mem: &Memory) -> Regs {
+        Regs {
+            lcdc: self.lcdc,
+            scy: mem.io[0x42],
+            scx: mem.io[0x43],
+            wy: mem.io[0x4A],
+            wx: mem.io[0x4B],
         }
+    }
+
+    /// Draws line `ly` from the last pixel drawn up to pixel `x` with the
+    /// current registers. Out of line: the pixel loop is the PPU's bulk
+    /// and runs once or a few times per line.
+    #[inline(never)]
+    fn draw(&mut self, ly: u8, x: u8, mem: &Memory, frame: &mut Frame) {
+        let from = self.drawn;
+        if x <= from {
+            return;
+        }
+        self.drawn = x;
+        let regs = self.regs(mem);
+        let src = Sources {
+            vram: &mem.vram,
+            oam: &mem.oam,
+            colors: &self.colors,
+        };
+        let row = render::frame_row(frame, usize::from(ly));
+        self.renderer
+            .render(row, usize::from(from), usize::from(x), &regs, &src);
+    }
+
+    /// Before a write at clock `now` (synced) to a register the picture
+    /// depends on (LCDC, SCY, SCX, BGP, OBP0, OBP1, WY, WX): if a line is
+    /// in mode 3, draws it up to the pixel being output with the old
+    /// value (ADR 0002 catch-up), so the write affects the pixels from
+    /// there on.
+    pub(crate) fn flush(&mut self, now: u64, mem: &Memory, frame: &mut Frame) {
+        if let Some((ly, x)) = self.mode3_pixel(now) {
+            self.draw(ly, x, mem, frame);
+        }
+    }
+
+    /// A BGP (FF47), OBP0 (FF48) or OBP1 (FF49) write: resolves that
+    /// palette's colors now (ADR 0013), after the bus has flushed.
+    pub(crate) fn write_palette(&mut self, reg: usize, value: u8, dmg: &DmgPalettes) {
+        match reg {
+            0x47 => self.colors.set_bgp(dmg, value),
+            _ => self.colors.set_obp(dmg, reg - 0x48, value),
+        }
+    }
+
+    /// Resolves all three compatibility palettes from the registers in
+    /// `mem` (reset, or new compatibility colors from the front end).
+    pub(crate) fn resolve_palettes(&mut self, mem: &Memory, dmg: &DmgPalettes) {
+        self.colors = Colors::dmg_compat(dmg, mem.io[0x47], mem.io[0x48], mem.io[0x49]);
     }
 
     /// A WY or LCDC write at clock `now` (synced): the WY condition is
@@ -803,14 +867,17 @@ impl Ppu {
         let wx = mem.io[0x4B];
         // The window starts on this line at pixel WX - 7 (SameBoy:
         // activates for WX < 166 + is_cgb).
-        let window = (self.lcdc & 0x20 != 0 && self.wy_triggered && wx <= 166).then_some(wx);
+        let window =
+            (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx);
         let tall = self.lcdc & 0x04 != 0;
-        let mut xs = [0u8; 10];
-        let n = if first || !self.objects.on_line(&mem.oam, l, tall) {
-            0
+        // One OAM scan per line, for both the stalls and the pixels.
+        let objs = if first || !self.objects.on_line(&mem.oam, l, tall) {
+            LineObjects::EMPTY
         } else {
-            select_objects(&mem.oam, l as u8, tall, &mut xs)
+            LineObjects::scan(&mem.oam, l as u8, tall)
         };
+        let xs = objs.x_positions();
+        let n = xs.len();
         let mode3 = if first { 86 } else { 84 };
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
         let first_pixel = mode3 + 12 + u16::from(scx & 7);
@@ -822,7 +889,7 @@ impl Ppu {
         let mut k = 0;
         if n != 0 || window.is_some() {
             let mut stalls = [(0u8, 0u8); 10];
-            let n_obj = object_stalls(&xs[..n], scx, window, &mut stalls);
+            let n_obj = object_stalls(xs, scx, window, &mut stalls);
             let mut win = window.map(|wx| (wx.saturating_sub(7), 6u8));
             for &s in &stalls[..n_obj] {
                 if let Some(w) = win.filter(|w| w.0 <= s.0) {
@@ -843,7 +910,8 @@ impl Ppu {
         }
         t.n_stalls = k as u8;
         t.end = first_pixel + 160 + total;
-        // RENDERER: start_line(l, scx, objects) for this line.
+        self.drawn = 0;
+        self.renderer.start_line(l as u8, scx, &objs);
     }
 
     /// OAM changed (a CPU or DMA write): the object summary is stale.
@@ -964,7 +1032,7 @@ impl Ppu {
             self.skip_frame = true;
             self.frame_start = now.wrapping_sub(u64::from(ON_POS));
             self.first_frame = true;
-            self.wy_triggered = false;
+            self.renderer.start_frame();
             self.line = LineTiming::NONE;
             // SameBoy's first update, one dot after the write: no mode
             // source, LY = 0 against LYC.
@@ -981,7 +1049,6 @@ impl Ppu {
     /// is in mode 3 (pixels `0..x` are out), else `None`. The renderer
     /// flushes up to here before a register write changes the picture
     /// (ADR 0002 catch-up). Valid once the line's pipeline has started.
-    #[allow(dead_code)] // RENDERER: the mid-line flush point (bus `write_ppu`).
     pub(crate) fn mode3_pixel(&self, now: u64) -> Option<(u8, u8)> {
         if !self.lcd_enabled() {
             return None;
@@ -1034,27 +1101,6 @@ impl ObjectLines {
         self.tall = tall;
         self.valid = true;
     }
-}
-
-/// The OAM scan of line `ly` (Pan Docs: OAM, "Selection priority"): the
-/// first 10 objects in OAM order whose rows cover LY (`tall`: 8x16), with
-/// any X. Writes their X coordinates to `xs` and returns how many. A
-/// stand-in until the renderer's `objects.rs` scan replaces it.
-fn select_objects(oam: &[u8; 0xA0], ly: u8, tall: bool, xs: &mut [u8; 10]) -> usize {
-    let height = if tall { 16 } else { 8 };
-    let mut n = 0;
-    for obj in oam.as_chunks::<4>().0 {
-        // Y is the screen row + 16.
-        let row = (ly as u16 + 16).wrapping_sub(u16::from(obj[0]));
-        if row < height {
-            xs[n] = obj[1];
-            n += 1;
-            if n == xs.len() {
-                break;
-            }
-        }
-    }
-    n
 }
 
 /// The mode-3 stalls of the objects at X coordinates `xs` (the selected
@@ -1455,6 +1501,46 @@ mod tests {
             ],
             [false, true]
         );
+    }
+
+    /// Each visible line is in the frame by VBlank, BG and objects, the
+    /// objects from the same OAM scan that sets the mode-3 length; the
+    /// first line after LCD enable has no OAM scan, so no objects.
+    #[test]
+    fn lines_are_drawn_with_the_objects_that_stall_them() {
+        let on = 1000;
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        r.ppu.lcdc |= 0x02; // OBJ on
+        let dmg = DmgPalettes {
+            bg: [1, 2, 3, 4],
+            obj0: [5, 6, 7, 8],
+            obj1: [9, 10, 11, 12],
+        };
+        r.mem.io[0x47] = 0xE4;
+        r.mem.io[0x48] = 0xE4;
+        r.ppu.resolve_palettes(&r.mem, &dmg);
+        // Tile 0: color 1 everywhere (BG); tile 1: color 3 (the object).
+        for row in 0..8 {
+            r.mem.vram[2 * row] = 0xFF;
+        }
+        r.mem.vram[16..32].fill(0xFF);
+        // One object on lines 0-7 at screen x 20-27.
+        r.mem.oam[..4].copy_from_slice(&[16, 28, 1, 0]);
+        r.ppu.oam_written();
+        // Line 1: the object at x 20 waits 1 dot for its BG tile, then 6
+        // (Pan Docs: OBJ penalty algorithm): mode 3 ends at 263.
+        let l1 = clock(on, 0, LINE);
+        r.sync(l1 + 262);
+        assert_eq!((r.stat(l1 + 262) & 3, r.stat(l1 + 263) & 3), (3, 0));
+        let events = r.sync(clock(on, 0, VBLANK_POS));
+        assert_eq!(events, Events::FRAME_READY);
+        for ly in 0..SCREEN_HEIGHT {
+            let row = &r.frame[ly * SCREEN_WIDTH..][..SCREEN_WIDTH];
+            for (x, &p) in row.iter().enumerate() {
+                let obj = (1..8).contains(&ly) && (20..28).contains(&x);
+                assert_eq!(p, if obj { 8 } else { 2 }, "({x}, {ly})");
+            }
+        }
     }
 
     #[test]

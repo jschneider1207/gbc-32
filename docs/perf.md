@@ -1,4 +1,6 @@
-# PerformanceROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/cpu_instrs.gb`
+# Performance
+
+ROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/cpu_instrs.gb`
 (CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
 The test ROMs are read from `$TEST_ROMS` (default `test-roms/`).
 
@@ -28,15 +30,38 @@ Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,464,091,710 |
-| cgb_sound.gb | 709,309,963 |
-| cgb-acid2.gbc | 341,700,412 |
-| synth:event-storm (2 s) | 422,070,901 |
-| synth:dma-storm (3 s) | 399,047,786 |
-| synth:halt-irq (10 s) | 159,655,635 |
+| cpu_instrs.gb | 1,726,409,705 |
+| cgb_sound.gb | 971,629,157 |
+| cgb-acid2.gbc | 789,966,291 |
+| synth:event-storm (2 s) | 446,532,249 |
+| synth:dma-storm (3 s) | 439,495,485 |
+| synth:halt-irq (10 s) | 290,969,131 |
+
+**Scanline renderer (M3).** Drawing pixels costs about 220k Ir per frame
+with the BG only (cpu_instrs, cgb_sound, halt-irq, event-storm and
+dma-storm all +205-226k Ir/frame: ~1.5k Ir per line, ~9.5 Ir per pixel
+including the per-line setup) and 375k Ir per frame with objects and the
+window (cgb-acid2, mixing on most lines; it is a CGB game drawn in the
+compatibility path until M5). From 1,464.1 / 709.3 / 341.7 / 422.1 /
+399.0 / 159.7 M: +17.9%, +37.0%, +131.2%, +5.8%, +10.1%, +82.2%.
+event-storm is now 3.74 M Ir per emulated frame (the 50%-of-M7 line in
+the plan's M8 is 4.02 M, x86 proxy only). How the pixel loop got there
+(cpu_instrs, Ir per frame added by rendering):
+
+| Pixel loop | Ir/frame |
+|---|---|
+| Index buffer + mix for every span (renderer as written) | 466k |
+| Spans with no object pixel: tiles straight to RGB555, no index buffer or mix | 318k |
+| + 256-entry bit-spread table (512 B flash), unrolled whole-tile path | 220k |
+
+The object path (index buffer, then mix) is the next cut if cgb-acid2-like
+content matters on the MCU. `Renderer::render` has no panic or bounds-check
+calls (x86 disassembly of the standalone function; on thumbv7em with one
+codegen unit it is inlined into `Ppu::draw`, which calls only
+`__aeabi_memclr`).
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
-mode 3, where the renderer will draw) plus STAT interrupt edges: from
+mode 3, where the renderer draws) plus STAT interrupt edges: from
 1,388.0 / 607.5 / 12.9 / 413.7 / 372.1 / 111.4 M (+6.8%, +16.8%, +274k Ir
 per frame on cgb-acid2, +2.6%, +9.0%, +45.7%). About 470 Ir per line event
 with no STAT source selected and no objects, 940 with sources and objects
@@ -77,16 +102,20 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 | `Ctx::write_io` | 884 | 930 |
 | `bus::read_high` | 848 | 890 |
 | `Ctx::sync_ppu` | 214 | 230 |
-| `Ppu::sync` | 2,976 | 3,120 |
+| `Ppu::sync` | 2,758 | 3,120 |
 | `Ppu::next_event` | 482 | 510 |
 | `Ppu::next_point` | 412 | 440 |
 | `Ppu::point_irq` | 494 | 520 |
-| `Ctx::write_ppu` (PPU registers, out of `write_io`) | 1,058 | 1,110 |
+| `Ctx::write_ppu` (PPU registers, out of `write_io`; mid-line flush) | 1,226 | 1,290 |
+| `Renderer::render` (pixel loop) | 2,668 | 2,800 |
+| `Renderer::start_line` (priority sort, buffer clear) | 2,208 | 2,320 |
+| `LineObjects::scan` (OAM scan) | 482 | 510 |
+| `Ppu::draw`, `Ppu::flush` | 122, 290 | 130, 305 |
 | `Ctx::write_mapped` | 460 | 480 |
 | `bus::read_vram`, `Ctx::write_vram` | 218, 216 | 230, 230 |
 | `bus::read_oam`, `Ctx::write_oam` | 280, 304 | 300, 320 |
 | `Ppu::vram_blocked`, `Ppu::oam_blocked` | 196, 240 | 210, 260 |
-| `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
+| `Ctx::write_timer_io` (cold) | 892 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
 
 OAM DMA (M2): every CPU access ORs `Hot::dma` (FE00 during a transfer)
@@ -137,11 +166,12 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,464,091,710 |
-| cgb_sound.gb | 709,309,963 |
-| cgb-acid2.gbc | 341,700,412 |
+| cpu_instrs.gb | 1,726,409,705 |
+| cgb_sound.gb | 971,629,157 |
+| cgb-acid2.gbc | 789,966,291 |
 
-(ADR 0014, PPU mode timing, took these from 1,388.0 M, 607.5 M and 12.9 M;
+(The scanline renderer took these from 1,464.1 M, 709.3 M and 341.7 M;
+ADR 0014, PPU mode timing, before it from 1,388.0 M, 607.5 M and 12.9 M;
 see the table above.)
 
 (ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and

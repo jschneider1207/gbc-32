@@ -34,7 +34,7 @@
 510 <gbc_core::ppu::Ppu>::next_event
 440 <gbc_core::ppu::Ppu>::next_point
 520 <gbc_core::ppu::Ppu>::point_irq
-1110 <gbc_core::bus::Ctx>::write_ppu
+1290 <gbc_core::bus::Ctx>::write_ppu
 # CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
 # 304, 240 bytes): VRAM accesses leave the inlined bus path for these.
 230 gbc_core::bus::read_vram
@@ -43,3 +43,12 @@
 300 gbc_core::bus::read_oam
 320 <gbc_core::bus::Ctx>::write_oam
 260 <gbc_core::ppu::Ppu>::oam_blocked
+# Scanline renderer (M3; measured 2668, 2208, 482, 122, 290 bytes): the
+# pixel loop, the per-line setup (object priority sort, buffer clear), the
+# OAM scan, and the PPU's draw/flush wrappers. write_ppu above grew from
+# 1058 to 1226 with the mid-line flush and palette resolution.
+2800 <gbc_core::ppu::render::Renderer>::render
+2320 <gbc_core::ppu::render::Renderer>::start_line
+510 <gbc_core::ppu::objects::LineObjects>::scan
+130 <gbc_core::ppu::Ppu>::draw
+305 <gbc_core::ppu::Ppu>::flush
