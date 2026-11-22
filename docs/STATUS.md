@@ -46,18 +46,20 @@ Working rules that matter here:
 ## Needs human
 
 Open (session 07):
-1. 198 Gambatte ROMs with `*_cgb04c.png` references (`scy/`, `bgen/`,
-   `bgtilemap/`, `scx_during_m3/`, ...) have no `cgb04c` in the ROM name,
-   so `gambatte-cgb` never selects them. Add a group or glob for them?
-   (Manifest change. A directory glob would also select ROMs with no CGB
-   rule, which is a runner error; ADR 0018.)
-2. Total `.text` budget (85,100 B, `check-code-size.sh`): 84,942 B used
-   after M5. The APU (M6) will need several KB. Raise the budget for M6
-   (and to what), or require cuts first? Raising is a loosening, so it's
-   the human's call. Context: the core is already over the H753's 64 KB
-   ITCM (plan task), so the budget guards growth, not a hardware limit.
+1. Review the drafted manifest group for the PNG-reference Gambatte ROMs
+   (see decision below) before it is committed.
 
-Decided in session 07 (2026-11-22): STOP is 2 bytes unless IE&IF is
+Decided in session 07 (2026-11-22), human: "Both those sound fine" to
+(a) a new stretch-tier group selecting exactly the Gambatte ROMs with a
+sibling `_cgb04c.png` (198 ROMs whose names lack `cgb04c`, so
+`gambatte-cgb` never selects them; a directory glob would also take ROMs
+with no CGB rule). The agent drafts it, the human looks it over before
+commit. (b) The total `.text` budget (85,100 B; 84,942 used after M5)
+will be raised once for M6, to a figure measured after the first APU
+channel lands: come back to the human with the number. Per-function
+budgets stay.
+
+Also decided in session 07 (2026-11-22): STOP is 2 bytes unless IE&IF is
 pending (SameBoy `stop()`, which encodes the Pan Docs flowchart). The
 human first chose "Keep pending cases only", but no SST 0x10 case sets
 IF, so that kept 0 of 1000. The human then chose: run all 1000 0x10
