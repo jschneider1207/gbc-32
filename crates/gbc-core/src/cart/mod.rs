@@ -30,6 +30,7 @@ pub type CartBuffers<'a> = (&'a [u8], &'a mut [u8]);
 /// over it ([`Emulator::load`](crate::Emulator::load)): the buffers the
 /// caller lent, plus the save state that lived inside the emulator, so
 /// nothing is lost on a game switch.
+#[must_use = "dropping it loses the RTC state, the dirty flag and the RAM buffer"]
 #[non_exhaustive]
 pub struct EjectedCart<'a> {
     /// The ROM passed to `load`.
@@ -39,7 +40,9 @@ pub struct EjectedCart<'a> {
     pub cart_ram: &'a mut [u8],
     /// The MBC3 RTC state at the moment the cartridge was removed, or
     /// `None` if it has no RTC. Persist it with the save; it is not kept
-    /// anywhere else.
+    /// anywhere else. The RTC keeps counting without setting
+    /// [`EjectedCart::save_dirty`], so persist it at exit regardless of that
+    /// flag.
     pub rtc: Option<RtcState>,
     /// [`Emulator::save_dirty`](crate::Emulator::save_dirty) at removal:
     /// the game changed its save since the caller last cleared the flag.

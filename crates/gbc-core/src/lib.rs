@@ -72,9 +72,27 @@
 //! }
 //! // On exit or a game switch:
 //! let ejected = emu.eject().unwrap();
-//! if info.has_save() && ejected.save_dirty {
-//!     let (_ram, _rtc) = (ejected.save_ram(), ejected.rtc); // write them out
+//! if info.has_save() {
+//!     if ejected.save_dirty {
+//!         let _ram: &[u8] = ejected.save_ram(); // write the RAM out
+//!     }
+//!     // The RTC keeps counting without setting the dirty flag, so write
+//!     // it at exit whether or not the game saved.
+//!     if let Some(_rtc) = ejected.rtc {
+//!         // write it out, with the wall-clock time
+//!     }
 //! }
+//! ```
+//!
+//! Dropping the result of `eject` (or of `load` over a cartridge) loses the
+//! RTC state, the dirty flag and the RAM buffer, so it is `#[must_use]`:
+//!
+//! ```compile_fail
+//! #![deny(unused_must_use)]
+//! use gbc_core::{Emulator, Memory};
+//! let mut mem = Box::new(Memory::new());
+//! let mut emu = Emulator::new(&mut mem);
+//! emu.eject();
 //! ```
 //!
 //! An emulator stored in a long-lived struct borrows its memory, ROM and
@@ -119,18 +137,27 @@
 //!     frame: &mut Frame,
 //! ) {
 //!     let mut emu = Emulator::new(mem);
-//!     emu.load(rom, save_ram, Config::default()).unwrap();
+//!     let _ = emu.load(rom, save_ram, Config::default()).unwrap();
+//!     let (mut frame_no, mut last_write): (u32, Option<u32>) = (0, None);
 //!     // Once per frame (the firmware's main loop):
 //!     emu.set_buttons(Buttons::EMPTY); // read from the GPIOs
 //!     let _ = emu.run_frame(frame, &mut []);
-//!     // Write the save to flash only when the game changed it:
+//!     frame_no += 1;
+//!     // Games write a save over 1-2 s (dozens of writes), so debounce:
+//!     // note the frame of each new write and flash only once it has been
+//!     // quiet for a second.
 //!     if emu.save_dirty() {
-//!         let _ = (emu.cart_ram(), emu.rtc_state()); // to flash / eMMC
-//!         emu.clear_save_dirty();
+//!         emu.clear_save_dirty(); // the next write sets it again
+//!         last_write = Some(frame_no);
 //!     }
-//!     // To switch games, `emu.eject()` (or the result of `load`) hands
-//!     // back the ROM and `save_ram` for the next `load`, with the RTC
-//!     // state (`EjectedCart`).
+//!     if last_write.is_some_and(|f| frame_no - f >= 60) {
+//!         last_write = None;
+//!         let _ = (emu.cart_ram(), emu.rtc_state()); // to flash / eMMC
+//!     }
+//!     // At power-off or a game switch, `emu.eject()` (or the result of
+//!     // `load`) hands back the ROM and `save_ram` for the next `load`,
+//!     // with the final RTC state (`EjectedCart`): flash it if a write is
+//!     // pending (`last_write`) or `rtc` is `Some`.
 //! }
 //! # let mem = Box::leak(Box::new(Memory::new()));
 //! # let save = Box::leak(vec![0u8; 0x2_0000].into_boxed_slice());
@@ -278,6 +305,7 @@ impl<'a> Emulator<'a> {
     /// with [`Emulator::save_dirty`] clear. On error the emulator is
     /// unchanged (the previous cartridge stays inserted) and the error
     /// hands back `rom` and `cart_ram`.
+    #[must_use = "the returned cartridge holds the previous RTC state, dirty flag and RAM buffer"]
     pub fn load(
         &mut self,
         rom: &'a [u8],
@@ -304,6 +332,7 @@ impl<'a> Emulator<'a> {
     /// in: powered off, no cartridge, default settings (stop events, held
     /// buttons and palettes are cleared). Returns `None`, changing nothing,
     /// if no cartridge is inserted.
+    #[must_use = "the ejected cartridge holds the RTC state, dirty flag and RAM buffer"]
     pub fn eject(&mut self) -> Option<EjectedCart<'a>> {
         if !self.hw.sys.cart.is_loaded() {
             return None;
@@ -628,13 +657,18 @@ impl<'a> Emulator<'a> {
     ///
     /// Lets the MCU write flash only when there is something new. A front
     /// end usually waits until it has been set for a while (games write a
-    /// save over several frames) before saving.
+    /// save over several frames) before saving: clear the flag on each
+    /// sighting, remember the frame, and save once no new write came for a
+    /// while.
     #[inline]
     pub fn save_dirty(&self) -> bool {
         self.hw.sys.cart.save_dirty
     }
 
-    /// Clears [`Emulator::save_dirty`], after the caller saved.
+    /// Clears [`Emulator::save_dirty`]. Call it only once the data is
+    /// captured (copied out or written). If an asynchronous flash write
+    /// later fails, the caller must keep its own pending flag: there is no
+    /// way to set this one again.
     #[inline]
     pub fn clear_save_dirty(&mut self) {
         self.hw.sys.cart.save_dirty = false;
