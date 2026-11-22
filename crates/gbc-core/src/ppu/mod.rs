@@ -410,9 +410,11 @@ impl Ppu {
 
     /// Power-on state at clock 0, as the CGB boot ROM leaves it: LCD on,
     /// BG on, tile data at 8000 (Pan Docs: Power Up Sequence), in VBlank
-    /// at [`POST_BOOT_POS`].
-    pub(crate) fn reset(&mut self) {
+    /// at [`POST_BOOT_POS`]. `cgb`: CGB mode (else DMG compatibility mode),
+    /// which selects how the renderer reads the BG map attributes and LCDC.0.
+    pub(crate) fn reset(&mut self, cgb: bool) {
         *self = Self::new();
+        self.renderer.cgb = cgb;
         self.lcdc = 0x91;
         self.frame_start = 0u64.wrapping_sub(u64::from(POST_BOOT_POS));
         // LY = 144 against LYC = 0: no coincidence, no source enabled.
@@ -1889,7 +1891,7 @@ mod tests {
     #[test]
     fn power_on_is_in_vblank_on_the_mcycle_grid() {
         let mut p = Ppu::new();
-        p.reset();
+        p.reset(false);
         assert_eq!((p.ly(0, false), p.stat(0, false) & 3), (144, 1));
         // Line 144, dot 163: line 145 starts 293 clocks later, and LY
         // reads 145 from its dot 2.

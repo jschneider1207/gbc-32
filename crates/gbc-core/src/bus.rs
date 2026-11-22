@@ -138,7 +138,7 @@ impl Sys<'_> {
         if !self.cgb_mode {
             self.joyp_select = 0x30;
         }
-        self.ppu.reset();
+        self.ppu.reset(self.cgb_mode);
         self.sched.set(EventKind::Ppu, self.ppu.next_event(false));
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
         // Up Sequence, "Hardware registers").
