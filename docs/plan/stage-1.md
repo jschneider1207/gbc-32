@@ -110,11 +110,15 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
   - [ ] STOP consumes its second byte (SameBoy `stop()`; runs it as an opcode only with an interrupt pending), read before the pause (M2 review H5)
 - [ ] STOP accuracy: DIV/TIMA/serial frozen in STOP, wake-up only on a selected P1 line, DIV reset rules, 2-byte STOP (Pan Docs "Using the STOP instruction"; M1 hardware review 6)
 - [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
-- [ ] CGB palettes (BCPS/BCPD/OCPS/OCPD, access blocking), BG attributes, CGB sprite priority
+- [x] CGB palettes (BCPS/BCPD/OCPS/OCPD), BG attributes, CGB sprite priority (e22721c, 17db555; cgb-acid2 passes)
+- [ ] Palette RAM access blocked in mode 3 (BCPD/OCPD reads and writes; `TODO(M5)` in `bus.rs`)
+- [ ] cgb-acid-hell: 2 pixels still differ after 17db555; find out why
+- [ ] ADR for the per-pixel object rank buffer (`Memory::obj_rank`): fetch order (X, drives mode-3 stalls) is separate from draw priority (OAM index in CGB mode); OPRI writes only latch during boot (SameBoy `memory.c`)
+- [ ] Extend `synth:cgb-raster` with CGB BG and object attributes (bank 1 tiles, flips, mixed palettes), rebaseline in the same commit
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
 - [ ] OAM DMA CPU-side bus conflicts vs. hardware: ~70 gambatte `oamdma` ROMs (`busypush*`/`busypop*` etc.) fail because the SameBoy-derived CGB C conflict table differs from gambatte's cgb04c hardware results; decide which reference wins per case once romtest runs gambatte ROMs. Also add a unit test for the FF46 write -> PPU sync call in the bus (c57dd2e review notes)
 - [ ] CGB vs. DMG-compatibility mode selection from the header
-- [ ] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results
+- [x] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results (78c6443, reviewed; 27d11fa; lockup rule 75902f9, human-approved; audio waits for M6)
 - [x] (done in M4: 0fa7a86 bench, 0c23c48, e15d85f, 68c5d32, 386acba; 3.66 M Ir/frame) Before M5 CGB rendering (M3 perf review): a synthetic bench combining the event storm with objects, the window and STAT sources (event-storm 3.73 M + acid2 PPU 0.53 M ~ 3.97 M Ir/frame, 99% of the 4.02 M line, added from two runs); make the ADR 0014 timing cuts and the object-mix cut first
 - [x] `Hw` buffer move: `Renderer::obj_buf` (176 B) moved into `Memory`; `Hw` is 832 B (was 1,008), size assert lowered from 1,024 to 864 B. The stall/timing arrays stayed (small). CGB palette tables go in `Memory` the same way
 - [ ] Re-check the two provisional PPU-side OAM DMA deviations (2-dot lead, last step not held through HALT; `docs/reference/oam-dma.md`) against gambatte `late_sp*` and `oamdma_late_halt_stat_*` once the `gambatte` check exists; also which DMA word a mode-3 object fetch reads (SameBoy fetch timing + gambatte-fitted lead) (M3 reviews)
@@ -122,8 +126,8 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] The speed-switch snapshot test in `lib.rs` pins current (H3-wrong) behavior: rewrite it from references with the H3 fix (M3 test-integrity review)
 - [ ] Blargg `interrupt_time` (and cpu_instrs 03/06 singly) lose console text since VRAM blocking (22eccab, "iled"); the commit blames the double-speed half-frame timeout. Confirm against double-speed LY/mode-3 timing, not just the explanation (M3 test-integrity review)
 
-- [ ] M4 hardware review (session 06): in CGB mode LCDC.0 is BG/window master priority, not BG blank; `ppu/render.rs` still blanks the BG to palette 0 color 0 (now visible with real CGB colors). Fix with CGB priority
-- [ ] M4 hardware review: `sorted_object_stalls` relies on `priority_order()` being an X sort. When CGB priority follows OAM order (OPRI=0), keep a separate X sort for mode-3 stall timing
+- [x] M4 hardware review (session 06): in CGB mode LCDC.0 is BG/window master priority, not BG blank; `ppu/render.rs` still blanks the BG to palette 0 color 0 (now visible with real CGB colors). Fix with CGB priority (e22721c)
+- [x] M4 hardware review: `sorted_object_stalls` relies on `priority_order()` being an X sort. When CGB priority follows OAM order (OPRI=0), keep a separate X sort for mode-3 stall timing (17db555: X order still drives fetch and stalls; OAM-index rank applied in the merge)
 - [ ] M4 hardware review: MBC3 latch fires on 00->01 only; SameBoy `write_mbc` latches on every 6000-7FFF write. Settle against hardware docs (GBCTR) / tests before changing behavior
 - [ ] M4 perf review lows: `fill_tiles` pair stores become unaligned word stores when SCX&7 is odd (80/line; matters if a platform puts the frame in FMC SDRAM, ES0491 2.7.3: document a frame-alignment/placement rule or split stores); `synth:worst-case` never hits VRAM/OAM out-of-line reads, cart RAM, MBC bank writes, or 10 objects on all 144 lines (OAM-DMA multiplexing, ~+60k Ir/frame est.); `Ppu::latch` has 6 bounds-check panic sites (code size)
 - [ ] M4 perf review HIGH, tracked: the 4.02 M x86-Ir line assumes 1 Ir = 1 M7 cycle; thumbv7em static counts are 1-2x (u64 maths in `boundary`), so 3.66 M Ir/frame is ~59-91% of the M7, and `Cpu::run` (25 KB) exceeds the 16 KB I-cache. Get an M7 cycle measurement as early as possible (needs the human/hardware); cut u64 per-event maths (u32 epoch deadlines) before M6 adds the APU
