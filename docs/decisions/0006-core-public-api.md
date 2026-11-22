@@ -194,3 +194,11 @@ skeleton or the API documentation disagreed with the hardware. Changes:
   short files and pads them with 0xFF. Reads past the end of a short ROM
   return 0xFF; `peek` already does, and the M1 bus must too.
   `LoadErrorKind::RomTooSmall` now means "can't hold the header".
+
+### 2026-11-22: save persistence (ADR 0015)
+
+`load` and `eject` now return an `EjectedCart` (the buffers plus the RTC
+state at removal and the save-dirty flag; `into_buffers()` gives the old
+tuple), and the API gained `cart_info`, `save_dirty` and
+`clear_save_dirty`. "Buffers always come back" stands and now covers the
+RTC state too. Details and rationale: ADR 0015.

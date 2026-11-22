@@ -65,7 +65,8 @@ conservative stand-in for SDRAM. The custom-board contract is
 
 The core is a library the platform drives. It never calls out to the
 platform. The concrete API and its rationale are in ADR 0006 (construction:
-ADR 0009); the crate docs in `crates/gbc-core/src/lib.rs` have desktop and
+ADR 0009; save persistence: ADR 0015); the crate docs in
+`crates/gbc-core/src/lib.rs` have desktop and
 MCU usage examples.
 
 ```text
@@ -74,8 +75,8 @@ Memory                             // the ~49 KiB of RAM arrays, provided by the
 Emulator<'a>                       // 'a = lifetime of the Memory and cartridge ROM/RAM borrows
   fn new(mem: &'a mut Memory) -> Self               // powered off, no cartridge; zero-fills mem
   fn load(&mut self, rom: &'a [u8], cart_ram: &'a mut [u8], Config)
-      -> Result<Option<CartBuffers<'a>>, LoadError<'a>>  // Ok: previous cart's buffers; Err: hands back rom/cart_ram
-  fn eject(&mut self) -> Option<CartBuffers<'a>>    // unload; back to the `new` state
+      -> Result<Option<EjectedCart<'a>>, LoadError<'a>>  // Ok: previous cart (as eject); Err: hands back rom/cart_ram
+  fn eject(&mut self) -> Option<EjectedCart<'a>>    // unload; back to the `new` state
   fn set_dmg_palettes(&mut self, DmgPalettes)       // no reset
   fn reset(&mut self)                               // power cycle; cart RAM/RTC kept
   fn set_buttons(&mut self, Buttons)
@@ -86,9 +87,15 @@ Emulator<'a>                       // 'a = lifetime of the Memory and cartridge 
   fn run_until (&mut self, clock: u64,  &mut Frame, &mut [StereoSample]) -> RunResult
   fn step      (&mut self,              &mut Frame, &mut [StereoSample]) -> RunResult
   // debug: clock(), registers(), peek(addr), serial_byte(), lcd_enabled(), screen_blank(), cpu_locked()
-  // cartridge: cart_ram(), rtc_state(), set_rtc_state()
+  // cartridge: cart_ram(), cart_info(), rtc_state(), set_rtc_state(),
+  //            save_dirty(), clear_save_dirty()
 RunResult { events: Events, clocks: u64, audio_samples: usize }
 cart_ram_size(rom) -> Result<usize, LoadErrorKind>
+cart_info(rom) -> Result<CartInfo, LoadErrorKind>  // before load: battery? RTC? RAM size
+CartInfo { ram_size, battery, rtc }, fn has_save()  // has_save = battery && (RAM || RTC)
+EjectedCart<'a> { rom, cart_ram, rtc: Option<RtcState>, save_dirty }  // cart_ram untrimmed
+  fn save_ram(&self) -> &[u8]                       // the header-sized part (the save file)
+  fn into_buffers(self) -> CartBuffers<'a>
 type CartBuffers<'a> = (&'a [u8], &'a mut [u8])     // RAM buffer as passed (untrimmed)
 LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
 
@@ -110,7 +117,11 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   used; `cart_ram()` (the save file) is exactly that long. The caller
   persists it, reading it through `cart_ram()` while the emulator holds the
   borrow, and gets the whole buffer back from `eject`, a later `load`, or a
-  `LoadError`.
+  `LoadError`. Only battery-backed cartridges have a save
+  (`cart_info(rom).has_save()`, usable before `load`). `save_dirty()` is
+  set when the game changes a RAM byte or writes an RTC register; the
+  caller saves and calls `clear_save_dirty()`, so the MCU writes flash
+  only when needed. MBC2 RAM is stored as read, `0xF0 | nibble`.
 - **RTC:** state is advanced by emulated time, lazily: caught up on
   register writes, the latch, `rtc_state` and reset
   (`docs/reference/mbc3-rtc.md`). The caller can read and write the RTC
@@ -118,7 +129,8 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   time on load: `load`, then
   `set_rtc_state(saved.advance_seconds(elapsed))`
   (`RtcState::advance_seconds`: halt-aware, hardware rollover, day
-  carry).
+  carry). `eject` and `load` over a cartridge return its RTC state at
+  removal in the `EjectedCart`, so a game switch never loses it.
 - **Video:** the caller passes a `Frame` (160×144 RGB555 `u16`, bits 0–4
   red, 5–9 green, 10–14 blue) to every run call, so it can double-buffer.
   The core draws into it line by line; it holds a whole frame when the
