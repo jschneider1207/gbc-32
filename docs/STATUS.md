@@ -23,7 +23,8 @@ Remaining M4 work, in order (plan "M4"):
 2. `Hw` is 1,000/1,024 B: move per-line buffers into `Memory` (plan task).
 3. CGB palette colors (BCPS/BCPD/OCPS/OCPD -> colors only), so the rtc3test
    screenshots (green PASS) match.
-4. Milestone close: hardware-correctness + test-integrity + perf reviewers
+4. Milestone close: reviews DONE (see log), fixes landed; waiting on the
+   human (Needs human 1-2), then baseline + tag. Was: reviewers
    over `stage1-m3..HEAD`, fixes, baseline, tag `stage1-m4`. mbc3-tester
    needs the human decision below before the gate can pass.
 
@@ -39,12 +40,25 @@ Working rules that matter here:
 
 ## Needs human
 
-None open. Resolved in session 06:
-- mbc3-tester reference: the human approved "fix the reference to match the
-  others" (2026-11-22). It is now a committed, pinned, recolored override in
-  `acceptance/references/` (#7BFF4A -> #7BFF31). The upstream file is untouched.
-- ADR 0015 changing `load`/`eject` returns: the human agreed it extends
-  ADR 0006 and does not change it (2026-11-22).
+Blocking the M4 tag (`stage1-m4`):
+1. **mbc3-tester `run_frames`**: the ROM's result first appears at 40.59
+   frames (counted as 70,224-clock units from the post-boot handover). That's
+   41,368 clocks after the 40-frame cutoff. No core or runner bug was found,
+   and upstream probably counts frames drawn. Proposal: `run_frames = 41`
+   for this group only (it passes with 0.41 frame of margin). Alternatives:
+   redefine `run_frames` everywhere, or leave it failing.
+2. **Reference-override mechanism** (test-integrity review M1/M2): a89713c
+   and 3da7107 added a committed, pinned PNG override plus a new ownership
+   class. The human approved the recolor, not this mechanism, and ADR 0007
+   wasn't amended. Proposal: replace it with a manifest-described in-memory
+   recolor of the pinned upstream PNG, `recolor = { from, to, count }`,
+   where `to` must be a contract palette color, plus a dated ADR 0007
+   amendment. Then remove `acceptance/references/` and its README rows.
+3. Optional: is the NUCLEO-H753ZI available for an early M7 cycle
+   measurement? (Perf review HIGH, plan task.)
+
+Resolved in session 06: the mbc3-tester recolor itself was approved, and
+ADR 0015 was agreed to extend ADR 0006, not change it.
 
 FYI (session 05): the human saw "a lot of compile errors" (session 05).
 build, clippy `-D warnings`, tests, the thumbv7em core build and the
