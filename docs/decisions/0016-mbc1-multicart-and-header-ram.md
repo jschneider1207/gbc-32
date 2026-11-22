@@ -80,3 +80,12 @@ before masking to 4 bits, as in SameBoy.
 - The multicart test ROM passes; no other ROM's behavior changes.
 - Detection is a heuristic. If a multicart is found that it misses, add a
   second structural check (not a title or hash).
+
+## Correction (2026-11-22)
+The sentence above that a 0x80000-byte (4 Mbit) multicart "fails the size
+test" is wrong: 0x80000 is at least the 0x44000 minimum (SameBoy
+`GB_configure_cart`: `rom_size >= 0x44000`), so it passes. Such a cart
+has a bank 0x10 (offset 0x40000) and is detected when its second game's
+logo is there. The size test only rules out ROMs of 0x40000 bytes or less
+(2 Mbit), which have no room for a second game at bank 0x10. The decision
+itself is unchanged.

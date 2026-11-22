@@ -15,10 +15,15 @@ Implemented in `crates/gbc-core/src/cart/rtc.rs` (counting) and
 
 - Unused bits are not stored and read 0 (rtc3test "Valid bits"; SameBoy
   masks to 3F/3F/1F/C1). Reading or writing needs the 0A enable at
-  0000-1FFF, like RAM. Selects above 0C read FF.
+  0000-1FFF, like RAM. Selects 0D-0F (RTC bit set, bank 5-7) read FF.
+  4000-5FFF decodes as SameBoy does (`Core/memory.c` `write_mbc`): bit 3
+  selects the RTC and the bank is `value & 7`, so 10-17 select RAM banks and
+  18-1F select the RTC again. Without an RTC, bit 3 is ignored.
 - **Reads** return the latched copy. **Latch:** writing 00 then 01 to
-  6000-7FFF copies the live counters (Pan Docs: MBC3). Implemented as
-  SameBoy does (`Core/mbc.c`): latch when bit 0 goes 0 -> 1.
+  6000-7FFF copies the live counters (Pan Docs: MBC3 says 00 then 01).
+  SameBoy (`Core/memory.c`) latches on every write to 6000-7FFF. We follow
+  Pan Docs (latch when bit 0 goes 0 -> 1) pending verification against
+  hardware (plan task).
 - **Writes** go to the live counters immediately, running or halted
   (rtc3test "Register writes" reads the value back after latching).
 
