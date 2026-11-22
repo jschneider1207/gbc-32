@@ -66,9 +66,11 @@ use crate::memory::Memory;
 use crate::schedule::NEVER;
 use crate::{Events, FRAME_CLOCKS};
 
-// OAM scan (M3); not wired into the timing yet.
+// Scanline renderer and OAM scan (M3); not wired into the timing yet.
 #[allow(dead_code)]
 mod objects;
+#[allow(dead_code)]
+mod render;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
