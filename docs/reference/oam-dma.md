@@ -133,6 +133,12 @@ STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
 Implemented in `dma.rs` (`OamDma::ppu_at`, `ppu_read`) and `ppu/mod.rs`
 (`Ppu::scan_to`, `fix_attrs`, `dma_event`).
 
+**Provisional (M3 review).** Both deviations from SameBoy below (the
+2-dot PPU lead and the last step not held through HALT) were fitted with
+a throwaway hex harness that was not committed; romtest's `gambatte`
+check still reports `unsupported`. Re-check them against the gambatte
+ROMs named below once that check exists (plan task, M5).
+
 **When.** The PPU sees each step of the transfer 2 dots before the CPU
 access it is due by, in both speeds: byte 0's write at `start - 2`, byte
 `i`'s at `start + i*m - 2`, the last step (the end) at `end - 2`; a PPU

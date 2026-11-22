@@ -150,8 +150,6 @@ impl Sys<'_> {
         if self.cgb_mode {
             self.serial.sc = 0x03;
         }
-        // TODO(M3): DIV, LY and STAT where the boot ROM hands over
-        // (boot_hwio).
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
