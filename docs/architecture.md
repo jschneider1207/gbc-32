@@ -111,8 +111,10 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   persists it, reading it through `cart_ram()` while the emulator holds the
   borrow, and gets the whole buffer back from `eject`, a later `load`, or a
   `LoadError`.
-- **RTC:** state is advanced by emulated time. The caller can read and write
-  the RTC state (`rtc_state`/`set_rtc_state`) to save it or to sync it to
+- **RTC:** state is advanced by emulated time, lazily: caught up on
+  register writes, the latch, `rtc_state` and reset
+  (`docs/reference/mbc3-rtc.md`). The caller can read and write the RTC
+  state (`rtc_state`/`set_rtc_state`) to save it or to sync it to
   wall-clock time on load.
 - **Video:** the caller passes a `Frame` (160×144 RGB555 `u16`, bits 0–4
   red, 5–9 green, 10–14 blue) to every run call, so it can double-buffer.

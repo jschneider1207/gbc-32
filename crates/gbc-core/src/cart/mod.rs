@@ -124,6 +124,8 @@ pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     })
 }
 
+mod rtc;
+
 /// Whether the cartridge type has an MBC3 real-time clock.
 fn has_rtc(rom: &[u8]) -> bool {
     matches!(rom[HEADER_CART_TYPE], 0x0F | 0x10)
@@ -265,7 +267,13 @@ pub(crate) struct Cart<'a> {
     /// [`cart_ram_size`] of the ROM (0 or a power of two).
     ram_len: usize,
     pub(crate) has_rtc: bool,
-    pub(crate) rtc: RtcState,
+    /// The RTC as of clock `rtc_synced` (lazy catch-up, see `rtc.rs`).
+    /// Read it through [`Cart::rtc_at`].
+    rtc: RtcState,
+    /// The emulator clock `rtc` was last advanced to.
+    rtc_synced: u64,
+    /// Bit 0 of the last 6000-7FFF write (MBC3 latch: 0 then 1 latches).
+    rtc_latch: bool,
     mapper: Mapper,
     /// The ROM size rounded up to a whole bank, then to a power of two (at
     /// least 32 KiB), minus one. Bank offsets wrap with this mask, so bank
@@ -315,6 +323,8 @@ impl<'a> Cart<'a> {
             ram_len: 0,
             has_rtc: false,
             rtc: RtcState::zero(),
+            rtc_synced: 0,
+            rtc_latch: false,
             mapper: Mapper::None,
             rom_mask: 0,
             rom_win: [&[]; 2],
@@ -392,8 +402,11 @@ impl<'a> Cart<'a> {
     }
 
     /// Mapper state back to power-on. Cartridge RAM and the RTC keep their
-    /// contents (battery backed).
+    /// contents (battery backed). The emulator clock restarts at 0, so the
+    /// caller first catches the RTC up ([`Cart::rtc_sync`]) if time passed.
     pub(crate) fn reset(&mut self) {
+        self.rtc_synced = 0;
+        self.rtc_latch = false;
         self.bank1 = 1;
         self.bank2 = 0;
         self.mode = 0;
@@ -440,9 +453,9 @@ impl<'a> Cart<'a> {
 
     /// A write to A000-BFFF (no panic path; see [`Cart::read_ram`]).
     #[inline]
-    pub(crate) fn write_ram(&mut self, addr: u16, value: u8) {
+    pub(crate) fn write_ram(&mut self, addr: u16, value: u8, now: u64) {
         if self.ram_enabled && self.rtc_sel != 0 {
-            self.write_rtc(value);
+            self.write_rtc(value, now);
         } else if self.ram_enabled && self.ram_len != 0 {
             let i = self.ram_index(addr);
             if let Some(b) = self.ram_buf.get_mut(i) {
@@ -451,9 +464,28 @@ impl<'a> Cart<'a> {
         }
     }
 
-    /// A000-BFFF read with an RTC register (or nothing) selected.
-    // M4 next: return the right latched register with its unused bits as
-    // 1s or 0s per Pan Docs / SameBoy. Stub: raw latched value.
+    /// The RTC state at clock `now` (caught up, without storing it).
+    pub(crate) fn rtc_at(&self, now: u64) -> RtcState {
+        let mut rtc = self.rtc;
+        rtc.advance(now.saturating_sub(self.rtc_synced));
+        rtc
+    }
+
+    /// Advances the stored RTC to clock `now`.
+    pub(crate) fn rtc_sync(&mut self, now: u64) {
+        self.rtc = self.rtc_at(now);
+        self.rtc_synced = now;
+    }
+
+    /// Replaces the RTC state as of clock `now`.
+    pub(crate) fn set_rtc(&mut self, state: RtcState, now: u64) {
+        self.rtc = state;
+        self.rtc_synced = now;
+    }
+
+    /// A000-BFFF read with an RTC register (or nothing) selected: the
+    /// latched copy, so no catch-up. Unused bits read 0 (rtc3test "Valid
+    /// bits"); the stored registers are already cut to their widths.
     #[inline(never)]
     fn read_rtc(&self) -> u8 {
         let t = &self.rtc.latched;
@@ -467,14 +499,26 @@ impl<'a> Cart<'a> {
         }
     }
 
-    /// A000-BFFF write with an RTC register (or nothing) selected.
-    // M4 next: write side effects (live register, subsecond reset, halt).
-    // Stub: stores into `rtc.live`, masked to the register width.
+    /// A000-BFFF write with an RTC register (or nothing) selected, at
+    /// clock `now`. Writes go to the live counters at once, running or
+    /// not. Writing the seconds also restarts the sub-second counter, so
+    /// the next tick is a full second later; other writes (including
+    /// halting and restarting) leave it alone (rtc3test "Sub-second
+    /// writes"; SameBoy `Core/memory.c` `write_mbc_ram` clears
+    /// `rtc_cycles` on a seconds write only).
     #[inline(never)]
-    fn write_rtc(&mut self, v: u8) {
+    fn write_rtc(&mut self, v: u8, now: u64) {
+        if self.rtc_sel == 0xFF {
+            return;
+        }
+        // Count the time before the write with the old halt state.
+        self.rtc_sync(now);
         let t = &mut self.rtc.live;
         match self.rtc_sel {
-            0x08 => t.seconds = v & 0x3F,
+            0x08 => {
+                t.seconds = v & 0x3F;
+                self.rtc.subsecond_clocks = 0;
+            }
             0x09 => t.minutes = v & 0x3F,
             0x0A => t.hours = v & 0x1F,
             0x0B => t.days = (t.days & 0x100) | u16::from(v),
@@ -494,8 +538,8 @@ impl<'a> Cart<'a> {
         (self.ram_off | (usize::from(addr) & (RAM_BANK - 1))) & (self.ram_len - 1)
     }
 
-    /// A write to 0000-7FFF (the mapper's registers).
-    pub(crate) fn write_rom(&mut self, addr: u16, value: u8) {
+    /// A write to 0000-7FFF (the mapper's registers) at clock `now`.
+    pub(crate) fn write_rom(&mut self, addr: u16, value: u8, now: u64) {
         match self.mapper {
             Mapper::None => {}
             Mapper::Mbc1 => {
@@ -555,8 +599,16 @@ impl<'a> Cart<'a> {
                             _ => 0xFF,
                         };
                     }
-                    // M4 next: latch register (6000-7FFF, 00 then 01).
-                    _ => {}
+                    // Latch: writing 00 then 01 copies the live clock to
+                    // the registers the game reads (Pan Docs: MBC3). Like
+                    // SameBoy (`Core/mbc.c`), bit 0 going 0 -> 1 latches.
+                    _ => {
+                        let bit = value & 1 != 0;
+                        if bit && !self.rtc_latch && self.has_rtc {
+                            self.latch_rtc(now);
+                        }
+                        self.rtc_latch = bit;
+                    }
                 }
                 self.update_banks();
             }
@@ -575,6 +627,12 @@ impl<'a> Cart<'a> {
                 self.update_banks();
             }
         }
+    }
+
+    #[inline(never)]
+    fn latch_rtc(&mut self, now: u64) {
+        self.rtc_sync(now);
+        self.rtc.latched = self.rtc.live;
     }
 
     /// Recomputes the ROM windows and RAM offset from the mapper registers.
@@ -756,19 +814,19 @@ mod tests {
         let mut ram = [0u8; 512];
         let mut c = mbc2_cart(&mut rom, &mut ram);
         // Bit 8 clear: RAM enable, never the bank, anywhere in 0000-3FFF.
-        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x0000, 0x0A, 0);
         assert_eq!(c.read_rom(0x4100), 1);
-        c.write_rom(0x3EFF, 0x05);
+        c.write_rom(0x3EFF, 0x05, 0);
         assert_eq!(c.read_rom(0x4100), 1);
         assert!(!c.ram_enabled);
         // Bit 8 set: ROM bank, never RAM enable.
-        c.write_rom(0x2100, 0x0A);
+        c.write_rom(0x2100, 0x0A, 0);
         assert_eq!(c.read_rom(0x4100), 0x0A);
-        c.write_rom(0x01FF, 0x03);
+        c.write_rom(0x01FF, 0x03, 0);
         assert_eq!(c.read_rom(0x4100), 3);
         // 4000-7FFF has no registers.
-        c.write_rom(0x4100, 0x05);
-        c.write_rom(0x6000, 0x0A);
+        c.write_rom(0x4100, 0x05, 0);
+        c.write_rom(0x6000, 0x0A, 0);
         assert_eq!(c.read_rom(0x4100), 3);
         assert!(!c.ram_enabled);
     }
@@ -778,12 +836,12 @@ mod tests {
         let mut rom = mbc2_rom();
         let mut ram = [0u8; 512];
         let mut c = mbc2_cart(&mut rom, &mut ram);
-        c.write_rom(0x2100, 0x00);
+        c.write_rom(0x2100, 0x00, 0);
         assert_eq!(c.read_rom(0x4100), 1);
         // Upper bits are ignored, and the zero check is on the 4-bit value.
-        c.write_rom(0x2100, 0xF5);
+        c.write_rom(0x2100, 0xF5, 0);
         assert_eq!(c.read_rom(0x4100), 5);
-        c.write_rom(0x2100, 0x10);
+        c.write_rom(0x2100, 0x10, 0);
         assert_eq!(c.read_rom(0x4100), 1);
         assert_eq!(c.read_rom(0x0100), 0);
     }
@@ -794,16 +852,16 @@ mod tests {
         let mut ram = [0u8; 512];
         let mut c = mbc2_cart(&mut rom, &mut ram);
         assert_eq!(c.read_ram(0xA000), 0xFF);
-        c.write_rom(0x0000, 0xFA);
+        c.write_rom(0x0000, 0xFA, 0);
         assert!(c.ram_enabled);
-        c.write_ram(0xA000, 0x05);
+        c.write_ram(0xA000, 0x05, 0);
         assert_eq!(c.read_ram(0xA000), 0xF5);
-        c.write_rom(0x0000, 0x0B);
+        c.write_rom(0x0000, 0x0B, 0);
         assert!(!c.ram_enabled);
         // Disabled RAM reads 0xFF and ignores writes.
-        c.write_ram(0xA000, 0x01);
+        c.write_ram(0xA000, 0x01, 0);
         assert_eq!(c.read_ram(0xA000), 0xFF);
-        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x0000, 0x0A, 0);
         assert_eq!(c.read_ram(0xA000), 0xF5);
     }
 
@@ -813,14 +871,14 @@ mod tests {
         let mut ram = [0u8; 512];
         ram[7] = 0xA3; // junk upper bits in a loaded save
         let mut c = mbc2_cart(&mut rom, &mut ram);
-        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x0000, 0x0A, 0);
         assert_eq!(c.read_ram(0xA007), 0xF3);
-        c.write_ram(0xA1FF, 0x5C);
+        c.write_ram(0xA1FF, 0x5C, 0);
         assert_eq!(c.read_ram(0xA1FF), 0xFC);
         // Only address bits 0-8 matter: echoed through A000-BFFF.
         assert_eq!(c.read_ram(0xA3FF), 0xFC);
         assert_eq!(c.read_ram(0xBFFF), 0xFC);
-        c.write_ram(0xB400, 0x02);
+        c.write_ram(0xB400, 0x02, 0);
         assert_eq!(c.read_ram(0xA000), 0xF2);
         // The save buffer holds the byte as read (upper nibble 1s).
         assert_eq!(c.ram()[0x1FF], 0xFC);
@@ -856,19 +914,19 @@ mod tests {
         // Power-on: bank 1.
         assert_eq!(at(&c, 0x4000), 1);
         // Bank 0 is selectable (not remapped to 1).
-        c.write_rom(0x2000, 0);
+        c.write_rom(0x2000, 0, 0);
         assert_eq!(at(&c, 0x4000), 0);
         assert_eq!(at(&c, 0x0000), 0);
         // 9th bit.
-        c.write_rom(0x2000, 0x23);
-        c.write_rom(0x3000, 1);
+        c.write_rom(0x2000, 0x23, 0);
+        c.write_rom(0x3000, 1, 0);
         assert_eq!(at(&c, 0x4000), 0x123);
         // Only bit 0 of the 3000 register counts.
-        c.write_rom(0x3FFF, 0xFE);
+        c.write_rom(0x3FFF, 0xFE, 0);
         assert_eq!(at(&c, 0x4000), 0x023);
         assert_eq!(c.mbc5_rom, 0x023);
-        c.write_rom(0x2FFF, 0xFF);
-        c.write_rom(0x3000, 1);
+        c.write_rom(0x2FFF, 0xFF, 0);
+        c.write_rom(0x3000, 1, 0);
         assert_eq!(at(&c, 0x4000), 0x1FF);
         // 0000-3FFF stays on bank 0.
         assert_eq!(at(&c, 0x0000), 0);
@@ -879,11 +937,11 @@ mod tests {
         let rom = mbc5_rom(4, 0x19);
         let mut ram = [0u8; 0x2_0000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x2000, 6); // 6 mod 4 = 2
+        c.write_rom(0x2000, 6, 0); // 6 mod 4 = 2
         assert_eq!(c.read_rom(0x4000), 2);
-        c.write_rom(0x3000, 1); // 0x106 mod 4 = 2
+        c.write_rom(0x3000, 1, 0); // 0x106 mod 4 = 2
         assert_eq!(c.read_rom(0x4000), 2);
-        c.write_rom(0x2000, 4); // bank 0 mirror
+        c.write_rom(0x2000, 4, 0); // bank 0 mirror
         assert_eq!(c.read_rom(0x4000), 0);
     }
 
@@ -895,23 +953,23 @@ mod tests {
             let mut c = Cart::new(&rom, &mut ram).unwrap();
             // Disabled at power-on.
             assert_eq!(c.read_ram(0xA000), 0xFF);
-            c.write_rom(0x0000, 0x0A);
+            c.write_rom(0x0000, 0x0A, 0);
             for bank in 0..16u8 {
-                c.write_rom(0x4000, bank);
-                c.write_ram(0xA000, bank + 1);
+                c.write_rom(0x4000, bank, 0);
+                c.write_ram(0xA000, bank + 1, 0);
             }
             // Rumble carts: bit 3 does not select a bank.
             for bank in 0..16u8 {
-                c.write_rom(0x5FFF, bank);
+                c.write_rom(0x5FFF, bank, 0);
                 let last = (0..16u8).rev().find(|b| b & mask == bank & mask).unwrap();
                 assert_eq!(c.read_ram(0xA000), last + 1, "{cart_type:#x} bank {bank}");
             }
             // Only a low nibble of A enables (and the 1000 half decodes too).
-            c.write_rom(0x0000, 0x00);
+            c.write_rom(0x0000, 0x00, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF);
-            c.write_rom(0x1000, 0x1A);
+            c.write_rom(0x1000, 0x1A, 0);
             assert_ne!(c.read_ram(0xA000), 0xFF);
-            c.write_rom(0x0000, 0x0B);
+            c.write_rom(0x0000, 0x0B, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF);
         }
     }
@@ -922,22 +980,22 @@ mod tests {
         let mut ram = [0u8; 0x2_0000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
         assert_eq!(c.read_rom(0x4000), 1);
-        c.write_rom(0x2000, 0); // 0 selects 1
+        c.write_rom(0x2000, 0, 0); // 0 selects 1
         assert_eq!(c.read_rom(0x4000), 1);
-        c.write_rom(0x3FFF, 0x45);
+        c.write_rom(0x3FFF, 0x45, 0);
         assert_eq!(c.read_rom(0x4000), 0x45);
         assert_eq!(c.read_rom(0x0000), 0);
         // 7-bit register below 4 MiB: bit 7 ignored.
         let rom = mbc5_rom(128, 0x13);
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x2000, 0xC5);
+        c.write_rom(0x2000, 0xC5, 0);
         assert_eq!(c.read_rom(0x4000), 0x45);
-        c.write_rom(0x2000, 0x80); // 0 -> 1, not bank 0x80
+        c.write_rom(0x2000, 0x80, 0); // 0 -> 1, not bank 0x80
         assert_eq!(c.read_rom(0x4000), 1);
         // MBC30 (over 2 MiB): 8 bits.
         let rom = mbc5_rom(256, 0x13);
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x2000, 0xC5);
+        c.write_rom(0x2000, 0xC5, 0);
         assert_eq!(c.read_rom(0x4000), 0xC5);
     }
 
@@ -946,9 +1004,9 @@ mod tests {
         let rom = mbc5_rom(4, 0x13);
         let mut ram = [0u8; 0x2_0000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x2000, 6); // 6 mod 4 = 2
+        c.write_rom(0x2000, 6, 0); // 6 mod 4 = 2
         assert_eq!(c.read_rom(0x4000), 2);
-        c.write_rom(0x2000, 4); // bank 0 mirror; no 0 -> 1 after the mask
+        c.write_rom(0x2000, 4, 0); // bank 0 mirror; no 0 -> 1 after the mask
         assert_eq!(c.read_rom(0x4000), 0);
     }
 
@@ -959,28 +1017,28 @@ mod tests {
         let mut ram = [0u8; 0x8000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
         assert_eq!(c.read_ram(0xA000), 0xFF); // disabled at power-on
-        c.write_rom(0x1FFF, 0x0A);
+        c.write_rom(0x1FFF, 0x0A, 0);
         for bank in 0..4u8 {
-            c.write_rom(0x4000, bank);
-            c.write_ram(0xA000, bank + 1);
+            c.write_rom(0x4000, bank, 0);
+            c.write_ram(0xA000, bank + 1, 0);
         }
         for bank in 0..4u8 {
-            c.write_rom(0x5FFF, bank);
+            c.write_rom(0x5FFF, bank, 0);
             assert_eq!(c.read_ram(0xA000), bank + 1);
         }
         // 04-07 mirror 0-3 on 32 KiB; 08-0C without an RTC map nothing.
-        c.write_rom(0x4000, 5);
+        c.write_rom(0x4000, 5, 0);
         assert_eq!(c.read_ram(0xA000), 2);
         for sel in [0x08, 0x0C, 0x0D, 0xFF] {
-            c.write_rom(0x4000, sel);
+            c.write_rom(0x4000, sel, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF, "{sel:#x}");
         }
-        c.write_rom(0x4000, 1);
+        c.write_rom(0x4000, 1, 0);
         assert_eq!(c.read_ram(0xA000), 2);
         // Only a low nibble of A enables.
-        c.write_rom(0x0000, 0x1B);
+        c.write_rom(0x0000, 0x1B, 0);
         assert_eq!(c.read_ram(0xA000), 0xFF);
-        c.write_rom(0x0000, 0x1A);
+        c.write_rom(0x0000, 0x1A, 0);
         assert_eq!(c.read_ram(0xA000), 2);
     }
 
@@ -990,22 +1048,123 @@ mod tests {
         rom[HEADER_RAM_SIZE] = 0x03;
         let mut ram = [0u8; 0x8000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x0000, 0x0A);
-        c.write_rom(0x4000, 0);
-        c.write_ram(0xA000, 0x77);
+        c.write_rom(0x0000, 0x0A, 0);
+        c.write_rom(0x4000, 0, 0);
+        c.write_ram(0xA000, 0x77, 0);
         c.rtc.latched.minutes = 0x21;
-        c.write_rom(0x4000, 0x09);
+        c.write_rom(0x4000, 0x09, 0);
         assert_eq!(c.read_ram(0xA000), 0x21); // RTC M, not RAM
-        c.write_ram(0xA000, 0x13); // goes to the live register
+        c.write_ram(0xA000, 0x13, 0); // goes to the live register
         assert_eq!(c.rtc.live.minutes, 0x13);
-        c.write_rom(0x4000, 0x0D); // above 0C: nothing
+        c.write_rom(0x4000, 0x0D, 0); // above 0C: nothing
         assert_eq!(c.read_ram(0xA000), 0xFF);
-        c.write_rom(0x4000, 0);
+        c.write_rom(0x4000, 0, 0);
         assert_eq!(c.read_ram(0xA000), 0x77); // RAM untouched
         // RTC reads still need the enable.
-        c.write_rom(0x4000, 0x09);
-        c.write_rom(0x0000, 0);
+        c.write_rom(0x4000, 0x09, 0);
+        c.write_rom(0x0000, 0, 0);
         assert_eq!(c.read_ram(0xA000), 0xFF);
+    }
+
+    /// Writes `v` to RTC register `reg` (08-0C) at clock `now`.
+    fn rtc_write(c: &mut Cart<'_>, reg: u8, v: u8, now: u64) {
+        c.write_rom(0x4000, reg, now);
+        c.write_ram(0xA000, v, now);
+    }
+
+    /// Latches at `now` and reads RTC register `reg`.
+    fn rtc_read(c: &mut Cart<'_>, reg: u8, now: u64) -> u8 {
+        c.write_rom(0x6000, 0, now);
+        c.write_rom(0x6000, 1, now);
+        c.write_rom(0x4000, reg, now);
+        c.read_ram(0xA000)
+    }
+
+    const SEC: u64 = crate::CLOCK_HZ as u64;
+
+    /// MBC3+TIMER, no RAM.
+    fn rtc_rom() -> std::vec::Vec<u8> {
+        let mut rom = mbc5_rom(2, 0x0F);
+        rom[HEADER_RAM_SIZE] = 0;
+        rom
+    }
+
+    #[test]
+    fn mbc3_rtc_latch_copies_live_on_0_then_1() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        rtc_write(&mut c, 0x08, 10, 0);
+        c.write_rom(0x6000, 0, 0);
+        c.write_rom(0x6000, 1, 0);
+        c.write_rom(0x4000, 0x08, 0);
+        assert_eq!(c.read_ram(0xA000), 10);
+        // The latched copy holds until the next 0 -> 1.
+        rtc_write(&mut c, 0x08, 20, 3 * SEC);
+        c.write_rom(0x6000, 1, 5 * SEC); // 1 -> 1: no latch
+        assert_eq!(c.read_ram(0xA000), 10);
+        c.write_rom(0x6000, 0, 5 * SEC);
+        assert_eq!(c.read_ram(0xA000), 10);
+        c.write_rom(0x6000, 1, 5 * SEC + SEC / 2);
+        assert_eq!(c.read_ram(0xA000), 22); // 2.5 s after the write
+    }
+
+    #[test]
+    fn mbc3_rtc_seconds_write_restarts_subsecond_others_do_not() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        // Like RTCS/900: written 1/8 s into a second, next tick 1 s later.
+        rtc_write(&mut c, 0x08, 5, SEC + SEC / 8);
+        assert_eq!(rtc_read(&mut c, 0x08, 2 * SEC + SEC / 8 - 1), 5);
+        assert_eq!(rtc_read(&mut c, 0x08, 2 * SEC + SEC / 8), 6);
+        // RTCM/600 (and H, DL, DH alike): the second keeps its phase.
+        let t = 2 * SEC + SEC / 8 + 3 * SEC / 8; // next tick at +5/8 s
+        for reg in [0x09, 0x0A, 0x0B, 0x0C] {
+            rtc_write(&mut c, reg, 0, t);
+        }
+        assert_eq!(rtc_read(&mut c, 0x08, t + 5 * SEC / 8 - 1), 6);
+        assert_eq!(rtc_read(&mut c, 0x08, t + 5 * SEC / 8), 7);
+    }
+
+    #[test]
+    fn mbc3_rtc_halt_bit_stops_and_resumes() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        // Like RTC off/400: stopped 5/8 s into a second, the next tick comes
+        // 3/8 s after restarting, however long it was off.
+        rtc_write(&mut c, 0x0C, 0x40, 5 * SEC / 8);
+        assert_eq!(rtc_read(&mut c, 0x0C, 50 * SEC), 0x40);
+        assert_eq!(rtc_read(&mut c, 0x08, 50 * SEC), 0);
+        rtc_write(&mut c, 0x0C, 0x00, 50 * SEC);
+        assert_eq!(rtc_read(&mut c, 0x08, 50 * SEC + 3 * SEC / 8 - 1), 0);
+        assert_eq!(rtc_read(&mut c, 0x08, 50 * SEC + 3 * SEC / 8), 1);
+        // Registers stay writable while halted; unused bits read 0.
+        rtc_write(&mut c, 0x0C, 0xFF, 60 * SEC);
+        rtc_write(&mut c, 0x0A, 0xFF, 60 * SEC);
+        assert_eq!(rtc_read(&mut c, 0x0C, 70 * SEC), 0xC1);
+        assert_eq!(rtc_read(&mut c, 0x0A, 70 * SEC), 0x1F);
+    }
+
+    #[test]
+    fn mbc3_rtc_catches_up_from_last_sync() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        // Hours of emulated time with no cart access: one catch-up.
+        let now = (3 * 86_400 + 2 * 3600 + 61) * SEC + 5;
+        let s = c.rtc_at(now);
+        assert_eq!((s.live.days, s.live.hours), (3, 2));
+        assert_eq!((s.live.minutes, s.live.seconds), (1, 1));
+        assert_eq!(s.subsecond_clocks, 5);
+        assert_eq!(c.rtc.live, RtcTime::default()); // `rtc_at` stores nothing
+        c.rtc_sync(now);
+        assert_eq!(c.rtc, s);
+        assert_eq!(c.rtc_at(now), s); // no double counting
     }
 
     #[test]
@@ -1014,13 +1173,13 @@ mod tests {
         rom[HEADER_RAM_SIZE] = 0x05; // 64 KiB: 8 banks
         let mut ram = [0u8; 0x1_0000];
         let mut c = Cart::new(&rom, &mut ram).unwrap();
-        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x0000, 0x0A, 0);
         for bank in 0..8u8 {
-            c.write_rom(0x4000, bank);
-            c.write_ram(0xA000, bank + 1);
+            c.write_rom(0x4000, bank, 0);
+            c.write_ram(0xA000, bank + 1, 0);
         }
         for bank in 0..8u8 {
-            c.write_rom(0x4000, bank);
+            c.write_rom(0x4000, bank, 0);
             assert_eq!(c.read_ram(0xA000), bank + 1);
         }
     }

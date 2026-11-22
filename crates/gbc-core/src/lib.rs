@@ -239,7 +239,9 @@ impl<'a> Emulator<'a> {
         let cart = Cart::new(rom, cart_ram)?;
         let previous = core::mem::replace(&mut self.hw.sys.cart, cart).into_buffers();
         self.hw.sys.config = config;
-        self.reset();
+        // Not `reset`: the new cartridge's RTC must not count the old
+        // cartridge's run time.
+        self.power_cycle();
         Ok(previous)
     }
 
@@ -278,6 +280,15 @@ impl<'a> Emulator<'a> {
     /// stop events are kept. Without a cartridge this does nothing: the
     /// emulator stays powered off, in the state [`Emulator::new`] leaves it.
     pub fn reset(&mut self) {
+        let sys = &mut self.hw.sys;
+        // The RTC counts the time up to the reset; the clock restarts at 0.
+        sys.cart.rtc_sync(sys.hot.clock());
+        self.power_cycle();
+    }
+
+    /// [`Emulator::reset`] without first counting the elapsed time on the
+    /// RTC.
+    fn power_cycle(&mut self) {
         if !self.hw.sys.cart.is_loaded() {
             return;
         }
@@ -540,9 +551,11 @@ impl<'a> Emulator<'a> {
         self.hw.sys.cart.ram()
     }
 
-    /// The MBC3 RTC state, or `None` if the cartridge has no RTC.
+    /// The MBC3 RTC state at [`Emulator::clock`], or `None` if the
+    /// cartridge has no RTC.
     pub fn rtc_state(&self) -> Option<RtcState> {
-        self.hw.sys.cart.has_rtc.then_some(self.hw.sys.cart.rtc)
+        let sys = &self.hw.sys;
+        sys.cart.has_rtc.then(|| sys.cart.rtc_at(sys.hot.clock()))
     }
 
     /// Restores the MBC3 RTC state (e.g. from a save, advanced to the
@@ -552,8 +565,9 @@ impl<'a> Emulator<'a> {
     /// `subsecond_clocks` is clamped below one second (see [`RtcTime`] and
     /// [`RtcState`]), so `rtc_state()` afterwards may differ from `state`.
     pub fn set_rtc_state(&mut self, state: RtcState) {
-        if self.hw.sys.cart.has_rtc {
-            self.hw.sys.cart.rtc = state.masked();
+        let sys = &mut self.hw.sys;
+        if sys.cart.has_rtc {
+            sys.cart.set_rtc(state.masked(), sys.hot.clock());
         }
     }
 }
@@ -970,6 +984,50 @@ mod tests {
         // 61 fits the 6-bit register: kept, not carried into minutes.
         assert_eq!((s.latched.seconds, s.latched.minutes), (61, 0));
         assert_eq!(s.subsecond_clocks, CLOCK_HZ - 1);
+    }
+
+    #[test]
+    fn rtc_state_counts_emulated_time_across_reset_not_load() {
+        let rtc_rom = || {
+            let rom = vec![0u8; 0x8000].leak();
+            rom[0x147] = 0x0F; // MBC3+TIMER+BATTERY
+            &*rom
+        };
+        let hz = u64::from(CLOCK_HZ);
+        let emu = fresh();
+        emu.load(rtc_rom(), &mut [], Config::default()).unwrap();
+        let mut fb = frame();
+        while emu.clock() < 3 * hz + hz / 2 {
+            let _ = emu.run_until(3 * hz + hz / 2, &mut fb, &mut []);
+        }
+        let s = emu.rtc_state().unwrap();
+        assert_eq!(s.live.seconds, 3);
+        assert_eq!(u64::from(s.subsecond_clocks), emu.clock() - 3 * hz);
+        // Counting resumes from the state set, at the clock it was set.
+        emu.set_rtc_state(RtcState {
+            live: RtcTime {
+                seconds: 59,
+                minutes: 59,
+                hours: 23,
+                ..RtcTime::default()
+            },
+            ..RtcState::default()
+        });
+        let set_at = emu.clock();
+        while emu.clock() < set_at + hz {
+            let _ = emu.run_until(set_at + hz, &mut fb, &mut []);
+        }
+        let s = emu.rtc_state().unwrap();
+        assert_eq!((s.live.days, s.live.hours, s.live.seconds), (1, 0, 0));
+        assert_eq!(u64::from(s.subsecond_clocks), emu.clock() - set_at - hz);
+        // A reset restarts the clock at 0 but keeps the time so far.
+        emu.reset();
+        assert_eq!(emu.clock(), 0);
+        assert_eq!(emu.rtc_state(), Some(s));
+        // Loading another cartridge does not count the old one's time.
+        let _ = emu.run_cycles(hz, &mut fb, &mut []);
+        emu.load(rtc_rom(), &mut [], Config::default()).unwrap();
+        assert_eq!(emu.rtc_state(), Some(RtcState::default()));
     }
 
     #[test]
