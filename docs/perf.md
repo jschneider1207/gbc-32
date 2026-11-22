@@ -29,8 +29,9 @@ in git):
   cannot cover more), every STAT source (modes 0/1/2, LYC=72) with IE=STAT
   and an 8-byte handler at 0x48 incrementing a WRAM counter. Replaces the
   sum of two separate runs (event-storm + acid2 PPU) as the worst case.
-  callgrind: `Ctx::boundary` 15.5%, `Renderer::render` 9.7%, timer 6.8%,
-  serial 4.9%.
+  callgrind: `Ctx::boundary` 15.9%, `Renderer::render` 9.1% (inclusive,
+  with `fill_mixed`; 9.7% before the fused object mixing), timer 7.0%,
+  serial 5.1%.
 
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.
@@ -41,18 +42,19 @@ Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
 |---|---|
 | cpu_instrs.gb | 1,726,409,705 |
 | cgb_sound.gb | 971,629,157 |
-| cgb-acid2.gbc | 789,966,291 |
+| cgb-acid2.gbc | 680,542,754 |
 | synth:event-storm (2 s) | 446,532,249 |
 | synth:dma-storm (3 s) | 439,495,485 |
 | synth:halt-irq (10 s) | 290,969,131 |
-| synth:worst-case (2 s) | 505,402,675 |
+| synth:worst-case (2 s) | 491,559,542 |
 
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
 (50% of M7) line, 0.21 M over it. The earlier sum estimate (event-storm
 3.73 M + acid2 PPU 0.53 M = 3.97 M, 99%) was 0.26 M too low: the real
 program also pays STAT IRQ entry (up to 3 per line) and the 10-object
-lines. x86 proxy only. Not optimized; PPU cuts are separate work.
+lines. x86 proxy only. Fused object mixing (below) took it to 491.6 M =
+4.12 M per frame, 102% of the line (0.10 M over).
 
 **Scanline renderer (M3).** Drawing pixels costs about 220k Ir per frame
 with the BG only (cpu_instrs, cgb_sound, halt-irq, event-storm and
@@ -71,11 +73,29 @@ the plan's M8 is 4.02 M, x86 proxy only). How the pixel loop got there
 | Spans with no object pixel: tiles straight to RGB555, no index buffer or mix | 318k |
 | + 256-entry bit-spread table (512 B flash), unrolled whole-tile path | 220k |
 
-The object path (index buffer, then mix) is the next cut if cgb-acid2-like
-content matters on the MCU. `Renderer::render` has no panic or bounds-check
-calls (x86 disassembly of the standalone function; on thumbv7em with one
-codegen unit it is inlined into `Ppu::draw`, which calls only
-`__aeabi_memclr`).
+**Fused object mixing.** Spans with object pixels used to decode the
+tiles into a 160-byte color-index buffer, then mix it with the object
+buffer pixel by pixel. Now the tiles are mixed as they are decoded, and a
+whole tile with no object pixel (one 8-byte test of the object buffer)
+takes the plain path; object fetches merge their 8 pixels into the object
+buffer with one 64-bit operation instead of 8 conditional byte stores.
+Measured at c33713d (Ir, 20 s / 2 s):
+
+| Variant | cgb-acid2 | synth:worst-case | `render` + `fill_mixed` (B) |
+|---|---|---|---|
+| Before (index buffer, then mix) | 788,859,655 | 505,402,675 | 2,684 |
+| Fused, unrolled mixed tile inlined twice (BG, window) | 681,103,233 | 492,404,783 | 3,684 |
+| Fused, mixed tile as a loop | 691,503,254 | 495,893,713 | 2,856 |
+| Fused, unrolled mixed tile out of line (`fill_mixed`) + 64-bit object merge (chosen) | 680,542,754 | 491,559,542 | 2,216 + 792 |
+
+cgb-acid2 -13.7% (about 91k Ir per frame: rendering ~375k -> ~285k),
+worst-case -2.7% (4.23 -> 4.12 M Ir per frame). BG-only ROMs and the
+other synthetic benches moved less than 0.05%. The 64-bit object merge
+alone was -1.5 M Ir on worst-case and -4.8 M on cgb-acid2 for +28 B; it
+also removes 8 data-dependent branches per object fetch on the M7.
+`Renderer::render` and `fill_mixed` have no panic or bounds-check calls
+(x86 disassembly; on thumbv7em their only relocations are `SPREAD` and,
+from `render`, `fill_mixed`).
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
 mode 3, where the renderer draws) plus STAT interrupt edges: from
@@ -124,7 +144,8 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 | `Ppu::next_point` | 412 | 440 |
 | `Ppu::point_irq` | 494 | 520 |
 | `Ctx::write_ppu` (PPU registers, out of `write_io`; mid-line flush) | 1,226 | 1,290 |
-| `Renderer::render` (pixel loop) | 2,668 | 2,800 |
+| `Renderer::render` (pixel loop) | 2,216 | 2,330 |
+| `render::fill_mixed` (tile loop with object mixing) | 792 | 830 |
 | `Renderer::start_line` (priority sort, buffer clear) | 2,208 | 2,320 |
 | `LineObjects::scan` (OAM scan) | 482 | 510 |
 | `Ppu::draw`, `Ppu::flush` | 122, 290 | 130, 305 |
@@ -185,7 +206,7 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 |---|---|
 | cpu_instrs.gb | 1,726,409,705 |
 | cgb_sound.gb | 971,629,157 |
-| cgb-acid2.gbc | 789,966,291 |
+| cgb-acid2.gbc | 680,542,754 |
 
 (The scanline renderer took these from 1,464.1 M, 709.3 M and 341.7 M;
 ADR 0014, PPU mode timing, before it from 1,388.0 M, 607.5 M and 12.9 M;
