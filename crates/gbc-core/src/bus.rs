@@ -1129,6 +1129,36 @@ impl Ctx<'_, '_> {
         // The CPU idles one M-cycle to double speed.
         m == 2
     }
+
+    /// Whether the speed-switch halt has run its length.
+    #[inline]
+    pub(crate) fn speed_switch_over(&self) -> bool {
+        (self.clock() as u32).wrapping_sub(self.sys.vdma.switch_end) as i32 >= 0
+    }
+
+    /// As [`Bus::halt_end`], except that the end of the countdown (not an
+    /// interrupt) starts no HDMA block: SameBoy clears `halted` in
+    /// `GB_advance_cycles` without the wake-up's `hdma_on`.
+    #[inline]
+    pub(crate) fn speed_switch_end(&mut self) {
+        if self.sys.vdma.halted && self.speed_switch_over() {
+            self.sys.vdma.halted = false;
+        }
+        self.halt_end();
+    }
+
+    /// The halted skip ([`Bus::idle_halted`]), stopping at the halt's
+    /// last M-cycle.
+    #[inline]
+    pub(crate) fn idle_speed_switch(&mut self) {
+        let m = self.hot.mcycle as u32;
+        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock() as u32) / m;
+        let n = self.mcycles_to_deadline().min(left);
+        self.hot.budget -= (n * m) as i32;
+        if self.hot.budget <= 0 {
+            self.boundary();
+        }
+    }
 }
 
 /// CGB VRAM DMA (FF51-FF55; `hdma` module, ADR 0017).
@@ -1346,29 +1376,13 @@ impl Bus for Ctx<'_, '_> {
         Ctx::speed_switch(self, ime, pending)
     }
 
-    fn speed_switch_over(&self) -> bool {
-        (self.clock() as u32).wrapping_sub(self.sys.vdma.switch_end) as i32 >= 0
-    }
-
-    /// As [`Self::halt_end`], except that the end of the countdown (not an
-    /// interrupt) starts no HDMA block: SameBoy clears `halted` in
-    /// `GB_advance_cycles` without the wake-up's `hdma_on`.
-    fn speed_switch_end(&mut self) {
-        if self.sys.vdma.halted && Bus::speed_switch_over(self) {
-            self.sys.vdma.halted = false;
-        }
-        self.halt_end();
-    }
-
-    /// The halted skip ([`Self::idle_halted`]), stopping at the halt's
-    /// last M-cycle.
-    fn idle_speed_switch(&mut self) {
-        let m = self.hot.mcycle as u32;
-        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock() as u32) / m;
-        let n = self.mcycles_to_deadline().min(left);
-        self.hot.budget -= (n * m) as i32;
-        if self.hot.budget <= 0 {
-            self.boundary();
+    fn speed_switch_halt(&mut self) -> bool {
+        if self.sys.ie & self.sys.iflags & INT_MASK != 0 || self.speed_switch_over() {
+            self.speed_switch_end();
+            true
+        } else {
+            self.idle_speed_switch();
+            false
         }
     }
 

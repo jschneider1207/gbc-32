@@ -26,7 +26,7 @@
 530 gbc_core::bus::read_during_dma
 860 <gbc_core::bus::Ctx>::write_during_dma
 540 <gbc_core::bus::Ctx>::div_reset
-940 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop
+880 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
 # PPU mode timing (ADR 0014; measured 2720, 482, 412, 494, 1058 bytes):
 # the per-line event and its update-point walk, and the PPU register
 # writes moved out of write_io.

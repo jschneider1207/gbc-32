@@ -148,28 +148,55 @@ macro_rules! bitset {
 
         impl core::fmt::Debug for $name {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.write_str(concat!(stringify!($name), "("))?;
-                let mut first = true;
-                $(
-                    if self.contains(Self::$flag) {
-                        if !first {
-                            f.write_str(" | ")?;
-                        }
-                        f.write_str(stringify!($flag))?;
-                        first = false;
-                    }
-                )*
-                let unknown = self.0 & !Self::ALL.0;
-                if unknown != 0 {
-                    if !first {
-                        f.write_str(" | ")?;
-                    }
-                    write!(f, "{unknown:#x}")?;
-                }
-                f.write_str(")")
+                const FLAGS: &[(&str, u16)] = &[$((stringify!($flag), $value)),*];
+                $crate::bitset::fmt_flags(
+                    f,
+                    concat!(stringify!($name), "("),
+                    FLAGS,
+                    self.0.into(),
+                    Self::ALL.0.into(),
+                )
             }
         }
     };
 }
 
 pub(crate) use bitset;
+
+/// The `Debug` output of a bit set: `Name(A | B | 0x..)`, flags in
+/// definition order, then any undefined bits in hex. One shared copy out of
+/// line, instead of one unrolled branch per flag in every set's `Debug`
+/// (code size on the MCU; none of it is hot).
+#[inline(never)]
+pub(crate) fn fmt_flags(
+    f: &mut core::fmt::Formatter<'_>,
+    open: &str,
+    flags: &[(&str, u16)],
+    bits: u16,
+    all: u16,
+) -> core::fmt::Result {
+    f.write_str(open)?;
+    let mut first = true;
+    let mut i = 0;
+    while let Some(&(name, flag)) = flags.get(i) {
+        // `contains`: every bit of the flag is set.
+        if bits & flag == flag {
+            if !first {
+                f.write_str(" | ")?;
+            }
+            f.write_str(name)?;
+            first = false;
+        }
+        // Opaque to the optimizer, so it doesn't unroll the loop (several
+        // hundred bytes on thumbv7em for code that is never hot).
+        i = core::hint::black_box(i) + 1;
+    }
+    let unknown = bits & !all;
+    if unknown != 0 {
+        if !first {
+            f.write_str(" | ")?;
+        }
+        write!(f, "{unknown:#x}")?;
+    }
+    f.write_str(")")
+}

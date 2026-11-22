@@ -1439,11 +1439,16 @@ mod tests {
         fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
             cpu::Bus::speed_switch(self.0, ime, pending)
         }
-        fn speed_switch_over(&self) -> bool {
-            self.0.speed_switch_over()
-        }
-        fn speed_switch_end(&mut self) {
-            self.0.speed_switch_end();
+        fn speed_switch_halt(&mut self) -> bool {
+            if self.interrupt_enable() & self.interrupt_flags() & cpu::INT_MASK != 0
+                || self.0.speed_switch_over()
+            {
+                self.0.speed_switch_end();
+                true
+            } else {
+                self.0.idle();
+                false
+            }
         }
         fn stop_wakeup(&self) -> bool {
             self.0.stop_wakeup()
@@ -1800,12 +1805,12 @@ mod tests {
         assert!(end > now + 4);
         assert!(cpu::Bus::speed_switch(&mut ctx, false, false));
         assert_eq!(ctx.sys.ppu.dma.paused, now);
-        while !cpu::Bus::speed_switch_over(&ctx) {
-            cpu::Bus::idle_speed_switch(&mut ctx);
+        while !ctx.speed_switch_over() {
+            ctx.idle_speed_switch();
         }
         let wake = ctx.clock();
         assert_eq!(wake, now + 0x8000 * 2);
-        cpu::Bus::speed_switch_end(&mut ctx);
+        ctx.speed_switch_end();
         assert_eq!(ctx.sys.ppu.dma.paused, schedule::NEVER);
         assert_eq!(ctx.sys.ppu.dma.end, wake + (end - now) / 2);
     }

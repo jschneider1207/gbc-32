@@ -153,19 +153,15 @@ pub trait Bus {
         let _ = (ime, pending);
         false
     }
-    /// Whether the speed-switch halt has run its length (free).
-    fn speed_switch_over(&self) -> bool {
-        true
-    }
-    /// The speed-switch halt ends (its countdown or an interrupt), in place
-    /// of [`Bus::halt_end`].
-    fn speed_switch_end(&mut self) {
+    /// One step of a CPU in the speed-switch halt: if an interrupt is
+    /// pending (IE & IF) or the halt has run its length, the halt ends (in
+    /// place of [`Bus::halt_end`]) and this returns true; otherwise it
+    /// idles like [`Bus::idle_halted`], never past the halt's end, and
+    /// returns false. The default halt has no length: it ends at once.
+    /// One cold call, so the HALT path of `step_not_running` stays as it was.
+    fn speed_switch_halt(&mut self) -> bool {
         self.halt_end();
-    }
-    /// Idles a CPU in the speed-switch halt, like [`Bus::idle_halted`]
-    /// but never past the halt's end.
-    fn idle_speed_switch(&mut self) {
-        self.idle();
+        true
     }
     /// Whether a stopped CPU wakes up (a button is pressed).
     fn stop_wakeup(&self) -> bool {
@@ -199,7 +195,7 @@ enum Mode {
     /// HALT: idles until an interrupt is pending (IE & IF != 0).
     Halted,
     /// The halt after a CGB speed switch: as `Halted`, but it also ends
-    /// when [`Bus::speed_switch_over`] (SameBoy
+    /// when its countdown runs out ([`Bus::speed_switch_halt`]; SameBoy
     /// `speed_switch_halt_countdown`).
     SpeedSwitch,
     /// The HALT bug: the next opcode fetch doesn't increment PC, so the
@@ -364,35 +360,32 @@ impl Cpu {
     fn step_not_running<B: Bus>(&mut self, bus: &mut B) -> Option<u16> {
         match self.mode {
             Mode::Running => Some(1),
-            Mode::Halted | Mode::SpeedSwitch => {
+            Mode::Halted => {
                 // Any pending interrupt ends HALT, even with IME off (then
                 // execution just continues after HALT). On CGB the wake-up
                 // costs one more idle M-cycle before the dispatch (IME on)
                 // or the next fetch (IME off): SameBoy `GB_cpu_run` samples
                 // IE & IF, then advances 4 clocks while halted, then takes
                 // either branch. See docs/reference/halt.md.
-                //
-                // The speed-switch halt is a HALT (SameBoy `halted`) that
-                // its countdown also ends ([`Bus::speed_switch_over`]),
-                // with the same wake-up M-cycle, then the fetch.
-                let switch = self.mode == Mode::SpeedSwitch;
-                if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0
-                    || (switch && bus.speed_switch_over())
-                {
-                    if switch {
-                        bus.speed_switch_end();
-                    } else {
-                        bus.halt_end();
-                    }
+                if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                    bus.halt_end();
                     bus.idle();
                     self.mode = Mode::Running;
                     Some(1)
                 } else {
-                    if switch {
-                        bus.idle_speed_switch();
-                    } else {
-                        bus.idle_halted();
-                    }
+                    bus.idle_halted();
+                    None
+                }
+            }
+            // The speed-switch halt is a HALT (SameBoy `halted`) that its
+            // countdown also ends, with the same wake-up M-cycle, then the
+            // fetch.
+            Mode::SpeedSwitch => {
+                if bus.speed_switch_halt() {
+                    bus.idle();
+                    self.mode = Mode::Running;
+                    Some(1)
+                } else {
                     None
                 }
             }
