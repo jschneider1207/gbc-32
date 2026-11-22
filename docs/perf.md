@@ -269,6 +269,7 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 | `Ppu::vram_blocked`, `Ppu::oam_blocked` | 196, 240 | 210, 260 |
 | `Ctx::write_timer_io` (cold) | 892 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
+| All of gbc-core (`(total .text)`: every `.text*` section in the rlib, measured at 2446bc2) | 83,408 | 85,100 |
 
 OAM DMA (M2): every CPU access ORs `Hot::dma` (FE00 during a transfer)
 into its region dispatch, so a transfer sends every address to the

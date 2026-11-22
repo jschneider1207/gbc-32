@@ -66,3 +66,8 @@
 # them first; the rest of that path is out of line (cold).
 155 <gbc_core::ppu::Ppu>::draw
 355 <gbc_core::ppu::Ppu>::flush
+# Total gbc-core code: the sum of all .text* sections in the rlib (the
+# special name below; M4 review / stage-1 plan task, a stricter check).
+# Measured 83,408 B at 2446bc2; budget +2%. ITCM is 64 KB, so this caps
+# growth while per-function ITCM placement is planned (docs/perf.md).
+85100 (total .text)

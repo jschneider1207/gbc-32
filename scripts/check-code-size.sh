@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fail if a budgeted gbc-core function exceeds its code-size budget on the
-# MCU build (thumbv7em-none-eabihf, release, cortex-m7). See docs/perf.md.
+# Fail if a budgeted gbc-core function, or all of its code ("(total .text)"
+# in the budgets file), exceeds its code-size budget on the MCU build
+# (thumbv7em-none-eabihf, release, cortex-m7). See docs/perf.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -10,6 +11,7 @@ TARGET=thumbv7em-none-eabihf
 TDIR=target/codesize
 
 NM=$(command -v llvm-nm || command -v rust-nm || command -v nm) || { echo "no nm found" >&2; exit 2; }
+SIZE=$(command -v llvm-size || command -v rust-size || command -v size) || { echo "no size found" >&2; exit 2; }
 
 if ! RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core --release \
     --target "$TARGET" --target-dir "$TDIR" >&2; then
@@ -28,12 +30,20 @@ for o in "$work"/*.o; do
     print ($2+0) "\t" name }' >> "$work/syms"
 done
 [ -s "$work/syms" ] || { echo "FAIL: no symbols read from $rlib" >&2; exit 1; }
+# Total code: every .text* section of every object in the rlib (all of
+# gbc-core, before the final link drops what a front end does not use).
+total_text=$("$SIZE" -A "$work"/*.o | awk '$1 ~ /^\.text/ {s += $2} END {print s + 0}')
+[ "$total_text" -gt 0 ] || { echo "FAIL: no .text sections read from $rlib" >&2; exit 1; }
 
 fail=0
 printf '%-62s %8s %8s %6s\n' symbol size budget used
 while read -r budget name; do
   case "$budget" in ''|'#'*) continue;; esac
-  size=$(awk -F'\t' -v n="$name" '$2==n {s+=$1; f=1} END {if (f) print s}' "$work/syms")
+  if [ "$name" = "(total .text)" ]; then
+    size=$total_text
+  else
+    size=$(awk -F'\t' -v n="$name" '$2==n {s+=$1; f=1} END {if (f) print s}' "$work/syms")
+  fi
   if [ -z "$size" ]; then
     printf '%-62s %8s %8s %6s\n' "$name" MISSING "$budget" -
     echo "  ^ symbol not found (renamed or inlined away?): update $BUDGETS" >&2
