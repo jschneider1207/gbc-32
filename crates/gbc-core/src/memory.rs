@@ -22,6 +22,10 @@ pub struct Memory {
     /// 2 banks of 8 KiB (CGB, VBK).
     pub(crate) vram: [u8; 0x4000],
     pub(crate) oam: [u8; 0xA0],
+    /// OAM as it was when the last OAM DMA transfer started (FF46 write):
+    /// what the PPU reads of a byte the transfer has not written yet
+    /// (`dma::OamDma::ppu_read`).
+    pub(crate) oam_dma_old: [u8; 0xA0],
     pub(crate) hram: [u8; 0x7F],
     /// FEA0-FEFF: on CGB revisions 0-C an extra RAM area with address
     /// bits 3-4 ignored (Pan Docs: "FEA0-FEFF range"; SameBoy
@@ -45,6 +49,7 @@ impl Memory {
             wram: [0; 0x8000],
             vram: [0; 0x4000],
             oam: [0; 0xA0],
+            oam_dma_old: [0; 0xA0],
             hram: [0; 0x7F],
             extra_oam: [0; 0x60],
             io: [0; 0x80],
@@ -58,6 +63,7 @@ impl Memory {
         self.wram.fill(0);
         self.vram.fill(0);
         self.oam.fill(0);
+        self.oam_dma_old.fill(0);
         self.hram.fill(0);
         self.extra_oam.fill(0);
         self.io.fill(0);
@@ -78,11 +84,12 @@ mod tests {
             wram,
             vram,
             oam,
+            oam_dma_old,
             hram,
             extra_oam,
             io,
         } = &NEW;
-        let fields: [&[u8]; 6] = [wram, vram, oam, hram, extra_oam, io];
+        let fields: [&[u8]; 7] = [wram, vram, oam, oam_dma_old, hram, extra_oam, io];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         // The fields cover every byte: no padding, nothing else.
         let total: usize = fields.iter().map(|f| f.len()).sum();

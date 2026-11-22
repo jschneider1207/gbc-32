@@ -58,6 +58,15 @@ impl LineObjects {
         objs
     }
 
+    /// An object with OAM Y `y` covers line `ly`. `tall`: 8x16 objects.
+    #[inline]
+    pub(crate) fn covers(y: u8, ly: u8, tall: bool) -> bool {
+        let height = if tall { 16 } else { 8 };
+        // The object covers screen lines y-16 .. y-16+height-1, i.e.
+        // y <= ly+16 < y+height. Widened to u16: no wrap at the top.
+        (u16::from(ly) + 16).wrapping_sub(u16::from(y)) < height
+    }
+
     /// One step of the OAM scan: selects OAM entry `index` (with OAM bytes
     /// `y` and `x` as the scan read them) if its Y range covers `ly` and
     /// fewer than 10 objects are selected. Call in OAM order. Exposed so
@@ -68,11 +77,7 @@ impl LineObjects {
         if n >= MAX_PER_LINE {
             return;
         }
-        let height = if tall { 16 } else { 8 };
-        // The object covers screen lines y-16 .. y-16+height-1, i.e.
-        // y <= ly+16 < y+height. Widened to u16: no wrap at the top.
-        let row = (u16::from(ly) + 16).wrapping_sub(u16::from(y));
-        if row < height {
+        if Self::covers(y, ly, tall) {
             self.index[n] = index;
             self.y[n] = y;
             self.x[n] = x;

@@ -73,8 +73,6 @@ pub(crate) struct Sys<'a> {
     /// Scheduled button changes; the earliest is the `Input` deadline
     /// (ADR 0012).
     pub(crate) inputs: InputQueue,
-    /// The last OAM DMA transfer; running while `Hot::dma` is set.
-    pub(crate) dma: OamDma,
 }
 
 impl Sys<'_> {
@@ -83,7 +81,6 @@ impl Sys<'_> {
             hot: Hot::new(),
             sched: Schedule::new(),
             inputs: InputQueue::new(),
-            dma: OamDma::new(),
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
@@ -757,27 +754,49 @@ impl Ctx<'_, '_> {
     /// one stops, but keeps CPU OAM reads blocked through the new start
     /// delay unless it was in its last M-cycle (SameBoy `GB_IO_DMA`,
     /// `dma_restarting`; Mooneye `oam_dma_restart`).
+    ///
+    /// The PPU is brought up to the write first (its OAM reads so far saw
+    /// the old state), and OAM is kept as it is now for the PPU's reads of
+    /// bytes not written yet (`Memory::oam_dma_old`).
+    #[inline(never)]
     fn oam_dma(&mut self, value: u8) {
-        self.mem.io[0x46] = value;
         let now = self.clock();
+        self.dma_ppu_event(now);
+        self.mem.io[0x46] = value;
         let m = self.hot.mcycle as u64;
         let restart = self.hot.dma != 0 && {
             self.dma_sync(now);
-            now + m < self.sys.dma.end
+            now + m < self.sys.ppu.dma.end
         };
         let start = now + 2 * m;
         let end = start + u64::from(dma::LEN) * m;
-        self.sys.dma = OamDma {
+        let mut d = OamDma {
             base: u16::from(value) << 8,
             start,
             block_from: if restart { now } else { start },
             end,
-            copied: 0,
-            paused: NEVER,
+            mcycle: m as u8,
+            ppu_live: true,
+            ..OamDma::new()
         };
+        d.set_ppu_window();
+        self.sys.ppu.dma = d;
+        self.mem.oam_dma_old = self.mem.oam;
         self.hot.dma = 0xFE00;
         self.sys.sched.set(EventKind::Dma, end);
         self.reschedule();
+    }
+
+    /// Before the OAM DMA state changes at `now` (an FF46 write, a halt
+    /// during a transfer): the PPU catches up, so its OAM reads up to now
+    /// (OAM scan entries, object fetches) see the old state
+    /// ([`OamDma::ppu_at`] only describes clocks after the last change).
+    #[inline(never)]
+    fn dma_ppu_event(&mut self, now: u64) {
+        self.run_ppu_to(now);
+        let s = &mut *self.sys;
+        s.ppu.dma_event(now, self.mem, self.frame);
+        self.schedule_ppu();
     }
 
     /// Copies the OAM DMA bytes due by the CPU access at `now` (an M-cycle
@@ -785,7 +804,7 @@ impl Ctx<'_, '_> {
     /// source byte not yet copied: a CPU write during the transfer, a
     /// restart, the end of a run call and the `Dma` deadline.
     fn dma_sync(&mut self, now: u64) {
-        let d = self.sys.dma;
+        let d = self.sys.ppu.dma;
         // Paused while halted: no progress past the pause.
         let due = d.due(now.min(d.paused), self.hot.mcycle as u64);
         for i in d.copied..due {
@@ -800,7 +819,7 @@ impl Ctx<'_, '_> {
         if due > d.copied {
             self.sys.ppu.oam_written();
         }
-        self.sys.dma.copied = d.copied.max(due);
+        self.sys.ppu.dma.copied = d.copied.max(due);
     }
 
     /// A CPU write while an OAM DMA transfer runs: OAM writes are dropped
@@ -818,14 +837,14 @@ impl Ctx<'_, '_> {
             }
             return;
         }
-        match dma_conflict(&self.sys.dma, now, self.hot.mcycle, addr) {
+        match dma_conflict(&self.sys.ppu.dma, now, self.hot.mcycle, addr) {
             (Conflict::None, _) => self.write_to(addr, value),
             (Conflict::Open, _) => {}
             (Conflict::Wram(a), _) => self.write_to(a, value),
             (Conflict::Dma, i) => {
                 // CGB C: the OAM byte just written is cleared when the
                 // DMA reads below A000 (SameBoy: `oam[dest - 1] = 0`).
-                if self.sys.dma.base < 0xA000 {
+                if self.sys.ppu.dma.base < 0xA000 {
                     self.mem.oam[usize::from(i)] = 0;
                     self.sys.ppu.oam_written();
                 }
@@ -840,14 +859,31 @@ impl Ctx<'_, '_> {
     /// M-cycle, whose own step still counts. OAM stays blocked (the
     /// transfer is still active) and the `Dma` deadline is cleared, so the
     /// halted skip doesn't stop at it. `docs/reference/oam-dma.md`.
+    ///
+    /// For the PPU (synced first: a halt changes what its OAM reads see):
+    /// with bytes left, the transfer stays active and halted until the
+    /// wake-up; halted in the start delay, it hasn't started for the PPU;
+    /// with every byte written, its last step isn't held and the PPU sees
+    /// it end on time (gambatte `oamdma_late_halt_stat_2`, cgb04c).
     #[inline(never)]
     fn dma_pause(&mut self) {
         let now = self.clock();
-        if now >= self.sys.dma.end {
+        if now >= self.sys.ppu.dma.end {
             return;
         }
+        self.dma_ppu_event(now);
         self.dma_sync(now);
-        self.sys.dma.paused = now;
+        let d = &mut self.sys.ppu.dma;
+        d.paused = now;
+        d.halt_from = now;
+        d.halt_to = NEVER;
+        d.halt_dest = d.copied;
+        if now <= d.ppu_from {
+            d.ppu_from = NEVER;
+            d.ppu_to = NEVER;
+        } else if d.copied < dma::LEN {
+            d.ppu_to = NEVER;
+        }
         self.sys.sched.set(EventKind::Dma, NEVER);
         self.reschedule();
     }
@@ -857,11 +893,14 @@ impl Ctx<'_, '_> {
     /// including the wake-up one, then takes exactly one step on wake-up
     /// (`GB_cpu_run`: `dma_cycles = 4; GB_dma_run`): the same count, by the
     /// next CPU access, as resuming one M-cycle early. Everything still
-    /// ahead moves out by the paused time.
+    /// ahead moves out by the paused time. The PPU's OAM scan sees the CPU
+    /// halted through the wake-up M-cycle (SameBoy clears `halted` after
+    /// it); what it sees up to now doesn't change, so it needn't sync.
     #[inline(never)]
     fn dma_resume(&mut self) {
         let now = self.clock();
-        let d = &mut self.sys.dma;
+        let m = self.hot.mcycle as u64;
+        let d = &mut self.sys.ppu.dma;
         let shift = now - d.paused;
         if d.block_from > d.paused {
             d.block_from += shift;
@@ -869,16 +908,26 @@ impl Ctx<'_, '_> {
         d.start += shift;
         d.end += shift;
         d.paused = NEVER;
+        d.halt_to = now + m;
+        let held = d.ppu_to == NEVER;
+        if d.ppu_from == NEVER {
+            d.set_ppu_window();
+        } else if held {
+            d.ppu_to = d.end - dma::PPU_LEAD;
+        }
         self.sys.sched.set(EventKind::Dma, d.end);
         self.reschedule();
     }
 
     /// A speed switch during a transfer: the remaining bytes keep their
     /// M-cycle count at the new M-cycle length `m`, from `now`.
-    /// Unverified on hardware (`docs/reference/oam-dma.md`).
+    /// Unverified on hardware (`docs/reference/oam-dma.md`); the PPU's
+    /// window follows (not synced: unverified anyway).
+    #[cold]
+    #[inline(never)]
     fn dma_rescale(&mut self, now: u64, old_m: u64, m: u64) {
         self.dma_sync(now);
-        let d = &mut self.sys.dma;
+        let d = &mut self.sys.ppu.dma;
         let k = u64::from(d.copied);
         // M-cycles from `now` to the access that counts byte `k` (or the end).
         let left = (d.start + k * old_m).saturating_sub(now) / old_m;
@@ -888,6 +937,10 @@ impl Ctx<'_, '_> {
         }
         d.start = start;
         d.end = start + u64::from(dma::LEN) * m;
+        d.mcycle = m as u8;
+        let from = d.ppu_from;
+        d.set_ppu_window();
+        d.ppu_from = d.ppu_from.min(from);
         self.sys.sched.set(EventKind::Dma, d.end);
     }
 }
@@ -998,7 +1051,7 @@ impl Bus for Ctx<'_, '_> {
     }
 
     fn halt_end(&mut self) {
-        if self.sys.dma.paused != NEVER {
+        if self.sys.ppu.dma.paused != NEVER {
             self.dma_resume();
         }
     }
@@ -1052,16 +1105,19 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let now = hot.clock();
     let plain = hot.without_dma();
     if addr >= 0xFE00 {
-        if addr < 0xFF00 && now >= sys.dma.block_from {
+        if addr < 0xFF00 && now >= sys.ppu.dma.block_from {
             return 0xFF;
+        }
+        if addr == 0xFF41 {
+            return sys.ppu.stat_during_dma(now, hot.mcycle == 2);
         }
         return read_high(mem, sys, &plain, addr);
     }
-    let addr = match dma_conflict(&sys.dma, now, hot.mcycle, addr) {
+    let addr = match dma_conflict(&sys.ppu.dma, now, hot.mcycle, addr) {
         (Conflict::None, _) => addr,
         (Conflict::Open, _) => return 0xFF,
         (Conflict::Wram(a), _) => a,
-        (Conflict::Dma, i) => sys.dma.base + u16::from(i),
+        (Conflict::Dma, i) => sys.ppu.dma.base + u16::from(i),
     };
     read::<true>(mem, sys, &plain, addr)
 }
@@ -1942,12 +1998,12 @@ mod dma_tests {
             ctx.read(0x0100); // HALT's fetch: its step counts
             ctx.halt_begin();
             let f = ctx.clock();
-            assert_eq!(ctx.sys.dma.copied, 10);
+            assert_eq!(ctx.sys.ppu.dma.copied, 10);
             assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), NEVER);
             for _ in 0..50 {
                 ctx.idle();
                 ctx.dma_sync(ctx.clock());
-                assert_eq!(ctx.sys.dma.copied, 10);
+                assert_eq!(ctx.sys.ppu.dma.copied, 10);
                 assert_eq!(ctx.hot.dma, 0xFE00);
                 assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFE00), 0xFF);
                 assert_eq!(read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFE9F), 0xFF);
@@ -1960,7 +2016,7 @@ mod dma_tests {
             assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), end);
             ctx.idle();
             ctx.dma_sync(ctx.clock());
-            assert_eq!(ctx.sys.dma.copied, 11);
+            assert_eq!(ctx.sys.ppu.dma.copied, 11);
             while ctx.clock() < end - 4 {
                 ctx.idle();
             }
@@ -1985,7 +2041,7 @@ mod dma_tests {
             assert!(ctx.clock() > t0 + 1_000_000);
             assert_eq!(ctx.hot.dma, 0xFE00);
             ctx.dma_sync(ctx.clock());
-            assert_eq!(ctx.sys.dma.copied, 2);
+            assert_eq!(ctx.sys.ppu.dma.copied, 2);
         });
     }
 
@@ -2019,5 +2075,107 @@ mod dma_tests {
         assert!(!cpu.halted());
         assert_eq!(cpu.registers().a, 4 ^ 0xA5);
         assert_eq!(ctx.sys.sched.deadline(EventKind::Dma), w + (162 + 40) * 4);
+    }
+
+    /// HALT with bytes left: the PPU sees the transfer halted until the
+    /// end of the wake-up M-cycle (SameBoy clears `halted` after it), then
+    /// running again, moved out by the halted time.
+    #[test]
+    fn halt_holds_the_ppu_window_while_bytes_are_left() {
+        use crate::dma::PpuView::*;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 10);
+            let p = ctx.clock();
+            ctx.halt_begin();
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.ppu_at(p), (Running, 9));
+            assert_eq!(d.ppu_at(p + 1), (Halted, 9));
+            assert_eq!(d.ppu_at(p + 5000), (Halted, 9));
+            for _ in 0..50 {
+                ctx.idle();
+            }
+            let r = ctx.clock();
+            ctx.halt_end();
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.ppu_at(r + 4), (Halted, 9));
+            assert_eq!(d.ppu_at(r + 5), (Running, 10));
+            assert_eq!(d.ppu_to, d.end - 2);
+            assert_eq!(d.ppu_at(d.end - 2), (Running, 160));
+            assert_eq!(d.ppu_at(d.end - 1), (Off, 160));
+        });
+    }
+
+    /// HALT after the last byte: the transfer's last step isn't held for
+    /// the PPU, which sees it end on time (gambatte
+    /// `oamdma/oamdma_late_halt_stat_2`, cgb04c).
+    #[test]
+    fn halt_after_the_last_byte_does_not_hold_the_ppu() {
+        use crate::dma::PpuView::*;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 161);
+            ctx.halt_begin();
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.ppu_at(t0 + 646), (Halted, 160));
+            assert_eq!(d.ppu_at(t0 + 647), (Off, 160));
+            for _ in 0..50 {
+                ctx.idle();
+            }
+            let r = ctx.clock();
+            ctx.halt_end();
+            assert_eq!(ctx.sys.ppu.dma.ppu_at(r + 1), (Off, 160));
+        });
+    }
+
+    /// HALT in the start delay: the transfer hasn't started for the PPU,
+    /// and starts only after the wake-up.
+    #[test]
+    fn halt_in_the_start_delay_delays_the_ppu_window() {
+        use crate::dma::PpuView::*;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            ctx.halt_begin();
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.ppu_at(t0 + 7), (Off, 0));
+            assert_eq!(d.ppu_at(t0 + 5000), (Off, 0));
+            for _ in 0..50 {
+                ctx.idle();
+            }
+            let r = ctx.clock();
+            ctx.halt_end();
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.ppu_at(r + 2), (Off, 0));
+            assert_eq!(d.ppu_at(r + 5), (Running, 1));
+        });
+    }
+
+    /// STAT reads mode 0 instead of 2 while a transfer runs (SameBoy
+    /// `GB_STAT_update`); modes 3 and 0 read as usual, and mode 2 again
+    /// once the transfer is over.
+    #[test]
+    fn stat_reads_mode_2_as_0_during_oam_dma() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            // LCD on at E: frame position = clock - E + 7, so the access at
+            // E + 4k is at position 4k + 7.
+            let e = ctx.clock();
+            ctx.write(0xFF40, 0x91);
+            idle_to(ctx, e, 100);
+            ctx.write(0xFF46, 0xC1); // Line 0 (the short first line), HBlank.
+            idle_to(ctx, e, 118); // Line 1, t = 23: mode 2.
+            assert_eq!(ctx.read(0xFF41) & 3, 0);
+            idle_to(ctx, e, 137); // Line 1, t = 99: mode 3.
+            assert_eq!(ctx.read(0xFF41) & 3, 3);
+            idle_to(ctx, e, 346); // Line 3, t = 23: mode 2, transfer over.
+            assert_eq!(ctx.hot.dma, 0);
+            assert_eq!(ctx.read(0xFF41) & 3, 2);
+        });
     }
 }

@@ -1187,7 +1187,7 @@ mod tests {
             assert_eq!(a.registers(), b.registers());
             assert_eq!(a.hw.cpu.halted(), b.hw.cpu.halted());
             assert_eq!(a.mem.oam, b.mem.oam);
-            let (da, db) = (&a.hw.sys.dma, &b.hw.sys.dma);
+            let (da, db) = (&a.hw.sys.ppu.dma, &b.hw.sys.ppu.dma);
             assert_eq!((da.start, da.end, da.copied), (db.start, db.end, db.copied));
             for reg in [0xFF04, 0xFF05, 0xFF0F, 0xFF41, 0xFF44] {
                 assert_eq!(a.peek(reg), b.peek(reg), "{reg:#06x}");

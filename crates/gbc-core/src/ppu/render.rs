@@ -146,6 +146,9 @@ pub(crate) struct Sources<'a> {
     /// Both VRAM banks; compatibility mode only reads bank 0.
     pub(crate) vram: &'a [u8; 0x4000],
     pub(crate) oam: &'a [u8; 0xA0],
+    /// Per slot, the tile index and attributes the objects' fetches read
+    /// on a line OAM DMA touches (`Ppu::fix_attrs`); else they read `oam`.
+    pub(crate) attrs: Option<&'a [(u8, u8); MAX_PER_LINE]>,
     pub(crate) colors: &'a Colors,
 }
 
@@ -178,9 +181,9 @@ pub(crate) struct Renderer {
     window_skip: u8,
     /// Window map row (pixels) this line draws.
     window_row: u8,
-    objects: LineObjects,
+    pub(crate) objects: LineObjects,
     /// Slots of `objects` from highest to lowest drawing priority.
-    order: [u8; MAX_PER_LINE],
+    pub(crate) order: [u8; MAX_PER_LINE],
     /// Object pixels of the line, at screen x + 8: 0 = transparent, else
     /// bits 0-1 color (1-3), bits 2-4 palette, bit 7 OAM "behind BG".
     obj_buf: [u8; OBJ_BUF_LEN],
@@ -246,6 +249,17 @@ impl Renderer {
         }
     }
 
+    /// The slot of the line's last object fetch: the last object in
+    /// priority (fetch) order on screen horizontally (X < 168; objects at
+    /// X >= 168 are never fetched). CGB: fetched even with LCDC.1 clear.
+    pub(crate) fn last_fetched(&self) -> Option<usize> {
+        self.order[..self.objects.len()]
+            .iter()
+            .rev()
+            .map(|&s| usize::from(s) % MAX_PER_LINE)
+            .find(|&s| self.objects.get(s).2 < 168)
+    }
+
     /// Draws pixels `[x0, x1)` of the current line into `row` with the
     /// registers `regs`. Spans must be consecutive and in order.
     pub(crate) fn render(
@@ -307,7 +321,7 @@ impl Renderer {
             }
             let first = usize::from(x.saturating_sub(8));
             if (x0..x1).contains(&first) {
-                self.fetch_object(src, lcdc, index, y, x);
+                self.fetch_object(src, lcdc, slot, index, y, x);
             }
         }
 
@@ -392,11 +406,15 @@ impl Renderer {
     }
 
     /// Decodes one object's row into the object buffer.
-    fn fetch_object(&mut self, src: &Sources, lcdc: u8, index: u8, y: u8, x: u8) {
+    fn fetch_object(&mut self, src: &Sources, lcdc: u8, slot: usize, index: u8, y: u8, x: u8) {
         self.obj_fetched = true;
-        let base = usize::from(index) % 40 * 4;
-        let tile = src.oam[base + 2];
-        let flags = src.oam[base + 3];
+        let (tile, flags) = match src.attrs {
+            Some(a) => a[slot % MAX_PER_LINE],
+            None => {
+                let base = usize::from(index) % 40 * 4;
+                (src.oam[base + 2], src.oam[base + 3])
+            }
+        };
         // LCDC.2 is read at fetch time (SameBoy `get_object_line_address`).
         // 8x16 objects ignore bit 0 of the tile index (Pan Docs: OAM byte 2).
         let (mask, tile) = if lcdc & LCDC_OBJ_TALL != 0 {
@@ -584,6 +602,7 @@ mod tests {
             let src = Sources {
                 vram: &self.vram,
                 oam: &self.oam,
+                attrs: None,
                 colors: &self.colors,
             };
             self.r.render(row, x0, x1, &self.regs, &src);

@@ -11,6 +11,11 @@
 
 use crate::schedule::NEVER;
 
+/// The PPU sees each step of a transfer this many dots before the CPU
+/// access it is due by, in both speeds (gambatte `oamdma/late_sp*`, cgb04c:
+/// single speed allows 0-2, double speed 2-3; SameBoy: half an M-cycle).
+pub(crate) const PPU_LEAD: u64 = 2;
+
 /// Bytes per transfer: one per M-cycle.
 pub(crate) const LEN: u8 = 0xA0;
 
@@ -33,6 +38,35 @@ pub(crate) struct OamDma {
     /// While the CPU is halted: the clock the transfer paused at (it makes
     /// no progress past it), else `NEVER`. See `Ctx::dma_pause`.
     pub(crate) paused: u64,
+    /// The PPU sees the transfer active at clocks in `(ppu_from, ppu_to]`
+    /// ([`Self::ppu_at`]); `NEVER` while a halt freezes that edge.
+    pub(crate) ppu_from: u64,
+    pub(crate) ppu_to: u64,
+    /// The last halt during the transfer, as the PPU sees it: clocks in
+    /// `(halt_from, halt_to]` (`halt_to` is `NEVER` while halted).
+    pub(crate) halt_from: u64,
+    pub(crate) halt_to: u64,
+    /// Bytes transferred when that halt began.
+    pub(crate) halt_dest: u8,
+    /// The M-cycle length (4, or 2 in double speed) the transfer runs at.
+    pub(crate) mcycle: u8,
+    /// Set by the FF46 write; cleared by the PPU at the first line start
+    /// past `ppu_to` (`Ppu::dma_touches`), so lines after the transfer
+    /// skip the DMA-aware path with one flag test.
+    pub(crate) ppu_live: bool,
+}
+
+/// What a PPU read of OAM at some clock sees of the transfer
+/// ([`OamDma::ppu_at`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PpuView {
+    /// Not transferring (before it, after it, or in the start delay).
+    Off,
+    /// Transferring: the OAM scan can't read OAM.
+    Running,
+    /// Paused by HALT with bytes left: on CGB C the OAM scan finds no
+    /// object.
+    Halted,
 }
 
 impl OamDma {
@@ -44,6 +78,66 @@ impl OamDma {
             end: 0,
             copied: 0,
             paused: NEVER,
+            ppu_from: 0,
+            ppu_to: 0,
+            halt_from: NEVER,
+            halt_to: NEVER,
+            halt_dest: 0,
+            mcycle: 4,
+            ppu_live: false,
+        }
+    }
+
+    /// Sets the PPU's window from `start` and `end`: the PPU sees each
+    /// step of the transfer [`PPU_LEAD`] dots before the CPU access it is
+    /// due by ([`Self::due`]), from byte 0's write to the last step.
+    pub(crate) fn set_ppu_window(&mut self) {
+        self.ppu_from = self.start - PPU_LEAD;
+        self.ppu_to = self.end - PPU_LEAD;
+    }
+
+    /// How a PPU read of OAM at clock `c` sees the transfer, and the
+    /// number of bytes written by then as the PPU sees it (0 before the
+    /// transfer, 160 after it). Valid for clocks since the last change of
+    /// the transfer's state (an FF46 write, a halt, a wake-up): the bus
+    /// brings the PPU up to each change first. `docs/reference/oam-dma.md`,
+    /// "What the PPU sees".
+    pub(crate) fn ppu_at(&self, c: u64) -> (PpuView, u8) {
+        if c <= self.ppu_from {
+            return (PpuView::Off, 0);
+        }
+        if c > self.ppu_to {
+            return (PpuView::Off, LEN);
+        }
+        if self.halt_from < c && c <= self.halt_to {
+            return (PpuView::Halted, self.halt_dest);
+        }
+        // Byte `i` is written at `start + i * mcycle - PPU_LEAD` and seen
+        // after it (`start` has moved out past any earlier halt).
+        // `mcycle` is 2 or 4: a shift.
+        debug_assert!(self.mcycle == 2 || self.mcycle == 4);
+        let since = c.saturating_sub(self.start - PPU_LEAD + 1);
+        let n = (since >> self.mcycle.trailing_zeros()) + 1;
+        (PpuView::Running, n.min(u64::from(LEN)) as u8)
+    }
+
+    /// A PPU OAM read of `addr` (0-9F) at a clock where it sees `dest`
+    /// bytes written ([`Self::ppu_at`]), with `oam` as it is now and `old`
+    /// as it was at the FF46 write. While bytes 1-159 are being written,
+    /// the read gets the 16-bit word being written instead (SameBoy
+    /// `oam_read`; Pan Docs: OAM DMA bus conflicts, "the PPU reads
+    /// whatever 16-bit word the DMA unit is writing").
+    pub(crate) fn ppu_read(dest: u8, addr: u8, oam: &[u8; 0xA0], old: &[u8; 0xA0]) -> u8 {
+        let a = if (1..LEN).contains(&dest) {
+            (dest & !1) | (addr & 1)
+        } else {
+            addr
+        };
+        let a = usize::from(a) % 0xA0;
+        if a < usize::from(dest) {
+            oam[a]
+        } else {
+            old[a]
         }
     }
 
@@ -130,7 +224,7 @@ pub(crate) fn conflict(base: u16, cur: u16, addr: u16) -> Conflict {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conflict, LEN, OamDma, conflict};
+    use super::{Conflict, LEN, OamDma, PpuView, conflict};
 
     #[test]
     fn due_counts_from_start_and_stops_at_160() {
@@ -177,5 +271,61 @@ mod tests {
         assert_eq!(conflict(0xE000, 0xE010, 0xD456), Wram(0xC456));
         assert_eq!(conflict(0xFE00, 0xFE10, 0x8100), None);
         assert_eq!(conflict(0xE000, 0xE010, 0xC011), None);
+    }
+
+    /// A transfer written at clock 1000 at M-cycle length `m`, as the bus
+    /// sets it up.
+    fn written_at_1000(m: u64) -> OamDma {
+        let start = 1000 + 2 * m;
+        let mut d = OamDma {
+            start,
+            end: start + u64::from(LEN) * m,
+            mcycle: m as u8,
+            ppu_live: true,
+            ..OamDma::new()
+        };
+        d.set_ppu_window();
+        d
+    }
+
+    /// The PPU sees each step 2 dots before the CPU access it is due by,
+    /// in both speeds (gambatte `oamdma/late_sp*`, cgb04c).
+    #[test]
+    fn ppu_window_leads_the_cpu_by_two_dots() {
+        use PpuView::*;
+        // Single speed: byte 0 is due by the access at 1008, seen after
+        // 1006; the last step is due by 1648, seen after 1646.
+        let d = written_at_1000(4);
+        assert_eq!(d.ppu_at(1006), (Off, 0));
+        assert_eq!(d.ppu_at(1007), (Running, 1));
+        assert_eq!(d.ppu_at(1010), (Running, 1));
+        assert_eq!(d.ppu_at(1011), (Running, 2));
+        assert_eq!(d.ppu_at(1006 + 159 * 4), (Running, 159));
+        assert_eq!(d.ppu_at(1007 + 159 * 4), (Running, 160));
+        assert_eq!(d.ppu_at(1646), (Running, 160));
+        assert_eq!(d.ppu_at(1647), (Off, 160));
+        // Double speed: due by 1004, seen after 1002; a byte per 2 dots.
+        let d = written_at_1000(2);
+        assert_eq!(d.ppu_at(1002), (Off, 0));
+        assert_eq!(d.ppu_at(1003), (Running, 1));
+        assert_eq!(d.ppu_at(1005), (Running, 2));
+        assert_eq!(d.ppu_at(1004 + 320 - 2), (Running, 160));
+        assert_eq!(d.ppu_at(1004 + 320 - 1), (Off, 160));
+    }
+
+    #[test]
+    fn ppu_read_gets_the_word_being_written() {
+        let oam: [u8; 0xA0] = core::array::from_fn(|i| 0x80 | i as u8);
+        let old: [u8; 0xA0] = core::array::from_fn(|i| i as u8);
+        // 5 bytes written: any read gets the word 4-5, byte 4 new, byte 5
+        // still old.
+        assert_eq!(OamDma::ppu_read(5, 0x10, &oam, &old), 0x84);
+        assert_eq!(OamDma::ppu_read(5, 0x23, &oam, &old), 0x05);
+        // 6 written: the word 6-7, both old.
+        assert_eq!(OamDma::ppu_read(6, 0x10, &oam, &old), 0x06);
+        assert_eq!(OamDma::ppu_read(6, 0x11, &oam, &old), 0x07);
+        // Before the transfer: OAM as it was; after it: as it is.
+        assert_eq!(OamDma::ppu_read(0, 0x23, &oam, &old), 0x23);
+        assert_eq!(OamDma::ppu_read(LEN, 0x23, &oam, &old), 0xA3);
     }
 }

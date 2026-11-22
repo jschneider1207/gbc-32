@@ -64,6 +64,7 @@
 //! re-evaluated at the update points and at STAT/LYC writes only, so a
 //! source that changes between update points is seen at the next one.
 
+use crate::dma::{OamDma, PpuView};
 use crate::memory::Memory;
 use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
@@ -222,7 +223,12 @@ pub(crate) struct LineTiming {
     /// window start.
     stalls: [(u8, u8); 11],
     n_stalls: u8,
+    /// Which stall is the window's (`NO_STALL`: none); the others are the
+    /// objects', in fetch order.
+    win_stall: u8,
 }
+
+const NO_STALL: u8 = 0xFF;
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -232,6 +238,7 @@ impl LineTiming {
         end: 0,
         stalls: [(0, 0); 11],
         n_stalls: 0,
+        win_stall: NO_STALL,
     };
 
     /// Pixels output before line position `t` (0-160), under the
@@ -292,6 +299,52 @@ pub(crate) struct Ppu {
     /// The LCD was turned on and its first frame hasn't completed yet. That
     /// frame is not displayed, so it doesn't clear `blanked`.
     skip_frame: bool,
+    /// The OAM scan of a line that OAM DMA touches, done entry by entry
+    /// ([`Ppu::scan_to`]) and possibly in parts, around changes of the
+    /// transfer's state.
+    scan: ScanProgress,
+    /// The last Y and X the PPU read from OAM (SameBoy `mode2_y_bus`,
+    /// `mode2_x_bus`): what the OAM scan compares while a running OAM DMA
+    /// keeps it off OAM. Tracked only while a transfer touches the lines
+    /// (`bus_live`); set from OAM when one starts ([`Ppu::dma_event`]).
+    bus: [u8; 2],
+    bus_live: bool,
+    /// The last OAM DMA transfer (FF46). The bus drives it (CPU-side
+    /// timing and conflicts, `bus.rs`); the PPU reads it for its own OAM
+    /// reads ([`OamDma::ppu_at`]).
+    pub(crate) dma: OamDma,
+    /// Object slots of the current line whose OAM fetch has happened under
+    /// an earlier DMA state ([`Ppu::fix_attrs`]).
+    attr_final: u16,
+    /// OAM DMA touches the current line: its objects' tile index and
+    /// attributes are what their fetches read then (`obj_attr`, by slot),
+    /// not OAM as it is at the draw.
+    attr_on: bool,
+    obj_attr: [(u8, u8); objects::MAX_PER_LINE],
+}
+
+/// See [`Ppu::scan`].
+#[derive(Clone, Copy)]
+struct ScanProgress {
+    /// Clock of the line's position 0 (`NEVER`: no scan in progress).
+    line: u64,
+    /// The next OAM entry to scan.
+    next: u8,
+    objs: LineObjects,
+}
+
+impl ScanProgress {
+    const NONE: Self = Self {
+        line: NEVER,
+        next: 0,
+        objs: LineObjects::EMPTY,
+    };
+}
+
+/// OAM scan entry `i` is read at this line position (SameBoy: one entry
+/// every 2 dots from the mode-2 STAT change, in both speeds).
+const fn entry_pos(i: u8) -> u64 {
+    4 + 2 * i as u64
 }
 
 /// Where a clock falls: line, line position, and whether line 0 is the
@@ -324,6 +377,13 @@ impl Ppu {
             objects: ObjectLines::STALE,
             blanked: false,
             skip_frame: false,
+            scan: ScanProgress::NONE,
+            bus: [0; 2],
+            bus_live: false,
+            attr_final: 0,
+            attr_on: false,
+            obj_attr: [(0, 0); objects::MAX_PER_LINE],
+            dma: OamDma::new(),
         }
     }
 
@@ -458,6 +518,19 @@ impl Ppu {
         }
         let a = self.at(now);
         v | self.mode(now, a, double) | if self.lyc_bit(a, double) { 0x04 } else { 0 }
+    }
+
+    /// [`Self::stat`] while an OAM DMA transfer runs (from the FF46 write
+    /// to its end, as the CPU sees it): mode 2 reads as mode 0. SameBoy
+    /// (`GB_STAT_update`, MIT) clears the mode bits at every STAT update
+    /// while DMA is active in mode 2 (the mode-2 start, STAT/LYC/FF46
+    /// writes), and `GB_dma_run` sets mode 2 again when the transfer ends
+    /// during the OAM scan, so the mode reads 0 exactly while the transfer
+    /// is active. Gambatte has no such rule; no test ROM we have checks
+    /// it. Not affected: the STAT interrupt line.
+    pub(crate) fn stat_during_dma(&self, now: u64, double: bool) -> u8 {
+        let v = self.stat(now, double);
+        if v & 3 == 2 { v & !3 } else { v }
     }
 
     /// STAT bit 2 (LY=LYC) at `a`: 0 while the comparison is off in single
@@ -739,7 +812,13 @@ impl Ppu {
                 // palettes are blocked for the CPU during mode 3, so
                 // drawing here sees what the hardware saw; register writes
                 // during mode 3 flushed the pixels before them already.
-                Pt::End => self.draw(l as u8, 160, mem, frame),
+                Pt::End => {
+                    if self.attr_on {
+                        self.end_dma_line(l as u8, mem, frame);
+                    } else {
+                        self.draw(l as u8, 160, mem, frame);
+                    }
+                }
                 Pt::VBlank => {
                     *iflags |= INT_VBLANK;
                     events |= self.frame_done();
@@ -810,6 +889,7 @@ impl Ppu {
         let src = Sources {
             vram: &mem.vram,
             oam: &mem.oam,
+            attrs: self.attr_on.then_some(&self.obj_attr),
             colors: &self.colors,
         };
         let row = render::frame_row(frame, usize::from(ly));
@@ -824,6 +904,11 @@ impl Ppu {
     /// there on.
     pub(crate) fn flush(&mut self, now: u64, mem: &Memory, frame: &mut Frame) {
         if let Some((ly, x)) = self.mode3_pixel(now) {
+            if self.attr_on {
+                // OAM DMA touches the line: the objects fetched so far get
+                // what their fetches read.
+                self.fix_attrs(mem, NEVER);
+            }
             self.draw(ly, x, mem, frame);
         }
     }
@@ -870,11 +955,25 @@ impl Ppu {
         let window =
             (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx);
         let tall = self.lcdc & 0x04 != 0;
-        // One OAM scan per line, for both the stalls and the pixels.
-        let objs = if first || !self.objects.on_line(&mem.oam, l, tall) {
+        let start = self.synced.wrapping_sub(if first { 91 } else { 89 });
+        // One OAM scan per line, for both the stalls and the pixels. On a
+        // line OAM DMA touches (from the FF46 write to the transfer's end
+        // as the PPU sees it), entry by entry, and the objects' fetches
+        // follow the transfer too.
+        let mut aware = false;
+        let objs = if first {
             LineObjects::EMPTY
+        } else if self.dma.ppu_live && self.dma_touches(start) {
+            aware = true;
+            self.scan_line(l, start, mem)
         } else {
-            LineObjects::scan(&mem.oam, l as u8, tall)
+            // No OAM read of this line is tracked on the mode-2 bus.
+            self.bus_live = false;
+            if self.objects.on_line(&mem.oam, l, tall) {
+                LineObjects::scan(&mem.oam, l as u8, tall)
+            } else {
+                LineObjects::EMPTY
+            }
         };
         let xs = objs.x_positions();
         let n = xs.len();
@@ -882,9 +981,10 @@ impl Ppu {
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
         let first_pixel = mode3 + 12 + u16::from(scx & 7);
         let t = &mut self.line;
-        t.start = self.synced.wrapping_sub(if first { 91 } else { 89 });
+        t.start = start;
         t.mode3 = mode3;
         t.first_pixel = first_pixel;
+        t.win_stall = NO_STALL;
         let mut total = 0u16;
         let mut k = 0;
         if n != 0 || window.is_some() {
@@ -893,6 +993,7 @@ impl Ppu {
             let mut win = window.map(|wx| (wx.saturating_sub(7), 6u8));
             for &s in &stalls[..n_obj] {
                 if let Some(w) = win.filter(|w| w.0 <= s.0) {
+                    t.win_stall = k as u8;
                     t.stalls[k] = w;
                     k += 1;
                     total += u16::from(w.1);
@@ -903,6 +1004,7 @@ impl Ppu {
                 total += u16::from(s.1);
             }
             if let Some(w) = win {
+                t.win_stall = k as u8;
                 t.stalls[k] = w;
                 k += 1;
                 total += u16::from(w.1);
@@ -912,12 +1014,210 @@ impl Ppu {
         t.end = first_pixel + 160 + total;
         self.drawn = 0;
         self.renderer.start_line(l as u8, scx, &objs);
+        self.attr_on = false;
+        if aware {
+            self.attr_final = 0;
+            self.attr_on = n != 0;
+        }
+    }
+
+    /// The transfer (live since its FF46 write) still touches the line
+    /// starting at clock `start`; once it doesn't, it never will again.
+    #[inline]
+    fn dma_touches(&mut self, start: u64) -> bool {
+        let touches = self.dma.ppu_to >= start;
+        self.dma.ppu_live = touches;
+        touches
     }
 
     /// OAM changed (a CPU or DMA write): the object summary is stale.
     #[inline]
     pub(crate) fn oam_written(&mut self) {
         self.objects.valid = false;
+    }
+
+    // --- OAM DMA as the PPU sees it (`docs/reference/oam-dma.md`) ---
+
+    /// Runs the OAM scan of line `l` (which starts at clock `start`) for
+    /// the entries read up to clock `until`, continuing a scan in
+    /// progress. Per entry, by what the transfer looks like then
+    /// ([`OamDma::ppu_at`]; SameBoy `add_object_from_index`, MIT):
+    /// - off: the entry's Y and X as OAM holds them then;
+    /// - running: OAM can't be read; the scan compares the Y and X it last
+    ///   read (the mode-2 bus, [`Self::bus`]), so unless that Y covers the
+    ///   line, nothing is found (Pan Docs: "most PPU revisions read each
+    ///   object as being off-screen");
+    /// - halted (the CPU in HALT with bytes left): the scan reads the word
+    ///   being written, but on CGB revisions 0-D finds nothing.
+    #[cold]
+    #[inline(never)]
+    fn scan_to(&mut self, l: u32, start: u64, until: u64, mem: &Memory) {
+        if self.scan.line != start {
+            self.scan = ScanProgress {
+                line: start,
+                ..ScanProgress::NONE
+            };
+        }
+        let (ly, tall) = (l as u8, self.lcdc & 0x04 != 0);
+        let d = self.dma;
+        // A run of entries at a time: the transfer looks the same from the
+        // first one's clock to `edge`.
+        while self.scan.next < 40 {
+            let i = self.scan.next;
+            let c = start.wrapping_add(entry_pos(i));
+            if c > until {
+                break;
+            }
+            let (view, dest) = d.ppu_at(c);
+            let edge = match view {
+                PpuView::Off if dest == 0 => d.ppu_from,
+                PpuView::Off => NEVER,
+                PpuView::Running if d.halt_from >= c => d.ppu_to.min(d.halt_from),
+                PpuView::Running => d.ppu_to,
+                PpuView::Halted => d.ppu_to.min(d.halt_to),
+            };
+            // The last entry read by `edge` and `until`.
+            let span = edge.min(until).wrapping_sub(start).saturating_sub(4) / 2;
+            let last = span.min(39) as u8;
+            let read = |e: u8, b| OamDma::ppu_read(dest, e * 4 + b, &mem.oam, &mem.oam_dma_old);
+            match view {
+                PpuView::Off => {
+                    for e in i..=last {
+                        self.scan.objs.consider(e, read(e, 0), read(e, 1), ly, tall);
+                    }
+                    self.bus = [read(last, 0), read(last, 1)];
+                    self.bus_live = true;
+                }
+                PpuView::Halted => {
+                    self.bus = [read(last, 0), read(last, 1)];
+                    self.bus_live = true;
+                }
+                PpuView::Running => {
+                    if !self.bus_live {
+                        self.init_bus(mem);
+                    }
+                    let [y, x] = self.bus;
+                    if LineObjects::covers(y, ly, tall) {
+                        for e in i..=last {
+                            self.scan.objs.consider(e, y, x, ly, tall);
+                        }
+                    }
+                }
+            }
+            self.scan.next = last + 1;
+        }
+    }
+
+    /// The mode-2 bus when tracking starts: the last OAM reads were the
+    /// last line's OAM scan (entry 39) and then its object fetches (the
+    /// last one's tile index; SameBoy reuses `mode2_y_bus` for it), read
+    /// from OAM as it is now (exact unless the CPU wrote OAM since).
+    #[cold]
+    fn init_bus(&mut self, mem: &Memory) {
+        self.bus = [mem.oam[0x9C], mem.oam[0x9D]];
+        if let Some(slot) = self.renderer.last_fetched() {
+            self.bus[0] = if self.attr_on {
+                self.obj_attr[slot].0
+            } else {
+                mem.oam[usize::from(self.renderer.objects.get(slot).0) % 40 * 4 + 2]
+            };
+        }
+        self.bus_live = true;
+    }
+
+    /// The tile index and attributes each object of the current line gets
+    /// from its fetch in mode 3, for the slots fetched up to clock `upto`
+    /// (`NEVER`: all) that aren't final yet; with `upto` they become final.
+    /// While bytes 1-159 are being written the fetch reads the word being
+    /// written ([`OamDma::ppu_read`]). The fetch's OAM read is placed
+    /// `d - 5` dots into the object's `d`-dot stall (SameBoy: after the
+    /// wait for the BG fetch and one more dot; untested).
+    #[cold]
+    #[inline(never)]
+    fn fix_attrs(&mut self, mem: &Memory, upto: u64) {
+        let t = self.line;
+        let r = &mut self.renderer;
+        let mut slots = r.order[..r.objects.len()]
+            .iter()
+            .map(|&s| usize::from(s) % 10)
+            .filter(|&s| r.objects.get(s).2 < 168);
+        let (mut clock, mut x) = (u32::from(t.first_pixel), 0u32);
+        for (j, &(sx, d)) in t.stalls[..usize::from(t.n_stalls) % 12].iter().enumerate() {
+            clock += u32::from(sx).saturating_sub(x);
+            x = x.max(u32::from(sx));
+            let begin = clock;
+            clock += u32::from(d);
+            if j == usize::from(t.win_stall) {
+                continue;
+            }
+            let Some(slot) = slots.next() else { break };
+            let c = t.start.wrapping_add(u64::from(begin + u32::from(d) - 5));
+            if self.attr_final & (1 << slot) != 0 || c > upto {
+                continue;
+            }
+            let (_, dest) = self.dma.ppu_at(c);
+            let base = r.objects.get(slot).0 % 40 * 4;
+            let read = |b| OamDma::ppu_read(dest, base + b, &mem.oam, &mem.oam_dma_old);
+            self.obj_attr[slot] = (read(2), read(3));
+            if upto != NEVER {
+                self.attr_final |= 1 << slot;
+            }
+        }
+    }
+
+    /// The End of a line OAM DMA touches: its objects get what their
+    /// fetches read, it is drawn, and its last object fetch leaves that
+    /// object's tile index on the mode-2 bus.
+    #[cold]
+    #[inline(never)]
+    fn end_dma_line(&mut self, ly: u8, mem: &Memory, frame: &mut Frame) {
+        self.fix_attrs(mem, NEVER);
+        self.draw(ly, 160, mem, frame);
+        if let Some(slot) = self.renderer.last_fetched() {
+            self.bus[0] = self.obj_attr[slot].0;
+        }
+    }
+
+    /// The whole OAM scan of line `l` (starting at clock `start`) on a
+    /// line OAM DMA touches, or the rest of one in progress.
+    #[cold]
+    #[inline(never)]
+    fn scan_line(&mut self, l: u32, start: u64, mem: &Memory) -> LineObjects {
+        self.scan_to(l, start, start.wrapping_add(entry_pos(39)), mem);
+        self.scan.line = NEVER;
+        self.scan.objs
+    }
+
+    /// Before the OAM DMA state changes at clock `now` (synced): the OAM
+    /// reads made up to now get the state they saw. In mode 3 the objects
+    /// fetched so far are fixed and the line is drawn up to now; in the
+    /// OAM scan the entries read so far are scanned. The mode-2 bus is set
+    /// if it isn't tracked yet.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn dma_event(&mut self, now: u64, mem: &Memory, frame: &mut Frame) {
+        if !self.lcd_enabled() {
+            return;
+        }
+        let a = self.at(now);
+        let start = now.wrapping_sub(u64::from(a.t));
+        if a.line < LINES && self.line.start == start {
+            // Latched: mode 3 or later. From here on the line's object
+            // fetches follow the transfer.
+            if usize::from(self.drawn) < SCREEN_WIDTH {
+                if !self.attr_on {
+                    self.attr_final = 0;
+                }
+                self.fix_attrs(mem, now);
+                self.attr_on = self.renderer.objects.len() != 0;
+                self.flush(now, mem, frame);
+            }
+        } else if a.line < LINES && !a.first {
+            self.scan_to(a.line, start, now, mem);
+        }
+        if !self.bus_live {
+            self.init_bus(mem);
+        }
     }
 
     // --- Writes (the bus syncs the PPU to the write's clock first) ---
@@ -1168,6 +1468,7 @@ mod tests {
     extern crate std;
     use super::*;
     use std::boxed::Box;
+    use std::vec;
     use std::vec::Vec;
 
     /// A PPU with its own memory and frame, driven like the bus drives it.
@@ -1707,5 +2008,149 @@ mod tests {
         assert_eq!(object_penalty(&[0], 3, None), 11);
         // In the window (WX = 7: window x 0), SCX doesn't matter.
         assert_eq!(object_penalty(&[8], 3, Some(7)), 11);
+    }
+
+    // --- OAM DMA as the PPU sees it ---
+
+    /// A Rig with the LCD on at 1000, synced to the start of line 5, and
+    /// objects at OAM entries 0 and 20 covering line 5 (OAM and the
+    /// pre-transfer copy alike); returns it and that line's clock.
+    fn dma_rig() -> (Rig, u64) {
+        let on = 1000;
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        let l5 = clock(on, 0, 5 * LINE);
+        r.sync(l5);
+        r.mem.oam[..2].copy_from_slice(&[16 + 5, 30]);
+        r.mem.oam[80..82].copy_from_slice(&[16 + 5, 60]);
+        r.mem.oam_dma_old = r.mem.oam;
+        r.ppu.oam_written();
+        r.ppu.bus = [0, 0];
+        r.ppu.bus_live = true;
+        (r, l5)
+    }
+
+    /// A transfer (single speed) the PPU sees running over `(from, to]`.
+    fn running(from: u64, to: u64) -> OamDma {
+        OamDma {
+            start: from + 2,
+            end: to.saturating_add(2),
+            ppu_from: from,
+            ppu_to: to,
+            mcycle: 4,
+            ppu_live: true,
+            ..OamDma::new()
+        }
+    }
+
+    /// The current line's selected objects as (OAM entry, X).
+    fn line_objects(r: &Rig) -> Vec<(u8, u8)> {
+        let o = &r.ppu.renderer.objects;
+        (0..o.len()).map(|s| (o.get(s).0, o.get(s).2)).collect()
+    }
+
+    /// A running transfer keeps the OAM scan off OAM: entries 0-9 (read
+    /// at t = 4..22) compare the last Y and X read instead, so entry 0 is
+    /// missed; entry 20, read after the transfer, is found. With a last Y
+    /// that covers the line, each of those entries becomes an object at
+    /// the last X (SameBoy `add_object_from_index`).
+    #[test]
+    fn running_dma_scans_the_last_read_y_and_x() {
+        for (bus, want) in [
+            ([0, 0], vec![(20, 60)]),
+            ([16 + 5, 77], (0..10).map(|e| (e, 77)).collect()),
+        ] {
+            let (mut r, l5) = dma_rig();
+            r.ppu.dma = running(l5 + 3, l5 + 22);
+            r.ppu.bus = bus;
+            r.sync(l5 + 89);
+            assert_eq!(line_objects(&r), want, "bus {bus:?}");
+        }
+    }
+
+    /// Halted with bytes left (CGB C): the OAM scan finds nothing, but
+    /// reads the word being written (bytes 6-7 here, not written yet).
+    #[test]
+    fn halted_dma_blocks_the_oam_scan() {
+        let (mut r, l5) = dma_rig();
+        // Byte 6, about to be written, would put an object on line 5.
+        r.mem.oam_dma_old[6..8].copy_from_slice(&[16 + 5, 0xCD]);
+        r.ppu.dma = OamDma {
+            halt_from: l5 - 50,
+            halt_to: NEVER,
+            halt_dest: 6,
+            ..running(l5 - 100, NEVER)
+        };
+        r.sync(l5 + 89);
+        assert_eq!(line_objects(&r), vec![]);
+        assert_eq!(r.ppu.bus, [16 + 5, 0xCD]);
+    }
+
+    /// A change of the transfer's state mid-scan (here an FF46 write at
+    /// t = 30): the entries read before it keep what they saw, because
+    /// `dma_event` scans them first. Entry 0 was read during the old
+    /// transfer (missed), entry 12 after it (found, from OAM as it is,
+    /// not as the new transfer found it at its start).
+    #[test]
+    fn dma_event_keeps_the_entries_read_before_it() {
+        let (mut r, l5) = dma_rig();
+        r.mem.oam[48..50].copy_from_slice(&[16 + 5, 90]);
+        r.ppu.dma = running(l5 + 3, l5 + 22);
+        r.sync(l5 + 30);
+        let (p, m, f) = (&mut r.ppu, &*r.mem, &mut *r.frame);
+        p.dma_event(l5 + 30, m, f);
+        r.ppu.dma = running(l5 + 36, l5 + 676);
+        r.sync(l5 + 89);
+        assert_eq!(line_objects(&r), vec![(12, 90)]);
+    }
+
+    /// A transfer during mode 3: the object fetch reads the word being
+    /// written (Pan Docs: OAM DMA bus conflicts; SameBoy `oam_read`), and
+    /// leaves its tile index on the mode-2 bus.
+    #[test]
+    fn object_fetch_reads_the_word_being_written() {
+        let (mut r, l5) = dma_rig();
+        // Only entry 0 (X = 30, screen x 22) on line 5.
+        r.mem.oam[80] = 0;
+        r.mem.oam_dma_old[80] = 0;
+        // Bytes 10-11 differ between OAM (written) and the old copy.
+        r.mem.oam[10..12].copy_from_slice(&[0x05, 0x00]);
+        r.mem.oam_dma_old[10..12].copy_from_slice(&[0x07, 0x20]);
+        // The object's 6-dot stall (Pan Docs: OBJ penalty algorithm)
+        // starts at 96 + 22 = 118, its OAM read is 1 dot in, at 119.
+        // Byte i is written at 77 + 4i: by then 11 bytes, so the read
+        // gets the word 10-11: byte 10 written, byte 11 not.
+        r.ppu.dma = running(l5 + 77, l5 + 400);
+        r.sync(l5 + 300);
+        assert_eq!(line_objects(&r), vec![(0, 30)]);
+        assert_eq!(r.ppu.obj_attr[0], (0x05, 0x20));
+        assert_eq!(r.ppu.bus[0], 0x05);
+    }
+
+    /// A transfer starting in mode 3 (here at t = 150): the object fetched
+    /// before it (entry 0, at t = 119) keeps what it read then; the one
+    /// fetched after it (entry 20, at t = 204) reads the word being
+    /// written. The line was latched without DMA, so `dma_event` starts
+    /// the per-slot attributes from scratch.
+    #[test]
+    fn dma_event_in_mode_3_fixes_the_fetches_so_far() {
+        let (mut r, l5) = dma_rig();
+        r.mem.oam[2..4].copy_from_slice(&[0x03, 0x00]);
+        r.mem.oam_dma_old[2..4].copy_from_slice(&[0x0A, 0x0B]);
+        // Entry 20 at X = 108 (screen x 100): its 7-dot stall starts at
+        // 202, its OAM read at 204.
+        r.mem.oam[81] = 108;
+        r.mem.oam_dma_old[81] = 108;
+        r.mem.oam_dma_old[16..18].copy_from_slice(&[0x09, 0x40]);
+        // Left over from an earlier line.
+        r.ppu.attr_final = 0xFFFF;
+        r.ppu.obj_attr = [(0xEE, 0xEE); 10];
+        r.sync(l5 + 150);
+        let (p, m, f) = (&mut r.ppu, &*r.mem, &mut *r.frame);
+        p.dma_event(l5 + 150, m, f);
+        // Byte i written at 140 + 4i: 16 bytes by 204, the word 16-17.
+        r.ppu.dma = running(l5 + 140, l5 + 400);
+        r.sync(l5 + 400);
+        assert_eq!(line_objects(&r), vec![(0, 30), (20, 108)]);
+        assert_eq!(r.ppu.obj_attr[..2], [(0x03, 0x00), (0x09, 0x40)]);
     }
 }

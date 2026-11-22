@@ -194,7 +194,7 @@ ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interr
   objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
   render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
 apu/        * StereoSample; later channels, frame sequencer, mixer
-dma.rs        OAM DMA (instant-copy stub in bus.rs until M2), GDMA/HDMA
+dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`); GDMA/HDMA in M5
 cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1; later MBC2/3(+RTC)/5
 serial.rs   * SB/SC internal-clock transfers, last byte sent
 ```
@@ -286,6 +286,33 @@ and OAM accesses check `Ppu::vram_blocked`/`oam_blocked` out of line
 (`read_vram`, `Ctx::write_vram`, `read_oam`, `Ctx::write_oam`); `peek` and
 the OAM DMA's reads use `read::<false>` and see memory as it is.
 
+### OAM DMA as the PPU sees it
+
+`docs/reference/oam-dma.md` has the hardware rules. The transfer's state
+(`dma::OamDma`) lives in the `Ppu` (`Ppu::dma`): the bus drives it (FF46
+write, HALT pause and wake-up, CPU conflicts, lazy copying) and both read
+it, so the PPU's sync and draw calls take no extra arguments.
+`OamDma::ppu_at(clock)` says what a PPU OAM read at a clock sees (off,
+running, halted) and how many bytes are written by then; it is a pure
+function of the state since its last change. So before each change (an
+FF46 write, a halt during a transfer) the bus calls `Ctx::dma_ppu_event`:
+the PPU syncs, scans the OAM entries read so far (`Ppu::scan_to`, keeping
+the partial scan in `Ppu::scan`), fixes the attributes of the objects
+fetched so far and draws the line up to now (`Ppu::fix_attrs`, `flush`).
+The wake-up from HALT needs no sync: it changes nothing up to it.
+
+A line is DMA-aware from the FF46 write (`OamDma::ppu_live`) until the
+first line that starts after the transfer's end as the PPU sees it
+(`Ppu::dma_touches` clears the flag), so the normal path costs one flag
+test per line. On an aware line the OAM scan runs entry by entry in runs
+of equal state, tracking the mode-2 bus (`Ppu::bus`), and the objects' tile
+index and attributes come from `Ppu::obj_attr` (passed to the renderer as
+`Sources::attrs`), filled lazily at each draw from the clock of each
+object's fetch in its stall. OAM bytes the transfer hasn't written yet are
+read from `Memory::oam_dma_old` (OAM at the FF46 write); the written ones
+are in `mem.oam`, because the bus copies the bytes due before every PPU
+sync.
+
 ### Scanline renderer
 
 `ppu/render.rs`, driven by the PPU (`Ppu::renderer`); pixels go straight
@@ -304,7 +331,7 @@ where the write lands in the M-cycle (SameBoy `cgb_conflict_map`, single
 speed): the access clock for LCDC/SCY/SCX/WY, one dot earlier for the
 palettes (CGB C), one dot later for WX. Drawing at the mode-3 end is exact
 for VRAM and OAM because the CPU can't write them during mode 3 (and OAM
-during mode 2, when the scan happens).
+during mode 2, when the scan happens); OAM DMA is the exception, below.
 
 Registers: LCDC lives in `Ppu`; SCY, SCX, WY, WX and the raw BGP/OBP0/OBP1
 stay in the `mem.io` backing store (reads unchanged on the bus path), and

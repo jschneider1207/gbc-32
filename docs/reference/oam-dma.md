@@ -41,7 +41,8 @@ are dropped, not caught up. Source: SameBoy master (MIT): `GB_dma_run`
 so the halted cycles are lost. Hardware evidence: gambatte
 `oamdma/oamdmasrc80_halt_m2irq_read8000` expects 81 on dmg08 and cgb04c (it
 reads source byte 31 after ~33 running and ~90 halted M-cycles); it needs
-STAT mode-2 IRQs, so it is an M3 check.
+STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
+`oamdmasrc80_halt_lycirq_read8000` (81).
 - **Where it starts:** HALT's own fetch M-cycle still steps (SameBoy
   `halt()` advances it with `halted` still false); the pause starts at the
   end of it, when the CPU halts. A HALT that doesn't halt (an interrupt
@@ -49,10 +50,9 @@ STAT mode-2 IRQs, so it is an M3 check.
 - **The start delay is frozen too:** its step (SameBoy `dma_current_dest`
   0xFF -> 0) is a `GB_dma_run` step like the others.
 - **OAM stays blocked:** the transfer is still active (`GB_is_dma_active`:
-  `dest != 0xA1`). The CPU can't access anything while halted; for the PPU,
-  SameBoy (`display.c` `add_object_from_index`) makes a halted DMA block
-  the mode-2 OAM scan on CGB-0 to CGB-D (so on CGB C), i.e. no objects:
-  M3.
+  `dest != 0xA1`). The CPU can't access anything while halted; for the PPU
+  see "What the PPU sees" (a halted transfer with bytes left blocks the
+  OAM scan on CGB C).
 - **Wake-up:** on CGB SameBoy samples IE & IF, advances the +1 wake-up
   M-cycle still halted (dropped too, `docs/reference/halt.md`), then sets
   `dma_cycles = 4` and runs exactly one step (`GB_cpu_run`, both the IME = 0
@@ -109,7 +109,8 @@ STAT mode-2 IRQs, so it is an M3 check.
 - Bytes are copied lazily (`OamDma::due`): before any CPU write during a
   transfer (it may change a source byte or its bank), on a restart, when a
   run call ends (so OAM is exact between calls), and at the `Dma` deadline.
-  The PPU does not read OAM yet.
+  Also before every PPU sync, so the PPU finds the bytes written by its
+  reads in `mem.oam` (and the others in `Memory::oam_dma_old`).
 - `peek` and the DMA's own source reads use the plain `read` with the flag
   cleared: no conflicts, OAM as it is.
 - HALT pauses the lazy model: at the halt (`Ctx::dma_pause`) the bytes due
@@ -123,5 +124,69 @@ STAT mode-2 IRQs, so it is an M3 check.
 ## Unverified
 - A speed switch during a transfer: the remaining bytes keep their M-cycle
   count at the new speed from the switch (`Ctx::dma_rescale`). No test ROM.
-- What the PPU sees during a transfer (Pan Docs: objects read as
-  off-screen in mode 2, the word being written in mode 3): M3.
+- The PPU during a restart: it sees only the new transfer's window, so
+  the old one stops for it at the FF46 write and the new one starts 2 dots
+  before the new byte 0 (SameBoy keeps it active throughout). No test ROM.
+- What the mode-3 object fetch reads, and when (below). No test ROM.
+
+## What the PPU sees (CGB C)
+Implemented in `dma.rs` (`OamDma::ppu_at`, `ppu_read`) and `ppu/mod.rs`
+(`Ppu::scan_to`, `fix_attrs`, `dma_event`).
+
+**When.** The PPU sees each step of the transfer 2 dots before the CPU
+access it is due by, in both speeds: byte 0's write at `start - 2`, byte
+`i`'s at `start + i*m - 2`, the last step (the end) at `end - 2`; a PPU
+read at clock `c` sees the steps before `c`. Evidence: gambatte
+`oamdma/late_sp{00,01,02,39}{x,y}_*` (30 ROMs, cgb04c; DMA starting or
+ending around the OAM scan's read of entry 0, 1, 2 or 39, read back
+through the mode-3 length): single speed allows 0-2 dots, double speed
+2-3, so 2 dots fits both; all 30 pass. SameBoy differs: its display sees
+the transfer active from the FF46 write (`dma_current_dest = 0xFF`), which
+`late_sp00x_2` (cgb04c out3) contradicts, and its byte writes are half an
+M-cycle (1 dot in double speed) early.
+
+**The OAM scan (mode 2).** SameBoy `add_object_from_index` (MIT): one
+entry every 2 dots from the mode-2 STAT change, `4 + 2i` dots into the
+line. Per entry, by what the transfer looks like then:
+- *off* (before byte 0's write, in the start delay, after the end): Y and
+  X from OAM as it is then;
+- *running*: the PPU can't read OAM; the scan compares the Y and X it last
+  read (`mode2_y_bus`, `mode2_x_bus`: the last scanned entry's, then each
+  object fetch's tile index replaces Y), so unless that Y covers the line
+  nothing is found, and if it does, each such entry becomes an object at
+  that X. Pan Docs ("OAM DMA bus conflicts"): "most PPU revisions read
+  each object as being off-screen". The two agree unless the last Y
+  covers the line; we follow SameBoy. When tracking starts (an FF46 write
+  after lines it didn't touch) the bus is taken from OAM as it is then:
+  exact unless the CPU wrote those bytes since the PPU read them;
+- *halted* (HALT with bytes left): CGB revisions 0-D find nothing (SameBoy;
+  CGB E would read the word being written). The bus gets the word being
+  written. The CPU's wake-up M-cycle still counts as halted (SameBoy clears
+  `halted` after it).
+
+**HALT and the PPU.** The window freezes with the transfer: halted in the
+start delay, the transfer hasn't started for the PPU until after the
+wake-up; with bytes left, it is active (and halted) until the wake-up and
+ends as late as the transfer does. With every byte written, the last step
+is *not* held: the PPU sees the transfer end on time. Evidence: gambatte
+`oamdma_late_halt_stat_1` (out0) and `_2` (out3), cgb04c: HALT one M-cycle
+before (1 byte left) or at (0 left) the transfer's last M-cycle, halted
+through line 4's read of OAM entry 0 (woken by the timer at t = 23);
+the object (entry 0) on line 4 is missed in `_1` and found in `_2`. SameBoy holds `dma_current_dest = 0xA0` through
+the halt, which would miss it in `_2` too.
+
+**Object fetches (mode 3).** The fetch reads the object's tile index and
+attributes from OAM, or, while bytes 1-159 are being written, the 16-bit
+word being written (SameBoy `oam_read`: `oam[(dest & ~1) | (addr & 1)]`
+with `dest` the next byte; Pan Docs: "the PPU reads whatever 16-bit word
+the DMA unit is writing ... an incorrect tile number and attributes"). We
+place the read `d - 5` dots into the object's `d`-dot stall (SameBoy: after
+the wait for the BG fetch and one more dot). Untested by any ROM.
+
+**STAT.** While a transfer runs (as the CPU sees it: from the FF46 write
+to the end), STAT reads mode 0 instead of mode 2. SameBoy `GB_STAT_update`
+clears the mode bits whenever it runs in mode 2 with DMA active (the mode-2
+start, STAT/LYC/FF46 writes), and `GB_dma_run` sets mode 2 again when the
+transfer ends during the scan. Gambatte has no such rule, and none of the
+674 cgb04c gambatte hex-output results changes with it (throwaway harness);
+no ROM we have is known to test it. The STAT interrupt line is not affected.
