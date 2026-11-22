@@ -6,7 +6,8 @@ the structure changes. The reasons behind decisions belong in
 
 > Status: the workspace and the core's public API (ADR 0006) are concrete as
 > of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
-> The PPU and APU are still skeletons. Targets (dev board, then custom
+> PPU mode timing as of M3 (ADR 0014; pixels not drawn yet); the APU is
+> still a skeleton. Targets (dev board, then custom
 > board) as of 2026-11-21.
 
 ## Workspace
@@ -165,9 +166,11 @@ See ADR 0002. In short:
   are computed from the clock on access and act through deadlines in the
   event table (ADR 0011).
 - The PPU and APU are lazily caught up to the current cycle whenever one of
-  their registers is accessed, and at scheduled events (mode changes, frame
-  end, audio buffer boundaries).
-- PPU mode timing is exact. Pixel output is drawn a scanline at a time, with
+  their registers is written, and at scheduled events (PPU: STAT interrupt
+  edges, VBlank, each visible line's mode-3 end; APU: audio buffer
+  boundaries). PPU register reads are computed from the clock.
+- PPU mode timing is exact (ADR 0014, below). Pixel output is drawn a
+  scanline at a time, with
   a mid-line flush on register writes.
 
 ## Module sketch (`gbc-core`)
@@ -187,7 +190,7 @@ cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/
 bus.rs      * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), memory map, I/O, peek
 timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clock, TIMA reload as the Timer event, serial edge clocks
   reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
-ppu/        * Frame, lazy stub timing (VBlank, LY, STAT mode); later modes, renderer, palettes
+ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows; later renderer, palettes
 apu/        * StereoSample; later channels, frame sequencer, mixer
 dma.rs        OAM DMA (instant-copy stub in bus.rs until M2), GDMA/HDMA
 cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1; later MBC2/3(+RTC)/5
@@ -225,7 +228,8 @@ wake-up or the end of the call, so the wake-up lands on the same M-cycle
 as idling one M-cycle at a time. The CGB speed-switch pause skips the same
 way, a deadline at a time. `Emulator::step` targets `clock + 1`, so its
 halted step stays one M-cycle. On the event table so far: the TIMA reload (`Timer`),
-the serial bit clock (`Serial`), the PPU's VBlank (`Ppu`) and scheduled
+the serial bit clock (`Serial`), the PPU (`Ppu`: STAT interrupt edges,
+VBlank and each visible line's mode-3 end) and scheduled
 button changes (`Input`, `Sys::inputs`, ADR 0012). The timer
 (`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
 of the clock (rebased on DIV writes and speed switches), computes DIV and
@@ -242,3 +246,46 @@ side effects, so the CPU and `Emulator::peek` share one `read` function
 `scripts/fetch-sm83-tests.sh`, verified file by file against the committed
 `tools/sm83-tests/sm83-v1.sha256` (`GBC_REQUIRE_TEST_DATA=1` makes missing
 data a failure instead of a skip).
+
+### PPU timing (ADR 0014)
+
+`ppu/mod.rs`. The PPU keeps `frame_start` (the clock of frame position 0;
+LCD enable is position 7, the post-boot state line 144 dot 163) and
+computes LY, the STAT mode and coincidence bits and the VRAM/OAM blocking
+windows from the position `now - frame_start` on every read, without side
+effects. Positions are SameBoy's nominal action times converted so that
+the state at a position includes the actions at it (an M-cycle boundary in
+single speed is at position 3 mod 4).
+
+The STAT interrupt line is walked over *update points*, 3-5 per line
+(`Pt`: LY change and mode 2 at `t = 3, 4`, the pipeline start `Latch` at
+89, mode-3 `End`, the HBlank source at `End + 1`, the VBlank-line and
+line-153 comparison points), with SameBoy's `mode_for_interrupt`,
+`ly_for_comparison` and held LYC-line semantics; rising edges request IF
+bit 1. `Ppu::sync(now)` commits the points up to `now`; `Ppu::next_event`
+walks ahead without committing to the first point that requests an
+interrupt, completes the frame (VBlank, `FRAME_READY`) or ends a visible
+line's mode 3, which is the `EventKind::Ppu` deadline. With no STAT source
+selected the walk skips to `Latch`/`End`/`VBlank` only.
+
+Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
+`SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
+"OBJ penalty algorithm"), as `LineTiming` with the per-pixel stalls so
+`Ppu::mode3_pixel(now)` can say which pixel is being drawn. Objects come
+from a private OAM scan (`select_objects`, to be replaced by the renderer's
+`objects.rs`), skipped for lines a cached object-line map (`ObjectLines`,
+invalidated by `Ppu::oam_written` on CPU and DMA OAM writes) shows empty.
+
+Every PPU register write goes through `Ctx::write_ppu`: sync first, then
+the write (STAT in two phases one dot apart, LYC one dot into the M-cycle
+in single speed, as SameBoy's conflict maps), then reschedule. CPU VRAM
+and OAM accesses check `Ppu::vram_blocked`/`oam_blocked` out of line
+(`read_vram`, `Ctx::write_vram`, `read_oam`, `Ctx::write_oam`); `peek` and
+the OAM DMA's reads use `read::<false>` and see memory as it is.
+
+Renderer integration points (marked `RENDERER:` in the code): the `Latch`
+point (start the line: SCX, objects), the `End` point (draw the line up to
+pixel 160 into the frame), `Ppu::next_frame` (start of frame), and
+`Ctx::write_ppu` for SCY/SCX/BGP/OBP0/OBP1/WY/WX (draw up to
+`mode3_pixel(now)` before the write lands). `frame_done` fills the frame
+white until then.
