@@ -12,16 +12,21 @@
 ## In flight (session 07, 2026-11-22)
 
 - Done on main: CGB BG attributes + LCDC.0 (e22721c, bench rebaselined),
-  romtest `gambatte` check (78c6443, reviewed; fixes 27d11fa, 06e1536),
-  gambatte lockup rule (75902f9, human-approved; covered by the M5-close
+  CGB object attributes + OAM-index priority (17db555; cgb-acid2 passes),
+  HDMA/GDMA (dc1ef28, 86a13ca, b315d4a; ADR 0017; same-suite 4 -> 8/76,
+  gambatte/dma 110 -> 157/229, 86 new passes, no regressions), romtest
+  `gambatte` check (78c6443, reviewed; fixes 27d11fa, 06e1536), gambatte
+  lockup rule (75902f9, human-approved; covered by the M5-close
   test-integrity review, not reviewed separately).
-- CGB object attributes + OPRI: uncommitted in the main tree (agent
-  resumed after a WSL out-of-memory crash).
-- HDMA/GDMA done on branch `worktree-agent-a46dc3e70b2125ffb`
-  (8d269bc, be21f45; ADR 0017; same-suite-cgb 6/6). Cherry-pick after the
-  object work lands. It takes `.text` to ~84,650 of 85,100 B.
-- Then: double speed / STOP (H3, H5), post-boot CGB handover.
-- One compiling agent at a time (AGENTS.md "Machine resources").
+- M5 acceptance groups now pass (cgb-acid2, mooneye-cgb-boot-regs).
+- Running: speed switch timing + 2-byte STOP (H3, H5; main tree), and
+  cgb-acid-hell's last 2 pixels (worktree, ppu/ only; needs a bench +
+  fingerprint run by the orchestrator before merging).
+- Then: STOP-mode accuracy + screen blank in STOP, post-boot CGB handover,
+  then M5 close (3 reviewers). 26 gambatte/dma ROMs went pass -> fail with
+  real DMA (they passed only because DMA did nothing: late enable, halt,
+  speed-switch edges); recheck after the speed switch.
+- Resources: at most 2 concurrent builds, heavy steps alone (AGENTS.md).
 
 ## Next up
 
@@ -124,7 +129,7 @@ Context on earlier human decisions:
 - **Datasheets:** `../gbc-32-hardware/datasheets/` (read-only for agents).
 - **Commits:** stage by explicit path only (AGENTS.md Git). Other agents
   and the human commit concurrently.
-- **Worktrees:** agents in `git worktree`s must not symlink `test-roms`
+- **Worktrees:** never point a worktree at another tree's `target/` (`CARGO_TARGET_DIR`): cargo then reuses stale binaries (session 07). Agents in `git worktree`s must not symlink `test-roms`
   (a deny rule blocks removing it); use `romtest --roms-dir`,
   `bench --root`, `TEST_ROMS=` for check-bench. Agent worktrees are
   "locked": removal needs `--force --force` (ask the human). Cherry-picked
