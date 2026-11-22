@@ -4,59 +4,56 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M4 (cartridges + saves), in progress. M3 is `stage1-m3`,
-  M2 `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, mid session 06 (log: `logs/2026-11-22-06-m4-carts.md`)
+- **Milestone:** M5 (CGB features), not started. M4 is `stage1-m4`
+  (0bf708d), M3 `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
+- **Last updated:** 2026-11-22, end of session 06 (M4 close; log
+  `logs/2026-11-22-06-m4-carts.md`)
 
 ## Next up
 
-Cartridge work is done: MBC1 (+ multicart, ADR 0016), MBC2, MBC3 + RTC on
-emulated time, MBC5, `RtcState::advance_seconds`, save persistence API
-(ADR 0015, reviewed, fixes in c2ab199). Mooneye MBC ROMs all pass; rtc3test
-passes every subtest in-ROM.
+Start M5 (`docs/plan/stage-1.md` "M5") in a fresh session. Acceptance:
+`cgb-acid2` and `mooneye-cgb-boot-regs` passing; `same-suite-cgb` and
+`age-cgb` tracked. Already in place from M4: CGB palette RAM colors for BG
+(41a47b2: BCPS/BCPD/OCPS/OCPD storage, auto-increment, read-back, 8 BG
+pair tables in `Memory`); CGB-mode objects still use OBP0/OBP1.
 
-Remaining M4 work, in order (plan "M4"):
-1. Perf: `synth:worst-case` is 4.04 M Ir/frame after e15d85f (100.4% of the
-   4.02 M line). Target <= 3.82 M (95%). In flight at this writing: a
-   render palette-pair cut (`ppu/render.rs`) and an event-boundary /
-   scheduler cut. Check `git log` for their commits.
-2. `Hw` is 1,000/1,024 B: move per-line buffers into `Memory` (plan task).
-3. CGB palette colors (BCPS/BCPD/OCPS/OCPD -> colors only), so the rtc3test
-   screenshots (green PASS) match.
-4. Milestone close: reviews DONE (see log), fixes landed; waiting on the
-   human (Needs human 1-2), then baseline + tag `stage1-m4`.
+Suggested order (one behavior per agent; chain agents that share files):
+1. VRAM bank 1 + BG map attributes (palette, bank, flips, priority), with the
+   LCDC.0 master-priority meaning in CGB mode (plan task from the M4 review).
+2. CGB object attributes (palette 0-7 from OCPD, VRAM bank) and CGB
+   priority (OPRI). Keep a separate X sort for mode-3 stall timing (plan
+   task: `sorted_object_stalls` depends on `priority_order()` being an X sort).
+3. WRAM banking, then GDMA/HDMA timing.
+4. Double speed / STOP fixes (H3, H5), then post-boot CGB-mode handover.
+5. romtest `gambatte` check, so the stretch-tier gambatte suite reports.
+
+Perf watch (must stay honest): `synth:worst-case` is 3.66 M x86 Ir/frame
+(91% of the 4.02 M line), but the line assumes 1 Ir = 1 M7 cycle, and the
+M4 perf review measured thumbv7em code at 1-2x (u64 maths). Treat the
+headroom as thin. Run `check-bench.sh` and `check-code-size.sh` (now with
+a total `.text` budget, 85,100 B; 83.4 KB used) on every hot-path step,
+and add M5 features to `synth:worst-case`/`synth:cgb-raster` as they land.
+No hardware yet (human, 2026-11-22), so the M7 measurement waits for Stage 2.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
 - `scripts/diff-fingerprint.sh <rev>` (3,822 runs incl. frame buffer, VRAM,
   OAM, input pass; ~20 s) proves "no behavior change"; behavior changes
-  must list and explain every differing ROM.
+  must list and explain every differing ROM. It doesn't cover the synth
+  benches; check those with frame hashes.
 - Gambatte ROMs report `unsupported` in romtest (plan task, M5). The two
   PPU-side OAM DMA deviations from SameBoy are provisional until then
   (`docs/reference/oam-dma.md`).
-- Run `scripts/check-bench.sh` and `check-code-size.sh` on hot-path steps.
+- Agents spawned with a fixed tool-call cap (~20-45) and one theme stayed
+  on budget this session; the uncapped ones ran 50-85 calls.
 
 ## Needs human
 
-Approved 2026-11-22, being implemented (then tag `stage1-m4`):
-1. **mbc3-tester `run_frames`**: the ROM's result first appears at 40.59
-   frames (counted as 70,224-clock units from the post-boot handover). That's
-   41,368 clocks after the 40-frame cutoff. No core or runner bug was found,
-   and upstream probably counts frames drawn. Proposal: `run_frames = 41`
-   for this group only (it passes with 0.41 frame of margin). Alternatives:
-   redefine `run_frames` everywhere, or leave it failing.
-2. **Reference-override mechanism** (test-integrity review M1/M2): a89713c
-   and 3da7107 added a committed, pinned PNG override plus a new ownership
-   class. The human approved the recolor, not this mechanism, and ADR 0007
-   wasn't amended. Proposal: replace it with a manifest-described in-memory
-   recolor of the pinned upstream PNG, `recolor = { from, to, count }`,
-   where `to` must be a contract palette color, plus a dated ADR 0007
-   amendment. Then remove `acceptance/references/` and its README rows.
-3. NUCLEO-H753ZI: not available yet (human, 2026-11-22). M7 cycle
-   measurement waits for Stage 2 (perf review HIGH, plan task).
-
-Resolved in session 06: the mbc3-tester recolor itself was approved, and
-ADR 0015 was agreed to extend ADR 0006, not change it.
+None open. Decided in session 06 (2026-11-22): the mbc3-tester reference
+uses a counted, contract-constrained in-memory recolor (ADR 0007
+amendment; a recolor may only relabel a color absent from the reference);
+mbc3-tester `run_frames` 41; ADR 0015 extends ADR 0006 and doesn't
+change it. Any new `recolor` or manifest change still needs the human.
 
 FYI (session 05): the human saw "a lot of compile errors" (session 05).
 build, clippy `-D warnings`, tests, the thumbv7em core build and the
@@ -66,6 +63,8 @@ Windows editor on WSL files, or loading `tools/fuzz/fuzz`, which needs
 nightly). Waiting on an example error if it persists.
 
 Context on earlier human decisions:
+- Acceptance screenshot fixes: a counted `recolor` on the pinned upstream
+  PNG, never a committed replacement image (session 06, ADR 0007).
 - `acceptance/test-roms.sha256` is human-owned.
 - Strictly-tightening gate/contract changes and factual README fixes are
   agent decisions.
@@ -110,25 +109,23 @@ None.
 
 ## Acceptance snapshot
 
-As of the M3 baseline (`stage1-m3`). `scripts/gate-stage1.sh` passes every
-step except the last (must-tier ROMs owned by M4-M6), with no regressions.
+As of the M4 baseline (`stage1-m4`). `scripts/gate-stage1.sh` passes every
+step except the last (must-tier ROMs owned by M5-M6), with no regressions.
 
 | Tier | Pass | Fail | Timeout | Crash | Unsupported | No reference |
 |---|---|---|---|---|---|---|
-| must (86) | 66 | 20 | 0 | 0 | 0 | 0 |
-| should (40) | 24 | 16 | 0 | 0 | 0 | 0 |
+| must (86) | 84 | 2 | 0 | 0 | 0 | 0 |
+| should (40) | 26 | 14 | 0 | 0 | 0 | 0 |
 | stretch (3268) | 12 | 97 | 0 | 10 | 3144 | 5 |
 
-Must-tier failures: mooneye-mbc ×14, rtc3test ×3, mbc3-tester (M4);
-cgb-acid2 (M5); cgb_sound (M6). `blargg-interrupt-time` (should) fails
-after the speed switch (M5).
+Must-tier failures: cgb-acid2 (M5), cgb_sound (M6). `blargg-interrupt-time`
+(should) fails after the speed switch (M5).
 
-Performance (`docs/perf.md`, `perf/bench-baseline.txt`; Ir/frame from the
-M3 perf review):
-- cpu_instrs 1,729 M (1.45 M/frame), cgb_sound 974 M (0.82 M), cgb-acid2
-  789 M (0.66 M; PPU ~0.53 M of it), each 20 s.
-- Synthetic: event-storm 446 M (3.73 M/frame, 93% of the 4.02 M line),
-  dma-storm 437 M, halt-irq 292 M.
-- Code size (thumbv7em): gbc-core `.text` 79.6 KB (no longer fits a 64 KB
-  ITCM; plan task). `Cpu::run` 27,760 B (budget 29,150), `execute_cb`
-  12,622, `Ppu::sync` 2,918, `render` 2,684, `start_line` 2,208.
+Performance (`docs/perf.md`, `perf/bench-baseline.txt` at cf95ba4; x86 Ir):
+- cpu_instrs 1,595 M (20 s), cgb_sound 841 M, cgb-acid2 512 M (was 790 M
+  at M3).
+- Synthetic: worst-case 437 M (3.66 M/frame, 91% of the 4.02 M line),
+  cgb-raster 294 M (2.46 M/frame), event-storm 396 M, dma-storm 418 M,
+  halt-irq 222 M.
+- Code size (thumbv7em): gbc-core `.text` 83.4 KB (total budget 85,100 B;
+  over the H753's 64 KB ITCM, plan task). `Hw` 832 B (assert <= 864).
