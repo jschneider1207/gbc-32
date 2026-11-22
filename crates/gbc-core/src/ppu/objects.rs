@@ -91,8 +91,8 @@ impl LineObjects {
     }
 
     /// The selected objects' X positions (OAM byte 1, screen X + 8) in
-    /// OAM order, for the mode-3 object penalties.
-    #[inline]
+    /// OAM order.
+    #[cfg(test)]
     pub(crate) fn x_positions(&self) -> &[u8] {
         &self.x[..self.len()]
     }

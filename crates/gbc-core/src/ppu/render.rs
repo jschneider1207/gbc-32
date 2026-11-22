@@ -237,12 +237,18 @@ impl Renderer {
 
     /// Start of line `ly`'s pixel output, with SCX as of that moment and
     /// the objects the OAM scan selected.
-    pub(crate) fn start_line(&mut self, ly: u8, scx: u8, objects: &LineObjects) {
+    pub(crate) fn start_line(
+        &mut self,
+        ly: u8,
+        scx: u8,
+        objects: &LineObjects,
+        order: [u8; MAX_PER_LINE],
+    ) {
         self.ly = ly;
         self.fine_scx = scx & 7;
         self.window_active = false;
         self.objects = *objects;
-        self.order = objects.priority_order();
+        self.order = order;
         // The buffer is all transparent unless an object was fetched.
         if self.obj_fetched {
             self.obj_buf = [0; OBJ_BUF_LEN];
@@ -710,7 +716,8 @@ mod tests {
         fn begin(&mut self, ly: u8) {
             self.r.check_wy(ly, &self.regs);
             let objs = LineObjects::scan(&self.oam, ly, self.regs.lcdc & LCDC_OBJ_TALL != 0);
-            self.r.start_line(ly, self.regs.scx, &objs);
+            self.r
+                .start_line(ly, self.regs.scx, &objs, objs.priority_order());
         }
 
         fn span(&mut self, row: &mut [u16; W], x0: usize, x1: usize) {

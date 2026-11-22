@@ -30,9 +30,9 @@
 # PPU mode timing (ADR 0014; measured 2720, 482, 412, 494, 1058 bytes):
 # the per-line event and its update-point walk, and the PPU register
 # writes moved out of write_io.
-3120 <gbc_core::ppu::Ppu>::sync
-510 <gbc_core::ppu::Ppu>::next_event
-440 <gbc_core::ppu::Ppu>::next_point
+960 <gbc_core::ppu::Ppu>::sync
+590 <gbc_core::ppu::Ppu>::next_event
+605 <gbc_core::ppu::Ppu>::seek
 520 <gbc_core::ppu::Ppu>::point_irq
 1290 <gbc_core::bus::Ctx>::write_ppu
 # CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
@@ -52,7 +52,7 @@
 # line into fill_mixed (2216 + 792 = 3008 in all, +324).
 2330 <gbc_core::ppu::render::Renderer>::render
 830 gbc_core::ppu::render::fill_mixed
-2320 <gbc_core::ppu::render::Renderer>::start_line
+4590 <gbc_core::ppu::Ppu>::latch
 510 <gbc_core::ppu::objects::LineObjects>::scan
 # OAM DMA as the PPU sees it (measured 138, 338): draw passes the
 # per-slot object attributes of a line OAM DMA touches, flush fixes

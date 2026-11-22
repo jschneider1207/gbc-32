@@ -170,6 +170,18 @@ enum Pt {
     L153Zero,
 }
 
+/// The next update point after [`Ppu::synced`](Ppu): frame position (past
+/// `FRAME`: the next frame's), its line (0-153; 0 past `FRAME`) and kind.
+/// Advanced point by point ([`Ppu::step`]) instead of searching from a
+/// position with a division per point ([`Ppu::next_point`], only used
+/// to re-seek when the walk changes: LCD enable, STAT selects).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Cursor {
+    pos: u32,
+    line: u8,
+    pt: Pt,
+}
+
 /// The STAT interrupt line and the LY=LYC part of it (SameBoy
 /// `stat_interrupt_line`, `lyc_interrupt_line`).
 #[derive(Clone, Copy)]
@@ -276,6 +288,9 @@ pub(crate) struct Ppu {
     /// no OAM scan.
     first_frame: bool,
     line_irq: IrqLine,
+    /// The next update point after `synced` (meaningless while the LCD is
+    /// off; set on enable).
+    cursor: Cursor,
     /// STAT bit 2 while the LCD is off: kept from when it was turned off
     /// (Mooneye `acceptance/ppu/stat_lyc_onoff`).
     lyc_flag_off: bool,
@@ -369,6 +384,11 @@ impl Ppu {
                 stat: false,
                 lyc: false,
             },
+            cursor: Cursor {
+                pos: 0,
+                line: 0,
+                pt: Pt::V0,
+            },
             lyc_flag_off: false,
             line: LineTiming::NONE,
             drawn: 0,
@@ -395,6 +415,7 @@ impl Ppu {
         self.lcdc = 0x91;
         self.frame_start = 0u64.wrapping_sub(u64::from(POST_BOOT_POS));
         // LY = 144 against LYC = 0: no coincidence, no source enabled.
+        self.seek();
     }
 
     #[inline]
@@ -700,6 +721,77 @@ impl Ppu {
         (FRAME + 89, Pt::Latch)
     }
 
+    /// The cursor for the current state: the first update point after
+    /// `synced` (`< frame_start + FRAME`, as between syncs), by search.
+    fn seek_point(&self) -> Cursor {
+        let pos = self.synced.wrapping_sub(self.frame_start) as u32;
+        let (pos, pt) = if self.quiet() {
+            self.next_work_point(pos, self.first_frame, self.frame_start)
+        } else {
+            self.next_point(pos, self.first_frame, self.frame_start)
+        };
+        let line = if pos >= FRAME { 0 } else { (pos / LINE) as u8 };
+        Cursor { pos, line, pt }
+    }
+
+    /// Re-seeks the cursor after a change to what the walk visits (LCD
+    /// enable, reset, the STAT selects becoming empty or not).
+    #[cold]
+    fn seek(&mut self) {
+        self.cursor = self.seek_point();
+    }
+
+    /// The update point after `c` (which is at or before the next frame's
+    /// first point; `start` is the clock of `c`'s frame position 0): what
+    /// [`Self::next_point`] (or [`Self::next_work_point`] if `quiet`)
+    /// returns for `c.pos`, without dividing. A visible line's `End` is at
+    /// its latched end, or at the earliest possible end if not latched yet.
+    #[inline]
+    fn step(&self, c: Cursor, quiet: bool, start: u64) -> Cursor {
+        let l = u32::from(c.line);
+        let base = l * LINE;
+        let (pos, line, pt) = match c.pt {
+            Pt::Ly3 => (c.pos + 1, l, Pt::Ly4),
+            Pt::Ly4 => (base + 89, l, Pt::Latch),
+            Pt::Latch => {
+                let end = match self.latched_end(start.wrapping_add(u64::from(base))) {
+                    Some(e) => base + e,
+                    // The earliest end: 167 dots after the pipeline start.
+                    None => c.pos + 167,
+                };
+                (end, l, Pt::End)
+            }
+            Pt::End if !quiet => (c.pos + 1, l, Pt::HBlank),
+            Pt::End | Pt::HBlank if l < LINES - 1 => {
+                if quiet {
+                    (base + LINE + 89, l + 1, Pt::Latch)
+                } else {
+                    (base + LINE + 3, l + 1, Pt::Ly3)
+                }
+            }
+            Pt::End => (VBLANK_POS, LINES, Pt::VBlank),
+            Pt::HBlank => (base + LINE, LINES, Pt::V0),
+            Pt::V0 => match l {
+                144 => (c.pos + 2, l, Pt::Quirk2),
+                153 => (c.pos + 6, l, Pt::L153Cmp),
+                _ => (c.pos + 4, l, Pt::V4),
+            },
+            Pt::Quirk2 => (c.pos + 2, l, Pt::V4),
+            Pt::V4 if l == LINES => (VBLANK_POS, l, Pt::VBlank),
+            Pt::V4 => (base + LINE, l + 1, Pt::V0),
+            Pt::VBlank if quiet => (FRAME + 89, 0, Pt::Latch),
+            Pt::VBlank => (base + LINE, l + 1, Pt::V0),
+            Pt::L153Cmp => (c.pos + 2, l, Pt::L153Off),
+            Pt::L153Off => (c.pos + 4, l, Pt::L153Zero),
+            Pt::L153Zero => (FRAME + 3, 0, Pt::Ly3),
+        };
+        Cursor {
+            pos,
+            line: line as u8,
+            pt,
+        }
+    }
+
     /// No STAT interrupt source is selected.
     #[inline]
     fn quiet(&self) -> bool {
@@ -743,26 +835,21 @@ impl Ppu {
         }
         let mut line = self.line_irq;
         let mut start = self.frame_start;
-        let mut first = self.first_frame;
-        let mut pos = self.synced.wrapping_sub(start) as u32;
+        let mut c = self.cursor;
         let quiet = self.quiet();
         loop {
-            let (mut p, pt) = if quiet {
-                self.next_work_point(pos, first, start)
-            } else {
-                self.next_point(pos, first, start)
-            };
-            if p >= FRAME {
-                p -= FRAME;
+            if c.pos >= FRAME {
+                c.pos -= FRAME;
                 start = start.wrapping_add(u64::from(FRAME));
-                first = false;
             }
-            let fires = matches!(pt, Pt::End | Pt::VBlank)
-                || (!quiet && self.point_irq(&mut line, pt, p / LINE, double));
+            let fires = matches!(c.pt, Pt::End | Pt::VBlank)
+                || (!quiet
+                    && c.pt != Pt::Latch
+                    && self.point_irq(&mut line, c.pt, u32::from(c.line), double));
             if fires {
-                return start.wrapping_add(u64::from(p));
+                return start.wrapping_add(u64::from(c.pos));
             }
-            pos = p;
+            c = self.step(c, quiet, start);
         }
     }
 
@@ -783,30 +870,22 @@ impl Ppu {
             return events;
         }
         let quiet = self.quiet();
-        loop {
-            let pos = self.synced.wrapping_sub(self.frame_start) as u32;
-            let (mut p, pt) = if quiet {
-                self.next_work_point(pos, self.first_frame, self.frame_start)
-            } else {
-                self.next_point(pos, self.first_frame, self.frame_start)
-            };
-            if self.frame_start.wrapping_add(u64::from(p)) > now {
-                break;
-            }
-            if p >= FRAME {
-                p -= FRAME;
+        while self.frame_start.wrapping_add(u64::from(self.cursor.pos)) <= now {
+            if self.cursor.pos >= FRAME {
                 self.next_frame();
             }
-            self.synced = self.frame_start.wrapping_add(u64::from(p));
-            let l = p / LINE;
-            if !quiet {
+            let c = self.cursor;
+            self.synced = self.frame_start.wrapping_add(u64::from(c.pos));
+            let l = u32::from(c.line);
+            // `Latch` and `End` don't change the STAT line.
+            if !quiet && !matches!(c.pt, Pt::Latch | Pt::End) {
                 let mut line = self.line_irq;
-                if self.point_irq(&mut line, pt, l, double) {
+                if self.point_irq(&mut line, c.pt, l, double) {
                     *iflags |= INT_STAT;
                 }
                 self.line_irq = line;
             }
-            match pt {
+            match c.pt {
                 Pt::Latch => self.latch(l, self.first_frame && l == 0, mem),
                 // The rest of line `l` (to pixel 160). VRAM, OAM and the
                 // palettes are blocked for the CPU during mode 3, so
@@ -814,9 +893,9 @@ impl Ppu {
                 // during mode 3 flushed the pixels before them already.
                 Pt::End => {
                     if self.attr_on {
-                        self.end_dma_line(l as u8, mem, frame);
+                        self.end_dma_line(c.line, mem, frame);
                     } else {
-                        self.draw(l as u8, 160, mem, frame);
+                        self.draw(c.line, 160, mem, frame);
                     }
                 }
                 Pt::VBlank => {
@@ -825,18 +904,23 @@ impl Ppu {
                 }
                 _ => {}
             }
+            // After the point's work: `Latch` fixes where `End` is.
+            self.cursor = self.step(c, quiet, self.frame_start);
         }
         self.synced = now;
         if now.wrapping_sub(self.frame_start) >= u64::from(FRAME) {
             // Past line 153, before the next frame's first point.
             self.next_frame();
         }
+        debug_assert_eq!(self.cursor, self.seek_point());
         events
     }
 
-    /// Frame position 0 of the next frame is reached.
+    /// Frame position 0 of the next frame is reached (the cursor is in
+    /// it: rebased).
     fn next_frame(&mut self) {
         self.frame_start = self.frame_start.wrapping_add(u64::from(FRAME));
+        self.cursor.pos -= FRAME;
         self.first_frame = false;
         // The window line counter and the WY condition restart (SameBoy
         // resets them after line 153).
@@ -942,7 +1026,9 @@ impl Ppu {
 
     /// The pixel pipeline of line `l` starts: fix its mode-3 timing from
     /// SCX, the window and the objects the OAM scan selected (none on the
-    /// first line after LCD enable).
+    /// first line after LCD enable). Out of line: it runs once per line,
+    /// and inlined, its register loads were hoisted into every sync.
+    #[inline(never)]
     fn latch(&mut self, l: u32, first: bool, mem: &Memory) {
         // SameBoy checks at the line start and on WY/LCDC writes (bus
         // `write_ppu` calls `check_wy` too); here before the window's
@@ -975,8 +1061,14 @@ impl Ppu {
                 LineObjects::EMPTY
             }
         };
-        let xs = objs.x_positions();
-        let n = xs.len();
+        // Priority order is ascending X (compatibility mode): sorted once
+        // for both the stalls and the renderer.
+        let n = objs.len();
+        let order = objs.priority_order();
+        let mut xs = [0u8; objects::MAX_PER_LINE];
+        for (x, &slot) in xs.iter_mut().zip(&order[..n]) {
+            *x = objs.get(usize::from(slot)).2;
+        }
         let mode3 = if first { 86 } else { 84 };
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
         let first_pixel = mode3 + 12 + u16::from(scx & 7);
@@ -989,7 +1081,7 @@ impl Ppu {
         let mut k = 0;
         if n != 0 || window.is_some() {
             let mut stalls = [(0u8, 0u8); 10];
-            let n_obj = object_stalls(xs, scx, window, &mut stalls);
+            let n_obj = sorted_object_stalls(&xs[..n], scx, window, &mut stalls);
             let mut win = window.map(|wx| (wx.saturating_sub(7), 6u8));
             for &s in &stalls[..n_obj] {
                 if let Some(w) = win.filter(|w| w.0 <= s.0) {
@@ -1013,7 +1105,7 @@ impl Ppu {
         t.n_stalls = k as u8;
         t.end = first_pixel + 160 + total;
         self.drawn = 0;
-        self.renderer.start_line(l as u8, scx, &objs);
+        self.renderer.start_line(l as u8, scx, &objs, order);
         self.attr_on = false;
         if aware {
             self.attr_final = 0;
@@ -1245,6 +1337,10 @@ impl Ppu {
         if !self.lcd_enabled() {
             return;
         }
+        if was_quiet != self.quiet() {
+            // The walk visits other points now (synced to `now`).
+            self.seek();
+        }
         if was_quiet {
             // The line was low; its LY=LYC part wasn't tracked. While the
             // comparison is off it holds the last result (approximated
@@ -1334,6 +1430,7 @@ impl Ppu {
             self.first_frame = true;
             self.renderer.start_frame();
             self.line = LineTiming::NONE;
+            self.seek();
             // SameBoy's first update, one dot after the write: no mode
             // source, LY = 0 against LYC.
             if self
@@ -1418,6 +1515,7 @@ impl ObjectLines {
 /// at X >= 168 are off screen and cost nothing. Checked against every case
 /// of Mooneye `acceptance/ppu/intr_2_mode0_timing_sprites` (unit test
 /// below; SameBoy's fetcher gives the same lengths).
+#[cfg(test)]
 pub(crate) fn object_stalls(
     xs: &[u8],
     scx: u8,
@@ -1427,17 +1525,19 @@ pub(crate) fn object_stalls(
     let mut sorted = [0u8; 10];
     let n = xs.len().min(10);
     sorted[..n].copy_from_slice(&xs[..n]);
-    // Insertion sort: at most 10 bytes, and core's generic sort links ~4 KiB
-    // of code on the Cortex-M7 (16 KiB I-cache). Equal Xs are identical.
-    for i in 1..n {
-        let v = sorted[i];
-        let mut j = i;
-        while j > 0 && sorted[j - 1] > v {
-            sorted[j] = sorted[j - 1];
-            j -= 1;
-        }
-        sorted[j] = v;
-    }
+    sorted[..n].sort_unstable();
+    sorted_object_stalls(&sorted[..n], scx, window, out)
+}
+
+/// [`object_stalls`] of X coordinates already in ascending order (the
+/// line's priority order, [`LineObjects::priority_order`]).
+fn sorted_object_stalls(
+    sorted: &[u8],
+    scx: u8,
+    window: Option<u8>,
+    out: &mut [(u8, u8); 10],
+) -> usize {
+    let n = sorted.len().min(10);
     let win_x = window.map(|wx| i32::from(wx) - 7);
     let mut last_tile = None;
     let mut k = 0;

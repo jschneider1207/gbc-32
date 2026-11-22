@@ -40,13 +40,13 @@ Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,726,409,705 |
-| cgb_sound.gb | 971,629,157 |
-| cgb-acid2.gbc | 680,542,754 |
-| synth:event-storm (2 s) | 446,532,249 |
-| synth:dma-storm (3 s) | 439,495,485 |
-| synth:halt-irq (10 s) | 290,969,131 |
-| synth:worst-case (2 s) | 491,559,542 |
+| cpu_instrs.gb | 1,705,666,917 |
+| cgb_sound.gb | 950,442,705 |
+| cgb-acid2.gbc | 599,044,146 |
+| synth:event-storm (2 s) | 443,445,759 |
+| synth:dma-storm (3 s) | 433,891,145 |
+| synth:halt-irq (10 s) | 280,514,521 |
+| synth:worst-case (2 s) | 482,065,134 |
 
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
@@ -54,7 +54,8 @@ Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
 3.73 M + acid2 PPU 0.53 M = 3.97 M, 99%) was 0.26 M too low: the real
 program also pays STAT IRQ entry (up to 3 per line) and the 10-object
 lines. x86 proxy only. Fused object mixing (below) took it to 491.6 M =
-4.12 M per frame, 102% of the line (0.10 M over).
+4.12 M per frame, 102% of the line (0.10 M over). The PPU timing cuts
+(below) took it to 482.1 M = 4.04 M per frame: 100.4%, 0.016 M over.
 
 **Scanline renderer (M3).** Drawing pixels costs about 220k Ir per frame
 with the BG only (cpu_instrs, cgb_sound, halt-irq, event-storm and
@@ -96,6 +97,46 @@ also removes 8 data-dependent branches per object fetch on the M7.
 `Renderer::render` and `fill_mixed` have no panic or bounds-check calls
 (x86 disassembly; on thumbv7em their only relocations are `SPREAD` and,
 from `render`, `fill_mixed`).
+
+**PPU timing cuts (ADR 0014 "Further cuts").** The walk over update
+points keeps a cursor (`Ppu::cursor`: the next point after the last sync,
+with its line) and advances it point by point (`Ppu::step`, no
+division); the division-based search (`next_point`) only re-seeks after
+LCD enable, reset or a STAT write that changes whether any source is
+selected (`Ppu::seek`, cold). Sync no longer searches once more to find
+that it is done. Also: `Latch` and `End` skip the STAT-line evaluation
+(they never change it); `Ppu::latch` is out of line (inlined, LLVM
+hoisted its register loads into every sync, ~32 instructions per call);
+the objects are sorted by X once per line, for both the mode-3 stalls and
+the renderer's priority order (was sorted twice). Ir (20 s / 2 s):
+
+| Step | cgb-acid2 | synth:worst-case | event-storm |
+|---|---|---|---|
+| Before (0c23c48) | 680,542,754 | 491,559,542 | 446,532,249 |
+| Cursor | 632,998,283 | 485,961,638 | 444,532,470 |
+| + `latch` out of line, no STAT evaluation at `Latch`/`End` | | 482,779,272 | |
+| + one X sort per line (chosen) | 599,044,146 | 482,065,134 | 443,445,759 |
+
+cgb-acid2 -12.0% (~68k Ir per frame), worst-case -1.9% (4.12 -> 4.04 M
+per frame), cpu_instrs -1.2%, cgb_sound -2.2%, halt-irq -3.6%, dma-storm
+-1.3%, event-storm -0.7%. The cursor is 8 bytes: `Hw` 992 -> 1,000 B.
+
+Reusing the look-ahead walk did not pay and is not done: `next_event`
+recorded the STAT line before its deadline, and a sync reaching that
+deadline skipped the evaluation at the points before it. worst-case
+482.8 -> 484.2 M (+0.3%): with the cursor a re-walked point costs about
+40 Ir, the bookkeeping on every sync and walk cost more, and it needed 16
+more bytes of `Hw`. `#[inline(always)]` on `point_irq`: -0.1 M for +800 B
+of `next_event`; not done.
+
+Remaining worst-case cost per visible line (callgrind, 2 s): two PPU
+events one dot apart (the `End` draw, then the HBlank STAT edge), each a
+scheduler dispatch + `sync_ppu` + `sync` + `next_event` (sync 5.5 M,
+next_event 2.8 M, `point_irq` 1.6 M, `sync_ppu` 2.0 M self); `latch` 11.6 M
+inclusive (~680 Ir per line: OAM scan, sort, stalls, renderer line
+start); `render` + `fill_mixed` ~44 M. Drawing at the HBlank event instead
+of a separate `End` event would change behavior: CPU VRAM writes do not
+sync the PPU (`Ctx::write_vram`).
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
 mode 3, where the renderer draws) plus STAT interrupt edges: from
@@ -139,14 +180,14 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 | `Ctx::write_io` | 884 | 930 |
 | `bus::read_high` | 848 | 890 |
 | `Ctx::sync_ppu` | 214 | 230 |
-| `Ppu::sync` | 2,758 | 3,120 |
-| `Ppu::next_event` | 482 | 510 |
-| `Ppu::next_point` | 412 | 440 |
+| `Ppu::sync` (cursor walk; 2,758 B with `latch` inlined) | 914 | 960 |
+| `Ppu::next_event` (`step` inlined; was 482 B calling `next_point`) | 562 | 590 |
+| `Ppu::seek` (cold: the division-based search, was `next_point` 412 B) | 576 | 605 |
 | `Ppu::point_irq` | 494 | 520 |
 | `Ctx::write_ppu` (PPU registers, out of `write_io`; mid-line flush) | 1,226 | 1,290 |
 | `Renderer::render` (pixel loop) | 2,216 | 2,330 |
 | `render::fill_mixed` (tile loop with object mixing) | 792 | 830 |
-| `Renderer::start_line` (priority sort, buffer clear) | 2,208 | 2,320 |
+| `Ppu::latch` (once per line: OAM scan, X sort, stalls; `Renderer::start_line`, 2,208 B out of line before, inlined) | 4,368 | 4,590 |
 | `LineObjects::scan` (OAM scan) | 482 | 510 |
 | `Ppu::draw`, `Ppu::flush` | 122, 290 | 130, 305 |
 | `Ctx::write_mapped` | 460 | 480 |
@@ -204,9 +245,9 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,726,409,705 |
-| cgb_sound.gb | 971,629,157 |
-| cgb-acid2.gbc | 680,542,754 |
+| cpu_instrs.gb | 1,705,666,917 |
+| cgb_sound.gb | 950,442,705 |
+| cgb-acid2.gbc | 599,044,146 |
 
 (The scanline renderer took these from 1,464.1 M, 709.3 M and 341.7 M;
 ADR 0014, PPU mode timing, before it from 1,388.0 M, 607.5 M and 12.9 M;
