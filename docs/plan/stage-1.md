@@ -112,7 +112,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Screen blank while in STOP mode (SameBoy `GB_display_vblank` blanks while stopped); extend `screen_blank` (M0 hardware review)
 - [x] CGB palettes (BCPS/BCPD/OCPS/OCPD), BG attributes, CGB sprite priority (e22721c, 17db555; cgb-acid2 passes)
 - [ ] Palette RAM access blocked in mode 3 (BCPD/OCPD reads and writes; `TODO(M5)` in `bus.rs`)
-- [ ] cgb-acid-hell: 2 pixels still differ after 17db555; find out why
+- [ ] cgb-acid-hell: 2 pixels at (80,68)/(80,69) after 17db555 (session 07 investigation, unfixed). The ROM writes LCDC every 8 dots in mode 3 (cycling $80/$E1/$E3/$F3); pixel 80 is the last before the $E3->$F3 write. We draw it through map column 0 palette 0 (attr 0x00), the reference looks like the next tile's palette 1 (attr 0x01). Ruled out: span off-by-one, LCDC.4 timing, flips, VRAM bank, objects. Next: SameBoy `GB_IO_LCDC` write path + `display.c` fetcher for a CGB attribute-latch quirk at the write dot. Affects CGB ROMs writing LCDC in mode 3 only
 - [ ] ADR for the per-pixel object rank buffer (`Memory::obj_rank`): fetch order (X, drives mode-3 stalls) is separate from draw priority (OAM index in CGB mode); OPRI writes only latch during boot (SameBoy `memory.c`)
 - [ ] Extend `synth:cgb-raster` with CGB BG and object attributes (bank 1 tiles, flips, mixed palettes), rebaseline in the same commit
 - [ ] GDMA/HDMA with correct timing, including during HALT and LCD off
