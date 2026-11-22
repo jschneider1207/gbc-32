@@ -77,11 +77,12 @@ Open (session 07):
 
 Decided in session 07 (2026-11-22): STOP is 2 bytes unless IE&IF is
 pending (SameBoy `stop()`, which encodes the Pan Docs flowchart). The
-human chose "Keep pending cases only": the SingleStepTests harness keeps
-the opcode 0x10 cases with IE&IF&0x1F != 0 (1 byte is right there) and
-skips the rest (SST always expects 1 byte and models no I/O), covered by
-dedicated, mutation-checked unit tests for SameBoy's STOP branches; needs
-an ADR. The human also approved loosening the
+human first chose "Keep pending cases only", but no SST 0x10 case sets
+IF, so that kept 0 of 1000. The human then chose: run all 1000 0x10
+cases and compare everything except PC and the bus-cycle list
+(registers, flags, SP, IME, RAM), where SST's 1-byte expectation
+contradicts hardware. The 5 SameBoy STOP branches have dedicated,
+mutation-checked unit tests (ADR 0020). The human also approved loosening the
 lockup rule for `gambatte/undef_ops` ("Those specific tests should
 probably have looser restrictions then right? If the whole point is to
 crash."). Scope chosen: for the `gambatte` check only, an invalid-opcode
