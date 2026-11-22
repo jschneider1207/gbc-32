@@ -18,7 +18,7 @@
 890 gbc_core::bus::read_high
 230 <gbc_core::bus::Ctx>::sync_ppu
 480 <gbc_core::bus::Ctx>::write_mapped
-1620 <gbc_core::bus::Ctx>::write_timer_io
+940 <gbc_core::bus::Ctx>::write_timer_io
 380 <gbc_core::timer::Timer>::read
 # Event dispatch and DMA conflict paths (measured after the incremental
 # event-table minimum: 1776, 502, 814, 508, 892 bytes).

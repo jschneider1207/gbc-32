@@ -113,6 +113,12 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] OAM DMA CPU-side bus conflicts vs. hardware: ~70 gambatte `oamdma` ROMs (`busypush*`/`busypop*` etc.) fail because the SameBoy-derived CGB C conflict table differs from gambatte's cgb04c hardware results; decide which reference wins per case once romtest runs gambatte ROMs. Also add a unit test for the FF46 write -> PPU sync call in the bus (c57dd2e review notes)
 - [ ] CGB vs. DMG-compatibility mode selection from the header
 - [ ] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results
+- [ ] Before M5 CGB rendering (M3 perf review): a synthetic bench combining the event storm with objects, the window and STAT sources (event-storm 3.73 M + acid2 PPU 0.53 M ~ 3.97 M Ir/frame, 99% of the 4.02 M line, added from two runs); make the ADR 0014 timing cuts and the object-mix cut first
+- [ ] `Hw` is 984 of 1,024 B (`lib.rs` size test, M3 perf review): move per-line buffers (`Renderer::obj_buf`, stall/timing arrays) into `Memory` rather than raising the limit
+- [ ] Re-check the two provisional PPU-side OAM DMA deviations (2-dot lead, last step not held through HALT; `docs/reference/oam-dma.md`) against gambatte `late_sp*` and `oamdma_late_halt_stat_*` once the `gambatte` check exists; also which DMA word a mode-3 object fetch reads (SameBoy fetch timing + gambatte-fitted lead) (M3 reviews)
+- [ ] Post-boot hand-over for CGB-mode cartridges: PPU phase (`ppu/mod.rs` post-boot), `POST_BOOT_COUNTER` (DIV), BCPS/OCPS are fitted to DMG-mode ROMs; the CGB boot ROM runs a different length (M3 reviews; `mooneye-cgb-boot-regs`)
+- [ ] The speed-switch snapshot test in `lib.rs` pins current (H3-wrong) behavior: rewrite it from references with the H3 fix (M3 test-integrity review)
+- [ ] Blargg `interrupt_time` (and cpu_instrs 03/06 singly) lose console text since VRAM blocking (22eccab, "iled"); the commit blames the double-speed half-frame timeout. Confirm against double-speed LY/mode-3 timing, not just the explanation (M3 test-integrity review)
 
 **Acceptance:** groups `cgb-acid2` and `mooneye-cgb-boot-regs` passing;
 `same-suite-cgb` and `age-cgb` tracked (should tier).
@@ -122,6 +128,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Four channels, frame sequencer, length/sweep/envelope, wave RAM quirks
 - [ ] Batched sample generation (ADR 0002) into a caller-provided buffer
 - [ ] Resampling/mixing strategy documented in architecture.md
+- [ ] FF76/FF77 (PCM12/PCM34) read live channel output; they are hard-wired to 00 (`bus.rs`, TODO(M6)) (M3 test-integrity review)
 
 **Acceptance:** group `blargg-cgb-sound` passing.
 
@@ -148,6 +155,8 @@ The human checks interactive play.
 - [ ] Unaligned ROM reads: the Stage 3 MCU (STM32H735) does not support unaligned reads from the FMC SDRAM that holds the ROM (ES0491 2.7.3). `-C target-feature=+strict-align` is unstable on Rust 1.100 (warns, slated to become a hard error, rust-lang/rust#162235), so ensure at code level that ROM bytes are never merged into wider loads (e.g. one ROM-read function using byte reads LLVM can't combine) and add a disassembly check; record in an ADR
 - [ ] ROM placement hook for the MCU front ends (e.g. caller-supplied per-bank slices so bank 0 and the current bank can sit in internal SRAM) only if Stage 2 measurements show ROM fetch misses matter (M1 perf review 5)
 - [ ] Benchmark: headless emulated frames/second on desktop for a fixed set of ROMs; record host cycles per emulated frame as the baseline for Stage 2
+- [ ] PPU edge cases from the M3 hardware review (low, no ROM): WY==LY only checked at t=89 and on writes, not at mode-2 start (a WY/LCDC.5 write in [4,89) loses the window trigger); a palette write whose line end == `now` misses pixel 159 (`bus.rs` palette flush: run to `at`, flush, then sync); a coarse mid-line SCX change applies mid-tile, hardware at the next fetch; mode-3 window stall latched at t=89 (WY/LCDC.5/WX writes in mode 3 change pixels, not mode-3 length); LCDC.2 (object height) latched at t=89, not per scanned entry; running-DMA OAM scan uses the mode-2 bus (SameBoy) vs Pan Docs "off-screen"; `stat_during_dma` mode-0 window vs the PPU's start-delay "off"; WY write in HBlank triggers the window next line (SameBoy) vs Pan Docs mode-2-only
+- [ ] Code size (M3 perf review): gbc-core `.text` 79.6 KB after 3b556ae (61.2 KB at M2), no longer fits the H753's 64 KB ITCM; per-frame hot set ~52 KB. Plan per-function ITCM placement (front-end link sections), and add a total-`.text` budget to `check-code-size.sh` (stricter)
 
 **Acceptance:** `./scripts/gate-stage1.sh` exits 0.
 
