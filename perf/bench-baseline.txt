@@ -8,3 +8,4 @@ synth:event-storm 2 394765192
 synth:dma-storm 3 417849646
 synth:halt-irq 10 222603290
 synth:worst-case 2 435415183
+synth:cgb-raster 2 311983738

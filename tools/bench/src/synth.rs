@@ -4,7 +4,13 @@
 //! and checksums; execution starts at 0x0100 as the CGB boot ROM leaves it.
 
 /// The names `bench synth:<name>` accepts.
-pub const NAMES: &[&str] = &["event-storm", "dma-storm", "halt-irq", "worst-case"];
+pub const NAMES: &[&str] = &[
+    "event-storm",
+    "dma-storm",
+    "halt-irq",
+    "worst-case",
+    "cgb-raster",
+];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
 const LOGO: [u8; 48] = [
@@ -146,17 +152,95 @@ const WORST_CASE: &[u8] = &[
     0x18, 0xF5, //             JR wait
 ];
 
+/// CGB palette raster effect ("hi-color") in double speed: after the speed
+/// switch, with the LCD off, tile 0 gets a pattern using all four colors
+/// and the BG map attributes (VRAM bank 1) select palette (column & 7), so
+/// every BG palette is on screen. Then BCPS=80 (auto-increment from 0) and
+/// LCD on with BG only (LCDC=91). Per line: wait for mode 0, write 32 BCPD
+/// bytes (LD (C),A; INC A at 3 M-cycles each, so they run on through mode
+/// 2 into mode 3 of the next line), wait for mode 3, then write BCPD, SCX,
+/// BCPD mid-line. E carries the value from line to line, so the colors
+/// keep changing.
+const CGB_RASTER_SETUP: &[u8] = &[
+    0xF3, //             DI
+    0x3E, 0x01, //       LD A,01
+    0xE0, 0x4D, //       LDH (KEY1),A
+    0x10, 0x00, //       STOP
+    0xAF, //             XOR A
+    0xE0, 0x40, //       LDH (LCDC),A    LCD off: free VRAM access
+    0x21, 0x00, 0x80, // LD HL,8000
+    0x06, 0x10, //       LD B,16
+    // tile:
+    0x3E, 0x55, //       LD A,55
+    0x22, //             LD (HL+),A
+    0x3E, 0x33, //       LD A,33
+    0x22, //             LD (HL+),A      colors 0-3 across each row
+    0x05, //             DEC B
+    0x20, 0xF7, //       JR NZ,tile
+    0x3E, 0x01, //       LD A,01
+    0xE0, 0x4F, //       LDH (VBK),A     attributes
+    0x21, 0x00, 0x98, // LD HL,9800
+    // attr:
+    0x7D, //             LD A,L
+    0xE6, 0x07, //       AND 7           palette = column & 7
+    0x22, //             LD (HL+),A
+    0x7C, //             LD A,H
+    0xFE, 0x9C, //       CP 9C
+    0x20, 0xF7, //       JR NZ,attr
+    0xAF, //             XOR A
+    0xE0, 0x4F, //       LDH (VBK),A
+    0x3E, 0x80, //       LD A,80
+    0xE0, 0x68, //       LDH (BCPS),A    auto-increment from 0
+    0x0E, 0x69, //       LD C,69         BCPD
+    0x3E, 0x91, //       LD A,91         LCD on, 8000 tiles, BG
+    0xE0, 0x40, //       LDH (LCDC),A
+];
+
+/// The `synth:cgb-raster` code: [`CGB_RASTER_SETUP`], then the per-line
+/// loop (32 unrolled BCPD writes).
+fn cgb_raster() -> Vec<u8> {
+    let mut code = CGB_RASTER_SETUP.to_vec();
+    code.extend_from_slice(&[
+        // line:
+        0xF0, 0x41, //   LDH A,(STAT)
+        0xE6, 0x03, //   AND 3
+        0x20, 0xFA, //   JR NZ,line      until mode 0
+        0x7B, //         LD A,E
+    ]);
+    for _ in 0..32 {
+        code.extend_from_slice(&[0xE2, 0x3C]); // LD (C),A; INC A
+    }
+    code.extend_from_slice(&[
+        0x5F, //         LD E,A
+        // mode3:
+        0xF0, 0x41, //   LDH A,(STAT)
+        0xE6, 0x03, //   AND 3
+        0xFE, 0x03, //   CP 3
+        0x20, 0xF8, //   JR NZ,mode3
+        0x7B, //         LD A,E
+        0xE2, //         LD (C),A        BCPD in mode 3
+        0xE0, 0x43, //   LDH (SCX),A     SCX in mode 3
+        0x3C, //         INC A
+        0xE2, //         LD (C),A        BCPD in mode 3
+        0x5F, //         LD E,A
+        0x18, 0xA6, //   JR line
+    ]);
+    code
+}
+
 /// STAT handler at 0x48 (8 bytes): PUSH AF; PUSH HL; LD HL,C000; INC (HL);
 /// POP HL; POP AF; RETI.
 const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0xD9];
 
 /// The ROM image for `name`, or `None` if there is no such ROM.
 pub fn build(name: &str) -> Option<Vec<u8>> {
+    let raster = cgb_raster();
     let (code, stat_vector, timer_vector): (&[u8], &[u8], &[u8]) = match name {
         "event-storm" => (EVENT_STORM, &[], &[]),
         "dma-storm" => (DMA_STORM, &[], &[]),
         "halt-irq" => (HALT_IRQ, &[], &[0xD9]), // RETI
         "worst-case" => (WORST_CASE, STAT_HANDLER, &[]),
+        "cgb-raster" => (&raster, &[], &[]),
         _ => return None,
     };
     Some(image(name, code, stat_vector, timer_vector))
@@ -266,5 +350,20 @@ mod tests {
         assert_eq!(r[2], 0x02);
         assert_eq!(r[3] & 0x80, 0x80, "double speed");
         assert_ne!(r[4], 0, "STAT handler ran");
+    }
+
+    #[test]
+    fn cgb_raster_writes_palettes_and_scx_every_line() {
+        // Double speed, LCD and BG on, BCPS auto-incrementing. One line
+        // (456 dots) later the loop has advanced BCPS by 34 and written a
+        // new SCX.
+        let at = u64::from(CLOCK_HZ) / 10;
+        let a = run("cgb-raster", at, &[0xFF4D, 0xFF40, 0xFF68, 0xFF43]);
+        let b = run("cgb-raster", at + 456, &[0xFF68, 0xFF43]);
+        assert_eq!(a[0] & 0x80, 0x80, "double speed");
+        assert_eq!(a[1], 0x91);
+        assert_eq!(a[2] & 0x80, 0x80, "auto-increment");
+        assert_ne!(a[2], b[0], "BCPS advanced");
+        assert_ne!(a[3], b[1], "SCX written");
     }
 }

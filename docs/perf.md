@@ -4,7 +4,7 @@ ROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/c
 (CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
 The test ROMs are read from `$TEST_ROMS` (default `test-roms/`).
 
-Four synthetic ROMs cover paths those miss. `tools/bench` builds them in
+Five synthetic ROMs cover paths those miss. `tools/bench` builds them in
 memory (`bench synth:<name> <secs>`, hand-assembled SM83 in
 `tools/bench/src/synth.rs`, 32 KiB, valid header and checksums; no ROM files
 in git):
@@ -32,6 +32,18 @@ in git):
   callgrind: `Ctx::boundary` 15.9%, `Renderer::render` 9.1% (inclusive,
   with `fill_mixed`; 9.7% before the fused object mixing), timer 7.0%,
   serial 5.1%.
+- `synth:cgb-raster` (2 s): a CGB palette raster ("hi-color") effect in
+  double speed. BG only (LCDC=91), one tile with all four colors, map
+  attributes selecting palette (column & 7) so all 8 BG palettes are on
+  screen. Every line: wait for mode 0, 32 BCPD writes with
+  auto-increment (3 M-cycles apart, so the last ~10 land in mode 3 of
+  the next line), wait for mode 3, then BCPD, SCX, BCPD mid-line. Per
+  emulated second: about 291k BCPD writes (34 per line, 4,880 per
+  frame), 8.6k SCX writes. When added: 311,983,738 Ir = 2.61 M
+  Ir per frame; the BCPD path (`write_io` minus `write_ppu`, inclusive)
+  is 178 Ir per write: `Ppu::sync` 55, `flush` 35 (51k of the writes
+  draw: 304 Ir each), the store, palette resolution and pair-table
+  rebuild ~88.
 
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.

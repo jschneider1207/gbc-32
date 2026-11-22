@@ -29,6 +29,7 @@ BENCHES=(
   "synth:dma-storm 3"
   "synth:halt-irq 10"
   "synth:worst-case 2"
+  "synth:cgb-raster 2"
 )
 
 update=0
