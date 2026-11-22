@@ -110,3 +110,36 @@ The unit tests draw digits from a third, independent description (a
   pick up ROMs with no CGB rule (runner error). Where pixels match in a
   scratch run of 39 of them, the colors were formula-exact, so the exact
   compare fits these references.
+
+## Amendment (2026-11-22): CPU lockup in gambatte groups
+
+**Rule.** In a group whose checks are all `gambatte = true` and whose exit
+is `run_frames = N`, a CPU lockup on an invalid opcode is no longer a
+`crash`. The run goes on to frame N and the gambatte check decides on the
+final frame as usual: the right screen is `pass`, a wrong one `fail`. The
+JSON `detail` records the lockup ("CPU locked up (PC=...) at clock ...;
+ran on to frame N"). Everything else stays `crash`: a lockup in any other
+group (another check kind, a mix of kinds, another exit), a panic, a
+rejected load, stalled emulated time and a late input change. The
+contract text is in `acceptance/README.md` ("Gambatte lockup rule").
+
+**Why.** The 10 `undef_ops/undef_op_*_dmg08_cgb04c_out01` ROMs execute an
+invalid opcode on purpose. On hardware the CPU hangs while the LCD keeps
+running, so the `01` drawn earlier stays on screen (Pan Docs, "CPU
+Instruction Set": the invalid opcodes lock up the CPU). Gambatte's
+testrunner runs a fixed 15 frames whatever the CPU does and then reads
+the screen. Under the old rule these ROMs could never pass, whatever the
+emulator did.
+
+**Core.** No change needed. The core already models the lockup this way:
+`Mode::Locked` idles the CPU, interrupts don't wake it, `CPU_LOCKED`
+fires once, and `run_until` keeps advancing time with the PPU and timers
+running (`gbc_core::Events::CPU_LOCKED`; `cpu::exec` test
+`invalid_opcode_locks_once`). The runner just keeps calling it.
+
+**Approval.** This loosens a check, so it needed the human. The human
+approved it on 2026-11-22: "Those specific tests should probably have
+looser restrictions then right? If the whole point is to crash." The
+scope (gambatte groups with a `run_frames` exit only) was set narrowly so
+that a lockup under the serial, screenshot and fibonacci checks, where it
+means the emulator went wrong, still fails loudly.

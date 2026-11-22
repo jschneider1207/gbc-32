@@ -98,6 +98,12 @@ pub struct RunPlan {
     /// Button state changes: from clock `.0` on, exactly `.1` is held.
     /// Sorted by clock.
     pub input: Vec<(u64, Buttons)>,
+    /// A CPU lockup on an invalid opcode doesn't end the run: the machine
+    /// keeps running (LCD, timers) to the exit and the checks decide on
+    /// the final frame. Only for `gambatte = true` groups with a
+    /// `run_frames` exit (acceptance/README.md; ADR 0018, amendment
+    /// 2026-11-22). Otherwise a lockup is [`End::Locked`], a crash.
+    pub lockup_runs_on: bool,
 }
 
 impl RunPlan {
@@ -105,8 +111,19 @@ impl RunPlan {
         Self {
             exit,
             input: input_timeline(entries),
+            lockup_runs_on: false,
         }
     }
+}
+
+/// Where the CPU locked up, when the run went on past it
+/// ([`RunPlan::lockup_runs_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lockup {
+    /// The clock when the run call that reported the lockup returned.
+    pub clock: u64,
+    /// PC then (just past the invalid opcode).
+    pub pc: u16,
 }
 
 /// Turns input entries into a sorted list of button-state changes.
@@ -186,6 +203,8 @@ pub struct RunState {
     pub registers: Option<Registers>,
     /// [`Machine::screen_blank`] at exit.
     pub screen_blank_at_exit: bool,
+    /// The CPU locked up and the run went on ([`RunPlan::lockup_runs_on`]).
+    pub lockup: Option<Lockup>,
 }
 
 pub fn new_frame() -> Box<Frame> {
@@ -279,7 +298,15 @@ pub fn run<M: Machine + ?Sized>(
             st.frames += 1;
         }
         if events.contains(Events::CPU_LOCKED) {
-            break End::Locked;
+            if !plan.lockup_runs_on {
+                break End::Locked;
+            }
+            // As on hardware, the CPU stays stuck (no interrupt wakes it)
+            // while the LCD keeps running; the core keeps advancing time.
+            if st.lockup.is_none() {
+                let (clock, pc) = core_call(|| (m.clock(), m.registers().pc))?;
+                st.lockup = Some(Lockup { clock, pc });
+            }
         }
         if ld_b_b && events.contains(Events::LD_B_B) {
             break End::LdBB;
@@ -377,6 +404,9 @@ pub mod fake {
         skip_frame: bool,
         stalled: Option<Events>,
         locked: bool,
+        /// If set, every completed frame shows this image instead of the
+        /// frame number.
+        pub image: Option<Box<Frame>>,
     }
 
     impl FakeMachine {
@@ -399,6 +429,7 @@ pub mod fake {
                 skip_frame: false,
                 stalled: None,
                 locked: false,
+                image: None,
             }
         }
 
@@ -459,7 +490,10 @@ pub mod fake {
                     } else {
                         self.blanked = false;
                     }
-                    frame.fill(self.frames);
+                    match &self.image {
+                        Some(img) => frame.copy_from_slice(&img[..]),
+                        None => frame.fill(self.frames),
+                    }
                     ev |= Events::FRAME_READY;
                 }
             }
@@ -591,6 +625,28 @@ mod tests {
         let st = run_fake(&mut m, &plan(Exit::LdBB { timeout_s: 120.0 }));
         assert_eq!(st.end, Some(End::Locked));
         assert!(st.clock < 6000);
+        assert_eq!(st.lockup, None);
+    }
+
+    #[test]
+    fn lockup_runs_on_when_the_plan_says_so() {
+        let mut m = FakeMachine::new(vec![(5000, Action::Lock)]);
+        m.regs.pc = 0x1234;
+        let p = RunPlan {
+            lockup_runs_on: true,
+            ..plan(Exit::RunFrames { frames: 15 })
+        };
+        let st = run_fake(&mut m, &p);
+        assert_eq!(st.end, Some(End::Completed));
+        assert_eq!(st.clock, 15 * FRAME);
+        assert_eq!(st.frames, 15);
+        assert_eq!(
+            st.lockup,
+            Some(Lockup {
+                clock: 5004,
+                pc: 0x1234
+            })
+        );
     }
 
     #[test]

@@ -111,7 +111,7 @@ results.
 | `screenshot = "path"` | The final frame matches the PNG exactly. `{dir}` and `{stem}` expand to the ROM's directory and file stem. Missing PNG → `no-reference`. The **final frame** is the last fully drawn 160×144 frame before exit (completed at the start of VBlank). The frame is solid white while the screen is blank: if the LCD is off at exit, if it was turned off since the last completed frame, if no frame has completed, or if the only frame completed since the LCD was turned back on is the first one (hardware doesn't display that frame; SameBoy `frame_skip`). |
 | `screenshot = "path", recolor = { from = "#RRGGBB", to = "#RRGGBB", count = N }` | As `screenshot`, against the same listed upstream PNG with one color replaced in memory: every pixel of color `from` becomes `to`. See "Recolored references" below. The PNG file is never changed. |
 | `fibonacci = true` | B=3, C=5, D=8, E=13, H=21, L=34 at exit. |
-| `gambatte = true` | Gambatte rules from the file name: `_out<hex>` → on-screen hex pattern, `_outaudio0/1` → silence/sound, sibling `.png` → screenshot. See the upstream `testrunner.cpp` (pokemon-speedrunning/gambatte-core @ d819bad196). |
+| `gambatte = true` | Gambatte rules from the file name: `_out<hex>` → on-screen hex pattern, `_outaudio0/1` → silence/sound, sibling `.png` → screenshot. See the upstream `testrunner.cpp` (pokemon-speedrunning/gambatte-core @ d819bad196). In an all-`gambatte` group with a `run_frames` exit, a CPU lockup doesn't end the run (see "Gambatte lockup rule" under Statuses). |
 
 ### Colors used for screenshot comparison
 
@@ -167,7 +167,7 @@ represented exactly in RGB555. The runner converts RGB555 to RGB888 with
 | `pass` | All checks passed | pass |
 | `fail` | At least one check failed | fail |
 | `timeout` | The `ld_b_b` exit never happened | fail |
-| `crash` | Panic, the CPU locked up on an invalid opcode, or an input change could not be applied on its M-cycle | fail |
+| `crash` | Panic, the CPU locked up on an invalid opcode (except under the Gambatte lockup rule below), or an input change could not be applied on its M-cycle | fail |
 | `unsupported` | The runner doesn't implement this check kind yet | fail |
 | `no-reference` | Expected PNG missing | excluded |
 
@@ -176,6 +176,18 @@ When several apply, precedence is `crash`/`timeout` > `fail` >
 crash, a timeout or another failing or unsupported check: `no-reference`
 applies only when every other check passed. A ROM whose `load` is rejected
 by the core, or whose emulator stops advancing time, is a `crash`.
+
+**Gambatte lockup rule** (approved by the human 2026-11-22; ADR 0018,
+amendment). In a group whose checks are all `gambatte = true` and whose
+exit is `run_frames = N`, a CPU lockup on an invalid opcode is not a
+`crash`. As on hardware, the CPU stays stuck (interrupts don't wake it)
+while the LCD, timers and the rest keep running; the run goes on to frame
+N, and the checks decide on the final frame as usual, so a wrong screen is
+`fail` and a lockup is never a `pass` by itself. The lockup is recorded in
+the ROM's `detail` ("CPU locked up (PC=...) at clock ...; ran on to frame
+N"). Everything else is unchanged: a lockup in any other group (any other
+check kind, or a mix, or another exit), a panic, a rejected load, stalled
+emulated time and a late input change are still `crash`.
 
 The runner must catch panics per ROM, so host builds need unwinding panics.
 Don't set `panic = "abort"` in workspace profiles used by `romtest`.

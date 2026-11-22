@@ -15,11 +15,13 @@ use crate::report::Status;
 
 /// Words: `load-error`, `panic` (inside the fake core), `runner-panic`
 /// (in the runner's own code, outside the panic boundary), `lock`, `ldbb`,
-/// `lcd-off`, `fib`, `serial:<text>`.
+/// `lcd-off`, `fib`, `serial:<text>`, `draw:<hex>` (every frame shows
+/// `<hex>` as a passing Gambatte test draws it).
 fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), CoreFailure> {
     let spec = std::str::from_utf8(rom).unwrap();
     let mut script = Vec::new();
     let mut regs = Registers::default();
+    let mut image = None;
     for word in spec.split_whitespace() {
         match word {
             "load-error" => return Err(CoreFailure::Load("bad header".into())),
@@ -39,6 +41,11 @@ fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
                     ..Registers::default()
                 }
             }
+            w if w.starts_with("draw:") => {
+                let mut f = crate::machine::new_frame();
+                crate::checks::tests::draw_hex(&mut f, &w["draw:".len()..], 0, 0);
+                image = Some(f);
+            }
             w if w.starts_with("serial:") => {
                 for (i, b) in w["serial:".len()..].bytes().enumerate() {
                     script.push((200 + 4 * i as u64, Action::Serial(b)));
@@ -49,6 +56,7 @@ fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
     }
     let mut m = FakeMachine::new(script);
     m.regs = regs;
+    m.image = image;
     run_machine(&mut m, plan, st)
 }
 
@@ -1164,5 +1172,75 @@ checks = [{{ serial = "NO" }}]
         let paths = Paths::new(&ws.root, &args.manifest).unwrap();
         let e = run(&args, &paths, &tamper, &mut Vec::new()).unwrap_err();
         assert!(e.starts_with(&format!("reference {UPSTREAM}")), "{e}");
+    }
+}
+
+/// A CPU lockup on an invalid opcode is not a crash in a `gambatte = true`
+/// group with a `run_frames` exit: the run goes on to the exit and the
+/// gambatte check decides on the final frame (ADR 0018, amendment
+/// 2026-11-22). Under any other check kind it is still a crash, and a
+/// panic is a crash under gambatte too.
+#[test]
+fn gambatte_lockup_runs_on_but_only_there() {
+    const LOCK_MANIFEST: &str = r#"
+roms_release = "v7.0"
+model = "cgb-c"
+
+[[group]]
+id = "gb"
+tier = "stretch"
+roms = ["u/*.gbc"]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
+
+[[group]]
+id = "shot"
+tier = "stretch"
+roms = ["v/lock.gb"]
+exit = { run_frames = 15 }
+checks = [{ screenshot = "{dir}/{stem}.png" }]
+
+[[group]]
+id = "serial"
+tier = "stretch"
+roms = ["v/lock.gb"]
+exit = { run_frames = 15 }
+checks = [{ serial = "OK" }]
+"#;
+    let ws = Ws::new();
+    ws.write("test-roms/u/ok_cgb04c_out01.gbc", b"draw:01 lock");
+    ws.write("test-roms/u/bad_cgb04c_out01.gbc", b"draw:00 lock");
+    ws.write("test-roms/u/panic_cgb04c_out01.gbc", b"draw:01 panic");
+    // Would pass both checks if the lockup didn't end the run.
+    ws.write("test-roms/v/lock.gb", b"lcd-off serial:OK lock");
+    ws.write("test-roms/v/lock.png", &encode_png(&img(255)).unwrap());
+    ws.write("acceptance/u.toml", LOCK_MANIFEST.as_bytes());
+    let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/u.toml"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let json = ws.json_of("u");
+    assert_eq!(
+        statuses_of(&json),
+        [
+            s("gb", "u/bad_cgb04c_out01.gbc", "fail"),
+            s("gb", "u/ok_cgb04c_out01.gbc", "pass"),
+            s("gb", "u/panic_cgb04c_out01.gbc", "crash"),
+            s("shot", "v/lock.gb", "crash"),
+            s("serial", "v/lock.gb", "crash"),
+        ]
+    );
+    let results = json["results"].as_array().unwrap();
+    for r in &results[..2] {
+        assert_eq!(r["end"], "completed");
+        assert_eq!(r["frames"], 15);
+        let detail = r["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("CPU locked up (PC=0x0000) at clock 104; ran on to frame 15"),
+            "{detail}"
+        );
+    }
+    assert_eq!(results[0]["checks"][0]["status"], "fail");
+    assert_eq!(results[2]["end"], "panic");
+    for r in &results[3..] {
+        assert_eq!(r["end"], "cpu_locked");
     }
 }

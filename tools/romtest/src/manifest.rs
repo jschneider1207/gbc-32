@@ -225,6 +225,20 @@ pub struct Group {
     pub checks: Vec<Check>,
 }
 
+impl Group {
+    /// A CPU lockup on an invalid opcode is not a crash in this group: its
+    /// checks are all `gambatte = true` and its exit is `run_frames`, so
+    /// the run goes on to the exit and the final frame decides, as in
+    /// Gambatte's testrunner and on hardware (the CPU hangs, the LCD keeps
+    /// showing what was drawn). acceptance/README.md; ADR 0018, amendment
+    /// 2026-11-22 (approved by the human).
+    pub fn lockup_runs_on(&self) -> bool {
+        matches!(self.exit, Exit::RunFrames { .. })
+            && !self.checks.is_empty()
+            && self.checks.iter().all(|c| matches!(c, Check::Gambatte))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub roms_release: String,
@@ -760,6 +774,28 @@ checks = [{ fibonacci = true }]"#;
             .unwrap();
         assert_eq!(sub.input.len(), 3);
         assert_eq!(sub.exit, Exit::RunS { seconds: 30.0 });
+    }
+
+    #[test]
+    fn lockup_runs_on_only_for_all_gambatte_run_frames_groups() {
+        let runs_on = |exit: &str, checks: &str| {
+            let body = format!(
+                "id = \"g\"\ntier = \"stretch\"\nroms = [\"a/*.gb\"]\n\
+                 exit = {exit}\nchecks = [{checks}]"
+            );
+            parse(&group(&body)).unwrap().groups[0].lockup_runs_on()
+        };
+        let gb = "{ gambatte = true }";
+        assert!(runs_on("{ run_frames = 15 }", gb));
+        assert!(!runs_on("{ run_s = 1 }", gb));
+        assert!(!runs_on("{ ld_b_b = true, timeout_s = 1 }", gb));
+        let mixed = "{ gambatte = true }, { serial = \"OK\" }";
+        assert!(!runs_on("{ run_frames = 15 }", mixed));
+        assert!(!runs_on("{ run_frames = 15 }", "{ serial = \"OK\" }"));
+        assert!(!runs_on(
+            "{ run_frames = 15 }",
+            "{ screenshot = \"{dir}/{stem}.png\" }"
+        ));
     }
 
     #[test]

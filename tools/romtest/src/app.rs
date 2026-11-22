@@ -183,7 +183,10 @@ pub fn run(
     let plans: Vec<RunPlan> = manifest
         .groups
         .iter()
-        .map(|g| RunPlan::new(g.exit, &g.input))
+        .map(|g| RunPlan {
+            lockup_runs_on: g.lockup_runs_on(),
+            ..RunPlan::new(g.exit, &g.input)
+        })
         .collect();
     let jobs = select(&manifest, &resolved, &plans, args)?;
     if let Some(tier) = args.gate
@@ -526,7 +529,15 @@ fn run_job(
             Exit::LdBB { timeout_s } => format!("no LD B,B within {timeout_s} s"),
             _ => String::new(),
         },
-        Outcome::Ran(End::Completed | End::LdBB) => String::new(),
+        Outcome::Ran(End::Completed) => match (st.lockup, group.exit) {
+            (Some(l), Exit::RunFrames { frames }) => format!(
+                "CPU locked up (PC={:#06x}) at clock {}; ran on to frame {frames} \
+                 (gambatte lockup rule)",
+                l.pc, l.clock
+            ),
+            _ => String::new(),
+        },
+        Outcome::Ran(End::LdBB) => String::new(),
     };
 
     let check_results: Vec<CheckResult> = if outcome.ran() {

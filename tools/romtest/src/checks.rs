@@ -537,7 +537,7 @@ pub fn selected(checks: &[Check], only: Option<CheckKind>) -> Vec<(usize, &Check
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::machine::new_frame;
 
@@ -626,7 +626,7 @@ mod tests {
     /// Draws `hex` the way a passing Gambatte test does: black digits on
     /// white from the top-left corner, each cell drawn independently from
     /// this bitmap description (not from `GLYPHS`, which it checks).
-    fn draw_hex(frame: &mut Frame, hex: &str, dx: usize, dy: usize) {
+    pub(crate) fn draw_hex(frame: &mut Frame, hex: &str, dx: usize, dy: usize) {
         // Each glyph as 7 rows of 7 columns (the cell's top row and left
         // column are blank); '#' is black.
         let shapes: [[&str; 7]; 16] = [
