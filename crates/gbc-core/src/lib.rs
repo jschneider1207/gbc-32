@@ -584,8 +584,13 @@ mod tests {
         Box::leak(Box::new(Emulator::new(Box::leak(Box::new(Memory::new())))))
     }
 
-    /// A CPU write to an I/O register, through the bus (no M-cycle).
+    /// A CPU write to LCDC, through the bus (no M-cycle).
     fn write_lcdc(emu: &mut Emulator, value: u8) {
+        write_reg(emu, 0xFF40, value);
+    }
+
+    /// A CPU write, through the bus (no M-cycle).
+    fn write_reg(emu: &mut Emulator, addr: u16, value: u8) {
         let mut fb = frame();
         let mut ctx = Ctx::new(
             emu.mem,
@@ -595,7 +600,7 @@ mod tests {
             Events::EMPTY,
             u64::MAX,
         );
-        ctx.write_mapped(0xFF40, value);
+        ctx.write_mapped(addr, value);
     }
 
     fn frame() -> Box<Frame> {
@@ -1269,11 +1274,13 @@ mod tests {
                 emu.peek(0xFF44),
             ));
         }
+        // DIV is 26 after boot (`timer::POST_BOOT_COUNTER`) until STOP
+        // resets it.
         assert_eq!(
             seen,
             [
-                (8, 8, 0, 134, 0),
-                (12, 20, 0, 134, 0),
+                (8, 8, 0x26, 134, 0),
+                (12, 20, 0x26, 134, 0),
                 (4104, 4124, 0, 130, 9),
                 (2, 4126, 0, 130, 9),
                 (4, 4130, 0, 130, 9),
@@ -1351,9 +1358,13 @@ mod tests {
 
     #[test]
     fn serial_transfer_reports_the_byte() {
-        // LD A,'X'; LDH (01),A; LD A,81; LDH (02),A; JR -2
+        // LDH (04),A (DIV reset: the bit clock's phase no longer depends
+        // on the post-boot counter); LD A,'X'; LDH (01),A; LD A,81;
+        // LDH (02),A; JR -2
         let emu = with_program(
-            &[0x3E, b'X', 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02, 0x18, 0xFE],
+            &[
+                0xE0, 0x04, 0x3E, b'X', 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02, 0x18, 0xFE,
+            ],
             0,
         );
         emu.set_stop_events(Events::SERIAL_TX);
@@ -1447,7 +1458,15 @@ mod tests {
 
     // --- Scheduled inputs (ADR 0012) ---
 
-    /// The P1 input lines (both groups are selected after boot).
+    /// [`emulator`] with both P1 button groups selected (a DMG-mode
+    /// cartridge starts with neither, `post_boot_state_of_a_dmg_mode_cartridge`).
+    fn input_emulator() -> &'static mut Emulator<'static> {
+        let emu = emulator();
+        write_reg(emu, 0xFF00, 0x00);
+        emu
+    }
+
+    /// The P1 input lines.
     fn p1(emu: &Emulator) -> u8 {
         emu.peek(0xFF00) & 0x0F
     }
@@ -1459,7 +1478,7 @@ mod tests {
 
     #[test]
     fn scheduled_input_lands_on_its_mcycle() {
-        let emu = emulator();
+        let emu = input_emulator();
         run_to(emu, 400);
         assert!(emu.set_buttons_at(1000, Buttons::A));
         assert_eq!(p1(emu), 0x0F);
@@ -1531,7 +1550,7 @@ mod tests {
     #[test]
     fn scheduled_input_p1_read_and_irq_from_its_mcycle_on() {
         use crate::cpu::Bus;
-        let emu = emulator();
+        let emu = input_emulator();
         let now = emu.clock();
         assert!(emu.set_buttons_at(now + 8, Buttons::START));
         emu.hw.sys.iflags = 0;
@@ -1596,7 +1615,7 @@ mod tests {
 
     #[test]
     fn scheduled_input_in_the_past_applies_now() {
-        let emu = emulator();
+        let emu = input_emulator();
         run_to(emu, 400);
         emu.hw.sys.iflags = 0;
         assert!(emu.set_buttons_at(100, Buttons::B));
@@ -1613,7 +1632,7 @@ mod tests {
 
     #[test]
     fn scheduled_inputs_reschedule_queue_and_collapse() {
-        let emu = emulator();
+        let emu = input_emulator();
         run_to(emu, 400);
         // Scheduled out of order: they still apply in clock order.
         assert!(emu.set_buttons_at(2000, Buttons::B));
@@ -1733,7 +1752,7 @@ mod tests {
 
     #[test]
     fn load_and_eject_drop_scheduled_inputs() {
-        let emu = emulator();
+        let emu = input_emulator();
         run_to(emu, 400);
         assert!(emu.set_buttons_at(1000, Buttons::A));
         let rom = vec![0u8; 0x8000].leak();
@@ -1752,7 +1771,7 @@ mod tests {
     fn scheduled_input_at_u64_max_is_refused() {
         // u64::MAX is the queue's empty-slot sentinel: it would never
         // fire and hold a slot until reset.
-        let emu = emulator();
+        let emu = input_emulator();
         assert!(!emu.set_buttons_at(u64::MAX, Buttons::A));
         assert_eq!(emu.hw.sys.inputs.len(), 0, "no slot taken");
         assert!(emu.set_buttons_at(u64::MAX - 1, Buttons::A));

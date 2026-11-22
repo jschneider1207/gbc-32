@@ -60,6 +60,18 @@ use crate::schedule::NEVER;
 /// Counter bit per TAC clock select: 4096, 262144, 65536, 16384 Hz.
 const TAC_BITS: [u64; 4] = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
 
+/// The system counter when the CGB boot ROM hands over (clock 0, PC =
+/// 0100), for a DMG-mode cartridge on CGB rev. C: DIV = 26, 0x88 clocks
+/// (34 M-cycles) before it ticks to 27. Mooneye `misc/boot_div-cgbABCDE`
+/// (verified on CGB A-E) reads DIV = 27 "immediately after DIV has
+/// incremented" with its read 34 M-cycles after PC = 0100 (NOP, JP 0150,
+/// 27 NOPs, then LDH A,(04) reads in its third M-cycle), then checks the
+/// phase with reads 63-65 M-cycles apart. The boot ROM runs longer for
+/// DMG-mode cartridges than for CGB ones (Pan Docs: Power Up Sequence,
+/// "the boot ROM's duration depends on the header"); no test pins the
+/// CGB-mode value, so CGB mode uses the same one (unverified).
+pub(crate) const POST_BOOT_COUNTER: u64 = 0x2700 - 34 * 4;
+
 /// The timer interrupt bit in IF.
 pub(crate) const INT_TIMER: u8 = 0x04;
 
@@ -101,6 +113,15 @@ impl Timer {
             overflow_at: NEVER,
             reloaded_at: NEVER,
         }
+    }
+
+    /// The timer as the CGB boot ROM leaves it at clock 0 (PC = 0100):
+    /// every register 0, the system counter at [`POST_BOOT_COUNTER`].
+    pub(crate) const fn post_boot() -> Self {
+        let mut t = Self::new();
+        t.base = POST_BOOT_COUNTER;
+        t.tima_from = POST_BOOT_COUNTER;
+        t
     }
 
     /// The system counter at clock `now`.

@@ -132,6 +132,15 @@ impl Sys<'_> {
         self.config = config;
         self.buttons = buttons;
         self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|&f| f & 0x80 != 0);
+        self.timer = Timer::post_boot();
+        // P1 select bits: in DMG compatibility mode the boot ROM reads the
+        // joypad (palette selection) and leaves both select lines high,
+        // so P1 reads FF (Mooneye `misc/boot_hwio-C`, verified on CGB). In
+        // CGB mode it doesn't touch P1: CF with nothing held (Pan Docs:
+        // Power Up Sequence, "Hardware registers", CGB P1 = C7 or CF).
+        if !self.cgb_mode {
+            self.joyp_select = 0x30;
+        }
         self.ppu.reset();
         self.sched.set(EventKind::Ppu, self.ppu.next_event());
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
@@ -155,8 +164,29 @@ impl Sys<'_> {
         // allowed while the boot ROM runs). Mooneye `boot_hwio-C` expects
         // FF6C = FF in DMG compatibility mode.
         mem.io[0x6C] = u8::from(!self.cgb_mode);
+        // BCPS = 88 and OCPS = 90 (auto-increment, index 8 and 16) in DMG
+        // compatibility mode: where the boot ROM's palette setup leaves
+        // them (Mooneye `misc/boot_hwio-C` reads C8 and D0, bit 6 reading
+        // 1). The CGB-mode values are unverified (no test); left at 0.
+        if !self.cgb_mode {
+            mem.io[0x68] = 0x88;
+            mem.io[0x6A] = 0x90;
+        }
     }
 }
+
+/// OR masks for reads of FF10-FF2F: write-only bits (lengths, frequency
+/// low bytes, trigger) and unused bits and registers read 1 (Pan Docs:
+/// Audio Registers; SameBoy Core/apu.c `read_mask`; Mooneye
+/// `misc/bits/unused_hwio-C` and `misc/boot_hwio-C`).
+const SOUND_READ_MASK: [u8; 0x20] = [
+    0x80, 0x3F, 0x00, 0xFF, 0xBF, // NR10-NR14
+    0xFF, 0x3F, 0x00, 0xFF, 0xBF, // FF15 (unused), NR21-NR24
+    0x7F, 0xFF, 0x9F, 0xFF, 0xBF, // NR30-NR34
+    0xFF, 0xFF, 0x00, 0x00, 0xBF, // FF1F (unused), NR41-NR44
+    0x00, 0x00, 0x70, // NR50-NR52
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // FF27-FF2F (unused)
+];
 
 /// Post-boot values of the stub I/O registers kept in `Memory::io` (Pan
 /// Docs: Power Up Sequence, "Hardware registers", CGB column).
@@ -579,8 +609,11 @@ impl Ctx<'_, '_> {
                 s.vbk = value & 0x01;
                 s.vram_off = usize::from(s.vbk) * 0x2000;
             }
-            // CGB palettes: plain storage until M5.
-            0x68..=0x6B if cgb => self.mem.io[reg] = value,
+            // CGB palettes: plain storage until M5. BCPS/OCPS (the index
+            // registers) are writable on a CGB in either mode, BCPD/OCPD
+            // only in CGB mode (SameBoy `write_high_memory`).
+            0x68 | 0x6A => self.mem.io[reg] = value,
+            0x69 | 0x6B if cgb => self.mem.io[reg] = value,
             // OPRI: writable in CGB mode only (after the boot ROM). Plain
             // storage until the M3 renderer uses it.
             0x6C if cgb => self.mem.io[reg] = value,
@@ -959,16 +992,25 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x02 => sys.serial.read_sc(cgb),
         0x04..=0x07 => sys.timer.read(hot.clock(), reg),
         0x0F => 0xE0 | sys.iflags,
-        // TODO(M6): sound register read masks.
-        0x10..=0x3F => mem.io[reg],
+        // Sound: write-only and unused bits read 1 (`SOUND_READ_MASK`);
+        // wave RAM as stored. TODO(M6): channel status in NR52, wave RAM
+        // while channel 3 plays.
+        0x10..=0x2F => mem.io[reg] | SOUND_READ_MASK[(reg - 0x10) & 0x1F],
+        0x30..=0x3F => mem.io[reg],
         0x40 => sys.ppu.lcdc,
         0x41 => sys.ppu.stat(hot.clock()),
         0x44 => sys.ppu.ly(hot.clock()),
         0x45 => sys.ppu.lyc,
         0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
         0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },
-        0x4F if cgb => 0xFE | sys.vbk,
-        0x68..=0x6B if cgb => mem.io[reg],
+        // VBK reads FE | bank on a CGB in either mode (SameBoy
+        // `read_high_memory`: only `GB_is_cgb`; Mooneye `misc/boot_hwio-C`
+        // reads FE in DMG compatibility mode). Writes need CGB mode.
+        0x4F => 0xFE | sys.vbk,
+        // BCPS/OCPS: bit 6 reads 1, in either mode (SameBoy
+        // `read_high_memory`; Mooneye `misc/bits/unused_hwio-C`).
+        0x68 | 0x6A => 0x40 | mem.io[reg],
+        0x69 | 0x6B if cgb => mem.io[reg],
         0x70 if cgb => 0xF8 | sys.svbk,
         // Undocumented CGB registers, as in SameBoy (Core/memory.c,
         // `read_high_memory`, the I/O part of `GB_read_memory`): OPRI
@@ -981,8 +1023,10 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x72 | 0x73 => mem.io[reg],
         0x74 if cgb => mem.io[reg],
         0x75 => 0x8F | mem.io[reg],
-        // TODO(M6): FF76/FF77 PCM12/PCM34 (the channel amplitudes; read
-        // only, CGB) read 00 with the APU silent.
+        // FF76/FF77 PCM12/PCM34: the channel amplitudes (read only, on CGB
+        // in either mode; Mooneye `misc/bits/unused_hwio-C` reads 00 with
+        // the APU silent). TODO(M6): the live amplitudes.
+        0x76 | 0x77 => 0x00,
         _ => 0xFF,
     }
 }
@@ -1131,10 +1175,52 @@ mod tests {
         write(emu, 0xFF70, 2);
         write(emu, 0xFF4F, 1);
         write(emu, 0xFF4D, 1);
-        for reg in [0xFF4D, 0xFF4F, 0xFF70] {
+        for reg in [0xFF4D, 0xFF70] {
             assert_eq!(emu.peek(reg), 0xFF, "{reg:#06x}");
         }
+        // VBK is readable (bank 0) but not writable.
+        assert_eq!(emu.peek(0xFF4F), 0xFE);
         assert_eq!(emu.peek(0xD000), 0x01);
+        // BCPS/OCPS are readable and writable, BCPD/OCPD are not.
+        write(emu, 0xFF68, 0x05);
+        write(emu, 0xFF69, 0x12);
+        assert_eq!((emu.peek(0xFF68), emu.peek(0xFF69)), (0x45, 0xFF));
+    }
+
+    /// The post-boot values Mooneye `misc/boot_hwio-C` and
+    /// `misc/boot_div-cgbABCDE` check that depend on the mode or phase.
+    #[test]
+    fn post_boot_state_of_a_dmg_mode_cartridge() {
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        assert_eq!(emu.peek(0xFF00), 0xFF);
+        assert_eq!((emu.peek(0xFF68), emu.peek(0xFF6A)), (0xC8, 0xD0));
+        // DIV ticks to 27 at clock 136 (34 M-cycles).
+        let t = Timer::post_boot();
+        assert_eq!(
+            (t.div(132), t.div(136), t.div(136 + 255)),
+            (0x26, 0x27, 0x27)
+        );
+        assert_eq!(emu.peek(0xFF04), 0x26);
+        // CGB mode leaves P1 alone.
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        assert_eq!(emu.peek(0xFF00), 0xCF);
+    }
+
+    #[test]
+    fn sound_registers_read_their_unused_bits_as_1() {
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        for (reg, ones) in [
+            (0xFF10, 0x80),
+            (0xFF15, 0xFF),
+            (0xFF1C, 0x9F),
+            (0xFF26, 0x70),
+        ] {
+            write(emu, reg, 0x00);
+            assert_eq!(emu.peek(reg), ones, "{reg:#06x}");
+        }
+        write(emu, 0xFF30, 0x00);
+        assert_eq!(emu.peek(0xFF30), 0x00);
+        assert_eq!((emu.peek(0xFF76), emu.peek(0xFF77)), (0x00, 0x00));
     }
 
     #[test]
