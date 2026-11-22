@@ -38,7 +38,7 @@ Working rules that matter here:
 
 ## Needs human
 
-Blocking the M4 tag (`stage1-m4`):
+Approved 2026-11-22, being implemented (then tag `stage1-m4`):
 1. **mbc3-tester `run_frames`**: the ROM's result first appears at 40.59
    frames (counted as 70,224-clock units from the post-boot handover). That's
    41,368 clocks after the 40-frame cutoff. No core or runner bug was found,
@@ -52,8 +52,8 @@ Blocking the M4 tag (`stage1-m4`):
    recolor of the pinned upstream PNG, `recolor = { from, to, count }`,
    where `to` must be a contract palette color, plus a dated ADR 0007
    amendment. Then remove `acceptance/references/` and its README rows.
-3. Optional: is the NUCLEO-H753ZI available for an early M7 cycle
-   measurement? (Perf review HIGH, plan task.)
+3. NUCLEO-H753ZI: not available yet (human, 2026-11-22). M7 cycle
+   measurement waits for Stage 2 (perf review HIGH, plan task).
 
 Resolved in session 06: the mbc3-tester recolor itself was approved, and
 ADR 0015 was agreed to extend ADR 0006, not change it.
