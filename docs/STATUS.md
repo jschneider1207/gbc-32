@@ -4,29 +4,28 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M3 (PPU, DMG-compatibility rendering + screenshots). M2 is
-  closed and tagged `stage1-m2` (ac36d13); M1 is `stage1-m1`.
-- **Last updated:** 2026-11-21, end of session 04 (`logs/2026-11-21-04-adr0011-event-scheduled-timer.md`)
+- **Milestone:** M3 (PPU, DMG-compatibility rendering + screenshots):
+  acceptance passes, closing. M2 is `stage1-m2`, M1 `stage1-m1`.
+- **Last updated:** 2026-11-21, during session 05 (M3)
 
 ## Next up
 
-Start M3 (read the M3 section of the plan). Suggested order:
-1. **ADR first:** output pixel format and stride (STM32 LTDC wants RGB565
-   or ARGB1555; convert per palette entry at palette-write time).
-2. **PPU mode state machine** on the event table (`EventKind::Ppu`
-   deadlines for mode/STAT/LYC; STAT/LYC writes sync + reschedule), STAT
-   interrupts, power-on PPU/DIV phase (boot_div/boot_hwio), first line
-   after LCD enable skips OAM scan.
-3. **Scanline renderer** with catch-up on mid-line writes (ADR 0002): BG,
-   window, sprites, DMG compatibility palettes; framebuffer output.
-4. **OAM DMA as the PPU sees it**, and confirm the HALT pause against
-   gambatte `oamdmasrc80_halt_*` once STAT IRQs exist.
+M3 acceptance passes (verified at 745b06a: the seven M3 groups, 52/52 ROMs,
+`--gate must` exit 0). Session 05 (in progress) state:
+- Done: ADR 0013 (RGB555, stride 160), PPU mode timing (ADR 0014,
+  f71dbce; mooneye-acceptance-ppu 7/7, mooneye-cgb-misc 4/4), VRAM/OAM
+  blocking (22eccab), renderer (53c0c37..7f53075) wired in (265a078).
+  Must 66/86, should 24/40, stretch 12 (before the M3 baseline update).
+- Running: OAM DMA as the PPU sees it + gambatte HALT-DMA confirmation
+  (plan M3, the two unticked tasks).
+- Then: milestone review (hardware correctness, test integrity, and
+  performance: the hot path changed), fix confirmed high/medium,
+  `--update-baseline`, tag `stage1-m3`, session log 05.
 
-M3 acceptance: groups `mooneye-acceptance` (already 46/46), `dmg-acid2-compat`,
-`blargg-cpu-instrs`, `blargg-instr-timing`, `blargg-mem-timing`,
-`blargg-mem-timing-2`, `blargg-halt-bug`. The Blargg ones fail only on their
-screenshot check today (PPU draws nothing), so they should flip once frames
-render.
+Must failures left after M3 are all later milestones: mbc3-tester and
+rtc3test x3 (MBC3/RTC not implemented, M4; the renderer draws them
+correctly), mooneye-mbc x14 (M4), cgb-acid2 (M5), cgb_sound (M6).
+`blargg-interrupt-time` (should) fails after the speed switch (M5).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).

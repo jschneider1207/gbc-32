@@ -76,15 +76,15 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 
 - [ ] OAM DMA as the PPU sees it (Pan Docs "OAM DMA bus conflicts": objects off-screen in mode 2, the word being written in mode 3); sync DMA progress before PPU OAM reads (`docs/reference/oam-dma.md`)
 - [ ] Confirm OAM DMA pausing in HALT (M2 review H4, SameBoy model) against gambatte `oamdma/oamdmasrc80_halt_*` and `mgb_oam_dma_halt_sprites` once STAT IRQs exist; a halted DMA blocks the mode-2 OAM scan on CGB C (SameBoy `add_object_from_index`)
-- [ ] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts
-- [ ] Scanline renderer with catch-up on mid-line register writes (ADR 0002)
-- [ ] Event deadlines: the table exists since M2 (`schedule.rs`, ADR 0011; incremental minimum 2944113). Remaining: PPU mode/STAT deadlines on `EventKind::Ppu`; STAT and LYC writes must sync the PPU and reschedule (M1 reviews)
-- [ ] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes
-- [ ] Framebuffer output; screenshot comparison working in `romtest`
-- [ ] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review)
-- [ ] First line after LCD enable skips OAM scan (GBCTR, SameBoy); no manifest ROM covers it (the lcdon_* tests are excluded), so add a unit test
+- [x] Mode timing state machine (OAM scan, mode 3 length incl. SCX/window/sprite penalties, HBlank, VBlank), STAT/LYC interrupts (ADR 0014, f71dbce)
+- [x] Scanline renderer with catch-up on mid-line register writes (ADR 0002) (265a078; mid-line writes land per SameBoy CGB table)
+- [x] Event deadlines: the table exists since M2 (`schedule.rs`, ADR 0011; incremental minimum 2944113). Remaining: PPU mode/STAT deadlines on `EventKind::Ppu`; STAT and LYC writes must sync the PPU and reschedule (M1 reviews) (f71dbce)
+- [x] BG, window, sprites (priority, 10-per-line limit), DMG compatibility palettes (53c0c37, 88c27b4; compat-mode object priority by X, OPRI=1)
+- [x] Framebuffer output; screenshot comparison working in `romtest` (265a078; dmg-acid2 passes)
+- [x] PPU and DIV phase at power-on (where the CGB boot ROM hands over), replacing the M0 stub that starts at LY=0 dot 0; checked by `mooneye-cgb-misc` boot_div/boot_hwio (M0 hardware review) (9de8fc2, f71dbce; boot_div, boot_hwio pass)
+- [x] First line after LCD enable skips OAM scan (GBCTR, SameBoy); no manifest ROM covers it (the lcdon_* tests are excluded), so add a unit test (f71dbce, `first_line_after_lcd_enable_skips_the_oam_scan`)
 - [x] Before writing the PPU: decide the output pixel format and stride (ADR 0013: keep RGB555, stride 160, colors resolved at palette-write time; the platform converts while scaling) (review finding 4)
-- [ ] First headless performance benchmark recorded in `docs/perf.md` (the callgrind Ir gate exists since M1 close, ADR 0010; add PPU-heavy numbers once the renderer runs)
+- [x] First headless performance benchmark recorded in `docs/perf.md` (the callgrind Ir gate exists since M1 close, ADR 0010; add PPU-heavy numbers once the renderer runs) (265a078, docs/perf.md)
 
 **Acceptance:** groups `mooneye-acceptance`, `dmg-acid2-compat`, `blargg-cpu-instrs`,
 `blargg-instr-timing`, `blargg-mem-timing`, `blargg-mem-timing-2` and
@@ -140,6 +140,8 @@ The human checks interactive play.
 
 - [ ] Fix issues found in the real-game checklist
 - [ ] Bring `should`-tier scores up where cheap
+- [ ] Mid-line PPU fidelity (Mealybug, stretch): tile-map/tile-data/SCY/object changes apply per pixel, hardware applies them per fetch; WX=0 is one pixel off when SCX&7 != 0 (`m3_window_timing_wx_0`); mid-line SCX carry (`m3_scx_low_3_bits` pixels 152-159). From the M3 renderer integration (265a078)
+- [ ] PPU cost cuts (M3): the object-mixing path in `render` is the next cut (~375k Ir/frame with objects vs ~220k without); `start_line` is 2.2 KB on thumbv7em, large for what it does; ADR 0014 lists two timing cuts (reuse the look-ahead walk, a cursor instead of the division-based point search)
 - [ ] Code size: re-measure `execute`/`execute_cb` on thumbv7em (68 KB at M1, more than the H753's fixed 64 KB ITCM; the H735 ITCM can be configured up to 256 KB). Target <= 40 KB, e.g. by moving rare read regions out of line (M1 perf review 1). At M2 close `run` 28,560 B + `execute_cb` 13,158 B = 41.7 KB, ~45.5 KB with boundary/read_high/write_mapped, 2.6x the M7 16 KiB I-cache: plan ITCM placement (M2 perf review P5)
 - [ ] Worst-case event density on the M7: `synth:event-storm` (double-speed timer TMA=FF + fast serial) is ~3.46 M x86 Ir/frame after 2944113, under the 4.02 M (50%) line only as an x86 proxy; the M2 perf review estimated M7 cycles at 1.3-2x Ir for this u64-heavy code. Measure on hardware (Stage 2) and, if over, e.g. u32 epoch-relative deadlines
 - [ ] Unaligned ROM reads: the Stage 3 MCU (STM32H735) does not support unaligned reads from the FMC SDRAM that holds the ROM (ES0491 2.7.3). `-C target-feature=+strict-align` is unstable on Rust 1.100 (warns, slated to become a hard error, rust-lang/rust#162235), so ensure at code level that ROM bytes are never merged into wider loads (e.g. one ROM-read function using byte reads LLVM can't combine) and add a disassembly check; record in an ADR
