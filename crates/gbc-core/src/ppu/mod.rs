@@ -70,7 +70,7 @@ use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
 pub(crate) use render::OBJ_BUF_LEN;
-use render::{Colors, Regs, Renderer, Sources};
+use render::{Colors, Regs, Renderer, Sources, pair_table};
 
 mod objects;
 mod render;
@@ -976,6 +976,7 @@ impl Ppu {
             oam: &mem.oam,
             attrs: self.attr_on.then_some(&self.obj_attr),
             colors: &self.colors,
+            pairs: &mem.bg_pairs,
         };
         let row = render::frame_row(frame, usize::from(ly));
         self.renderer.render(
@@ -1005,18 +1006,53 @@ impl Ppu {
     }
 
     /// A BGP (FF47), OBP0 (FF48) or OBP1 (FF49) write: resolves that
-    /// palette's colors now (ADR 0013), after the bus has flushed.
-    pub(crate) fn write_palette(&mut self, reg: usize, value: u8, dmg: &DmgPalettes) {
+    /// palette's colors now (ADR 0013), after the bus has flushed. In CGB
+    /// mode BGP has no effect on colors (Pan Docs: FF47 BGP, "Non-CGB
+    /// Mode only"; the BG colors come from palette RAM).
+    // TODO(M5): OBP0/OBP1 too; CGB-mode objects still use them until the
+    // CGB object attributes (palette number) and OCPD colors are done.
+    pub(crate) fn write_palette(
+        &mut self,
+        reg: usize,
+        value: u8,
+        dmg: &DmgPalettes,
+        cgb: bool,
+        pairs: &mut [[u32; 16]; 8],
+    ) {
         match reg {
-            0x47 => self.colors.set_bgp(dmg, value),
+            0x47 if cgb => {}
+            0x47 => {
+                self.colors.set_bgp(dmg, value);
+                pairs[0] = pair_table(&self.colors.bg[0]);
+            }
             _ => self.colors.set_obp(dmg, reg - 0x48, value),
         }
     }
 
-    /// Resolves all three compatibility palettes from the registers in
-    /// `mem` (reset, or new compatibility colors from the front end).
-    pub(crate) fn resolve_palettes(&mut self, mem: &Memory, dmg: &DmgPalettes) {
+    /// A BCPD write (CGB mode) to palette RAM byte `index`, after the bus
+    /// has flushed and stored it: re-resolves that BG palette. The whole
+    /// palette (4 colors, 16 pairs) is rebuilt; writes come in bursts at
+    /// palette loads, not per pixel.
+    pub(crate) fn write_bcpd(&mut self, index: usize, mem: &mut Memory) {
+        let pal = (index >> 3) & 7;
+        self.colors.set_cgb_bg(&mem.bg_pal, pal);
+        mem.bg_pairs[pal] = pair_table(&self.colors.bg[pal]);
+    }
+
+    /// Resolves all palettes from the registers and palette RAM in `mem`
+    /// (reset, or new compatibility colors from the front end): in DMG
+    /// compatibility mode BG palette 0 and OBJ palettes 0-1 from BGP/OBP0/
+    /// OBP1, in CGB mode the BG palettes from palette RAM.
+    pub(crate) fn resolve_palettes(&mut self, mem: &mut Memory, dmg: &DmgPalettes, cgb: bool) {
         self.colors = Colors::dmg_compat(dmg, mem.io[0x47], mem.io[0x48], mem.io[0x49]);
+        if cgb {
+            for pal in 0..8 {
+                self.colors.set_cgb_bg(&mem.bg_pal, pal);
+            }
+        }
+        for (t, pal) in mem.bg_pairs.iter_mut().zip(&self.colors.bg) {
+            *t = pair_table(pal);
+        }
     }
 
     /// A WY or LCDC write at clock `now` (synced): the WY condition is
@@ -1936,7 +1972,7 @@ mod tests {
         };
         r.mem.io[0x47] = 0xE4;
         r.mem.io[0x48] = 0xE4;
-        r.ppu.resolve_palettes(&r.mem, &dmg);
+        r.ppu.resolve_palettes(&mut r.mem, &dmg, false);
         // Tile 0: color 1 everywhere (BG); tile 1: color 3 (the object).
         for row in 0..8 {
             r.mem.vram[2 * row] = 0xFF;

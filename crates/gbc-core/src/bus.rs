@@ -153,7 +153,19 @@ impl Sys<'_> {
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
-        self.ppu.resolve_palettes(mem, &self.config.dmg_palettes);
+        // CGB mode: the boot ROM fades all 8 BG palettes to white (7FFF)
+        // before starting the game (SameBoy BootROMs/cgb_boot.asm,
+        // `Preboot`: 32 brightening steps over hBgPalettes, all 64 bytes).
+        // OBJ palette RAM is not written (left at zero here; random on
+        // hardware). DMG compatibility mode: palette RAM is unreadable
+        // (BCPD/OCPD read FF), so its contents don't matter.
+        if self.cgb_mode {
+            for c in mem.bg_pal.as_chunks_mut::<2>().0 {
+                *c = 0x7FFFu16.to_le_bytes();
+            }
+        }
+        self.ppu
+            .resolve_palettes(mem, &self.config.dmg_palettes, self.cgb_mode);
         // OPRI bit 0: the boot ROM selects coordinate priority (1) for
         // DMG compatibility mode, and leaves 0 (OAM index priority) in CGB
         // mode (Pan Docs: FF6C - OPRI; SameBoy Core/memory.c, OPRI write
@@ -169,6 +181,20 @@ impl Sys<'_> {
             mem.io[0x6A] = 0x90;
         }
     }
+}
+
+/// A BCPD/OCPD write in CGB mode: stores `value` at the palette RAM byte the
+/// index register (BCPS/OCPS) selects in bits 0-5, then, if its bit 7
+/// (auto-increment) is set, increments bits 0-5, wrapping 3F to 00 and
+/// keeping bit 7 (Pan Docs: LCD Color Palettes, FF68 BCPS; SameBoy
+/// `write_high_memory`, GB_IO_BGPD). Returns the byte written.
+fn palette_data_write(index: &mut u8, ram: &mut [u8; 64], value: u8) -> usize {
+    let i = usize::from(*index & 0x3F);
+    ram[i] = value;
+    if *index & 0x80 != 0 {
+        *index = (*index & 0x80) | (index.wrapping_add(1) & 0x3F);
+    }
+    i
 }
 
 /// OR masks for reads of FF10-FF2F: write-only bits (lengths, frequency
@@ -621,7 +647,13 @@ impl Ctx<'_, '_> {
                 s.ppu.flush(at, self.mem, self.frame);
                 self.mem.io[reg] = value;
                 match reg {
-                    0x47..=0x49 => s.ppu.write_palette(reg, value, &s.config.dmg_palettes),
+                    0x47..=0x49 => s.ppu.write_palette(
+                        reg,
+                        value,
+                        &s.config.dmg_palettes,
+                        s.cgb_mode,
+                        &mut self.mem.bg_pairs,
+                    ),
                     0x4A => s.ppu.check_wy_at(now, self.mem),
                     _ => {}
                 }
@@ -742,11 +774,24 @@ impl Ctx<'_, '_> {
                 s.vbk = value & 0x01;
                 s.vram_off = usize::from(s.vbk) * 0x2000;
             }
-            // CGB palettes: plain storage until M5. BCPS/OCPS (the index
-            // registers) are writable on a CGB in either mode, BCPD/OCPD
-            // only in CGB mode (SameBoy `write_high_memory`).
+            // CGB palettes. BCPS/OCPS (the index registers) are writable on
+            // a CGB in either mode, BCPD/OCPD only in CGB mode (SameBoy
+            // `write_high_memory`). TODO(M5): access blocked in mode 3.
             0x68 | 0x6A => self.mem.io[reg] = value,
-            0x69 | 0x6B if cgb => self.mem.io[reg] = value,
+            0x69 if cgb => {
+                // Draw the pixels output so far with the old colors.
+                let now = self.clock();
+                self.run_ppu_to(now);
+                let s = &mut *self.sys;
+                s.ppu.flush(now, self.mem, self.frame);
+                let i = palette_data_write(&mut self.mem.io[0x68], &mut self.mem.bg_pal, value);
+                s.ppu.write_bcpd(i, self.mem);
+            }
+            // TODO(M5): OBJ colors from OCPD (with the CGB object palette
+            // number); stored for read-back only.
+            0x6B if cgb => {
+                palette_data_write(&mut self.mem.io[0x6A], &mut self.mem.obj_pal, value);
+            }
             // OPRI: writable in CGB mode only (after the boot ROM). Plain
             // storage until the M3 renderer uses it.
             0x6C if cgb => self.mem.io[reg] = value,
@@ -1242,7 +1287,11 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // BCPS/OCPS: bit 6 reads 1, in either mode (SameBoy
         // `read_high_memory`; Mooneye `misc/bits/unused_hwio-C`).
         0x68 | 0x6A => 0x40 | mem.io[reg],
-        0x69 | 0x6B if cgb => mem.io[reg],
+        // BCPD/OCPD read the palette RAM byte at the index, without
+        // incrementing it (SameBoy `read_high_memory`; Pan Docs: FF69).
+        // TODO(M5): FF while the PPU reads palettes (mode 3).
+        0x69 if cgb => mem.bg_pal[usize::from(mem.io[0x68] & 0x3F)],
+        0x6B if cgb => mem.obj_pal[usize::from(mem.io[0x6A] & 0x3F)],
         0x70 if cgb => 0xF8 | sys.svbk,
         // Undocumented CGB registers, as in SameBoy (Core/memory.c,
         // `read_high_memory`, the I/O part of `GB_read_memory`): OPRI
@@ -1426,7 +1475,12 @@ mod tests {
     /// A DMG-mode emulator whose BG is tile 0 (color 3) in even map
     /// columns and tile 1 (color 0) in odd ones.
     fn striped_bg() -> &'static mut Emulator<'static> {
-        let emu = load(rom(0x8000, 0, 0, 0x00));
+        striped_bg_with(0x00)
+    }
+
+    /// [`striped_bg`] with header byte 0x143 = `cgb_flag`.
+    fn striped_bg_with(cgb_flag: u8) -> &'static mut Emulator<'static> {
+        let emu = load(rom(0x8000, 0, 0, cgb_flag));
         emu.mem.vram[..16].fill(0xFF);
         for col in 0..32 {
             emu.mem.vram[0x1800 + col] = (col & 1) as u8;
@@ -1472,6 +1526,83 @@ mod tests {
                 (true, true) => gray[3],
                 _ => gray[0],
             };
+            assert_eq!(p, want, "x = {x}");
+        }
+    }
+
+    /// BCPD/OCPD writes store at the BCPS/OCPS index and, with bit 7 set,
+    /// increment it with bits 0-5 wrapping (bit 7 kept, bit 6 reads 1);
+    /// reads return the byte at the index without incrementing (Pan Docs:
+    /// LCD Color Palettes; SameBoy `write_high_memory`/`read_high_memory`).
+    #[test]
+    fn cgb_palette_data_auto_increments_and_reads_back() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF68, 0xBE); // auto-increment, index 3E
+        for v in [0x11, 0x22, 0x33] {
+            write(emu, 0xFF69, v);
+        }
+        assert_eq!(emu.peek(0xFF68), 0xC1);
+        assert_eq!((emu.mem.bg_pal[0x3E], emu.mem.bg_pal[0x3F]), (0x11, 0x22));
+        assert_eq!(emu.mem.bg_pal[0], 0x33);
+        // No auto-increment: writes and reads stay at the index.
+        write(emu, 0xFF68, 0x3F);
+        assert_eq!((emu.peek(0xFF69), emu.peek(0xFF69)), (0x22, 0x22));
+        write(emu, 0xFF69, 0x44);
+        assert_eq!((emu.peek(0xFF68), emu.peek(0xFF69)), (0x7F, 0x44));
+        // OCPD: the same, on OBJ palette RAM.
+        write(emu, 0xFF6A, 0xBF);
+        write(emu, 0xFF6B, 0x55);
+        write(emu, 0xFF6B, 0x66);
+        assert_eq!(emu.peek(0xFF6A), 0xC1);
+        write(emu, 0xFF6A, 0x3F);
+        assert_eq!(emu.peek(0xFF6B), 0x55);
+        write(emu, 0xFF6A, 0x00);
+        assert_eq!(emu.peek(0xFF6B), 0x66);
+        assert_eq!(emu.mem.bg_pal[0x3F], 0x44);
+    }
+
+    /// Line 5 of the first full frame of `emu` (striped BG).
+    fn line5(emu: &mut Emulator) -> [u16; 160] {
+        let line = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 456 * 5;
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(line + 400, &mut fb, &mut []);
+        fb.as_chunks::<160>().0[5]
+    }
+
+    /// CGB mode: BG colors come from palette RAM (BG palette 0 here, no
+    /// attributes yet); BGP has no effect; the other colors are the boot
+    /// ROM's white.
+    #[test]
+    fn cgb_mode_bg_colors_come_from_palette_ram() {
+        let emu = striped_bg_with(0x80);
+        // Off clock 0 (the BGP write path looks one dot back).
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(100, &mut fb, &mut []);
+        write(emu, 0xFF68, 0x86); // BG palette 0, color 3, auto-increment
+        write(emu, 0xFF69, 0x20);
+        write(emu, 0xFF69, 0x03);
+        write(emu, 0xFF47, 0x00);
+        let row = line5(emu);
+        for (x, &p) in row.iter().enumerate() {
+            let want = if (x / 8) % 2 == 0 { 0x0320 } else { 0x7FFF };
+            assert_eq!(p, want, "x = {x}");
+        }
+    }
+
+    /// DMG compatibility mode: BCPD writes are ignored, BGP picks the
+    /// compatibility colors as before.
+    #[test]
+    fn dmg_compat_bg_colors_ignore_palette_ram() {
+        let emu = striped_bg();
+        write(emu, 0xFF68, 0x80);
+        for _ in 0..8 {
+            write(emu, 0xFF69, 0x1F);
+        }
+        let gray = crate::DmgPalettes::GRAYSCALE.bg;
+        let row = line5(emu);
+        for (x, &p) in row.iter().enumerate() {
+            // Post-boot BGP = FC: color 3 -> shade 3, color 0 -> shade 0.
+            let want = if (x / 8) % 2 == 0 { gray[3] } else { gray[0] };
             assert_eq!(p, want, "x = {x}");
         }
     }

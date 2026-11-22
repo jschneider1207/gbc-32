@@ -42,6 +42,17 @@ pub struct Memory {
     /// 0 = transparent, else bits 0-1 color, bits 2-4 palette, bit 7 BG
     /// priority. Per-line scratch lives here, not in `Hw` (ADR 0009).
     pub(crate) obj_buf: [u8; OBJ_BUF_LEN],
+    /// CGB BG palette RAM (BCPD, FF69): 8 palettes of 4 colors, RGB555
+    /// little-endian, bytes as written (bit 15 included, for read-back).
+    /// Pan Docs: LCD Color Palettes (CGB only).
+    pub(crate) bg_pal: [u8; 64],
+    /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
+    pub(crate) obj_pal: [u8; 64],
+    /// Per BG palette, the pixel-pair table of its resolved colors
+    /// (`ppu::render::pair_table`), kept up to date on palette writes so
+    /// the renderer never builds one. Palette 0 in DMG compatibility mode
+    /// is BGP's colors.
+    pub(crate) bg_pairs: [[u32; 16]; 8],
 }
 
 impl Memory {
@@ -60,6 +71,9 @@ impl Memory {
             extra_oam: [0; 0x60],
             io: [0; 0x80],
             obj_buf: [0; OBJ_BUF_LEN],
+            bg_pal: [0; 64],
+            obj_pal: [0; 64],
+            bg_pairs: [[0; 16]; 8],
         }
     }
 
@@ -75,6 +89,9 @@ impl Memory {
         self.extra_oam.fill(0);
         self.io.fill(0);
         self.obj_buf.fill(0);
+        self.bg_pal.fill(0);
+        self.obj_pal.fill(0);
+        self.bg_pairs = [[0; 16]; 8];
     }
 }
 
@@ -97,11 +114,30 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
+            bg_pal,
+            obj_pal,
+            bg_pairs,
         } = &NEW;
-        let fields: [&[u8]; 8] = [wram, vram, oam, oam_dma_old, hram, extra_oam, io, obj_buf];
+        let fields: [&[u8]; 10] = [
+            wram,
+            vram,
+            oam,
+            oam_dma_old,
+            hram,
+            extra_oam,
+            io,
+            obj_buf,
+            bg_pal,
+            obj_pal,
+        ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
-        // The fields cover every byte: no padding, nothing else.
-        let total: usize = fields.iter().map(|f| f.len()).sum();
-        assert_eq!(size_of::<Memory>(), total);
+        assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
+        // The fields cover every byte: nothing else, and no padding but
+        // the tail to `bg_pairs`' 4-byte alignment (HRAM is 127 bytes).
+        let total: usize = fields.iter().map(|f| f.len()).sum::<usize>() + size_of_val(bg_pairs);
+        assert_eq!(
+            size_of::<Memory>(),
+            total.next_multiple_of(align_of::<Memory>())
+        );
     }
 }

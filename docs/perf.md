@@ -161,12 +161,16 @@ per frame, 98.3% of the line), cpu_instrs -6.3%, cgb_sound -11.3%,
 halt-irq -19.2%, dma-storm -3.6%, event-storm -2.4%. `diff-fingerprint`:
 identical on 3,822 ROMs. Code: +1.3 KB over the four functions.
 
-CGB palettes (M5): the table is per palette, so with 8 BG palettes it
-should not be rebuilt per span. The 8 pair tables (512 B) then live with
-the caller's `Memory` (next to palette RAM) and are updated on each BCPD
-write (a color change rewrites the 7 entries of its palette that hold
-it); the whole-tile loop indexes `pairs[attribute palette]` per tile and
-keeps its shape.
+CGB palette colors (M4): the 8 BG pair tables (512 B) are kept in the
+caller's `Memory` (`bg_pairs`, next to palette RAM) and rebuilt per
+palette when it changes: a BCPD write (CGB mode; the whole palette's 16
+entries, not only the 7 holding the color), a BGP write (palette 0, DMG
+compatibility mode), reset and `set_dmg_palettes`. The renderer no longer
+builds a table per span; it uses `pairs[0]` until M5's BG attributes pick
+`pairs[attribute palette]` per tile. Ir vs the b799d82 baseline (20 s / 2 s):
+cpu_instrs -0.05%, cgb_sound +0.02%, cgb-acid2 +0.29%, event-storm +0.33%,
+dma-storm +0.02%, halt-irq -0.19%, worst-case +0.32% (436.8 M = 3.66 M
+per frame, 91% of the 4.02 M line). `Renderer::render` 1,680 -> 1,512 B.
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
 mode 3, where the renderer draws) plus STAT interrupt edges: from

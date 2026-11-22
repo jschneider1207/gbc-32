@@ -19,7 +19,8 @@
 //! - per line: [`Renderer::start_line`] at the start of mode 3 (or the end
 //!   of the OAM scan) with the line's [`LineObjects`] and SCX, then
 //!   [`Renderer::render`] for consecutive spans covering 0..160;
-//! - [`Colors`], updated when BGP/OBP0/OBP1 are written (colors are resolved
+//! - [`Colors`] and the BG pixel-pair tables ([`pair_table`]), updated when
+//!   BGP/OBP0/OBP1 or the CGB palette RAM are written (colors are resolved
 //!   at palette-write time, ADR 0013).
 //!
 //! Cost per line: 21 BG/window tile fetches (one map byte and two data
@@ -126,6 +127,17 @@ impl Colors {
         c
     }
 
+    /// CGB mode: BG palette `pal` from palette RAM `ram` (BCPD). Colors are
+    /// little-endian RGB555, the frame's format (ADR 0013); bit 15 is not
+    /// a color bit (Pan Docs: LCD Color Palettes, "Palette data").
+    pub(crate) fn set_cgb_bg(&mut self, ram: &[u8; 64], pal: usize) {
+        let pal = pal & 7;
+        for (e, c) in self.bg[pal].iter_mut().enumerate() {
+            let i = pal * 8 + e * 2;
+            *c = u16::from_le_bytes([ram[i], ram[i + 1]]) & 0x7FFF;
+        }
+    }
+
     /// A BGP write in compatibility mode.
     pub(crate) fn set_bgp(&mut self, dmg: &DmgPalettes, bgp: u8) {
         self.bg[0] = resolve_dmg(&dmg.bg, bgp);
@@ -151,6 +163,8 @@ pub(crate) struct Sources<'a> {
     /// on a line OAM DMA touches (`Ppu::fix_attrs`); else they read `oam`.
     pub(crate) attrs: Option<&'a [(u8, u8); MAX_PER_LINE]>,
     pub(crate) colors: &'a Colors,
+    /// Per BG palette, [`pair_table`] of `colors.bg` (kept in `Memory`).
+    pub(crate) pairs: &'a [[u32; 16]; 8],
 }
 
 /// Row `ly` (0-143) of a frame, for [`Renderer::render`].
@@ -385,7 +399,8 @@ impl Renderer {
             }
             return;
         }
-        let pairs = pair_table(&colors.bg[0]);
+        // TODO(M5): the palette from each tile's BG attributes.
+        let pairs = &src.pairs[0];
         let split = (win_from - x0).min(out.len());
         let (bg, win) = out.split_at_mut(split);
         let (obj_bg, obj_win) = if MIX {
@@ -405,7 +420,7 @@ impl Renderer {
                 0x1800
             };
             let y = self.ly.wrapping_add(regs.scy);
-            fill::<MIX>(bg, obj_bg, src.vram, colors, &pairs, lcdc, map, y, col);
+            fill::<MIX>(bg, obj_bg, src.vram, colors, pairs, lcdc, map, y, col);
         }
         if !win.is_empty() {
             let col =
@@ -420,7 +435,7 @@ impl Renderer {
                 obj_win,
                 src.vram,
                 colors,
-                &pairs,
+                pairs,
                 lcdc,
                 map,
                 self.window_row,
@@ -643,10 +658,10 @@ fn fill_tiles<const MIX: bool>(
 /// The colors of two adjacent pixels of palette `pal`: entry 4a + b holds
 /// color a (left pixel) in bits 0-15 and color b (right pixel) in bits
 /// 16-31, so a decoded tile row ([`decode`]) gives an index per 4 bits.
-/// Built per span (64 bytes of stack, 16 entries) rather than kept: the
-/// span's whole tiles then take 4 lookups each instead of 8.
-#[inline(always)]
-fn pair_table(pal: &[u16; 4]) -> [u32; 16] {
+/// Kept per palette in `Memory` and rebuilt when the palette changes, so
+/// a span's whole tiles take 4 lookups each instead of 8 with no per-span
+/// setup.
+pub(crate) fn pair_table(pal: &[u16; 4]) -> [u32; 16] {
     let mut t = [0u32; 16];
     for (i, e) in t.iter_mut().enumerate() {
         *e = u32::from(pal[i >> 2]) | (u32::from(pal[i & 3]) << 16);
@@ -810,6 +825,7 @@ mod tests {
                 oam: &self.oam,
                 attrs: None,
                 colors: &self.colors,
+                pairs: &[pair_table(&self.colors.bg[0]); 8],
             };
             self.r
                 .render(row, x0, x1, &self.regs, &src, &mut self.obj_buf);

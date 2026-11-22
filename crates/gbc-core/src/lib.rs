@@ -351,7 +351,7 @@ impl<'a> Emulator<'a> {
     pub fn set_dmg_palettes(&mut self, palettes: DmgPalettes) {
         let sys = &mut self.hw.sys;
         sys.config.dmg_palettes = palettes;
-        sys.ppu.resolve_palettes(self.mem, &palettes);
+        sys.ppu.resolve_palettes(self.mem, &palettes, sys.cgb_mode);
     }
 
     /// Power cycle: the post-boot state (no boot ROM is run; registers are
