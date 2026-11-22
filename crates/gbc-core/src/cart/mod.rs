@@ -231,6 +231,8 @@ enum Mapper {
     Mbc1,
     /// MBC2 (types 05-06): 16 ROM banks, 512x4 bits of built-in RAM.
     Mbc2,
+    /// MBC3 (types 0F-13); 0F/10 have the RTC. Also MBC30 (see `write_rom`).
+    Mbc3,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },
 }
@@ -240,9 +242,10 @@ impl Mapper {
         match cart_type {
             0x01..=0x03 => Self::Mbc1,
             0x05 | 0x06 => Self::Mbc2,
+            0x0F..=0x13 => Self::Mbc3,
             0x19..=0x1B => Self::Mbc5 { rumble: false },
             0x1C..=0x1E => Self::Mbc5 { rumble: true },
-            // TODO(M4): MBC3 and the rest; until then they
+            // TODO(M4): the rest; until then they
             // run as if they had no MBC.
             _ => Self::None,
         }
@@ -291,8 +294,16 @@ pub(crate) struct Cart<'a> {
     mode: u8,
     /// MBC5 ROM bank, 9 bits (2000-2FFF is bits 0-7, 3000-3FFF bit 8) and
     /// RAM bank (4 bits, 3 on rumble carts). Bank 0 is a real bank.
+    ///
+    /// MBC3 reuses both: `mbc5_rom` is its ROM bank (8 bits stored, 7 used
+    /// below 4 MiB) and `mbc5_ram` the raw 4000-5FFF value.
     mbc5_rom: u16,
     mbc5_ram: u8,
+    /// MBC3: the selected RTC register, 08-0C, or 0xFF when the 4000-5FFF
+    /// value maps nothing at A000-BFFF (RTC select without an RTC, or a
+    /// value above 0C); 0 when RAM is mapped. Kept apart from `mbc5_ram`
+    /// so the RAM read path tests one byte.
+    rtc_sel: u8,
 }
 
 impl<'a> Cart<'a> {
@@ -315,6 +326,7 @@ impl<'a> Cart<'a> {
             mode: 0,
             mbc5_rom: 1,
             mbc5_ram: 0,
+            rtc_sel: 0,
         }
     }
 
@@ -387,6 +399,7 @@ impl<'a> Cart<'a> {
         self.mode = 0;
         self.mbc5_rom = 1;
         self.mbc5_ram = 0;
+        self.rtc_sel = 0;
         // Without an MBC there is no enable register.
         self.ram_enabled = self.mapper == Mapper::None;
         self.update_banks();
@@ -410,7 +423,13 @@ impl<'a> Cart<'a> {
     /// is never taken and there is no panic path in the CPU's hot code.
     #[inline]
     pub(crate) fn read_ram(&self, addr: u16) -> u8 {
-        if !self.ram_enabled || self.ram_len == 0 {
+        if !self.ram_enabled {
+            return 0xFF;
+        }
+        if self.rtc_sel != 0 {
+            return self.read_rtc();
+        }
+        if self.ram_len == 0 {
             return 0xFF;
         }
         self.ram_buf
@@ -422,11 +441,49 @@ impl<'a> Cart<'a> {
     /// A write to A000-BFFF (no panic path; see [`Cart::read_ram`]).
     #[inline]
     pub(crate) fn write_ram(&mut self, addr: u16, value: u8) {
-        if self.ram_enabled && self.ram_len != 0 {
+        if self.ram_enabled && self.rtc_sel != 0 {
+            self.write_rtc(value);
+        } else if self.ram_enabled && self.ram_len != 0 {
             let i = self.ram_index(addr);
             if let Some(b) = self.ram_buf.get_mut(i) {
                 *b = value | self.ram_or;
             }
+        }
+    }
+
+    /// A000-BFFF read with an RTC register (or nothing) selected.
+    // M4 next: return the right latched register with its unused bits as
+    // 1s or 0s per Pan Docs / SameBoy. Stub: raw latched value.
+    #[inline(never)]
+    fn read_rtc(&self) -> u8 {
+        let t = &self.rtc.latched;
+        match self.rtc_sel {
+            0x08 => t.seconds,
+            0x09 => t.minutes,
+            0x0A => t.hours,
+            0x0B => t.days as u8,
+            0x0C => (t.days >> 8) as u8 & 1 | u8::from(t.halted) << 6 | u8::from(t.day_carry) << 7,
+            _ => 0xFF,
+        }
+    }
+
+    /// A000-BFFF write with an RTC register (or nothing) selected.
+    // M4 next: write side effects (live register, subsecond reset, halt).
+    // Stub: stores into `rtc.live`, masked to the register width.
+    #[inline(never)]
+    fn write_rtc(&mut self, v: u8) {
+        let t = &mut self.rtc.live;
+        match self.rtc_sel {
+            0x08 => t.seconds = v & 0x3F,
+            0x09 => t.minutes = v & 0x3F,
+            0x0A => t.hours = v & 0x1F,
+            0x0B => t.days = (t.days & 0x100) | u16::from(v),
+            0x0C => {
+                t.days = (t.days & 0xFF) | u16::from(v & 1) << 8;
+                t.halted = v & 0x40 != 0;
+                t.day_carry = v & 0x80 != 0;
+            }
+            _ => {}
         }
     }
 
@@ -467,6 +524,42 @@ impl<'a> Cart<'a> {
                     self.update_banks();
                 }
             }
+            Mapper::Mbc3 => {
+                // Pan Docs: MBC3; SameBoy Core/mbc.c (MBC3).
+                match addr >> 13 {
+                    // RAM and RTC enable: 0A in the low nibble.
+                    0 => self.ram_enabled = value & 0x0F == 0x0A,
+                    // ROM bank: 7 bits, 0 selects 1. MBC30 (ROM over 2 MiB,
+                    // i.e. more than 128 banks, e.g. Pokemon Crystal JP)
+                    // has an 8-bit register, found from the ROM size as
+                    // the header has no MBC30 type. The mask then wraps
+                    // the bank to the ROM size.
+                    1 => {
+                        let bits = if self.rom_mask > 0x1F_FFFF {
+                            0xFF
+                        } else {
+                            0x7F
+                        };
+                        self.mbc5_rom = u16::from((value & bits).max(1));
+                    }
+                    // 00-07 RAM bank. MBC3 has 4 (32 KiB), MBC30 8
+                    // (64 KiB); 04-07 select banks 4-7, which mirror 0-3
+                    // on 32 KiB RAM (`ram_index` masks by RAM size).
+                    // 08-0C select an RTC register if the cart has one;
+                    // that and anything above 0C map nothing (reads 0xFF).
+                    2 => {
+                        self.mbc5_ram = value;
+                        self.rtc_sel = match value {
+                            0..=7 => 0,
+                            0x08..=0x0C if self.has_rtc => value,
+                            _ => 0xFF,
+                        };
+                    }
+                    // M4 next: latch register (6000-7FFF, 00 then 01).
+                    _ => {}
+                }
+                self.update_banks();
+            }
             Mapper::Mbc5 { rumble } => {
                 // Pan Docs: MBC5. Registers decode on address bits 12-14.
                 match addr >> 12 {
@@ -489,6 +582,11 @@ impl<'a> Cart<'a> {
         let (lo, hi, ram) = match self.mapper {
             Mapper::None => (0, 1, 0),
             Mapper::Mbc2 => (0, usize::from(self.bank1), 0),
+            Mapper::Mbc3 => (
+                0,
+                usize::from(self.mbc5_rom),
+                usize::from(self.mbc5_ram & 7),
+            ),
             Mapper::Mbc5 { .. } => (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram)),
             Mapper::Mbc1 => {
                 // Mode 1 also applies BANK2 to 0000-3FFF and to RAM (Pan
@@ -815,6 +913,115 @@ mod tests {
             assert_ne!(c.read_ram(0xA000), 0xFF);
             c.write_rom(0x0000, 0x0B);
             assert_eq!(c.read_ram(0xA000), 0xFF);
+        }
+    }
+
+    #[test]
+    fn mbc3_rom_banking() {
+        let rom = mbc5_rom(256, 0x13);
+        let mut ram = [0u8; 0x2_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        assert_eq!(c.read_rom(0x4000), 1);
+        c.write_rom(0x2000, 0); // 0 selects 1
+        assert_eq!(c.read_rom(0x4000), 1);
+        c.write_rom(0x3FFF, 0x45);
+        assert_eq!(c.read_rom(0x4000), 0x45);
+        assert_eq!(c.read_rom(0x0000), 0);
+        // 7-bit register below 4 MiB: bit 7 ignored.
+        let rom = mbc5_rom(128, 0x13);
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x2000, 0xC5);
+        assert_eq!(c.read_rom(0x4000), 0x45);
+        c.write_rom(0x2000, 0x80); // 0 -> 1, not bank 0x80
+        assert_eq!(c.read_rom(0x4000), 1);
+        // MBC30 (over 2 MiB): 8 bits.
+        let rom = mbc5_rom(256, 0x13);
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x2000, 0xC5);
+        assert_eq!(c.read_rom(0x4000), 0xC5);
+    }
+
+    #[test]
+    fn mbc3_rom_bank_masks_to_rom_size() {
+        let rom = mbc5_rom(4, 0x13);
+        let mut ram = [0u8; 0x2_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x2000, 6); // 6 mod 4 = 2
+        assert_eq!(c.read_rom(0x4000), 2);
+        c.write_rom(0x2000, 4); // bank 0 mirror; no 0 -> 1 after the mask
+        assert_eq!(c.read_rom(0x4000), 0);
+    }
+
+    #[test]
+    fn mbc3_ram_banking_and_enable() {
+        let mut rom = mbc5_rom(2, 0x13);
+        rom[HEADER_RAM_SIZE] = 0x03; // 32 KiB: 4 banks
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        assert_eq!(c.read_ram(0xA000), 0xFF); // disabled at power-on
+        c.write_rom(0x1FFF, 0x0A);
+        for bank in 0..4u8 {
+            c.write_rom(0x4000, bank);
+            c.write_ram(0xA000, bank + 1);
+        }
+        for bank in 0..4u8 {
+            c.write_rom(0x5FFF, bank);
+            assert_eq!(c.read_ram(0xA000), bank + 1);
+        }
+        // 04-07 mirror 0-3 on 32 KiB; 08-0C without an RTC map nothing.
+        c.write_rom(0x4000, 5);
+        assert_eq!(c.read_ram(0xA000), 2);
+        for sel in [0x08, 0x0C, 0x0D, 0xFF] {
+            c.write_rom(0x4000, sel);
+            assert_eq!(c.read_ram(0xA000), 0xFF, "{sel:#x}");
+        }
+        c.write_rom(0x4000, 1);
+        assert_eq!(c.read_ram(0xA000), 2);
+        // Only a low nibble of A enables.
+        c.write_rom(0x0000, 0x1B);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        c.write_rom(0x0000, 0x1A);
+        assert_eq!(c.read_ram(0xA000), 2);
+    }
+
+    #[test]
+    fn mbc3_rtc_select_routes_a000() {
+        let mut rom = mbc5_rom(2, 0x10);
+        rom[HEADER_RAM_SIZE] = 0x03;
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x4000, 0);
+        c.write_ram(0xA000, 0x77);
+        c.rtc.latched.minutes = 0x21;
+        c.write_rom(0x4000, 0x09);
+        assert_eq!(c.read_ram(0xA000), 0x21); // RTC M, not RAM
+        c.write_ram(0xA000, 0x13); // goes to the live register
+        assert_eq!(c.rtc.live.minutes, 0x13);
+        c.write_rom(0x4000, 0x0D); // above 0C: nothing
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        c.write_rom(0x4000, 0);
+        assert_eq!(c.read_ram(0xA000), 0x77); // RAM untouched
+        // RTC reads still need the enable.
+        c.write_rom(0x4000, 0x09);
+        c.write_rom(0x0000, 0);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+    }
+
+    #[test]
+    fn mbc30_ram_has_eight_banks() {
+        let mut rom = mbc5_rom(2, 0x13);
+        rom[HEADER_RAM_SIZE] = 0x05; // 64 KiB: 8 banks
+        let mut ram = [0u8; 0x1_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A);
+        for bank in 0..8u8 {
+            c.write_rom(0x4000, bank);
+            c.write_ram(0xA000, bank + 1);
+        }
+        for bank in 0..8u8 {
+            c.write_rom(0x4000, bank);
+            assert_eq!(c.read_ram(0xA000), bank + 1);
         }
     }
 
