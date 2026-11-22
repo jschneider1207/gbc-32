@@ -48,6 +48,16 @@ Working rules that matter here:
 Open (session 07):
 1. Review the drafted manifest group for the PNG-reference Gambatte ROMs
    (see decision below) before it is committed.
+2. Review the drafted manifest change narrowing the lockup rule (below).
+
+Decided in session 07 (2026-11-22), human, after the M5 test-integrity
+review (medium: the lockup rule covered all 3,154 gambatte ROMs, broader
+than "those specific tests"): "Narrow to undef_ops". Plan: an explicit
+per-group manifest opt-in (e.g. `lockup = "run_on"`), the 10
+`gambatte/undef_ops` ROMs in their own group with it, every other group
+treats a lockup as `crash` again; contract text + ADR 0018 amendment.
+Manifest change drafted for the human's OK; re-review (runner pass/fail
+logic changes again).
 
 Decided in session 07 (2026-11-22), human: "Both those sound fine" to
 (a) a new stretch-tier group selecting exactly the Gambatte ROMs with a
