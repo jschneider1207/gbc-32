@@ -56,6 +56,13 @@ Working rules that matter here:
    (c-sp/gameboy-test-roms). All of these change human-owned acceptance
    files, so agents won't touch them. Blocks the M4 gate (must-tier).
 
+2. **FYI, sign-off wanted (not blocking):** ADR 0015 (80a5010) changes what
+   `load`/`eject` return (`EjectedCart`: buffers + RTC state + save-dirty
+   flag) and appends a dated note to Accepted ADR 0006, as its earlier
+   amendment did. The decision "buffers always come back" stands and is
+   extended, so it was treated as an extension. Say if you see it as a
+   change to 0006's decision.
+
 FYI (session 05): the human saw "a lot of compile errors" (session 05).
 build, clippy `-D warnings`, tests, the thumbv7em core build and the
 nightly fuzz crate are all clean with the pinned toolchain, so this is
