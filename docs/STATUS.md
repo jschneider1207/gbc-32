@@ -4,54 +4,48 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M3 (PPU, DMG-compatibility rendering + screenshots):
-  acceptance passes, closing. M2 is `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-21, during session 05 (M3)
+- **Milestone:** M4 (cartridges + saves), not started. M3 is `stage1-m3`,
+  M2 `stage1-m2`, M1 `stage1-m1`.
+- **Last updated:** 2026-11-21, end of session 05 (M3 close)
 
 ## Next up
 
-M3 acceptance passes (verified at 745b06a: the seven M3 groups, 52/52 ROMs,
-`--gate must` exit 0). Session 05 (in progress) state:
-- Done: ADR 0013 (RGB555, stride 160), PPU mode timing (ADR 0014,
-  f71dbce; mooneye-acceptance-ppu 7/7, mooneye-cgb-misc 4/4), VRAM/OAM
-  blocking (22eccab), renderer (53c0c37..7f53075) wired in (265a078).
-  Must 66/86, should 24/40, stretch 12 (before the M3 baseline update).
-- Done: OAM DMA as the PPU sees it + gambatte HALT-DMA confirmation
-  (c57dd2e; gambatte oamdma 331 -> 347, no manifest change). Two
-  deliberate deviations from SameBoy fitted to gambatte hardware ROMs: the
-  PPU sees DMA steps 2 dots early; the last step is not held through HALT.
-  All M3 plan tasks are ticked; M3 must gate verified at c57dd2e.
-- Next: milestone review (hardware correctness, test integrity, and
-  performance: the hot path changed), fix confirmed high/medium,
-  `--update-baseline`, tag `stage1-m3`, session log 05 (cover sessions
-  05 work above: 4 implementation agents, ADRs 0013/0014).
-  Review range: `stage1-m2..HEAD`. Point the hardware reviewer at the two
-  SameBoy deviations and the renderer choices noted in code comments.
-- Token cost (human, session 05): M3 agents were too big (timing ~523k
-  tokens, DMA ~494k). Split work into small, one-behavior agent tasks so
-  no single agent carries most of a milestone; chain them when they share
-  files. Applies to the review fixes too.
+Start M4 (`docs/plan/stage-1.md` "M4"): MBC1 full, MBC2, MBC3 + RTC on
+emulated time, MBC5; header parsing; save RAM/RTC through the core API.
+Acceptance: groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
+`rtc3test-sub-second`, `mbc3-tester`. The renderer already draws
+rtc3test/mbc3-tester correctly; their failures are MBC logic.
 
-Must failures left after M3 are all later milestones: mbc3-tester and
-rtc3test x3 (MBC3/RTC not implemented, M4; the renderer draws them
-correctly), mooneye-mbc x14 (M4), cgb-acid2 (M5), cgb_sound (M6).
-`blargg-interrupt-time` (should) fails after the speed switch (M5).
+Suggested split (human: one behavior per agent, chain agents that share
+files): (1) header parsing + ROM/RAM sizing, (2) MBC2, (3) MBC5, (4) MBC1
+full (multicart detection is a header/heuristic question: record an ADR),
+(5) MBC3 banking, (6) RTC registers/latch on emulated time, (7)
+`RtcState::advance_seconds` rollover, (8) save RAM/RTC API (core public
+API change: one reviewer, ADR on the boundary).
+
+M3 review follow-ups are plan tasks (981c60a). Two of them should land
+**before M5 CGB rendering**: the combined worst-case bench (the worst
+case is ~99% of the 50% line, summed from two runs) and the PPU cost cuts;
+plus `Hw` at 984/1,024 B. Don't let M4 grow `Hw` without moving buffers.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
 - `scripts/diff-fingerprint.sh <rev>` (3,822 runs incl. frame buffer, VRAM,
   OAM, input pass; ~20 s) proves "no behavior change"; behavior changes
-  must list and explain every differing ROM. Fingerprinting the frame
-  buffer means every PPU change will diff broadly: explain by group.
-- Gambatte ROMs report `unsupported` in romtest (plan task, M5). For
-  hex-output checks agents have used a throwaway /tmp harness reading
-  the 0x9800 tilemap; with a real PPU that task becomes cheaper.
-- The PPU is the next hot path: run `scripts/check-bench.sh` and
-  `check-code-size.sh` on each step; the perf review triggers at M3 close.
+  must list and explain every differing ROM.
+- Gambatte ROMs report `unsupported` in romtest (plan task, M5). The two
+  PPU-side OAM DMA deviations from SameBoy are provisional until then
+  (`docs/reference/oam-dma.md`).
+- Run `scripts/check-bench.sh` and `check-code-size.sh` on hot-path steps.
 
 ## Needs human
 
-None open.
+None open. FYI: the human saw "a lot of compile errors" (session 05).
+build, clippy `-D warnings`, tests, the thumbv7em core build and the
+nightly fuzz crate are all clean with the pinned toolchain, so this is
+editor-side (likely rust-analyzer using a different toolchain, e.g. a
+Windows editor on WSL files, or loading `tools/fuzz/fuzz`, which needs
+nightly). Waiting on an example error if it persists.
 
 Context on earlier human decisions:
 - `acceptance/test-roms.sha256` is human-owned.
@@ -62,9 +56,7 @@ Context on earlier human decisions:
 - Unsafe-free core (ADR 0009).
 - The project is MIT-licensed. AGENTS.md has a rule on dependency licenses
   and on not copying code from copyleft emulators.
-- Review I7 (session 04): 8ede259 called exact-M-cycle input timing
-  "stricter"; it is a pre-announced reinterpretation with zero status
-  changes. Told the human, no objection.
+- Token cost (session 05): agents must be small, one behavior each.
 - Remote `origin` = `git@github.com:jschneider1207/gbc-32.git`. The human
   pushes; agents never do.
 
@@ -78,8 +70,6 @@ Context on earlier human decisions:
     `docs/fuzzing.md`).
 - **valgrind** 3.22.0. Benchmark Ir counts are tied to it and the pinned
   toolchain; a change to either is a rebaseline commit.
-- **Human rule (session 04):** a test counts only once it has been seen to
-  fail against broken code (AGENTS.md).
 - **SM83 single-step data:** `scripts/fetch-sm83-tests.sh` →
   `test-data/sm83/`. Set `GBC_REQUIRE_TEST_DATA=1` locally.
 - **Desktop system libraries:** installed. WSL2 Ubuntu 24.04, no `jq`.
@@ -92,6 +82,8 @@ Context on earlier human decisions:
   `bench --root`, `TEST_ROMS=` for check-bench. Agent worktrees are
   "locked": removal needs `--force --force` (ask the human). Cherry-picked
   branches need `git branch -D` after `git cherry` shows all `-`.
+- **romtest filters** match ROM paths, not group names (e.g.
+  `--filter 'mooneye-test-suite/acceptance/**'`).
 - **Gate:** `scripts/gate-*.sh` edits prompt the human (`.claude/settings.json`).
 
 ## Blockers
@@ -100,25 +92,25 @@ None.
 
 ## Acceptance snapshot
 
-As of ac36d13 (the M2 baseline). `scripts/gate-stage1.sh` passes every step
-except the last (must-tier ROMs owned by M3/M4), with no regressions.
+As of the M3 baseline (`stage1-m3`). `scripts/gate-stage1.sh` passes every
+step except the last (must-tier ROMs owned by M4-M6), with no regressions.
 
 | Tier | Pass | Fail | Timeout | Crash | Unsupported | No reference |
 |---|---|---|---|---|---|---|
-| must (86) | 60 | 24 | 2 | 0 | 0 | 0 |
-| should (40) | 4 | 28 | 8 | 0 | 0 | 0 |
-| stretch (3268) | 1 | 107 | 2 | 10 | 3144 | 4 |
+| must (86) | 66 | 20 | 0 | 0 | 0 | 0 |
+| should (40) | 24 | 16 | 0 | 0 | 0 | 0 |
+| stretch (3268) | 12 | 97 | 0 | 10 | 3144 | 5 |
 
-Must-tier failures: Blargg ×6, rtc3test ×3, mbc3-tester (screenshot only,
-M3); cgb-acid2/dmg-acid2 timeouts (M3); MBC2/MBC5 ×14 (M4).
+Must-tier failures: mooneye-mbc ×14, rtc3test ×3, mbc3-tester (M4);
+cgb-acid2 (M5); cgb_sound (M6). `blargg-interrupt-time` (should) fails
+after the speed switch (M5).
 
-Performance (`docs/perf.md`, `perf/bench-baseline.txt`, Ir over the listed
-emulated time):
-- cpu_instrs 1,388.0 M, cgb_sound 607.5 M, cgb-acid2 12.86 M (20 s each;
-  M1 was 1,926 M / 923 M / 928 M).
-- Synthetic: event-storm 413.7 M (2 s, ~3.46 M Ir/frame, the 50%-of-M7
-  line is 4.02 M — x86 proxy only, plan M8), dma-storm ~372 M (3 s),
-  halt-irq ~111 M (10 s).
-- Code size (thumbv7em): `Cpu::run::<Ctx>` 29,224 B (budget 30,000),
-  `execute_cb` ~13.2 KB (13,820); budgets also on boundary, div_reset,
-  Bus::stop, DMA paths, timer I/O.
+Performance (`docs/perf.md`, `perf/bench-baseline.txt`; Ir/frame from the
+M3 perf review):
+- cpu_instrs 1,729 M (1.45 M/frame), cgb_sound 974 M (0.82 M), cgb-acid2
+  789 M (0.66 M; PPU ~0.53 M of it), each 20 s.
+- Synthetic: event-storm 446 M (3.73 M/frame, 93% of the 4.02 M line),
+  dma-storm 437 M, halt-irq 292 M.
+- Code size (thumbv7em): gbc-core `.text` 79.6 KB (no longer fits a 64 KB
+  ITCM; plan task). `Cpu::run` 27,760 B (budget 29,150), `execute_cb`
+  12,622, `Ppu::sync` 2,918, `render` 2,684, `start_line` 2,208.
