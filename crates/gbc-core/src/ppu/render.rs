@@ -669,6 +669,22 @@ pub(crate) fn pair_table(pal: &[u16; 4]) -> [u32; 16] {
     t
 }
 
+/// Sets color `c` (0-3) of the palette whose [`pair_table`] is `t` to
+/// `col`: the 4 entries with it as the left pixel (4c + k) and the 4 with
+/// it as the right pixel (4k + c; entry 5c is both). The same table as a
+/// rebuild, for half the stores and no palette read (a BCPD write changes
+/// one color).
+pub(crate) fn set_pair_color(t: &mut [u32; 16], c: usize, col: u16) {
+    let c = c & 3;
+    let col = u32::from(col);
+    for k in 0..4 {
+        let l = &mut t[4 * c + k];
+        *l = (*l & 0xFFFF_0000) | col;
+        let r = &mut t[4 * k + c];
+        *r = (*r & 0xFFFF) | (col << 16);
+    }
+}
+
 /// Part of a tile: the pixels of the decoded row `w` from bits 15-14 on,
 /// mixed with `obj` with `MIX`. Out of line: at most two per span, and
 /// inlined it would be copied into every `fill_tiles` instance (code size).
@@ -752,6 +768,17 @@ fn decode(lo: u8, hi: u8) -> u16 {
 mod tests {
     use super::*;
     use crate::ppu::objects::LineObjects;
+
+    #[test]
+    fn set_pair_color_matches_a_rebuilt_table() {
+        for c in 0..4 {
+            let mut pal = [0x1111, 0x2222, 0x3333, 0x4444];
+            let mut t = pair_table(&pal);
+            pal[c] = 0x7ABC;
+            set_pair_color(&mut t, c, 0x7ABC);
+            assert_eq!(t, pair_table(&pal), "color {c}");
+        }
+    }
 
     // Distinct colors per palette and shade: BG shade s = 100 + s, OBJ0
     // 200 + s, OBJ1 300 + s.

@@ -783,7 +783,10 @@ impl Ctx<'_, '_> {
                 let now = self.clock();
                 self.run_ppu_to(now);
                 let s = &mut *self.sys;
-                s.ppu.flush(now, self.mem, self.frame);
+                // Synced to `now`: outside mode 3 there is nothing to draw.
+                if s.ppu.drawing() {
+                    s.ppu.flush(now, self.mem, self.frame);
+                }
                 let i = palette_data_write(&mut self.mem.io[0x68], &mut self.mem.bg_pal, value);
                 s.ppu.write_bcpd(i, self.mem);
             }

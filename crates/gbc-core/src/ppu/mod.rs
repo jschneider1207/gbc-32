@@ -70,7 +70,7 @@ use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
 pub(crate) use render::OBJ_BUF_LEN;
-use render::{Colors, Regs, Renderer, Sources, pair_table};
+use render::{Colors, Regs, Renderer, Sources, pair_table, set_pair_color};
 
 mod objects;
 mod render;
@@ -1029,14 +1029,28 @@ impl Ppu {
         }
     }
 
-    /// A BCPD write (CGB mode) to palette RAM byte `index`, after the bus
-    /// has flushed and stored it: re-resolves that BG palette. The whole
-    /// palette (4 colors, 16 pairs) is rebuilt; writes come in bursts at
-    /// palette loads, not per pixel.
+    /// A BCPD write (CGB mode) to palette RAM byte `index` (0-63), after
+    /// the bus has flushed and stored it: re-resolves the one color it is
+    /// part of (2 bytes, little-endian RGB555, bit 15 not a color bit; Pan
+    /// Docs: LCD Color Palettes) and its pair-table entries. Hi-color
+    /// raster effects write palette RAM every line (synth:cgb-raster).
     pub(crate) fn write_bcpd(&mut self, index: usize, mem: &mut Memory) {
-        let pal = (index >> 3) & 7;
-        self.colors.set_cgb_bg(&mem.bg_pal, pal);
-        mem.bg_pairs[pal] = pair_table(&self.colors.bg[pal]);
+        let (pal, c, i) = ((index >> 3) & 7, (index >> 1) & 3, index & 0x3E);
+        let col = u16::from_le_bytes([mem.bg_pal[i], mem.bg_pal[i + 1]]) & 0x7FFF;
+        self.colors.bg[pal][c] = col;
+        set_pair_color(&mut mem.bg_pairs[pal], c, col);
+    }
+
+    /// Whether the PPU, synced to some clock, is between a visible line's
+    /// `Latch` and `End` points (its next update point is `End`). Every
+    /// clock where [`mode3_pixel`](Self::mode3_pixel) is `Some` is: that
+    /// needs the line latched (`Latch` passed) and a time before its mode-3
+    /// end, where `End` is, with no point between the two. So a flush at
+    /// the synced clock can skip the line-position arithmetic when this is
+    /// false.
+    #[inline]
+    pub(crate) fn drawing(&self) -> bool {
+        matches!(self.cursor.pt, Pt::End)
     }
 
     /// Resolves all palettes from the registers and palette RAM in `mem`
@@ -1994,6 +2008,28 @@ mod tests {
                 let obj = (1..8).contains(&ly) && (20..28).contains(&x);
                 assert_eq!(p, if obj { 8 } else { 2 }, "({x}, {ly})");
             }
+        }
+    }
+
+    #[test]
+    fn drawing_whenever_a_mode3_pixel_is_due() {
+        // Synced to t, `drawing` holds wherever `mode3_pixel(t)` is Some
+        // (the BCPD write skips the flush otherwise), quiet or not, with
+        // object stalls on line 5, over two frames.
+        for select in [0, 0x08] {
+            let on = 1000;
+            let mut r = Rig::on_at(on, select, 0xFF);
+            r.mem.oam[0] = 16 + 5;
+            r.mem.oam[1] = 8;
+            let mut due = 0;
+            for t in on..on + 2 * u64::from(FRAME) {
+                r.sync(t);
+                if r.ppu.mode3_pixel(t).is_some() {
+                    due += 1;
+                    assert!(r.ppu.drawing(), "select {select:#x}, clock {t}");
+                }
+            }
+            assert!(due > 2 * 144 * 160, "{due}");
         }
     }
 
