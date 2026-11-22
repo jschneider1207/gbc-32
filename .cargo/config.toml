@@ -1,0 +1,4 @@
+# Cap parallel rustc jobs. Several agents building at once with the
+# default (one job per core) exhausted WSL2 RAM and crashed the host.
+[build]
+jobs = 4

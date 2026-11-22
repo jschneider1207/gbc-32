@@ -218,6 +218,16 @@ every turn, so:
 - start a fresh session at each milestone boundary, after STATUS is
   rewritten.
 
+**Machine resources:** this runs in WSL2 on the human's own PC. Running
+out of RAM has crashed WSL and nearly the whole host before. Every `target/`
+directory is a full separate build.
+- Only one agent compiles at a time. Don't run build/test-heavy subagents
+  in parallel.
+- Use a git worktree or scratch copy only when it's needed (mutation checks,
+  isolating risky edits). Delete it, including its `target/`, when done.
+- Leave the `jobs` cap in `.cargo/config.toml` in place. Don't override it
+  with `-j`.
+
 ## Code conventions
 
 - Rust stable, edition 2024. Toolchain pinned in `rust-toolchain.toml`.
