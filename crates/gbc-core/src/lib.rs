@@ -37,6 +37,12 @@
 //! assert!(result.events.contains(Events::FRAME_READY));
 //! ```
 //!
+//! Saves: persist [`Emulator::cart_ram`] and, for MBC3+RTC carts,
+//! [`Emulator::rtc_state`] (with the wall-clock time). On the next run,
+//! [`Emulator::load`] first, then
+//! `emu.set_rtc_state(saved.advance_seconds(elapsed_secs))`: `load` resets
+//! the clock, so setting it earlier is lost.
+//!
 //! An emulator stored in a long-lived struct borrows its memory, ROM and
 //! cartridge RAM for `'a`. A front end that switches games at run time
 //! typically uses `Emulator<'static>` with buffers from `Box::leak` (one
@@ -553,6 +559,8 @@ impl<'a> Emulator<'a> {
 
     /// The MBC3 RTC state at [`Emulator::clock`], or `None` if the
     /// cartridge has no RTC.
+    ///
+    /// Save this with the cart RAM; restore with [`Emulator::set_rtc_state`].
     pub fn rtc_state(&self) -> Option<RtcState> {
         let sys = &self.hw.sys;
         sys.cart.has_rtc.then(|| sys.cart.rtc_at(sys.hot.clock()))
@@ -560,6 +568,11 @@ impl<'a> Emulator<'a> {
 
     /// Restores the MBC3 RTC state (e.g. from a save, advanced to the
     /// current wall-clock time). Ignored if the cartridge has no RTC.
+    ///
+    /// To sync to wall-clock time, call this after [`Emulator::load`]:
+    /// `emu.set_rtc_state(saved.advance_seconds(elapsed))` (see
+    /// [`RtcState::advance_seconds`]). Loading first matters: `load`
+    /// starts the clock from zero, so a state set before it is lost.
     ///
     /// The registers are masked to their hardware widths and
     /// `subsecond_clocks` is clamped below one second (see [`RtcTime`] and

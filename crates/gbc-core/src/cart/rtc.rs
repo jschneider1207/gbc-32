@@ -27,8 +27,10 @@ const fn count(v: u8, mut n: u64, modulus: u8, width: u8) -> (u8, u64) {
         n -= to_wrap;
         v = 0;
     }
-    let total = v + n;
-    ((total % modulus as u64) as u8, total / modulus as u64)
+    // Split so `v + n` cannot overflow for any `n` (u64::MAX seconds).
+    let m = modulus as u64;
+    let rem = v + n % m;
+    ((rem % m) as u8, n / m + rem / m)
 }
 
 impl RtcTime {
@@ -54,6 +56,23 @@ impl RtcTime {
 }
 
 impl RtcState {
+    /// Adds `seconds` of wall-clock time, with hardware rollover: seconds,
+    /// minutes and hours carry at 60/60/24 (out-of-range register values
+    /// wrap as in [`RtcTime`]), and the day counter overflowing past 511
+    /// sets the sticky `day_carry`. A halted clock does not advance.
+    /// `latched` and `subsecond_clocks` are untouched. Correct for any
+    /// `seconds` (not a per-second loop).
+    ///
+    /// For syncing on load: `emu.load(..)`, then
+    /// `emu.set_rtc_state(saved.advance_seconds(elapsed))`.
+    #[must_use]
+    pub fn advance_seconds(mut self, seconds: u64) -> Self {
+        if !self.live.halted {
+            self.live.add_seconds(seconds);
+        }
+        self
+    }
+
     /// Advances the live clock by `clocks` base clocks of emulated time.
     /// The RTC's 32,768 Hz crystal does not follow CGB double speed, so a
     /// second is always [`CLOCK_HZ`] base clocks. A halted clock keeps its
@@ -132,6 +151,85 @@ mod tests {
         let mut t = time(7, 5, 10, 62);
         t.add_seconds(60);
         assert_eq!(t, time(7, 5, 10, 58));
+    }
+
+    #[test]
+    fn advance_seconds_plain_and_untouched_fields() {
+        let s = RtcState {
+            live: time(3, 10, 58, 30),
+            latched: time(1, 2, 3, 4),
+            subsecond_clocks: 77,
+        };
+        let a = s.advance_seconds(95);
+        assert_eq!(a.live, time(3, 11, 0, 5));
+        assert_eq!(a.latched, s.latched);
+        assert_eq!(a.subsecond_clocks, 77);
+    }
+
+    #[test]
+    fn advance_seconds_carries_through_days() {
+        let s = RtcState {
+            live: time(255, 23, 59, 59),
+            ..RtcState::default()
+        };
+        assert_eq!(s.advance_seconds(1).live, time(256, 0, 0, 0));
+        assert_eq!(s.advance_seconds(86_400 + 1).live, time(257, 0, 0, 0));
+    }
+
+    #[test]
+    fn advance_seconds_day_overflow_sets_carry() {
+        let s = RtcState {
+            live: time(511, 23, 59, 59),
+            ..RtcState::default()
+        };
+        let a = s.advance_seconds(1).live;
+        assert_eq!(a.days, 0);
+        assert!(a.day_carry);
+        assert!(!s.advance_seconds(0).live.day_carry);
+    }
+
+    #[test]
+    fn advance_seconds_halted_is_noop() {
+        let mut s = RtcState {
+            live: time(5, 5, 5, 5),
+            subsecond_clocks: 9,
+            ..RtcState::default()
+        };
+        s.live.halted = true;
+        assert_eq!(s.advance_seconds(1_000_000), s);
+    }
+
+    #[test]
+    fn advance_seconds_out_of_range_wraps_like_internal_path() {
+        // 62 s + 2 -> 64 wraps to 0 with no minute carry.
+        let s = RtcState {
+            live: time(7, 5, 10, 62),
+            ..RtcState::default()
+        };
+        assert_eq!(s.advance_seconds(2).live, time(7, 5, 10, 0));
+        let mut t = s;
+        t.advance(2 * HZ);
+        assert_eq!(s.advance_seconds(2).live, t.live);
+    }
+
+    #[test]
+    fn advance_seconds_huge_input_does_not_overflow() {
+        for start in [time(0, 0, 0, 0), time(511, 23, 59, 59), time(7, 31, 63, 63)] {
+            let s = RtcState {
+                live: start,
+                ..RtcState::default()
+            };
+            let a = s.advance_seconds(u64::MAX);
+            assert!(a.live.days <= 0x1FF);
+        }
+        // 2^64-1 s mod 60 / mod 86400 checked against u128 arithmetic.
+        let a = RtcState::default().advance_seconds(u64::MAX).live;
+        let n = u128::from(u64::MAX);
+        assert_eq!(u128::from(a.seconds), n % 60);
+        assert_eq!(u128::from(a.minutes), n / 60 % 60);
+        assert_eq!(u128::from(a.hours), n / 3600 % 24);
+        assert_eq!(u128::from(a.days), n / 86_400 % 512);
+        assert!(a.day_carry);
     }
 
     #[test]
