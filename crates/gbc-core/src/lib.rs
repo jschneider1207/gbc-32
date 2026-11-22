@@ -646,7 +646,7 @@ impl<'a> Emulator<'a> {
     /// Save this with the cart RAM; restore with [`Emulator::set_rtc_state`].
     pub fn rtc_state(&self) -> Option<RtcState> {
         let sys = &self.hw.sys;
-        sys.cart.has_rtc.then(|| sys.cart.rtc_at(sys.hot.clock()))
+        sys.cart.has_rtc().then(|| sys.cart.rtc_at(sys.hot.clock()))
     }
 
     /// Restores the MBC3 RTC state (e.g. from a save, advanced to the
@@ -662,7 +662,7 @@ impl<'a> Emulator<'a> {
     /// [`RtcState`]), so `rtc_state()` afterwards may differ from `state`.
     pub fn set_rtc_state(&mut self, state: RtcState) {
         let sys = &mut self.hw.sys;
-        if sys.cart.has_rtc {
+        if sys.cart.has_rtc() {
             sys.cart.set_rtc(state.masked(), sys.hot.clock());
         }
     }

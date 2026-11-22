@@ -332,8 +332,12 @@ enum Mapper {
     Mbc1,
     /// MBC2 (types 05-06): 16 ROM banks, 512x4 bits of built-in RAM.
     Mbc2,
-    /// MBC3 (types 0F-13); 0F/10 have the RTC. Also MBC30 (see `write_rom`).
+    /// MBC3 (types 11-13), no clock. Also MBC30 (see `write_rom`).
     Mbc3,
+    /// MBC3 with the RTC (types 0F-10). A variant rather than a `Cart`
+    /// flag, and a unit one (two variants with data would make `Mapper` 2
+    /// bytes), to keep `Cart` at 128 bytes and `Hw` under 1 KiB (ADR 0015).
+    Mbc3Rtc,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },
 }
@@ -343,7 +347,8 @@ impl Mapper {
         match cart_type {
             0x01..=0x03 => Self::Mbc1,
             0x05 | 0x06 => Self::Mbc2,
-            0x0F..=0x13 => Self::Mbc3,
+            0x0F | 0x10 => Self::Mbc3Rtc,
+            0x11..=0x13 => Self::Mbc3,
             0x19..=0x1B => Self::Mbc5 { rumble: false },
             0x1C..=0x1E => Self::Mbc5 { rumble: true },
             // TODO(M4): the rest; until then they
@@ -365,7 +370,6 @@ pub(crate) struct Cart<'a> {
     ram_buf: &'a mut [u8],
     /// [`cart_ram_size`] of the ROM (0 or a power of two).
     ram_len: usize,
-    pub(crate) has_rtc: bool,
     /// The RTC as of clock `rtc_synced` (lazy catch-up, see `rtc.rs`).
     /// Read it through [`Cart::rtc_at`].
     rtc: RtcState,
@@ -425,7 +429,6 @@ impl<'a> Cart<'a> {
             rom: &[],
             ram_buf: &mut [],
             ram_len: 0,
-            has_rtc: false,
             rtc: RtcState::zero(),
             rtc_synced: 0,
             rtc_latch: false,
@@ -456,7 +459,6 @@ impl<'a> Cart<'a> {
                     rom,
                     ram_buf: ram,
                     ram_len: needed,
-                    has_rtc: has_rtc(rom),
                     mapper,
                     ram_or: if mapper == Mapper::Mbc2 { 0xF0 } else { 0 },
                     rom_mask: padded.next_power_of_two() - 1,
@@ -483,6 +485,11 @@ impl<'a> Cart<'a> {
         })
     }
 
+    /// Whether the cartridge has an MBC3 real-time clock.
+    pub(crate) fn has_rtc(&self) -> bool {
+        self.mapper == Mapper::Mbc3Rtc
+    }
+
     /// Whether a cartridge is inserted (a loaded ROM is never empty).
     pub(crate) fn is_loaded(&self) -> bool {
         !self.rom.is_empty()
@@ -506,7 +513,7 @@ impl<'a> Cart<'a> {
         if !self.is_loaded() {
             return None;
         }
-        let rtc = self.has_rtc.then(|| self.rtc_at(now));
+        let rtc = self.has_rtc().then(|| self.rtc_at(now));
         Some(EjectedCart {
             rom: self.rom,
             cart_ram: self.ram_buf,
@@ -687,7 +694,8 @@ impl<'a> Cart<'a> {
                     self.update_banks();
                 }
             }
-            Mapper::Mbc3 => {
+            Mapper::Mbc3 | Mapper::Mbc3Rtc => {
+                let rtc = self.mapper == Mapper::Mbc3Rtc;
                 // Pan Docs: MBC3; SameBoy Core/mbc.c (MBC3).
                 match addr >> 13 {
                     // RAM and RTC enable: 0A in the low nibble.
@@ -714,7 +722,7 @@ impl<'a> Cart<'a> {
                         self.mbc5_ram = value;
                         self.rtc_sel = match value {
                             0..=7 => 0,
-                            0x08..=0x0C if self.has_rtc => value,
+                            0x08..=0x0C if rtc => value,
                             _ => 0xFF,
                         };
                     }
@@ -723,7 +731,7 @@ impl<'a> Cart<'a> {
                     // SameBoy (`Core/mbc.c`), bit 0 going 0 -> 1 latches.
                     _ => {
                         let bit = value & 1 != 0;
-                        if bit && !self.rtc_latch && self.has_rtc {
+                        if bit && !self.rtc_latch && rtc {
                             self.latch_rtc(now);
                         }
                         self.rtc_latch = bit;
@@ -759,7 +767,7 @@ impl<'a> Cart<'a> {
         let (lo, hi, ram) = match self.mapper {
             Mapper::None => (0, 1, 0),
             Mapper::Mbc2 => (0, usize::from(self.bank1), 0),
-            Mapper::Mbc3 => (
+            Mapper::Mbc3 | Mapper::Mbc3Rtc => (
                 0,
                 usize::from(self.mbc5_rom),
                 usize::from(self.mbc5_ram & 7),
@@ -1396,8 +1404,8 @@ mod tests {
     fn rtc_detected_from_type() {
         let rom = rom_with(0x10, 0x03);
         let mut ram = [0u8; 0x8000];
-        assert!(Cart::new(&rom, &mut ram).unwrap().has_rtc);
+        assert!(Cart::new(&rom, &mut ram).unwrap().has_rtc());
         let rom = rom_with(0x13, 0x03);
-        assert!(!Cart::new(&rom, &mut ram).unwrap().has_rtc);
+        assert!(!Cart::new(&rom, &mut ram).unwrap().has_rtc());
     }
 }
