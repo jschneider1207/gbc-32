@@ -4,67 +4,44 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M5 (CGB features), not started. M4 is `stage1-m4`
-  (0bf708d), M3 `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, end of session 06 (M4 close; log
-  `logs/2026-11-22-06-m4-carts.md`)
-
-## In flight (session 07, 2026-11-22)
-
-- Done on main: CGB BG attributes + LCDC.0 (e22721c, bench rebaselined),
-  CGB object attributes + OAM-index priority (17db555; cgb-acid2 passes),
-  HDMA/GDMA (dc1ef28, 86a13ca, b315d4a; ADR 0017; same-suite 4 -> 8/76,
-  gambatte/dma 110 -> 157/229, 86 new passes, no regressions), romtest
-  `gambatte` check (78c6443, reviewed; fixes 27d11fa, 06e1536), gambatte
-  lockup rule (75902f9, human-approved; covered by the M5-close
-  test-integrity review, not reviewed separately).
-- M5 acceptance groups now pass (cgb-acid2, mooneye-cgb-boot-regs).
-- Running: speed switch timing + 2-byte STOP (H3, H5; main tree), and
-  cgb-acid-hell's last 2 pixels (worktree, ppu/ only; needs a bench +
-  fingerprint run by the orchestrator before merging).
-- Then: STOP-mode accuracy + screen blank in STOP, post-boot CGB handover,
-  then M5 close (3 reviewers). 26 gambatte/dma ROMs went pass -> fail with
-  real DMA (they passed only because DMA did nothing: late enable, halt,
-  speed-switch edges); recheck after the speed switch.
-- Resources: at most 2 concurrent builds, heavy steps alone (AGENTS.md).
+- **Milestone:** M5 (CGB features): acceptance passes, close review not
+  run yet. M4 is `stage1-m4` (0bf708d), M3 `stage1-m3`, M2 `stage1-m2`,
+  M1 `stage1-m1`.
+- **Last updated:** 2026-11-22, session 07 (log `logs/2026-11-22-07-m5-cgb.md`)
 
 ## Next up
 
-Start M5 (`docs/plan/stage-1.md` "M5") in a fresh session. Acceptance:
-`cgb-acid2` and `mooneye-cgb-boot-regs` passing; `same-suite-cgb` and
-`age-cgb` tracked. Already in place from M4: CGB palette RAM colors for BG
-(41a47b2: BCPS/BCPD/OCPS/OCPD storage, auto-increment, read-back, 8 BG
-pair tables in `Memory`); CGB-mode objects still use OBP0/OBP1.
+1. **M5 close** (AGENTS.md "Independent review"): 3 reviewers in parallel
+   on `stage1-m4..HEAD` (hardware correctness, test integrity incl. the
+   gambatte check 78c6443 and the lockup rule 75902f9 which had no
+   separate review, perf/portability for the PPU/bus/CPU hot-path
+   changes). Only the perf reviewer builds (bench, code size); the other
+   two read and may run `cargo test`. Triage, fix confirmed high/medium,
+   then `--update-baseline` (the committed baseline still lists every
+   gambatte ROM `unsupported`), commit, tag `stage1-m5`.
+2. Unfinished M5 plan items roll forward as plan tasks (STOP-mode
+   accuracy and screen blank in STOP, palette mode-3 blocking, post-boot
+   CGB handover, OAM DMA conflicts vs gambatte, interrupt_time, the
+   other-clock-phase PPU thresholds, cgb-acid-hell 2 px).
+3. Code size: total `.text` is 84,942 of 85,100 B (158 B left). M6 (APU)
+   can't fit without a budget decision or big cuts: raise it with the
+   human before M6 (Needs human).
 
-Suggested order (one behavior per agent; chain agents that share files):
-1. VRAM bank 1 + BG map attributes (palette, bank, flips, priority), with the
-   LCDC.0 master-priority meaning in CGB mode (plan task from the M4 review).
-2. CGB object attributes (palette 0-7 from OCPD, VRAM bank) and CGB
-   priority (OPRI). Keep a separate X sort for mode-3 stall timing (plan
-   task: `sorted_object_stalls` depends on `priority_order()` being an X sort).
-3. WRAM banking, then GDMA/HDMA timing.
-4. Double speed / STOP fixes (H3, H5), then post-boot CGB-mode handover.
-5. romtest `gambatte` check, so the stretch-tier gambatte suite reports.
-
-Perf watch (must stay honest): `synth:worst-case` is 3.66 M x86 Ir/frame
-(91% of the 4.02 M line), but the line assumes 1 Ir = 1 M7 cycle, and the
-M4 perf review measured thumbv7em code at 1-2x (u64 maths). Treat the
-headroom as thin. Run `check-bench.sh` and `check-code-size.sh` (now with
-a total `.text` budget, 85,100 B; 83.4 KB used) on every hot-path step,
-and add M5 features to `synth:worst-case`/`synth:cgb-raster` as they land.
-No hardware yet (human, 2026-11-22), so the M7 measurement waits for Stage 2.
+Perf watch: `synth:worst-case` ~3.69 M x86 Ir/frame (92% of the 4.02 M
+line, which assumes 1 Ir = 1 M7 cycle; thumbv7em code is 1-2x). Bench vs
+baseline (e22721c): cgb-acid2 +2.28%, cgb-raster +1.86%, the rest under
++0.5% or negative. Run `check-bench.sh` and `check-code-size.sh` on every
+hot-path step.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
-- `scripts/diff-fingerprint.sh <rev>` (3,822 runs incl. frame buffer, VRAM,
-  OAM, input pass; ~20 s) proves "no behavior change"; behavior changes
-  must list and explain every differing ROM. It doesn't cover the synth
-  benches; check those with frame hashes.
-- Gambatte ROMs report `unsupported` in romtest (plan task, M5). The two
-  PPU-side OAM DMA deviations from SameBoy are provisional until then
-  (`docs/reference/oam-dma.md`).
-- Agents spawned with a fixed tool-call cap (~20-45) and one theme stayed
-  on budget this session; the uncapped ones ran 50-85 calls.
+- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change";
+  behavior changes must list and explain every differing ROM. A STOP
+  counter attributed all 1,368 speed-switch diffs (session 07).
+- Resources: at most 2 concurrent builds, heavy steps (bench, fingerprint,
+  gate) alone; scratch worktrees get their own target dir and are deleted
+  when done (AGENTS.md "Machine resources").
+- Agents with one theme and a ~20-45 tool-call cap stay on budget.
 
 ## Needs human
 
@@ -74,6 +51,11 @@ Open (session 07):
    so `gambatte-cgb` never selects them. Add a group or glob for them?
    (Manifest change. A directory glob would also select ROMs with no CGB
    rule, which is a runner error; ADR 0018.)
+2. Total `.text` budget (85,100 B, `check-code-size.sh`): 84,942 B used
+   after M5. The APU (M6) will need several KB. Raise the budget for M6
+   (and to what), or require cuts first? Raising is a loosening, so it's
+   the human's call. Context: the core is already over the H753's 64 KB
+   ITCM (plan task), so the budget guards growth, not a hardware limit.
 
 Decided in session 07 (2026-11-22): STOP is 2 bytes unless IE&IF is
 pending (SameBoy `stop()`, which encodes the Pan Docs flowchart). The
@@ -151,23 +133,18 @@ None.
 
 ## Acceptance snapshot
 
-As of the M4 baseline (`stage1-m4`). `scripts/gate-stage1.sh` passes every
-step except the last (must-tier ROMs owned by M5-M6), with no regressions.
+Session 07, main 58c87a4 (full-manifest run, not yet a committed
+baseline; the committed baseline is still `stage1-m4`'s):
+- must 85/86: only `cgb_sound` fails (M6). cgb-acid2 and
+  mooneye-cgb-boot-regs pass (M5 acceptance).
+- should 32/40 (M4: 26): same-suite-cgb 6/6, age-cgb 14/21;
+  `blargg-interrupt-time` still fails.
+- stretch: about 2,555/3,263 with the gambatte check live (M4: 12, when
+  gambatte was `unsupported`); 131 gambatte audio ROMs `unsupported`
+  until M6.
 
-| Tier | Pass | Fail | Timeout | Crash | Unsupported | No reference |
-|---|---|---|---|---|---|---|
-| must (86) | 84 | 2 | 0 | 0 | 0 | 0 |
-| should (40) | 26 | 14 | 0 | 0 | 0 | 0 |
-| stretch (3268) | 12 | 97 | 0 | 10 | 3144 | 5 |
-
-Must-tier failures: cgb-acid2 (M5), cgb_sound (M6). `blargg-interrupt-time`
-(should) fails after the speed switch (M5).
-
-Performance (`docs/perf.md`, `perf/bench-baseline.txt` at cf95ba4; x86 Ir):
-- cpu_instrs 1,595 M (20 s), cgb_sound 841 M, cgb-acid2 512 M (was 790 M
-  at M3).
-- Synthetic: worst-case 437 M (3.66 M/frame, 91% of the 4.02 M line),
-  cgb-raster 294 M (2.46 M/frame), event-storm 396 M, dma-storm 418 M,
-  halt-irq 222 M.
-- Code size (thumbv7em): gbc-core `.text` 83.4 KB (total budget 85,100 B;
-  over the H753's 64 KB ITCM, plan task). `Hw` 832 B (assert <= 864).
+Performance (`docs/perf.md`, `perf/bench-baseline.txt` rebaselined at
+e22721c; x86 Ir): worst-case ~443 M (3.69 M/frame, 92% of the 4.02 M
+line); cgb-acid2 +2.28% and cgb-raster +1.86% over the baseline.
+Code size (thumbv7em): gbc-core `.text` 84,942 of 85,100 B. `Hw` within
+its 864 B assert.
