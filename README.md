@@ -85,6 +85,7 @@ Design, fabricate, and test a first custom board based on what stage 2 taught us
 
   The core's ROM interface is unchanged.
 - **New drivers that stage 2 doesn't have:** SDMMC for eMMC (ROM library and saves) and USB upload of ROMs. The display and audio parts are also new: neither the panel, its interface (FMC parallel vs LTDC) nor the audio DAC/amplifier is the same as on the dev setup. The dev-board display is only a stand-in.
+- **Launcher firmware:** the device needs top-level firmware around the core. It boots into a native menu (not a Game Boy ROM) that lists the games on eMMC, loads the chosen ROM into SDRAM and its save into cart RAM, runs the emulator, and flushes saves when you return to the menu. This is platform code, and the core doesn't change: the caller already owns the ROM, RAM and memory buffers. Stage 2 can make do with a single ROM in QSPI flash.
 
 Stage 2 on the NUCLEO-H753ZI still applies: it proves the core runs at full speed on a Cortex-M7, and its QSPI NOR ROM reads are a conservative proxy for SDRAM.
 
