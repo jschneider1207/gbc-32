@@ -98,6 +98,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] `load` over an MBC3 cartridge drops its `RtcState` silently (doc now says to save it first); consider returning it with the buffers (M1 API review, low)
 - [ ] `RtcState::advance_seconds(u64)` in the core with hardware rollover (out-of-range wrap, day carry, halt bit), so front ends can sync to wall-clock time correctly; document load-then-set_rtc_state order (review finding 8)
 
+- [ ] ADR 0015 review lows (session 06): RTC register writes set save-dirty even when the value is unchanged, unlike RAM writes (compare first; a seconds write must still dirty since it resets the sub-second count); `CartInfo::has_save` misses EEPROM saves (MBC7 0x22, TAMA5 0xFD, header RAM 00): document or add `eeprom_size` when those mappers arrive; `CartInfo::rtc` is documented as MBC3-only, HuC3 (FE) has a clock too: word it as "`rtc_state()` is Some"
 - [ ] CGB palette colors (pulled forward from M5's "CGB palettes" task, session 06): rtc3test logic passes every subtest after 07f1de2, but its screenshots draw "PASS" in CGB palette green, and BCPD/OCPD are still plain storage. Only the BCPS/BCPD/OCPS/OCPD -> color path that rtc3test needs; attributes/banks/priority stay in M5. Do it **after** the M5 "Before M5 CGB rendering" perf tasks (combined worst-case bench, ADR 0014 timing cuts, object-mix cut) and the `Hw` buffer move (`Hw` is 992/1,024 B after the RTC), which move into M4 with it
 
 **Acceptance:** groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
