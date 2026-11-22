@@ -68,13 +68,16 @@ halt if nothing pending), speed switch, and plain STOP mode. With one
 byte, the byte after STOP runs as the next opcode.
 
 SingleStepTests (`tools/sm83-tests`) expects STOP to be one byte in every
-case. The human's decision (2026-11-22, "keep pending cases only"): the
-harness runs the 10 cases with IE & IF & 1F != 0 (IE and IF from the
-case's flat RAM at FFFF and FF0F) and skips only those with nothing
-pending; core unit tests cover those (one per SameBoy branch). The harness
-pins the counts. As measured, no 10 case puts FFFF or FF0F in its RAM, so
-all 1000 are skipped and 0 run: STOP has no SingleStepTests coverage, only
-the unit tests.
+case, and none of its 1000 `10.json` cases sets IE or IF (measured), so
+all have nothing pending and the core's PC is +2 with a read of pc+1 where
+SST has an idle cycle. The human's decision (2026-11-22, superseding "keep
+pending cases only", which kept 0 and skipped 1000): the harness runs all
+1000 cases and compares everything except PC and the bus-cycle list, the
+two things the length rule changes by definition. Registers A-L, F, SP,
+IME, EI and the final RAM are still compared, so STOP clobbering state
+fails. The exemption is pinned in the harness (file `10`, 1000 cases
+exempt; every other file 0 exempt), so it can't silently grow. Core unit
+tests still cover the length rule itself (one per SameBoy branch).
 
 ## Consequences
 - Measured against main (ce1ac76), full stage1 manifest: gambatte
