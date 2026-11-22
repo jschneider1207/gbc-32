@@ -16,6 +16,8 @@ Acceptance: groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
 `rtc3test-sub-second`, `mbc3-tester`. Done so far (session 06): MBC5 c096256,
 MBC2 b863fe2, MBC3 banking ae82317, RTC 07f1de2. rtc3test logic passes but
 needs CGB palette colors (pulled into M4, see plan); mbc3-tester: Needs human.
+`synth:worst-case` (0fa7a86) measures 4.23 M Ir/frame, 105% of the 50% line:
+PPU and event-boundary cuts must bring it under before CGB palettes land.
 
 Suggested split (human: one behavior per agent, chain agents that share
 files): (1) header parsing + ROM/RAM sizing, (2) MBC2, (3) MBC5, (4) MBC1
