@@ -4,32 +4,28 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M4 (cartridges + saves), not started. M3 is `stage1-m3`,
+- **Milestone:** M4 (cartridges + saves), in progress. M3 is `stage1-m3`,
   M2 `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-21, end of session 05 (M3 close)
+- **Last updated:** 2026-11-22, mid session 06 (log: `logs/2026-11-22-06-m4-carts.md`)
 
 ## Next up
 
-Start M4 (`docs/plan/stage-1.md` "M4"): MBC1 full, MBC2, MBC3 + RTC on
-emulated time, MBC5; header parsing; save RAM/RTC through the core API.
-Acceptance: groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
-`rtc3test-sub-second`, `mbc3-tester`. Done so far (session 06): MBC5 c096256,
-MBC2 b863fe2, MBC3 banking ae82317, RTC 07f1de2. rtc3test logic passes but
-needs CGB palette colors (pulled into M4, see plan); mbc3-tester: Needs human.
-`synth:worst-case` (0fa7a86) measures 4.23 M Ir/frame, 105% of the 50% line:
-PPU and event-boundary cuts must bring it under before CGB palettes land.
+Cartridge work is done: MBC1 (+ multicart, ADR 0016), MBC2, MBC3 + RTC on
+emulated time, MBC5, `RtcState::advance_seconds`, save persistence API
+(ADR 0015, reviewed, fixes in c2ab199). Mooneye MBC ROMs all pass; rtc3test
+passes every subtest in-ROM.
 
-Suggested split (human: one behavior per agent, chain agents that share
-files): (1) header parsing + ROM/RAM sizing, (2) MBC2, (3) MBC5, (4) MBC1
-full (multicart detection is a header/heuristic question: record an ADR),
-(5) MBC3 banking, (6) RTC registers/latch on emulated time, (7)
-`RtcState::advance_seconds` rollover, (8) save RAM/RTC API (core public
-API change: one reviewer, ADR on the boundary).
-
-M3 review follow-ups are plan tasks (981c60a). Two of them should land
-**before M5 CGB rendering**: the combined worst-case bench (the worst
-case is ~99% of the 50% line, summed from two runs) and the PPU cost cuts;
-plus `Hw` at 984/1,024 B. Don't let M4 grow `Hw` without moving buffers.
+Remaining M4 work, in order (plan "M4"):
+1. Perf: `synth:worst-case` is 4.04 M Ir/frame after e15d85f (100.4% of the
+   4.02 M line). Target <= 3.82 M (95%). In flight at this writing: a
+   render palette-pair cut (`ppu/render.rs`) and an event-boundary /
+   scheduler cut. Check `git log` for their commits.
+2. `Hw` is 1,000/1,024 B: move per-line buffers into `Memory` (plan task).
+3. CGB palette colors (BCPS/BCPD/OCPS/OCPD -> colors only), so the rtc3test
+   screenshots (green PASS) match.
+4. Milestone close: hardware-correctness + test-integrity + perf reviewers
+   over `stage1-m3..HEAD`, fixes, baseline, tag `stage1-m4`. mbc3-tester
+   needs the human decision below before the gate can pass.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
