@@ -117,7 +117,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] Extend `synth:cgb-raster` with CGB BG and object attributes (bank 1 tiles, flips, mixed palettes), rebaseline in the same commit
 - [x] GDMA/HDMA with correct timing, including during HALT and LCD off (dc1ef28, 86a13ca, b315d4a; ADR 0017). Deferred edge cases: byte-wise GDMA vs mode-3 VRAM reads; OAM DMA during VRAM DMA (SameBoy); VRAM-bank and CGB-E write corruptions; HALT wake with IME off runs the instruction before the block (SameBoy: block first); a second block when FF55 is written between mode-3 end and the trigger; VRAM/E000+ sources read FF instead of the data bus; a run call can overshoot by one transfer step (ADR 0017)
 - [ ] OAM DMA CPU-side bus conflicts vs. hardware: ~70 gambatte `oamdma` ROMs (`busypush*`/`busypop*` etc.) fail because the SameBoy-derived CGB C conflict table differs from gambatte's cgb04c hardware results; decide which reference wins per case once romtest runs gambatte ROMs. Also add a unit test for the FF46 write -> PPU sync call in the bus (c57dd2e review notes)
-- [x] CGB vs. DMG-compatibility mode selection from the header (already in place: `Bus.cgb_mode` from header byte 0x143, used by every CGB feature)
+- [x] CGB vs. DMG-compatibility mode selection from the header (`Bus.cgb_mode` from 0x143 bit 7; PGB-mode values are a separate low below)
 - [x] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results (78c6443, reviewed; 27d11fa; lockup rule 75902f9, human-approved; audio waits for M6)
 - [x] (done in M4: 0fa7a86 bench, 0c23c48, e15d85f, 68c5d32, 386acba; 3.66 M Ir/frame) Before M5 CGB rendering (M3 perf review): a synthetic bench combining the event storm with objects, the window and STAT sources (event-storm 3.73 M + acid2 PPU 0.53 M ~ 3.97 M Ir/frame, 99% of the 4.02 M line, added from two runs); make the ADR 0014 timing cuts and the object-mix cut first
 - [x] `Hw` buffer move: `Renderer::obj_buf` (176 B) moved into `Memory`; `Hw` is 832 B (was 1,008), size assert lowered from 1,024 to 864 B. The stall/timing arrays stayed (small). CGB palette tables go in `Memory` the same way
@@ -136,6 +136,16 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] ADR 0015 review lows (session 06): RTC register writes set save-dirty even when the value is unchanged, unlike RAM writes (compare first; a seconds write must still dirty since it resets the sub-second count); `CartInfo::has_save` misses EEPROM saves (MBC7 0x22, TAMA5 0xFD, header RAM 00): document or add `eeprom_size` when those mappers arrive; `CartInfo::rtc` is documented as MBC3-only, HuC3 (FE) has a clock too: word it as "`rtc_state()` is Some"
 - [ ] M4 perf fix follow-up: a BCPD write still costs ~147 x86 Ir (mostly `run_ppu_to`/`Ppu::sync` + `write_io`; ~370 Ir more per mid-mode-3 span draw); `synth:cgb-raster` 2.46 M Ir/frame. Cut the per-write sync cost when CGB rendering lands
 - [ ] romtest recolor re-review low (92f4707): `a_merge_into_an_existing_color_is_exit_2` only reaches the up-front `verify_recolors` path; the check-time `apply_recolor` call (checks.rs:308) has no isolated test (same function, so no bypass today)
+
+- [ ] M5 review (hardware) low: in plain STOP, HDMA triggers and OAM DMA keep running; SameBoy blocks HBlank blocks while `stopped`, runs no `GB_dma_run` while stopped, and applies the mode-0 wake rule in `leave_stop_mode`. Do with the STOP-accuracy task
+- [ ] M5 review (hardware) low: an FF55 write in the last dot before mode 2 (`stat_mode0()` true for t < 4) starts a block at once; SameBoy `memory.c` requires `display_state != 7`
+- [ ] M5 review (hardware) low: HDMA's STAT decisions (`write_hdma5`, `vdma_halt`, `stat_mode0`) ignore the OAM-DMA STAT quirk (SameBoy reads raw STAT, 0 in mode 2 during OAM DMA)
+- [ ] M5 review (hardware) low: header 0x143 with bit 7 plus bit 2 or 3 (0x84/0x88/0x8C) is PGB mode on hardware (Pan Docs 0143; SameBoy `cgb_mode = !(value & 0xC)`); `bus.rs` picks CGB mode for them
+- [ ] M5 review (hardware) info: FF55 read-back after a cancel returns the written length | 0x80 (SameBoy, Gambatte), not the remaining blocks Pan Docs implies; note it in ADR 0017
+- [ ] M5 review (perf) low: BG attribute decode runs in DMG compatibility mode with `attr_mask` 0 (cpu_instrs +3.13% at e22721c); a const-generic CGB variant costs ~1.8 KB, revisit with the M6 code-size budget
+- [ ] M5 review (perf) low: object rank merge does ~10 u64 ops (2 multiplies) per object fetch, also in compatibility mode (rank 0); <= ~30k M7 cycles/frame
+- [ ] M5 review (perf) low: no per-function budgets for `fetch_objects` 776, `partial_tile` 182/162, `write_palette_data` 356, `vram_dma` 708, `vdma_arm` 210, `Emulator::run` 458
+- [ ] M5 review (perf) low: benches miss OCPD writes and a combined palette raster + objects + HDMA frame; worst-case runs all-zero attributes (OK: decode is data-independent)
 
 **Acceptance:** groups `cgb-acid2` and `mooneye-cgb-boot-regs` passing;
 `same-suite-cgb` and `age-cgb` tracked (should tier).
