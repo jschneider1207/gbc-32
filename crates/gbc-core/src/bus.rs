@@ -1050,7 +1050,7 @@ impl Ctx<'_, '_> {
     /// The CGB speed switch of a STOP ([`StopKind::Switch`]), after its second
     /// byte if read; returns whether the CPU waits ([`Bus::speed_switch`]).
     /// After SameBoy `stop()`
-    /// and `GB_advance_cycles` (MIT; ADR 0019 has the derivation):
+    /// and `GB_advance_cycles` (MIT; ADR 0020 has the derivation):
     ///
     /// - KEY1 bit 0 clears and the speed toggles.
     /// - Nothing pending: the CPU halts for 0x20008 T-cycles (0x8002
@@ -1084,8 +1084,27 @@ impl Ctx<'_, '_> {
         if pending && m == 2 {
             freeze += 4;
         }
+        // To single speed the halt is one clock short of whole M-cycles
+        // (below); the timer counts that clock, so it stays on the CPU's
+        // M-cycle grid.
+        let short = i64::from(m == 4 && !pending);
         // T-cycles to clocks at the new speed.
-        self.sys.timer.speed_switch(now, freeze * m / 4);
+        self.sys
+            .timer
+            .speed_switch(now, (freeze * m / 4) as i64 - short);
+        if !pending && self.sys.vdma.hblank {
+            self.vdma_halt(true);
+        }
+        if short != 0 {
+            // The halt's odd clocks (`switch_end` below), idled first (the
+            // CPU halts at `now`, so after `vdma_halt`): the CPU's M-cycle
+            // grid moves by 3 (-1) clocks, and the input, serial and timer
+            // deadlines below follow the new grid.
+            self.hot.budget -= 3;
+            if self.hot.budget <= 0 {
+                self.boundary();
+            }
+        }
         // The M-cycle grid changes, and with it the boundary a scheduled
         // button change rounds down to (ADR 0012); `schedule_serial`
         // reschedules the countdown.
@@ -1093,10 +1112,15 @@ impl Ctx<'_, '_> {
         self.set_timer_deadline();
         self.schedule_serial();
         if !pending {
-            self.sys.vdma.switch_end = (now + 0x8000 * m) as u32;
-            if self.sys.vdma.hblank {
-                self.vdma_halt(true);
-            }
+            // To single speed, Gambatte's PPU gains a clock at the switch
+            // (`PPU::speedChange`: `p_.now -= isDoubleSpeed()`), and SameBoy
+            // counts 0x20003 T-cycles at single speed after its 5-cycle
+            // freeze: the PPU sees one clock less than 0x8001 M-cycles from
+            // `now` to the next fetch (3 clocks, idled above, then 0x7FFF
+            // M-cycles and the wake-up), so the CPU's M-cycle grid moves by
+            // a clock against the PPU's, as on hardware (gambatte
+            // `lcd_offset` tests, offsets 1 and 3).
+            self.sys.vdma.switch_end = (now + 0x8000 * m - short as u64) as u32;
             return true;
         }
         if dma_paused {

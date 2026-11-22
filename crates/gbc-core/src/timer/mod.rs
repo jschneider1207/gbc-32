@@ -313,17 +313,22 @@ impl Timer {
     /// A CGB speed switch at `now`: the counter (and the overflow window,
     /// which the eager model advanced only in M-cycle ticks) stays frozen
     /// for `pause` base clocks (0 for none), then runs at the other speed.
-    pub(crate) fn speed_switch(&mut self, now: u64, pause: u64) {
+    ///
+    /// `pause` may be negative: -1 counts one clock the CPU doesn't see
+    /// (the speed-switch halt to single speed is one clock short of whole
+    /// M-cycles, `Ctx::speed_switch`), keeping the timer on the CPU's grid.
+    pub(crate) fn speed_switch(&mut self, now: u64, pause: i64) {
+        let from = now.wrapping_add_signed(pause);
         self.base = self.sc(now);
         self.shift ^= 1;
-        self.base_clock = now + pause;
+        self.base_clock = from;
         if self.in_cycle_a(now) {
-            self.overflow_at = now + pause;
+            self.overflow_at = from.max(now);
         } else {
             self.schedule_overflow();
         }
         if self.reloaded_at == now {
-            self.reloaded_at = now + pause;
+            self.reloaded_at = from.max(now);
         }
     }
 }

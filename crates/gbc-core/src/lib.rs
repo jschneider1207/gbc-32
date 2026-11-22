@@ -1658,9 +1658,11 @@ mod tests {
         assert_eq!(emu.hw.sys.hot.mcycle, 2);
         assert_eq!(emu.peek(0xFF4D) & 0x81, 0x80, "double speed, disarmed");
         // Back: LDH (6 clocks), STOP's two M-cycles (4), the halt (0x8001
-        // normal-speed M-cycles: SameBoy's 5 frozen T-cycles cost the PPU
-        // a whole M-cycle here, one clock more than SameBoy), LD B,B (4).
-        let back = 65568 + 10 + 0x8001 * 4 + 4;
+        // normal-speed M-cycles less one clock: SameBoy counts 0x20003
+        // T-cycles after its 5 frozen ones, Gambatte's PPU gains a clock;
+        // ADR 0020), LD B,B (4). The timer counts that clock: DIV is as
+        // without it.
+        let back = 65568 + 10 + 0x8001 * 4 - 1 + 4;
         assert_eq!(to_ld_b_b(emu), (back, 0x10C, 0x0008));
         assert_eq!(emu.hw.sys.hot.mcycle, 4);
     }
@@ -1967,7 +1969,8 @@ mod tests {
         // LD A,01; LDH (4D),A; STOP 00 (to double speed); LD B,B; LDH
         // (4D),A; STOP 00 (back to normal speed); NOPs. The first halt
         // ends at 2 mod 4 and an even number of double-speed M-cycles
-        // follow, so the normal-speed grid is at 2 mod 4.
+        // follow; the halt back is one clock short of whole M-cycles
+        // (ADR 0020), so the normal-speed grid is at 1 mod 4.
         let program = [
             0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0xE0, 0x4D, 0x10, 0x00,
         ];
@@ -1979,12 +1982,12 @@ mod tests {
         // Scheduled in double speed, landing after the switch back.
         let t = (emu.clock() + 40_000) & !3;
         assert!(emu.set_buttons_at(t, Buttons::A));
-        run_to(emu, t - 6);
+        run_to(emu, t - 7);
         assert_eq!(emu.hw.sys.hot.mcycle, 4, "back in normal speed");
         assert_eq!(p1(emu), 0x0F);
         // t is not a boundary on this grid: the M-cycle it falls in
-        // starts at t - 2.
-        run_to(emu, t - 2);
+        // starts at t - 3.
+        run_to(emu, t - 3);
         assert_eq!(p1(emu), 0x0E);
     }
 
@@ -2156,7 +2159,8 @@ mod tests {
         let r = emu.run_cycles(100_000, &mut frame(), &mut []);
         assert_eq!(r.events, Events::LD_B_B);
         // LDH (6 clocks), STOP's two M-cycles (4), then the switch. T is
-        // 2 mod 4: the normal-speed grid after it is too.
+        // 2 mod 4; the halt idles 3 clocks first (ADR 0020), so the
+        // normal-speed grid after it is at T + 3.
         const T: u64 = 65578;
         assert_eq!(emu.clock(), T - 10);
         emu.set_stop_events(Events::EMPTY);
@@ -2181,14 +2185,14 @@ mod tests {
             across_switch_to_normal(&[(1001, a), (3001, none)]),
             (0x10, 0x0F)
         );
-        // T + 1001 and T + 1003 share the normal-speed M-cycle starting at
-        // T + 1000 and collapse (no interrupt); T + 1004 starts the next.
+        // T + 1001 and T + 1002 share the normal-speed M-cycle starting at
+        // T + 999 and collapse (no interrupt); T + 1003 starts the next.
         assert_eq!(
-            across_switch_to_normal(&[(1001, a), (1003, none)]),
+            across_switch_to_normal(&[(1001, a), (1002, none)]),
             (0, 0x0F)
         );
         assert_eq!(
-            across_switch_to_normal(&[(1001, a), (1004, none)]),
+            across_switch_to_normal(&[(1001, a), (1003, none)]),
             (0x10, 0x0F)
         );
         assert_eq!(across_switch_to_normal(&[(1001, a)]), (0x10, 0x0E));
@@ -2197,12 +2201,13 @@ mod tests {
     #[test]
     fn scheduled_input_already_past_after_a_speed_switch_lands_next() {
         // Scheduled in double speed for T + 2; on the normal-speed grid
-        // after the switch at T that M-cycle started at T - 2, already
-        // past, so it lands at the next boundary, T + 4: with a release
-        // at T + 7 (also T + 4) it collapses, with one at T + 8 it doesn't.
+        // after the switch at T (grid at T + 3, ADR 0020) that M-cycle
+        // started at T - 1, already past, so it lands at the next
+        // boundary, T + 3: with a release at T + 6 (also T + 3) it
+        // collapses, with one at T + 7 it doesn't.
         let (a, none) = (Buttons::A, Buttons::EMPTY);
-        assert_eq!(across_switch_to_normal(&[(2, a), (7, none)]), (0, 0x0F));
-        assert_eq!(across_switch_to_normal(&[(2, a), (8, none)]), (0x10, 0x0F));
+        assert_eq!(across_switch_to_normal(&[(2, a), (6, none)]), (0, 0x0F));
+        assert_eq!(across_switch_to_normal(&[(2, a), (7, none)]), (0x10, 0x0F));
     }
 
     #[test]
