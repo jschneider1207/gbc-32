@@ -64,5 +64,5 @@
 # OAM DMA as the PPU sees it (measured 138, 338): draw passes the
 # per-slot object attributes of a line OAM DMA touches, flush fixes
 # them first; the rest of that path is out of line (cold).
-145 <gbc_core::ppu::Ppu>::draw
+155 <gbc_core::ppu::Ppu>::draw
 355 <gbc_core::ppu::Ppu>::flush

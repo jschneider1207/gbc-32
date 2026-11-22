@@ -117,7 +117,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] CGB vs. DMG-compatibility mode selection from the header
 - [ ] `romtest`: implement the `gambatte` check (hex-pattern screen match, audio silence, PNG), so the stretch-tier Gambatte suite reports real results
 - [ ] Before M5 CGB rendering (M3 perf review): a synthetic bench combining the event storm with objects, the window and STAT sources (event-storm 3.73 M + acid2 PPU 0.53 M ~ 3.97 M Ir/frame, 99% of the 4.02 M line, added from two runs); make the ADR 0014 timing cuts and the object-mix cut first
-- [ ] `Hw` is 984 of 1,024 B (`lib.rs` size test, M3 perf review): move per-line buffers (`Renderer::obj_buf`, stall/timing arrays) into `Memory` rather than raising the limit
+- [x] `Hw` buffer move: `Renderer::obj_buf` (176 B) moved into `Memory`; `Hw` is 832 B (was 1,008), size assert lowered from 1,024 to 864 B. The stall/timing arrays stayed (small). CGB palette tables go in `Memory` the same way
 - [ ] Re-check the two provisional PPU-side OAM DMA deviations (2-dot lead, last step not held through HALT; `docs/reference/oam-dma.md`) against gambatte `late_sp*` and `oamdma_late_halt_stat_*` once the `gambatte` check exists; also which DMA word a mode-3 object fetch reads (SameBoy fetch timing + gambatte-fitted lead) (M3 reviews)
 - [ ] Post-boot hand-over for CGB-mode cartridges: PPU phase (`ppu/mod.rs` post-boot), `POST_BOOT_COUNTER` (DIV), BCPS/OCPS are fitted to DMG-mode ROMs; the CGB boot ROM runs a different length (M3 reviews; `mooneye-cgb-boot-regs`)
 - [ ] The speed-switch snapshot test in `lib.rs` pins current (H3-wrong) behavior: rewrite it from references with the H3 fix (M3 test-integrity review)

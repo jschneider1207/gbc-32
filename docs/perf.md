@@ -246,7 +246,7 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 | `render::fill_mixed` (tile loop with object mixing) | 792 | 830 |
 | `Ppu::latch` (once per line: OAM scan, X sort, stalls; `Renderer::start_line`, 2,208 B out of line before, inlined) | 4,368 | 4,590 |
 | `LineObjects::scan` (OAM scan) | 482 | 510 |
-| `Ppu::draw`, `Ppu::flush` | 122, 290 | 130, 305 |
+| `Ppu::draw`, `Ppu::flush` | 146, 290 | 155, 305 |
 | `Ctx::write_mapped` | 460 | 480 |
 | `bus::read_vram`, `Ctx::write_vram` | 218, 216 | 230, 230 |
 | `bus::read_oam`, `Ctx::write_oam` | 280, 304 | 300, 320 |

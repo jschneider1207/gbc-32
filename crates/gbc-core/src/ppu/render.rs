@@ -72,7 +72,7 @@ const ATTR_DMG_OBP1: u8 = 0x10;
 
 /// The object line buffer covers screen x -8..168, so an object at any X
 /// below 168 is written without clipping: buffer index = screen x + 8.
-const OBJ_BUF_LEN: usize = W + 16;
+pub(crate) const OBJ_BUF_LEN: usize = W + 16;
 
 /// The PPU registers the renderer reads, as of the span being drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,7 +187,9 @@ pub(crate) struct Renderer {
     pub(crate) order: [u8; MAX_PER_LINE],
     /// Object pixels of the line, at screen x + 8: 0 = transparent, else
     /// bits 0-1 color (1-3), bits 2-4 palette, bit 7 OAM "behind BG".
-    obj_buf: [u8; OBJ_BUF_LEN],
+    /// `obj_buf` still holds the previous line's objects (cleared by the
+    /// next `render`).
+    obj_dirty: bool,
     /// An object was fetched into `obj_buf` on this line (else it is all
     /// transparent).
     obj_fetched: bool,
@@ -206,7 +208,7 @@ impl Renderer {
             window_row: 0,
             objects: LineObjects::EMPTY,
             order: [0; MAX_PER_LINE],
-            obj_buf: [0; OBJ_BUF_LEN],
+            obj_dirty: false,
             obj_fetched: false,
         }
     }
@@ -249,11 +251,10 @@ impl Renderer {
         self.window_active = false;
         self.objects = *objects;
         self.order = order;
-        // The buffer is all transparent unless an object was fetched.
-        if self.obj_fetched {
-            self.obj_buf = [0; OBJ_BUF_LEN];
-            self.obj_fetched = false;
-        }
+        // The buffer (`Memory::obj_buf`) is all transparent unless an object
+        // was fetched; it is cleared by the first `render` of the line.
+        self.obj_dirty = self.obj_fetched;
+        self.obj_fetched = false;
     }
 
     /// The slot of the line's last object fetch: the last object in
@@ -269,6 +270,9 @@ impl Renderer {
 
     /// Draws pixels `[x0, x1)` of the current line into `row` with the
     /// registers `regs`. Spans must be consecutive and in order.
+    // The object buffer is a separate `&mut` (it lives in `Memory`, while
+    // `Sources` is shared borrows of other parts of it).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
         row: &mut [u16; W],
@@ -276,10 +280,15 @@ impl Renderer {
         x1: usize,
         regs: &Regs,
         src: &Sources,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
     ) {
         let x1 = x1.min(W);
         if x0 >= x1 {
             return;
+        }
+        if self.obj_dirty {
+            *obj_buf = [0; OBJ_BUF_LEN];
+            self.obj_dirty = false;
         }
         let lcdc = regs.lcdc;
 
@@ -328,7 +337,7 @@ impl Renderer {
             }
             let first = usize::from(x.saturating_sub(8));
             if (x0..x1).contains(&first) {
-                self.fetch_object(src, lcdc, slot, index, y, x);
+                self.fetch_object(obj_buf, src, lcdc, slot, index, y, x);
             }
         }
 
@@ -342,7 +351,7 @@ impl Renderer {
         } else {
             // Mixed while the BG/window tiles are decoded, 8 pixels at a
             // time; tiles with no object pixel take the plain path.
-            self.bg_span::<true>(out, &self.obj_buf[x0 + 8..x1 + 8], x0, win_from, regs, src);
+            self.bg_span::<true>(out, &obj_buf[x0 + 8..x1 + 8], x0, win_from, regs, src);
         }
     }
 
@@ -421,7 +430,17 @@ impl Renderer {
     }
 
     /// Decodes one object's row into the object buffer.
-    fn fetch_object(&mut self, src: &Sources, lcdc: u8, slot: usize, index: u8, y: u8, x: u8) {
+    #[allow(clippy::too_many_arguments)] // Object fields plus the buffer.
+    fn fetch_object(
+        &mut self,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
+        src: &Sources,
+        lcdc: u8,
+        slot: usize,
+        index: u8,
+        y: u8,
+        x: u8,
+    ) {
         self.obj_fetched = true;
         let (tile, flags) = match src.attrs {
             Some(a) => a[slot % MAX_PER_LINE],
@@ -459,8 +478,7 @@ impl Renderer {
         // is written where the new color is opaque and the buffer is still
         // transparent (an earlier, higher-priority object keeps it).
         let x = usize::from(x);
-        if let Some(dst) = self
-            .obj_buf
+        if let Some(dst) = obj_buf
             .get_mut(x..x + 8)
             .and_then(|s| <&mut [u8; 8]>::try_from(s).ok())
         {
@@ -735,6 +753,7 @@ mod tests {
         colors: Colors,
         regs: Regs,
         r: Renderer,
+        obj_buf: [u8; OBJ_BUF_LEN],
     }
 
     impl Scene {
@@ -751,6 +770,7 @@ mod tests {
                     ..Regs::default()
                 },
                 r,
+                obj_buf: [0; OBJ_BUF_LEN],
             }
         }
 
@@ -791,7 +811,8 @@ mod tests {
                 attrs: None,
                 colors: &self.colors,
             };
-            self.r.render(row, x0, x1, &self.regs, &src);
+            self.r
+                .render(row, x0, x1, &self.regs, &src, &mut self.obj_buf);
         }
 
         fn line(&mut self, ly: u8) -> [u16; W] {
@@ -1254,6 +1275,7 @@ mod tests {
                 colors: s.colors,
                 regs: s.regs,
                 r: Renderer::new(),
+                obj_buf: [0; OBJ_BUF_LEN],
             };
             split.r.start_frame();
             for ly in 0..48 {

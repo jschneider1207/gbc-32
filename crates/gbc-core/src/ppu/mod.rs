@@ -69,6 +69,7 @@ use crate::memory::Memory;
 use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
+pub(crate) use render::OBJ_BUF_LEN;
 use render::{Colors, Regs, Renderer, Sources};
 
 mod objects;
@@ -859,7 +860,7 @@ impl Ppu {
     pub(crate) fn sync(
         &mut self,
         now: u64,
-        mem: &Memory,
+        mem: &mut Memory,
         frame: &mut Frame,
         iflags: &mut u8,
         double: bool,
@@ -963,7 +964,7 @@ impl Ppu {
     /// current registers. Out of line: the pixel loop is the PPU's bulk
     /// and runs once or a few times per line.
     #[inline(never)]
-    fn draw(&mut self, ly: u8, x: u8, mem: &Memory, frame: &mut Frame) {
+    fn draw(&mut self, ly: u8, x: u8, mem: &mut Memory, frame: &mut Frame) {
         let from = self.drawn;
         if x <= from {
             return;
@@ -977,8 +978,14 @@ impl Ppu {
             colors: &self.colors,
         };
         let row = render::frame_row(frame, usize::from(ly));
-        self.renderer
-            .render(row, usize::from(from), usize::from(x), &regs, &src);
+        self.renderer.render(
+            row,
+            usize::from(from),
+            usize::from(x),
+            &regs,
+            &src,
+            &mut mem.obj_buf,
+        );
     }
 
     /// Before a write at clock `now` (synced) to a register the picture
@@ -986,7 +993,7 @@ impl Ppu {
     /// in mode 3, draws it up to the pixel being output with the old
     /// value (ADR 0002 catch-up), so the write affects the pixels from
     /// there on.
-    pub(crate) fn flush(&mut self, now: u64, mem: &Memory, frame: &mut Frame) {
+    pub(crate) fn flush(&mut self, now: u64, mem: &mut Memory, frame: &mut Frame) {
         if let Some((ly, x)) = self.mode3_pixel(now) {
             if self.attr_on {
                 // OAM DMA touches the line: the objects fetched so far get
@@ -1262,7 +1269,7 @@ impl Ppu {
     /// object's tile index on the mode-2 bus.
     #[cold]
     #[inline(never)]
-    fn end_dma_line(&mut self, ly: u8, mem: &Memory, frame: &mut Frame) {
+    fn end_dma_line(&mut self, ly: u8, mem: &mut Memory, frame: &mut Frame) {
         self.fix_attrs(mem, NEVER);
         self.draw(ly, 160, mem, frame);
         if let Some(slot) = self.renderer.last_fetched() {
@@ -1287,7 +1294,7 @@ impl Ppu {
     /// if it isn't tracked yet.
     #[cold]
     #[inline(never)]
-    pub(crate) fn dma_event(&mut self, now: u64, mem: &Memory, frame: &mut Frame) {
+    pub(crate) fn dma_event(&mut self, now: u64, mem: &mut Memory, frame: &mut Frame) {
         if !self.lcd_enabled() {
             return;
         }
@@ -1607,7 +1614,7 @@ mod tests {
         }
 
         fn sync(&mut self, now: u64) -> Events {
-            let (p, m, f) = (&mut self.ppu, &*self.mem, &mut *self.frame);
+            let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
             p.sync(now, m, f, &mut self.iflags, false)
         }
 
@@ -2219,7 +2226,7 @@ mod tests {
         r.mem.oam[48..50].copy_from_slice(&[16 + 5, 90]);
         r.ppu.dma = running(l5 + 3, l5 + 22);
         r.sync(l5 + 30);
-        let (p, m, f) = (&mut r.ppu, &*r.mem, &mut *r.frame);
+        let (p, m, f) = (&mut r.ppu, &mut *r.mem, &mut *r.frame);
         p.dma_event(l5 + 30, m, f);
         r.ppu.dma = running(l5 + 36, l5 + 676);
         r.sync(l5 + 89);
@@ -2268,7 +2275,7 @@ mod tests {
         r.ppu.attr_final = 0xFFFF;
         r.ppu.obj_attr = [(0xEE, 0xEE); 10];
         r.sync(l5 + 150);
-        let (p, m, f) = (&mut r.ppu, &*r.mem, &mut *r.frame);
+        let (p, m, f) = (&mut r.ppu, &mut *r.mem, &mut *r.frame);
         p.dma_event(l5 + 150, m, f);
         // Byte i written at 140 + 4i: 16 bytes by 204, the word 16-17.
         r.ppu.dma = running(l5 + 140, l5 + 400);

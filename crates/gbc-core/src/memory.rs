@@ -1,5 +1,7 @@
 //! Large internal RAM arrays.
 
+use crate::ppu::OBJ_BUF_LEN;
+
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
 /// area and the I/O register backing store), about 49 KiB, provided by the
 /// caller and borrowed by [`Emulator`](crate::Emulator) (ADR 0009).
@@ -36,6 +38,10 @@ pub struct Memory {
     /// most PPU and CGB palette registers until M3/M5). Indexed by the
     /// low address byte; registers with behavior live in their component.
     pub(crate) io: [u8; 0x80],
+    /// Object pixels of the current line (`ppu::render::Renderer`): screen x + 8;
+    /// 0 = transparent, else bits 0-1 color, bits 2-4 palette, bit 7 BG
+    /// priority. Per-line scratch lives here, not in `Hw` (ADR 0009).
+    pub(crate) obj_buf: [u8; OBJ_BUF_LEN],
 }
 
 impl Memory {
@@ -53,6 +59,7 @@ impl Memory {
             hram: [0; 0x7F],
             extra_oam: [0; 0x60],
             io: [0; 0x80],
+            obj_buf: [0; OBJ_BUF_LEN],
         }
     }
 
@@ -67,6 +74,7 @@ impl Memory {
         self.hram.fill(0);
         self.extra_oam.fill(0);
         self.io.fill(0);
+        self.obj_buf.fill(0);
     }
 }
 
@@ -88,8 +96,9 @@ mod tests {
             hram,
             extra_oam,
             io,
+            obj_buf,
         } = &NEW;
-        let fields: [&[u8]; 7] = [wram, vram, oam, oam_dma_old, hram, extra_oam, io];
+        let fields: [&[u8]; 8] = [wram, vram, oam, oam_dma_old, hram, extra_oam, io, obj_buf];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         // The fields cover every byte: no padding, nothing else.
         let total: usize = fields.iter().map(|f| f.len()).sum();

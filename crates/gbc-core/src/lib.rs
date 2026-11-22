@@ -247,7 +247,7 @@ pub struct Emulator<'a> {
 }
 
 /// Everything except the large RAM arrays, which live in [`Memory`]. It
-/// must stay small: under 1 KiB, checked by a test. The limit protects the
+/// must stay small: at most 864 B (832 now), checked by a test. The limit protects the
 /// MCU, whose stack is a few KiB and is shared with interrupt handlers, and
 /// where the `Emulator` (and so `Hw`) may live on the stack. It is not
 /// tight: per-scanline PPU buffers, APU state and mapper registers fit with
@@ -759,8 +759,8 @@ mod tests {
     #[test]
     fn emulator_is_small_enough_for_the_stack() {
         // Only `Memory` is big (see the `Hw` docs for the limit).
-        assert!(size_of::<Hw<'_>>() < 1024, "{}", size_of::<Hw<'_>>());
-        assert!(size_of::<Emulator<'_>>() < 1024 + 16);
+        assert!(size_of::<Hw<'_>>() <= 864, "{}", size_of::<Hw<'_>>());
+        assert!(size_of::<Emulator<'_>>() < 864 + 16);
         assert!(size_of::<Memory>() > 48 * 1024);
     }
 
