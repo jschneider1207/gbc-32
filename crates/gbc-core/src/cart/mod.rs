@@ -1487,6 +1487,9 @@ mod mbc1m_tests {
         assert!(!is_mbc1m(&r));
         // Too short to be 8 Mbit.
         assert!(!is_mbc1m(&r[..0x4_0000]));
+        // Holds both logos but under SameBoy's 0x44000 minimum.
+        assert!(is_mbc1m(&rom(0x01, true)[..0x4_4000]));
+        assert!(!is_mbc1m(&rom(0x01, true)[..0x4_3FFF]));
         // Only MBC1 types are multicart candidates.
         assert_eq!(Mapper::from_header(&rom(0x01, true)), Mapper::Mbc1M);
         assert_eq!(Mapper::from_header(&rom(0x03, true)), Mapper::Mbc1M);
