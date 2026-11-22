@@ -449,8 +449,8 @@ pub(crate) struct Cart<'a> {
     mbc5_rom: u16,
     mbc5_ram: u8,
     /// MBC3: the selected RTC register, 08-0C, or 0xFF when the 4000-5FFF
-    /// value maps nothing at A000-BFFF (RTC select without an RTC, or a
-    /// value above 0C); 0 when RAM is mapped. Kept apart from `mbc5_ram`
+    /// value maps nothing at A000-BFFF (RTC select above 0C, or RAM
+    /// bank 4-7 on an RTC cart below MBC30); 0 when RAM is mapped. Kept apart from `mbc5_ram`
     /// so the RAM read path tests one byte.
     rtc_sel: u8,
 }
@@ -697,6 +697,15 @@ impl<'a> Cart<'a> {
         (self.ram_off | (usize::from(addr) & (RAM_BANK - 1))) & (self.ram_len - 1)
     }
 
+    /// MBC30 (a bigger MBC3, e.g. Pokemon Crystal JP: 2 MiB ROM, 64 KiB
+    /// RAM). The header has no MBC30 type; SameBoy (`Core/mbc.c`,
+    /// `GB_configure_cart`) infers it from `rom_size > 0x200000 ||
+    /// mbc_ram_size > 0x8000`. It has an 8-bit ROM bank and 8 RAM banks.
+    #[inline]
+    fn is_mbc30(&self) -> bool {
+        self.rom_mask > 0x1F_FFFF || self.ram_len > 0x8000
+    }
+
     /// A write to 0000-7FFF (the mapper's registers) at clock `now`.
     pub(crate) fn write_rom(&mut self, addr: u16, value: u8, now: u64) {
         match self.mapper {
@@ -733,35 +742,38 @@ impl<'a> Cart<'a> {
                 match addr >> 13 {
                     // RAM and RTC enable: 0A in the low nibble.
                     0 => self.ram_enabled = value & 0x0F == 0x0A,
-                    // ROM bank: 7 bits, 0 selects 1. MBC30 (ROM over 2 MiB,
-                    // i.e. more than 128 banks, e.g. Pokemon Crystal JP)
-                    // has an 8-bit register, found from the ROM size as
-                    // the header has no MBC30 type. The mask then wraps
-                    // the bank to the ROM size.
+                    // ROM bank: 7 bits, 0 selects 1. MBC30 has an 8-bit
+                    // register; the header has no MBC30 type, so it is
+                    // inferred (see `is_mbc30`). The mask then wraps the
+                    // bank to the ROM size.
                     1 => {
-                        let bits = if self.rom_mask > 0x1F_FFFF {
-                            0xFF
-                        } else {
-                            0x7F
-                        };
+                        let bits = if self.is_mbc30() { 0xFF } else { 0x7F };
                         self.mbc5_rom = u16::from((value & bits).max(1));
                     }
-                    // 00-07 RAM bank. MBC3 has 4 (32 KiB), MBC30 8
-                    // (64 KiB); 04-07 select banks 4-7, which mirror 0-3
-                    // on 32 KiB RAM (`ram_index` masks by RAM size).
-                    // 08-0C select an RTC register if the cart has one;
-                    // that and anything above 0C map nothing (reads 0xFF).
+                    // SameBoy (`Core/memory.c` `write_mbc`, MBC3): bit 3
+                    // selects the RTC (`rtc_mapped = value & 8`) and the
+                    // bank is `value & 7`, so 10-17 select RAM banks and
+                    // 18-1F the RTC again. RTC registers are bank 0-4 (08-0C);
+                    // 0D-0F read nothing. Without an RTC, bit 3 is ignored.
+                    // Without MBC30, banks 4-7 mirror 0-3 (`ram_index`
+                    // masks by RAM size), except on RTC carts where SameBoy
+                    // reads and writes nothing there (`read_mbc_ram`).
                     2 => {
-                        self.mbc5_ram = value;
-                        self.rtc_sel = match value {
-                            0..=7 => 0,
-                            0x08..=0x0C if rtc => value,
-                            _ => 0xFF,
+                        let bank = value & 7;
+                        self.mbc5_ram = bank;
+                        self.rtc_sel = if rtc && value & 8 != 0 {
+                            if bank <= 4 { 8 + bank } else { 0xFF }
+                        } else if rtc && bank > 3 && !self.is_mbc30() {
+                            0xFF
+                        } else {
+                            0
                         };
                     }
                     // Latch: writing 00 then 01 copies the live clock to
-                    // the registers the game reads (Pan Docs: MBC3). Like
-                    // SameBoy (`Core/mbc.c`), bit 0 going 0 -> 1 latches.
+                    // the registers the game reads (Pan Docs: MBC3). We
+                    // follow Pan Docs (bit 0 going 0 -> 1 latches);
+                    // SameBoy (`Core/memory.c`) latches on every write to
+                    // 6000-7FFF. Unverified on hardware (plan task).
                     _ => {
                         let bit = value & 1 != 0;
                         if bit && !self.rtc_latch && rtc {
@@ -775,7 +787,9 @@ impl<'a> Cart<'a> {
             Mapper::Mbc5 { rumble } => {
                 // Pan Docs: MBC5. Registers decode on address bits 12-14.
                 match addr >> 12 {
-                    0 | 1 => self.ram_enabled = value & 0x0F == 0x0A,
+                    // SameBoy (`Core/memory.c`, MBC5): all 8 bits must be
+                    // 0A (MBC1/MBC3 compare only the low nibble).
+                    0 | 1 => self.ram_enabled = value == 0x0A,
                     2 => self.mbc5_rom = (self.mbc5_rom & 0x100) | u16::from(value),
                     3 => self.mbc5_rom = (self.mbc5_rom & 0xFF) | (u16::from(value & 1) << 8),
                     // Pan Docs: on rumble carts bit 3 drives the motor, so the
@@ -1226,10 +1240,17 @@ mod tests {
             // Only a low nibble of A enables (and the 1000 half decodes too).
             c.write_rom(0x0000, 0x00, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF);
-            c.write_rom(0x1000, 0x1A, 0);
+            c.write_rom(0x1000, 0x0A, 0);
             assert_ne!(c.read_ram(0xA000), 0xFF);
             c.write_rom(0x0000, 0x0B, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF);
+            // MBC5 compares all 8 bits (SameBoy `value == 0x0A`).
+            for v in [0x1A, 0x8A] {
+                c.write_rom(0x0000, v, 0);
+                assert_eq!(c.read_ram(0xA000), 0xFF, "{v:#x}");
+            }
+            c.write_rom(0x0000, 0x0A, 0);
+            assert_ne!(c.read_ram(0xA000), 0xFF);
         }
     }
 
@@ -1245,7 +1266,8 @@ mod tests {
         assert_eq!(c.read_rom(0x4000), 0x45);
         assert_eq!(c.read_rom(0x0000), 0);
         // 7-bit register below 4 MiB: bit 7 ignored.
-        let rom = mbc5_rom(128, 0x13);
+        let mut rom = mbc5_rom(128, 0x13);
+        rom[HEADER_RAM_SIZE] = 0x03; // 32 KiB: not MBC30 by RAM size
         let mut c = Cart::new(&rom, &mut ram).unwrap();
         c.write_rom(0x2000, 0xC5, 0);
         assert_eq!(c.read_rom(0x4000), 0x45);
@@ -1285,12 +1307,20 @@ mod tests {
             c.write_rom(0x5FFF, bank, 0);
             assert_eq!(c.read_ram(0xA000), bank + 1);
         }
-        // 04-07 mirror 0-3 on 32 KiB; 08-0C without an RTC map nothing.
+        // 04-07 mirror 0-3 on 32 KiB. Without an RTC, bit 3 is ignored and
+        // the bank is `value & 7` (SameBoy), so 10-17 select RAM too.
         c.write_rom(0x4000, 5, 0);
         assert_eq!(c.read_ram(0xA000), 2);
-        for sel in [0x08, 0x0C, 0x0D, 0xFF] {
+        for (sel, want) in [
+            (0x08, 1),
+            (0x0C, 1),
+            (0x0D, 2),
+            (0x11, 2),
+            (0x17, 4),
+            (0xFF, 4),
+        ] {
             c.write_rom(0x4000, sel, 0);
-            assert_eq!(c.read_ram(0xA000), 0xFF, "{sel:#x}");
+            assert_eq!(c.read_ram(0xA000), want, "{sel:#x}");
         }
         c.write_rom(0x4000, 1, 0);
         assert_eq!(c.read_ram(0xA000), 2);
@@ -1315,8 +1345,16 @@ mod tests {
         assert_eq!(c.read_ram(0xA000), 0x21); // RTC M, not RAM
         c.write_ram(0xA000, 0x13, 0); // goes to the live register
         assert_eq!(c.rtc.live.minutes, 0x13);
-        c.write_rom(0x4000, 0x0D, 0); // above 0C: nothing
+        c.write_rom(0x4000, 0x0D, 0); // RTC bit set, bank 5: nothing
         assert_eq!(c.read_ram(0xA000), 0xFF);
+        // 10-17 select RAM banks (SameBoy `rtc_mapped = value & 8`), bank
+        // 4-7 reads nothing on a 4-bank MBC3; 18-1F map the RTC again.
+        c.write_rom(0x4000, 0x10, 0);
+        assert_eq!(c.read_ram(0xA000), 0x77);
+        c.write_rom(0x4000, 0x14, 0);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        c.write_rom(0x4000, 0x19, 0);
+        assert_eq!(c.read_ram(0xA000), 0x21); // RTC M (latched)
         c.write_rom(0x4000, 0, 0);
         assert_eq!(c.read_ram(0xA000), 0x77); // RAM untouched
         // RTC reads still need the enable.
@@ -1441,6 +1479,39 @@ mod tests {
             c.write_rom(0x4000, bank, 0);
             assert_eq!(c.read_ram(0xA000), bank + 1);
         }
+    }
+
+    #[test]
+    fn mbc3_ram_enable_uses_low_nibble() {
+        for v in [0x1A, 0x8A] {
+            let mut rom = mbc5_rom(2, 0x13);
+            rom[HEADER_RAM_SIZE] = 0x03;
+            let mut ram = [0u8; 0x8000];
+            let mut c = Cart::new(&rom, &mut ram).unwrap();
+            c.write_rom(0x0000, v, 0);
+            c.write_ram(0xA000, 5, 0);
+            assert_eq!(c.read_ram(0xA000), 5, "{v:#x}");
+        }
+    }
+
+    #[test]
+    fn mbc30_by_ram_size_alone_has_eight_banks_and_8bit_rom_bank() {
+        // Pokemon Crystal JP: 2 MiB ROM (128 banks), 64 KiB RAM. SameBoy
+        // detects MBC30 from `mbc_ram_size > 0x8000` as well as ROM size.
+        let mut rom = mbc5_rom(128, 0x10);
+        rom[HEADER_RAM_SIZE] = 0x05;
+        let mut ram = [0u8; 0x1_0000];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        c.write_rom(0x2000, 0x80, 0); // 8 bits: bank 0x80 wraps to 0
+        assert_eq!(c.read_rom(0x4000), 0);
+        // RAM banks 4-7 are real, and 10-17 select them too.
+        c.write_rom(0x4000, 6, 0);
+        c.write_ram(0xA000, 0x66, 0);
+        c.write_rom(0x4000, 0x16, 0);
+        assert_eq!(c.read_ram(0xA000), 0x66);
+        c.write_rom(0x4000, 0x0E, 0); // RTC bit, bank 6: nothing
+        assert_eq!(c.read_ram(0xA000), 0xFF);
     }
 
     #[test]
