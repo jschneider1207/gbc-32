@@ -4,7 +4,7 @@ ROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/c
 (CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
 The test ROMs are read from `$TEST_ROMS` (default `test-roms/`).
 
-Three synthetic ROMs cover paths those miss. `tools/bench` builds them in
+Four synthetic ROMs cover paths those miss. `tools/bench` builds them in
 memory (`bench synth:<name> <secs>`, hand-assembled SM83 in
 `tools/bench/src/synth.rs`, 32 KiB, valid header and checksums; no ROM files
 in git):
@@ -23,10 +23,19 @@ in git):
   wakeups (`boundary` calls, and 32.7k `step_not_running` and 2-byte IRQ
   pushes).
 
+- `synth:worst-case` (2 s): the event storm above plus the busiest PPU
+  frame in one program: LCD on with BG, window (WY=0, WX=87), 40 8x16
+  objects in four groups of 10 (10 per line on 64 of 144 lines; 40 objects
+  cannot cover more), every STAT source (modes 0/1/2, LYC=72) with IE=STAT
+  and an 8-byte handler at 0x48 incrementing a WRAM counter. Replaces the
+  sum of two separate runs (event-storm + acid2 PPU) as the worst case.
+  callgrind: `Ctx::boundary` 15.5%, `Renderer::render` 9.7%, timer 6.8%,
+  serial 4.9%.
+
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.
 
-Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
+Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
 
 | ROM | Ir |
 |---|---|
@@ -36,6 +45,14 @@ Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
 | synth:event-storm (2 s) | 446,532,249 |
 | synth:dma-storm (3 s) | 439,495,485 |
 | synth:halt-irq (10 s) | 290,969,131 |
+| synth:worst-case (2 s) | 505,402,675 |
+
+**Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
+119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
+(50% of M7) line, 0.21 M over it. The earlier sum estimate (event-storm
+3.73 M + acid2 PPU 0.53 M = 3.97 M, 99%) was 0.26 M too low: the real
+program also pays STAT IRQ entry (up to 3 per line) and the 10-object
+lines. x86 proxy only. Not optimized; PPU cuts are separate work.
 
 **Scanline renderer (M3).** Drawing pixels costs about 220k Ir per frame
 with the BG only (cpu_instrs, cgb_sound, halt-irq, event-storm and

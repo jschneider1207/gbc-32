@@ -4,7 +4,7 @@
 //! and checksums; execution starts at 0x0100 as the CGB boot ROM leaves it.
 
 /// The names `bench synth:<name>` accepts.
-pub const NAMES: &[&str] = &["event-storm", "dma-storm", "halt-irq"];
+pub const NAMES: &[&str] = &["event-storm", "dma-storm", "halt-irq", "worst-case"];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
 const LOGO: [u8; 48] = [
@@ -74,19 +74,97 @@ const HALT_IRQ: &[u8] = &[
     0x18, 0xFC, //       JR idle
 ];
 
+/// Combined worst case: the event storm plus the busiest PPU frame. After
+/// the speed switch, with the LCD off: tiles 0 and 1 solid, 40 objects in
+/// four groups of 10 (8x16, Y=16/52/88/124, X=8+6i so they overlap) giving
+/// 10 objects on 64 of the 144 lines (40 objects cannot cover more), then
+/// LCD on with BG, window (WY=0, WX=87), objects, every STAT source
+/// (modes 0/1/2 and LYC=72) and only IE=STAT. The STAT handler at 0x48 bumps
+/// a WRAM counter. Then the event-storm timer and serial loop runs.
+const WORST_CASE: &[u8] = &[
+    0xF3, //                   DI
+    0x3E, 0x01, //             LD A,01
+    0xE0, 0x4D, //             LDH (KEY1),A
+    0x10, 0x00, //             STOP
+    0x3E, 0xFF, //             LD A,FF
+    0xE0, 0x06, //             LDH (TMA),A
+    0x3E, 0x05, //             LD A,05
+    0xE0, 0x07, //             LDH (TAC),A     on, 262 kHz
+    0xAF, //                   XOR A
+    0xE0, 0x40, //             LDH (LCDC),A    LCD off: free VRAM/OAM access
+    0x21, 0x00, 0x80, //       LD HL,8000
+    0x3E, 0xFF, //             LD A,FF
+    0x06, 0x20, //             LD B,32         tiles 0 and 1 solid
+    0x22, //                   LD (HL+),A
+    0x05, //                   DEC B
+    0x20, 0xFC, //             JR NZ,-4
+    0x21, 0x00, 0xFE, //       LD HL,FE00
+    0x16, 0x10, //             LD D,16         first group's Y
+    0x1E, 0x04, //             LD E,4          groups
+    // group:
+    0x06, 0x0A, //             LD B,10
+    0x0E, 0x08, //             LD C,8          first X
+    // obj:
+    0x7A, //                   LD A,D
+    0x22, //                   LD (HL+),A      Y
+    0x79, //                   LD A,C
+    0x22, //                   LD (HL+),A      X
+    0xAF, //                   XOR A
+    0x22, //                   LD (HL+),A      tile 0
+    0x22, //                   LD (HL+),A      attributes 0
+    0x79, //                   LD A,C
+    0xC6, 0x06, //             ADD A,6
+    0x4F, //                   LD C,A
+    0x05, //                   DEC B
+    0x20, 0xF2, //             JR NZ,obj
+    0x7A, //                   LD A,D
+    0xC6, 0x24, //             ADD A,36
+    0x57, //                   LD D,A
+    0x1D, //                   DEC E
+    0x20, 0xE7, //             JR NZ,group
+    0xAF, //                   XOR A
+    0xE0, 0x4A, //             LDH (WY),A
+    0x3E, 0x57, //             LD A,87
+    0xE0, 0x4B, //             LDH (WX),A
+    0x3E, 0x48, //             LD A,72
+    0xE0, 0x45, //             LDH (LYC),A
+    0x3E, 0x78, //             LD A,78         STAT: LYC, mode 2, 1, 0
+    0xE0, 0x41, //             LDH (STAT),A
+    0x3E, 0x02, //             LD A,02
+    0xE0, 0xFF, //             LDH (IE),A      STAT only
+    0xAF, //                   XOR A
+    0xE0, 0x0F, //             LDH (IF),A
+    0x3E, 0xB7, //             LD A,B7         LCD, window, 8x16 obj, 8000 tiles, obj, BG
+    0xE0, 0x40, //             LDH (LCDC),A
+    0xFB, //                   EI
+    // wait:
+    0xF0, 0x02, //             LDH A,(SC)
+    0x87, //                   ADD A,A         carry = transfer running
+    0x38, 0xFB, //             JR C,wait
+    0x3E, 0x83, //             LD A,83
+    0xE0, 0x02, //             LDH (SC),A
+    0x18, 0xF5, //             JR wait
+];
+
+/// STAT handler at 0x48 (8 bytes): PUSH AF; PUSH HL; LD HL,C000; INC (HL);
+/// POP HL; POP AF; RETI.
+const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0xD9];
+
 /// The ROM image for `name`, or `None` if there is no such ROM.
 pub fn build(name: &str) -> Option<Vec<u8>> {
-    let (code, timer_vector): (&[u8], &[u8]) = match name {
-        "event-storm" => (EVENT_STORM, &[]),
-        "dma-storm" => (DMA_STORM, &[]),
-        "halt-irq" => (HALT_IRQ, &[0xD9]), // RETI
+    let (code, stat_vector, timer_vector): (&[u8], &[u8], &[u8]) = match name {
+        "event-storm" => (EVENT_STORM, &[], &[]),
+        "dma-storm" => (DMA_STORM, &[], &[]),
+        "halt-irq" => (HALT_IRQ, &[], &[0xD9]), // RETI
+        "worst-case" => (WORST_CASE, STAT_HANDLER, &[]),
         _ => return None,
     };
-    Some(image(name, code, timer_vector))
+    Some(image(name, code, stat_vector, timer_vector))
 }
 
-fn image(title: &str, code: &[u8], timer_vector: &[u8]) -> Vec<u8> {
+fn image(title: &str, code: &[u8], stat_vector: &[u8], timer_vector: &[u8]) -> Vec<u8> {
     let mut rom = vec![0u8; 0x8000];
+    rom[0x48..0x48 + stat_vector.len()].copy_from_slice(stat_vector);
     rom[0x50..0x50 + timer_vector.len()].copy_from_slice(timer_vector);
     // Entry: NOP; JP 0150.
     rom[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
@@ -174,5 +252,19 @@ mod tests {
             &[0xFFFF, 0xFF07, 0xFF06],
         );
         assert_eq!(r, [0x04, 0xFD, 0xF0]);
+    }
+    #[test]
+    fn worst_case_has_ten_objects_on_a_line_and_stat_irqs_running() {
+        // OAM X of object 9 (=8+6*9), STAT sources, the handler's counter.
+        let r = run(
+            "worst-case",
+            u64::from(CLOCK_HZ) / 10,
+            &[0xFE25, 0xFF41, 0xFFFF, 0xFF4D, 0xC000],
+        );
+        assert_eq!(r[0], 62);
+        assert_eq!(r[1] & 0x78, 0x78);
+        assert_eq!(r[2], 0x02);
+        assert_eq!(r[3] & 0x80, 0x80, "double speed");
+        assert_ne!(r[4], 0, "STAT handler ran");
     }
 }

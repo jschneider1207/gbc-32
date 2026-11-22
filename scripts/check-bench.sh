@@ -28,6 +28,7 @@ BENCHES=(
   "synth:event-storm 2"
   "synth:dma-storm 3"
   "synth:halt-irq 10"
+  "synth:worst-case 2"
 )
 
 update=0

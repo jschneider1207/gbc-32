@@ -7,3 +7,4 @@ cgb-acid2/cgb-acid2.gbc 20 789966291
 synth:event-storm 2 446532249
 synth:dma-storm 3 439495485
 synth:halt-irq 10 290969131
+synth:worst-case 2 505402675
