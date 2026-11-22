@@ -1427,7 +1427,17 @@ pub(crate) fn object_stalls(
     let mut sorted = [0u8; 10];
     let n = xs.len().min(10);
     sorted[..n].copy_from_slice(&xs[..n]);
-    sorted[..n].sort_unstable();
+    // Insertion sort: at most 10 bytes, and core's generic sort links ~4 KiB
+    // of code on the Cortex-M7 (16 KiB I-cache). Equal Xs are identical.
+    for i in 1..n {
+        let v = sorted[i];
+        let mut j = i;
+        while j > 0 && sorted[j - 1] > v {
+            sorted[j] = sorted[j - 1];
+            j -= 1;
+        }
+        sorted[j] = v;
+    }
     let win_x = window.map(|wx| i32::from(wx) - 7);
     let mut last_tile = None;
     let mut k = 0;
@@ -1869,6 +1879,19 @@ mod tests {
     /// Every case of Mooneye `acceptance/ppu/intr_2_mode0_timing_sprites`:
     /// (extra M-cycles of mode 3, object X coordinates). The test's reads
     /// see mode 0 one M-cycle later per 4 dots of penalty.
+    #[test]
+    fn object_stalls_come_out_in_x_order() {
+        let mut out = [(0, 0); 10];
+        let n = object_stalls(
+            &[88, 20, 168, 8, 60, 20, 100, 44, 30, 12],
+            0,
+            None,
+            &mut out,
+        );
+        let px: Vec<u8> = out[..n].iter().map(|&(p, _)| p).collect();
+        assert_eq!(px, [0, 4, 12, 12, 22, 36, 52, 80, 92]);
+    }
+
     #[test]
     fn object_penalties_match_mooneye_sprite_timing() {
         let r = |x: u8, n: usize| [x; 10][..n].to_vec();
