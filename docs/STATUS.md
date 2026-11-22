@@ -13,8 +13,9 @@
 Start M4 (`docs/plan/stage-1.md` "M4"): MBC1 full, MBC2, MBC3 + RTC on
 emulated time, MBC5; header parsing; save RAM/RTC through the core API.
 Acceptance: groups `mooneye-mbc`, `rtc3test-basic`, `rtc3test-range`,
-`rtc3test-sub-second`, `mbc3-tester`. The renderer already draws
-rtc3test/mbc3-tester correctly; their failures are MBC logic.
+`rtc3test-sub-second`, `mbc3-tester`. Done so far (session 06): MBC5 c096256,
+MBC2 b863fe2, MBC3 banking ae82317, RTC 07f1de2. rtc3test logic passes but
+needs CGB palette colors (pulled into M4, see plan); mbc3-tester: Needs human.
 
 Suggested split (human: one behavior per agent, chain agents that share
 files): (1) header parsing + ROM/RAM sizing, (2) MBC2, (3) MBC5, (4) MBC1
