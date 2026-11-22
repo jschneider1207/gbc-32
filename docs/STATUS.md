@@ -75,7 +75,13 @@ Open (session 07):
    (Manifest change. A directory glob would also select ROMs with no CGB
    rule, which is a runner error; ADR 0018.)
 
-Decided in session 07 (2026-11-22): the human approved loosening the
+Decided in session 07 (2026-11-22): STOP is 2 bytes unless IE&IF is
+pending (SameBoy `stop()`, which encodes the Pan Docs flowchart). The
+human chose "Keep pending cases only": the SingleStepTests harness keeps
+the opcode 0x10 cases with IE&IF&0x1F != 0 (1 byte is right there) and
+skips the rest (SST always expects 1 byte and models no I/O), covered by
+dedicated, mutation-checked unit tests for SameBoy's STOP branches; needs
+an ADR. The human also approved loosening the
 lockup rule for `gambatte/undef_ops` ("Those specific tests should
 probably have looser restrictions then right? If the whole point is to
 crash."). Scope chosen: for the `gambatte` check only, an invalid-opcode
