@@ -9,6 +9,20 @@
 - **Last updated:** 2026-11-22, end of session 06 (M4 close; log
   `logs/2026-11-22-06-m4-carts.md`)
 
+## In flight (session 07, 2026-11-22)
+
+- Done on main: CGB BG attributes + LCDC.0 (e22721c, bench rebaselined),
+  romtest `gambatte` check (78c6443, reviewed; fixes 27d11fa, 06e1536),
+  gambatte lockup rule (75902f9, human-approved; covered by the M5-close
+  test-integrity review, not reviewed separately).
+- CGB object attributes + OPRI: uncommitted in the main tree (agent
+  resumed after a WSL out-of-memory crash).
+- HDMA/GDMA done on branch `worktree-agent-a46dc3e70b2125ffb`
+  (8d269bc, be21f45; ADR 0017; same-suite-cgb 6/6). Cherry-pick after the
+  object work lands. It takes `.text` to ~84,650 of 85,100 B.
+- Then: double speed / STOP (H3, H5), post-boot CGB handover.
+- One compiling agent at a time (AGENTS.md "Machine resources").
+
 ## Next up
 
 Start M5 (`docs/plan/stage-1.md` "M5") in a fresh session. Acceptance:
