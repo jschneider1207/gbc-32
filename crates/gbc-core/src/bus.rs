@@ -157,6 +157,8 @@ impl Sys<'_> {
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
+        // FF55 reads FF: no VRAM DMA active (`VramDma::read_hdma5`).
+        mem.io[0x55] = 0xFF;
         // CGB mode: the boot ROM fades all 8 BG palettes to white (7FFF)
         // before starting the game (SameBoy BootROMs/cgb_boot.asm,
         // `Preboot`: 32 brightening steps over hBgPalettes, all 64 bytes).
@@ -1050,6 +1052,11 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// Stores the FF55 read-back where `read_io` reads it.
+    fn vdma_sync_reg(&mut self) {
+        self.mem.io[0x55] = self.sys.vdma.read_hdma5();
+    }
+
     /// STAT mode 0 now (also with the LCD off).
     fn stat_mode0(&self) -> bool {
         self.sys.ppu.stat(self.clock(), self.hot.mcycle == 2) & 3 == 0
@@ -1077,6 +1084,7 @@ impl Ctx<'_, '_> {
         }
         let mode0 = self.stat_mode0();
         self.sys.vdma.write_hdma5(value, mode0);
+        self.vdma_sync_reg();
         if self.sys.vdma.pending {
             self.done = true;
         }
@@ -1172,6 +1180,7 @@ impl Ctx<'_, '_> {
             }
         }
         self.sys.vdma = v;
+        self.vdma_sync_reg();
         self.idle_mcycles(hdma::stall_mcycles(blocks, self.hot.mcycle as u32));
     }
 }
@@ -1445,9 +1454,11 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x41 => sys.ppu.stat(hot.clock(), hot.mcycle == 2),
         0x44 => sys.ppu.ly(hot.clock(), hot.mcycle == 2),
         0x45 => sys.ppu.lyc,
-        0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
+        // FF55 (HDMA5): its read-back, kept in `io` by the VRAM DMA
+        // (`Ctx::vdma_sync_reg`; FF in DMG compatibility mode), so
+        // `read_high` stays small. FF51-FF54 are write-only (`_`: FF).
+        0x42 | 0x43 | 0x46..=0x4B | 0x55 => mem.io[reg],
         // FF51-FF54 are write-only (the `_` arm: FF).
-        0x55 if cgb => sys.vdma.read_hdma5(),
         0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },
         // VBK reads FE | bank on a CGB in either mode (SameBoy
         // `read_high_memory`: only `GB_is_cgb`; Mooneye `misc/boot_hwio-C`
