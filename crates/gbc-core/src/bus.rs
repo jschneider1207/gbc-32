@@ -570,11 +570,12 @@ impl Ctx<'_, '_> {
     /// later for a register write timed there) and reschedules. A running
     /// OAM DMA is brought up to date first: the PPU may read OAM.
     fn sync_ppu_to(&mut self, at: u64) {
-        self.run_ppu_to(at);
+        self.run_ppu_to_call(at);
         self.schedule_ppu();
     }
 
     /// [`Self::sync_ppu_to`] without the rescheduling.
+    #[inline(always)]
     fn run_ppu_to(&mut self, at: u64) {
         if self.hot.dma != 0 {
             self.dma_sync(self.clock());
@@ -586,6 +587,14 @@ impl Ctx<'_, '_> {
         if self.sys.vdma.hblank {
             self.vdma_arm(at, true);
         }
+    }
+
+    /// [`Self::run_ppu_to`] as a call, for the callers other than
+    /// `write_palette_data` (the one hot enough to inline it, for raster
+    /// palette effects), for the code-size budgets.
+    #[inline(never)]
+    fn run_ppu_to_call(&mut self, at: u64) {
+        self.run_ppu_to(at);
     }
 
     /// Sets the Ppu deadline and reschedules.
@@ -606,7 +615,7 @@ impl Ctx<'_, '_> {
         let double = self.hot.mcycle == 2;
         match reg {
             0x40 => {
-                self.run_ppu_to(now);
+                self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu.flush(now, self.mem, self.frame);
                 // Turning the LCD off outside mode 0 starts an HBlank
@@ -625,10 +634,10 @@ impl Ctx<'_, '_> {
                 // value (SameBoy `GB_CONFLICT_STAT_CGB`, `_DOUBLE`).
                 let keep = if double { 0x08 } else { 0x40 };
                 let first = (value & !keep) | (self.sys.ppu.stat_select() & keep);
-                self.run_ppu_to(now);
+                self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu.write_stat(now, first, &mut s.iflags, double);
-                self.run_ppu_to(now + 1);
+                self.run_ppu_to_call(now + 1);
                 let s = &mut *self.sys;
                 s.ppu.write_stat(now + 1, value, &mut s.iflags, double);
             }
@@ -638,7 +647,7 @@ impl Ctx<'_, '_> {
                 // `GB_CONFLICT_WRITE_CPU`); double speed: at the access
                 // (`GB_CONFLICT_READ_OLD`).
                 let at = now + u64::from(!double);
-                self.run_ppu_to(at);
+                self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
                 s.ppu.write_lyc(at, value, &mut s.iflags, double);
             }
@@ -659,7 +668,7 @@ impl Ctx<'_, '_> {
                     0x4B => now + 1,
                     _ => now,
                 };
-                self.run_ppu_to(now.max(at));
+                self.run_ppu_to_call(now.max(at));
                 let s = &mut *self.sys;
                 s.ppu.flush(at, self.mem, self.frame);
                 self.mem.io[reg] = value;
@@ -885,7 +894,7 @@ impl Ctx<'_, '_> {
     /// ([`OamDma::ppu_at`] only describes clocks after the last change).
     #[inline(never)]
     fn dma_ppu_event(&mut self, now: u64) {
-        self.run_ppu_to(now);
+        self.run_ppu_to_call(now);
         let s = &mut *self.sys;
         s.ppu.dma_event(now, self.mem, self.frame);
         self.schedule_ppu();
@@ -1079,7 +1088,7 @@ impl Ctx<'_, '_> {
         if value & 0x80 != 0 {
             // Latch the current line, if due, before the transfer is
             // active.
-            self.run_ppu_to(now);
+            self.run_ppu_to_call(now);
             self.schedule_ppu();
         }
         let mode0 = self.stat_mode0();
@@ -1097,6 +1106,11 @@ impl Ctx<'_, '_> {
     /// per line. `fire_late`: a trigger at or before `now` fires at the
     /// next boundary (the PPU sync that latched the line ran late by less
     /// than an M-cycle); otherwise it is treated as passed.
+    /// Out of line and cold: `run_ppu_to` calls it only with an HDMA
+    /// active, and must stay small enough to inline into the PPU register
+    /// and palette write paths.
+    #[cold]
+    #[inline(never)]
     fn vdma_arm(&mut self, now: u64, fire_late: bool) {
         let s = &mut *self.sys;
         let Some(start) = s.ppu.mode0_start() else {
@@ -1148,7 +1162,7 @@ impl Ctx<'_, '_> {
     /// not model).
     pub(crate) fn vram_dma(&mut self) {
         let now = self.clock();
-        self.run_ppu_to(now);
+        self.run_ppu_to_call(now);
         if self.sys.ppu.drawing() {
             self.sys.ppu.flush(now, self.mem, self.frame);
         }
