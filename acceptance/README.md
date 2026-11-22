@@ -11,7 +11,6 @@ don't count.
 | `acceptance/*.toml` (manifests) | Human | Read only. Propose changes in `docs/STATUS.md` → "Needs human". |
 | Expected screenshots in `test-roms/` | Upstream | Never modify. |
 | `acceptance/test-roms.sha256` (integrity list) | Human | Read only. Regenerated with `scripts/hash-test-roms.sh` only when the human pins a new test-ROM release, never to make a run pass. |
-| `acceptance/references/` (committed reference overrides) | Human-approved | Create or change one only on explicit human approval recorded in the session log. Generated only by `scripts/recolor-reference.exs` from a pinned upstream file in `test-roms/`; its SHA-256 is pinned in the manifest. |
 | `acceptance/results/*.json` (baselines) | Agent | Update only via `--update-baseline`, which refuses if anything regressed. |
 | Runner implementation (`tools/romtest`) | Agent | Change freely, as long as it still follows this contract. |
 
@@ -40,24 +39,6 @@ listed file exists and matches, and that every ROM matched by a manifest
 glob is listed. Every ROM and reference PNG is hashed again from the exact
 bytes loaded. Any mismatch, missing file or unlisted file is exit 2. This
 stops a deleted or altered ROM or PNG from silently changing results.
-
-### Integrity of committed reference overrides
-
-A screenshot check may name a committed reference override instead of an
-upstream PNG: `screenshot = "references/<path>.png", sha256 = "<hex>"`.
-The path is fixed (no `{dir}` or `{stem}`), relative to the manifest's
-directory (so `acceptance/references/...`), and must start with
-`references/`; a `references/` path without `sha256` is a bad manifest
-(exit 2). Overrides are held to the same integrity rule as `test-roms/`:
-before anything runs, the runner reads every override in the manifest
-(whatever the selection) and checks it against its pinned SHA-256, and the
-bytes a check loads are hashed again. A missing, unreadable or altered
-override is exit 2, never `no-reference`, and the runner never falls back
-to the upstream file in `test-roms/`. The pin lives in the human-owned
-manifest, so changing an override needs a manifest change. An override is
-made only by `scripts/recolor-reference.exs`, which checks the upstream
-file against `acceptance/test-roms.sha256` and refuses unless exactly the
-expected number of pixels change, all from one given color to another.
 
 ### Exit codes
 
@@ -128,7 +109,6 @@ results.
 |---|---|
 | `serial = "text"` | Bytes written to the serial port (SB/SC transfers) contain `text`. |
 | `screenshot = "path"` | The final frame matches the PNG exactly. `{dir}` and `{stem}` expand to the ROM's directory and file stem. Missing PNG → `no-reference`. The **final frame** is the last fully drawn 160×144 frame before exit (completed at the start of VBlank). The frame is solid white while the screen is blank: if the LCD is off at exit, if it was turned off since the last completed frame, if no frame has completed, or if the only frame completed since the LCD was turned back on is the first one (hardware doesn't display that frame; SameBoy `frame_skip`). |
-| `screenshot = "references/...", sha256 = "<hex>"` | As `screenshot`, against a committed reference override pinned to that SHA-256 (see "Integrity of committed reference overrides"). Missing or altered → exit 2. |
 | `screenshot = "path", recolor = { from = "#RRGGBB", to = "#RRGGBB", count = N }` | As `screenshot`, against the same listed upstream PNG with one color replaced in memory: every pixel of color `from` becomes `to`. See "Recolored references" below. The PNG file is never changed. |
 | `fibonacci = true` | B=3, C=5, D=8, E=13, H=21, L=34 at exit. |
 | `gambatte = true` | Gambatte rules from the file name: `_out<hex>` → on-screen hex pattern, `_outaudio0/1` → silence/sound, sibling `.png` → screenshot. See the upstream `testrunner.cpp` (pokemon-speedrunning/gambatte-core @ d819bad196). |

@@ -10,11 +10,6 @@ use gbc_core::{Buttons, CLOCK_HZ, FRAME_CLOCKS};
 use serde::{Deserialize, Serialize};
 
 use crate::glob::Glob;
-use crate::integrity::{Sha256Hash, parse_hex, to_hex};
-
-/// Committed reference overrides live here, relative to the manifest's
-/// directory (`acceptance/references/`).
-pub const REFERENCES_DIR: &str = "references/";
 
 /// The only supported model (ADR 0003).
 pub const MODEL: &str = "cgb-c";
@@ -139,14 +134,6 @@ pub enum Check {
     /// optional counted recolor applied to it in memory (only with a fixed
     /// path).
     Screenshot(String, Option<Recolor>),
-    /// A committed reference override (acceptance/README.md, "Committed
-    /// reference overrides"): a fixed path relative to the manifest's
-    /// directory, under `references/`, pinned to this SHA-256. It never
-    /// falls back to `test-roms/`; missing or altered is a runner error.
-    PinnedScreenshot {
-        path: String,
-        sha256: Sha256Hash,
-    },
     Fibonacci,
     Gambatte,
 }
@@ -155,7 +142,7 @@ impl Check {
     pub fn kind(&self) -> CheckKind {
         match self {
             Check::Serial(_) => CheckKind::Serial,
-            Check::Screenshot(..) | Check::PinnedScreenshot { .. } => CheckKind::Screenshot,
+            Check::Screenshot(..) => CheckKind::Screenshot,
             Check::Fibonacci => CheckKind::Fibonacci,
             Check::Gambatte => CheckKind::Gambatte,
         }
@@ -174,9 +161,6 @@ impl fmt::Display for Check {
                 hex_color(r.to),
                 r.count
             ),
-            Check::PinnedScreenshot { path, sha256 } => {
-                write!(f, "screenshot = {path:?}, sha256 = {:?}", to_hex(sha256))
-            }
             Check::Fibonacci => f.write_str("fibonacci = true"),
             Check::Gambatte => f.write_str("gambatte = true"),
         }
@@ -305,8 +289,6 @@ struct RawExit {
 struct RawCheck {
     serial: Option<String>,
     screenshot: Option<String>,
-    /// Only with `screenshot`: pins a committed reference override.
-    sha256: Option<String>,
     /// Only with a fixed `screenshot` path: a counted recolor.
     recolor: Option<RawRecolor>,
     fibonacci: Option<bool>,
@@ -514,17 +496,6 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
     if given.iter().filter(|&&g| g).count() != 1 {
         return Err("each check needs exactly one key".into());
     }
-    if let RawCheck {
-        screenshot: Some(s),
-        sha256: Some(h),
-        ..
-    } = &c
-    {
-        return parse_pinned(s, h);
-    }
-    if c.sha256.is_some() {
-        return Err("sha256 is only allowed together with screenshot".into());
-    }
     if c.recolor.is_some() && c.screenshot.is_none() {
         return Err("recolor is only allowed together with screenshot".into());
     }
@@ -555,13 +526,6 @@ fn parse_check(c: RawCheck) -> Result<Check, String> {
             {
                 return Err(format!(
                     "screenshot path {s:?}: only {{dir}} and {{stem}} are expanded"
-                ));
-            }
-            // A committed override without its pin must not be resolved
-            // against test-roms/ (where it would be `no-reference`).
-            if s.starts_with(REFERENCES_DIR) {
-                return Err(format!(
-                    "screenshot path {s:?}: a committed reference under {REFERENCES_DIR} needs its sha256"
                 ));
             }
             let recolor = match recolor {
@@ -621,23 +585,6 @@ fn parse_recolor(path: &str, r: RawRecolor) -> Result<Recolor, String> {
         .filter(|&n| n >= 1)
         .ok_or_else(|| bad(format!("count = {} must be at least 1", r.count)))?;
     Ok(Recolor { from, to, count })
-}
-
-/// A committed reference override: a fixed path (no `{dir}`/`{stem}`)
-/// under [`REFERENCES_DIR`], with its SHA-256.
-fn parse_pinned(path: &str, sha256: &str) -> Result<Check, String> {
-    let sha256 = parse_hex(sha256)
-        .ok_or_else(|| format!("screenshot {path:?}: bad sha256 (64 lowercase hex digits)"))?;
-    if !path.starts_with(REFERENCES_DIR) || path.contains(['{', '}']) {
-        return Err(format!(
-            "screenshot {path:?} with sha256: must be a fixed path under {REFERENCES_DIR}"
-        ));
-    }
-    expand_template(path, "", "").map_err(|e| format!("bad screenshot path {path:?}: {e}"))?;
-    Ok(Check::PinnedScreenshot {
-        path: path.to_owned(),
-        sha256,
-    })
 }
 
 /// Expands `{dir}` and `{stem}` for a ROM at `dir/stem.ext` (`dir` is
@@ -903,31 +850,6 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
     }
 
     #[test]
-    fn parses_a_pinned_screenshot() {
-        let g = &parse(&format!(
-            "roms_release = \"v7.0\"\nmodel = \"cgb-c\"\n[[group]]\n{}",
-            MIN.replace(
-                "fibonacci = true",
-                &format!("screenshot = \"references/a/b.png\", sha256 = \"{H}\""),
-            )
-        ))
-        .unwrap()
-        .groups[0];
-        let c = &g.checks[0];
-        assert_eq!(c.kind(), CheckKind::Screenshot);
-        assert_eq!(
-            c,
-            &Check::PinnedScreenshot {
-                path: "references/a/b.png".into(),
-                sha256: parse_hex(H).unwrap(),
-            }
-        );
-    }
-
-    /// A SHA-256 for pinned-screenshot cases.
-    const H: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-
-    #[test]
     fn parses_a_recolor() {
         let body = MIN.replace(
             "fibonacci = true",
@@ -1036,6 +958,9 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
         }
     }
 
+    /// A SHA-256, for the removed `sha256` form.
+    const H: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
     #[test]
     fn rejects_bad_values() {
         let cases = [
@@ -1061,49 +986,14 @@ checks = [{ serial = "Passed" }, { screenshot = "{dir}/{stem}.png" }, { fibonacc
                 MIN.replace("fibonacci = true", "screenshot = \"{name}.png\""),
                 "expanded",
             ),
-            // Committed reference overrides (pinned screenshots).
-            (
-                MIN.replace("fibonacci = true", &format!("sha256 = \"{H}\"")),
-                "exactly one",
-            ),
+            // The committed reference overrides of a89713c were removed
+            // (ADR 0007, 2026-11-22 amendment): `sha256` is no check key.
             (
                 MIN.replace(
                     "fibonacci = true",
-                    &format!("fibonacci = true, sha256 = \"{H}\""),
+                    &format!("screenshot = \"references/a.png\", sha256 = \"{H}\""),
                 ),
-                "only allowed together with screenshot",
-            ),
-            (
-                MIN.replace("fibonacci = true", "screenshot = \"references/a.png\""),
-                "needs its sha256",
-            ),
-            (
-                MIN.replace(
-                    "fibonacci = true",
-                    &format!("screenshot = \"a/b.png\", sha256 = \"{H}\""),
-                ),
-                "fixed path under references/",
-            ),
-            (
-                MIN.replace(
-                    "fibonacci = true",
-                    &format!("screenshot = \"references/{{stem}}.png\", sha256 = \"{H}\""),
-                ),
-                "fixed path under references/",
-            ),
-            (
-                MIN.replace(
-                    "fibonacci = true",
-                    &format!("screenshot = \"references/../x.png\", sha256 = \"{H}\""),
-                ),
-                "bad screenshot path",
-            ),
-            (
-                MIN.replace(
-                    "fibonacci = true",
-                    "screenshot = \"references/a.png\", sha256 = \"abc\"",
-                ),
-                "bad sha256",
+                "unknown field `sha256`",
             ),
             (MIN.replace("run_s = 1", "run_s = 0"), "run_s"),
             (MIN.replace("run_s = 1", "run_s = -2.5"), "run_s"),

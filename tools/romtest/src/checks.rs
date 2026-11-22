@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use gbc_core::{Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::Serialize;
 
-use crate::integrity::{self, Sha256Hash};
 use crate::manifest::{Check, CheckKind, Manifest, Recolor, expand_template, hex_color};
 
 const W: usize = SCREEN_WIDTH;
@@ -203,9 +202,6 @@ pub type VerifyFn<'a> = dyn Fn(&str, &[u8]) -> Result<(), String> + 'a;
 /// Everything a check needs about one ROM run.
 pub struct Ctx<'a> {
     pub roms_dir: &'a Path,
-    /// The manifest's directory: committed reference overrides
-    /// (`Check::PinnedScreenshot`) are relative to it.
-    pub manifest_dir: &'a Path,
     /// The ROM path relative to `roms_dir`.
     pub rom: &'a str,
     pub serial: &'a [u8],
@@ -261,9 +257,6 @@ pub fn evaluate(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckResul
         Check::Screenshot(template, recolor) => {
             screenshot(check, template, recolor.as_ref(), index, ctx)?
         }
-        Check::PinnedScreenshot { path, sha256 } => {
-            pinned_screenshot(check, path, sha256, index, ctx)?
-        }
     })
 }
 
@@ -318,26 +311,6 @@ fn screenshot(
         }
     };
     result.reference = Some(reference);
-    Ok(result)
-}
-
-/// A committed reference override: read from the manifest's directory and
-/// checked against its pinned SHA-256. Missing or altered is `Err` (a
-/// runner error), never `no-reference`, and `test-roms/` is never read.
-fn pinned_screenshot(
-    check: &Check,
-    rel: &str,
-    sha256: &Sha256Hash,
-    index: usize,
-    ctx: &Ctx<'_>,
-) -> Result<CheckResult, String> {
-    let path = ctx.manifest_dir.join(rel);
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("reading committed reference {}: {e}", path.display()))?;
-    integrity::check_pinned(rel, &bytes, sha256)?;
-    let expected = decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
-    let mut result = compare(check, index, ctx, &expected)?;
-    result.reference = Some(rel.to_owned());
     Ok(result)
 }
 
@@ -454,7 +427,6 @@ mod tests {
     fn ctx<'a>(roms_dir: &'a Path, rom: &'a str, serial: &'a [u8], frame: &'a Frame) -> Ctx<'a> {
         Ctx {
             roms_dir,
-            manifest_dir: roms_dir,
             rom,
             serial,
             registers: Some(Registers::default()),

@@ -21,8 +21,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{Check, Manifest};
-
 /// The list file name; it lives next to the manifest.
 pub const FILE_NAME: &str = "test-roms.sha256";
 
@@ -122,7 +120,7 @@ impl RomHashes {
     }
 }
 
-pub fn parse_hex(s: &str) -> Option<Sha256Hash> {
+fn parse_hex(s: &str) -> Option<Sha256Hash> {
     if s.len() != 64 || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
@@ -133,6 +131,7 @@ pub fn parse_hex(s: &str) -> Option<Sha256Hash> {
     Some(out)
 }
 
+#[cfg(test)]
 pub fn to_hex(h: &Sha256Hash) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -259,39 +258,6 @@ pub fn verify<'a>(
         files: entries.len(),
         bytes: bytes.into_inner() as u64,
     })
-}
-
-/// Checks bytes loaded for a committed reference override (`path`,
-/// relative to the manifest's directory) against the SHA-256 pinned in the
-/// manifest. `Err` is a runner error (exit 2), as for `test-roms/`.
-pub fn check_pinned(path: &str, bytes: &[u8], want: &Sha256Hash) -> Result<(), String> {
-    let got: Sha256Hash = Sha256::digest(bytes).into();
-    if &got != want {
-        return Err(format!(
-            "committed reference {path} has SHA-256 {}, but the manifest pins {} \
-             (regenerate it only with scripts/recolor-reference.exs, on explicit human approval)",
-            to_hex(&got),
-            to_hex(want)
-        ));
-    }
-    Ok(())
-}
-
-/// Reads and checks every committed reference override in the manifest
-/// (whatever the selection, like the `test-roms/` list). A missing file is
-/// an error, never `no-reference`. Returns how many were checked.
-pub fn verify_pinned(manifest_dir: &Path, manifest: &Manifest) -> Result<usize, String> {
-    let mut n = 0;
-    for check in manifest.groups.iter().flat_map(|g| &g.checks) {
-        if let Check::PinnedScreenshot { path, sha256 } = check {
-            let full = manifest_dir.join(path);
-            let bytes = std::fs::read(&full)
-                .map_err(|e| format!("reading committed reference {}: {e}", full.display()))?;
-            check_pinned(path, &bytes, sha256)?;
-            n += 1;
-        }
-    }
-    Ok(n)
 }
 
 fn names(paths: &[&str]) -> String {
