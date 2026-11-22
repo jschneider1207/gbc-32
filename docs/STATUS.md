@@ -27,10 +27,10 @@ M3 acceptance passes (verified at 745b06a: the seven M3 groups, 52/52 ROMs,
   05 work above: 4 implementation agents, ADRs 0013/0014).
   Review range: `stage1-m2..HEAD`. Point the hardware reviewer at the two
   SameBoy deviations and the renderer choices noted in code comments.
-- Token cost: the human flagged M3 as token-heavy (timing agent ~523k,
-  DMA agent ~494k). Keep briefs on must-tier scope, cap review findings,
-  use cheaper models for already-specified fixes, and pipe romtest/bench
-  output through tail/grep.
+- Token cost (human, session 05): M3 agents were too big (timing ~523k
+  tokens, DMA ~494k). Split work into small, one-behavior agent tasks so
+  no single agent carries most of a milestone; chain them when they share
+  files. Applies to the review fixes too.
 
 Must failures left after M3 are all later milestones: mbc3-tester and
 rtc3test x3 (MBC3/RTC not implemented, M4; the renderer draws them
