@@ -22,7 +22,7 @@
 380 <gbc_core::timer::Timer>::read
 # Event dispatch and DMA conflict paths (measured after the incremental
 # event-table minimum: 1776, 502, 814, 508, 892 bytes).
-1870 <gbc_core::bus::Ctx>::boundary
+2220 <gbc_core::bus::Ctx>::boundary
 530 gbc_core::bus::read_during_dma
 860 <gbc_core::bus::Ctx>::write_during_dma
 540 <gbc_core::bus::Ctx>::div_reset

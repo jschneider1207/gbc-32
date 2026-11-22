@@ -357,16 +357,23 @@ impl Ctx<'_, '_> {
     /// flip-flop's next 1 -> 0 edge, `serial` module docs) while a
     /// transfer runs. The caller reschedules ([`Self::schedule_serial`]).
     fn set_serial_deadline(&mut self) {
-        let now = self.clock();
-        let s = &mut *self.sys;
-        let at = match s.serial.next_shift(s.timer.sc(now)) {
+        let at = self.serial_deadline(self.clock());
+        self.sys.sched.set(EventKind::Serial, at);
+    }
+
+    /// The Serial deadline at clock `now`: the bit clock's next shift
+    /// while a transfer runs, else [`NEVER`].
+    #[inline(always)]
+    fn serial_deadline(&self, now: u64) -> u64 {
+        let s = &*self.sys;
+        match s.serial.next_shift(s.timer.sc(now)) {
             None => NEVER,
             Some(v) => s.timer.clock_at(v),
-        };
-        s.sched.set(EventKind::Serial, at);
+        }
     }
 
     /// [`Self::set_serial_deadline`], and reschedules.
+    #[inline(never)]
     fn schedule_serial(&mut self) {
         self.set_serial_deadline();
         self.reschedule();
@@ -436,7 +443,12 @@ impl Ctx<'_, '_> {
     /// capped deadline just reschedules). Called whenever a deadline
     /// changes while the countdown runs.
     fn reschedule(&mut self) {
-        let now = self.clock();
+        self.reschedule_at(self.clock());
+    }
+
+    /// [`Self::reschedule`], `now` being the current clock.
+    #[inline(always)]
+    fn reschedule_at(&mut self, now: u64) {
         let deadline = self.sys.sched.next().min(self.target);
         let ahead = deadline.saturating_sub(now).min(i32::MAX as u64);
         self.hot.deadline = now + ahead;
@@ -463,14 +475,16 @@ impl Ctx<'_, '_> {
             self.target = u64::MAX;
             self.done = true;
         }
-        self.reschedule();
+        // No handler moves the clock.
+        self.reschedule_at(now);
     }
 
     /// Runs every kind of scheduled work whose deadline is at or before
     /// `now`, in [`EventKind`] order, so events on the same clock run in a
-    /// fixed order (ADR 0011). Each handler sets its next deadline.
+    /// fixed order (ADR 0011). Each handler sets its next deadline. The
+    /// caller checked that something is due (`now >= sched.next()`).
     fn run_events(&mut self, now: u64) {
-        while let Some(kind) = self.sys.sched.take_due(now) {
+        while let Some(kind) = self.sys.sched.take_first_due(now) {
             match kind {
                 EventKind::Timer => {
                     let s = &mut *self.sys;
@@ -481,7 +495,8 @@ impl Ctx<'_, '_> {
                     let done = self.sys.serial.shift();
                     self.serial_done(done);
                     // `boundary` reschedules after the loop.
-                    self.set_serial_deadline();
+                    let at = self.serial_deadline(now);
+                    self.sys.sched.set_inline(EventKind::Serial, at);
                 }
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
@@ -491,6 +506,9 @@ impl Ctx<'_, '_> {
                 }
                 // Not scheduled yet: the APU in M6.
                 EventKind::DivApu | EventKind::AudioBuffer => {}
+            }
+            if now < self.sys.sched.next() {
+                break;
             }
         }
     }

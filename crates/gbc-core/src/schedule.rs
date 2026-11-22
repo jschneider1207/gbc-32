@@ -7,6 +7,13 @@
 //! stand for is rescheduled (a PPU sync, a register write), so the minimum
 //! is maintained there (incrementally, rescanning only when the earliest
 //! entry moves later) and never per M-cycle.
+//!
+//! Every dispatch takes the due entry and recomputes the minimum, so that
+//! fold runs once per event (about 1.8 M times per emulated second in
+//! `synth:worst-case`). The kinds after `Ppu` fire rarely (`Dma` at most
+//! every ~160 M-cycles, `Input` per button change, the APU ones in M6), so
+//! their minimum is cached in [`Schedule::slow`], and the per-event fold is
+//! over the three hot kinds and that cache: four values, not seven.
 
 /// No deadline.
 pub(crate) const NEVER: u64 = u64::MAX;
@@ -49,6 +56,9 @@ impl EventKind {
         Self::AudioBuffer,
     ];
     const COUNT: usize = Self::ALL.len();
+    /// Kinds below this index are folded on every dispatch; the others
+    /// ("slow") through [`Schedule::slow`].
+    const HOT: usize = Self::Dma as usize;
 }
 
 /// One deadline (a clock, or [`NEVER`]) per [`EventKind`], and the
@@ -58,6 +68,8 @@ pub(crate) struct Schedule {
     at: [u64; EventKind::COUNT],
     /// The minimum of `at`.
     next: u64,
+    /// The minimum of the slow entries, `at[EventKind::HOT..]`.
+    slow: u64,
 }
 
 impl Schedule {
@@ -66,6 +78,7 @@ impl Schedule {
         Self {
             at: [NEVER; EventKind::COUNT],
             next: NEVER,
+            slow: NEVER,
         }
     }
 
@@ -99,6 +112,15 @@ impl Schedule {
         let i = kind as usize;
         let old = self.at[i];
         self.at[i] = at;
+        // `i` is a constant here (every caller names its kind), so this
+        // branch folds away.
+        if i >= EventKind::HOT {
+            if at <= self.slow {
+                self.slow = at;
+            } else if old == self.slow {
+                self.recompute_slow();
+            }
+        }
         if at <= self.next {
             self.next = at;
         } else if old == self.next {
@@ -106,16 +128,24 @@ impl Schedule {
         }
     }
 
+    /// `next` from the hot entries and the cached slow minimum.
     #[inline]
     fn recompute(&mut self) {
-        self.next = self.at.iter().fold(NEVER, |m, &t| m.min(t));
+        let hot = &self.at[..EventKind::HOT];
+        self.next = hot.iter().fold(self.slow, |m, &t| m.min(t));
+    }
+
+    #[inline]
+    fn recompute_slow(&mut self) {
+        let slow = &self.at[EventKind::HOT..];
+        self.slow = slow.iter().fold(NEVER, |m, &t| m.min(t));
     }
 
     /// The first kind, in [`EventKind`] order, whose deadline is at or
     /// before `now`, with its deadline cleared to [`NEVER`] (its handler
     /// sets the next one). `None` once nothing is due, at the cost of one
     /// compare: nothing is due while `now` is before the minimum.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn take_due(&mut self, now: u64) -> Option<EventKind> {
         if now < self.next {
             return None;
@@ -123,13 +153,28 @@ impl Schedule {
         self.take_first_due(now)
     }
 
-    /// `take_due` once something is due: the first due entry (an
-    /// early-exit scan), then the new minimum (a branchless fold; one
-    /// pass doing both measured slower, a branch per entry).
-    #[inline(never)]
-    fn take_first_due(&mut self, now: u64) -> Option<EventKind> {
-        let i = self.at.iter().position(|&t| t <= now)?;
+    /// `take_due` once something is due (`now >= next()`; `None` if not):
+    /// the first due entry (an early-exit scan, the slow entries only if
+    /// their minimum is due), then the new minimum (a branchless fold; one
+    /// pass doing both measured slower, a branch per entry). Inlined into
+    /// `Ctx::boundary`: -14 M Ir in `synth:worst-case` (2 s), for +28 B
+    /// of MCU code net (`boundary` grows, this symbol goes; docs/perf.md).
+    #[inline(always)]
+    pub(crate) fn take_first_due(&mut self, now: u64) -> Option<EventKind> {
+        let i = match self.at[..EventKind::HOT].iter().position(|&t| t <= now) {
+            Some(i) => i,
+            None => {
+                if self.slow > now {
+                    return None;
+                }
+                let slow = &self.at[EventKind::HOT..];
+                EventKind::HOT + slow.iter().position(|&t| t <= now)?
+            }
+        };
         self.at[i] = NEVER;
+        if i >= EventKind::HOT {
+            self.recompute_slow();
+        }
         self.recompute();
         Some(EventKind::ALL[i])
     }
@@ -319,6 +364,8 @@ mod tests {
                 }
             }
             assert_eq!(s.next(), s.at.iter().fold(NEVER, |m, &t| m.min(t)));
+            let slow = &s.at[EventKind::HOT..];
+            assert_eq!(s.slow, slow.iter().fold(NEVER, |m, &t| m.min(t)));
         }
     }
 }

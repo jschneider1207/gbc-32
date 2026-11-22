@@ -184,6 +184,33 @@ without a rescan) took event-storm from 516.4 M to 413.7 M (-19.9%;
 `boundary` inclusive 190.7 -> 135.9 Ir per call, 1.85 M calls: about
 4.32 M -> 3.46 M Ir per emulated frame), halt-irq -7.0%, dma-storm -3.2%.
 
+**Event dispatch cuts.** Every dispatch takes the due entry and refolds
+the event-table minimum, about 1.8 M times in `synth:worst-case` (2 s;
+1.29 M `boundary` calls, 1.42 events each: Timer + Serial often share a
+clock). The kinds after `Ppu` fire rarely, so their minimum is cached
+(`Schedule::slow`, +8 B: `Hw` 1,000 -> 1,008 B) and the per-event fold is
+over 4 values, not 7. `take_first_due` is inlined into `boundary` (the
+caller has checked `next`, so the loop does one compare per event, not
+two); `boundary` reschedules from the `now` it has; the Serial handler
+uses `set_inline`. MCU code: `boundary` 1,792 -> 2,112 B (budget 1,870
+-> 2,220) and the 292 B `take_first_due` symbol is gone: +28 B net.
+Ir at 68c5d32 -> after (2 s / 20 s):
+
+| Step | synth:worst-case | event-storm |
+|---|---|---|
+| Before | 472,244,651 | 432,681,063 |
+| All (chosen) | 435,415,183 | 394,765,192 |
+
+Measured one at a time on e15d85f (worst-case 482.07 M): hot/slow split
+-10.7 M, the `boundary` cuts -13.3 M, inlining `take_first_due` -14.2 M
+(keeping only the slow-kind path out of line: -10.0 M at 1,976 B, so the
+whole function is inlined). worst-case -7.8% (3.95 -> 3.65 M Ir per
+frame, 90.7% of the 4.02 M line), event-storm -8.8%, halt-irq -1.8%,
+cgb-acid2 -0.7%, the others under 0.3%. Remaining per event: the
+4-value fold, the handler's own work (Timer reload ~33 Ir, Serial shift
+and next deadline ~34 Ir), and ~22 Ir of `boundary` prologue/epilogue
+per call.
+
 ## Code-size budgets
 
 Hot CPU/bus functions in `gbc-core` have code-size budgets so the MCU build
