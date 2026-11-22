@@ -142,7 +142,7 @@ impl Sys<'_> {
             self.joyp_select = 0x30;
         }
         self.ppu.reset();
-        self.sched.set(EventKind::Ppu, self.ppu.next_event());
+        self.sched.set(EventKind::Ppu, self.ppu.next_event(false));
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
         // Up Sequence, "Hardware registers").
         self.iflags = 0x01;
@@ -516,11 +516,87 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn sync_ppu(&mut self) {
         let now = self.clock();
+        self.sync_ppu_to(now);
+    }
+
+    /// Catches the PPU up to clock `at` (the current clock, or one dot
+    /// later for a register write timed there) and reschedules. A running
+    /// OAM DMA is brought up to date first: the PPU may read OAM.
+    fn sync_ppu_to(&mut self, at: u64) {
+        self.run_ppu_to(at);
+        self.schedule_ppu();
+    }
+
+    /// [`Self::sync_ppu_to`] without the rescheduling.
+    fn run_ppu_to(&mut self, at: u64) {
+        if self.hot.dma != 0 {
+            self.dma_sync(self.clock());
+        }
+        let double = self.hot.mcycle == 2;
         let s = &mut *self.sys;
-        let events = s.ppu.sync(now, self.frame, &mut s.iflags);
-        s.sched.set(EventKind::Ppu, s.ppu.next_event());
+        let events = s.ppu.sync(at, self.mem, self.frame, &mut s.iflags, double);
         self.raise(events);
+    }
+
+    /// Sets the Ppu deadline and reschedules.
+    fn schedule_ppu(&mut self) {
+        let s = &mut *self.sys;
+        s.sched
+            .set(EventKind::Ppu, s.ppu.next_event(self.hot.mcycle == 2));
         self.reschedule();
+    }
+
+    /// Writes to the PPU registers FF40-FF45 and FF47-FF4B. The PPU is
+    /// synced to the write first (ADR 0002): the write lands between the
+    /// update points before and after it, and moves the next deadline.
+    /// Out of line, off `write_io`.
+    #[inline(never)]
+    fn write_ppu(&mut self, reg: usize, value: u8) {
+        let now = self.clock();
+        let double = self.hot.mcycle == 2;
+        match reg {
+            0x40 => {
+                self.run_ppu_to(now);
+                let s = &mut *self.sys;
+                s.ppu.write_lcdc(now, value, &mut s.iflags, double);
+                s.ppu.check_wy_at(now, self.mem);
+            }
+            0x41 => {
+                // CGB: in two phases one dot apart; for the first, the LYC
+                // select (double speed: the mode-0 select) keeps its old
+                // value (SameBoy `GB_CONFLICT_STAT_CGB`, `_DOUBLE`).
+                let keep = if double { 0x08 } else { 0x40 };
+                let first = (value & !keep) | (self.sys.ppu.stat_select() & keep);
+                self.run_ppu_to(now);
+                let s = &mut *self.sys;
+                s.ppu.write_stat(now, first, &mut s.iflags, double);
+                self.run_ppu_to(now + 1);
+                let s = &mut *self.sys;
+                s.ppu.write_stat(now + 1, value, &mut s.iflags, double);
+            }
+            0x44 => {} // LY is read-only.
+            0x45 => {
+                // Single speed: one dot into the M-cycle (SameBoy
+                // `GB_CONFLICT_WRITE_CPU`); double speed: at the access
+                // (`GB_CONFLICT_READ_OLD`).
+                let at = now + u64::from(!double);
+                self.run_ppu_to(at);
+                let s = &mut *self.sys;
+                s.ppu.write_lyc(at, value, &mut s.iflags, double);
+            }
+            // SCY SCX BGP OBP0 OBP1 WY WX.
+            _ => {
+                self.run_ppu_to(now);
+                // RENDERER: if `ppu.mode3_pixel(now)` is `Some((ly, x))`,
+                // draw line `ly` up to pixel `x` with the old value first.
+                self.mem.io[reg] = value;
+                if reg == 0x4A {
+                    self.sys.ppu.check_wy_at(now, self.mem);
+                }
+            }
+        }
+        // The selects, LYC or LCDC may move the next deadline.
+        self.schedule_ppu();
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
@@ -561,7 +637,10 @@ impl Ctx<'_, '_> {
     fn write_high(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         match addr {
-            0xFE00..=0xFE9F => self.mem.oam[a & 0xFF] = value,
+            0xFE00..=0xFE9F => {
+                self.mem.oam[a & 0xFF] = value;
+                self.sys.ppu.oam_written();
+            }
             0xFEA0..=0xFEFF => self.mem.extra_oam[extra_oam_index(a)] = value,
             0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
             0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
@@ -591,19 +670,8 @@ impl Ctx<'_, '_> {
             0x0F => s.iflags = value & INT_MASK,
             // Sound: plain storage until M6.
             0x10..=0x3F => self.mem.io[reg] = value,
-            0x40 => {
-                self.sync_ppu();
-                let now = self.clock();
-                let s = &mut *self.sys;
-                s.ppu.write_lcdc(now, value);
-                s.sched.set(EventKind::Ppu, s.ppu.next_event());
-                self.reschedule();
-            }
-            0x41 => s.ppu.write_stat(value),
-            0x45 => s.ppu.lyc = value,
+            0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
             0x46 => self.oam_dma(value),
-            // SCY SCX BGP OBP0 OBP1 WY WX: plain storage until M3.
-            0x42 | 0x43 | 0x47..=0x4B => self.mem.io[reg] = value,
             0x4D if cgb => s.key1 = value & 0x01,
             0x4F if cgb => {
                 s.vbk = value & 0x01;
@@ -677,6 +745,9 @@ impl Ctx<'_, '_> {
                 read(self.mem, self.sys, &self.hot.without_dma(), src)
             };
         }
+        if due > d.copied {
+            self.sys.ppu.oam_written();
+        }
         self.sys.dma.copied = d.copied.max(due);
     }
 
@@ -704,6 +775,7 @@ impl Ctx<'_, '_> {
                 // DMA reads below A000 (SameBoy: `oam[dest - 1] = 0`).
                 if self.sys.dma.base < 0xA000 {
                     self.mem.oam[usize::from(i)] = 0;
+                    self.sys.ppu.oam_written();
                 }
             }
         }
@@ -998,8 +1070,8 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x10..=0x2F => mem.io[reg] | SOUND_READ_MASK[(reg - 0x10) & 0x1F],
         0x30..=0x3F => mem.io[reg],
         0x40 => sys.ppu.lcdc,
-        0x41 => sys.ppu.stat(hot.clock()),
-        0x44 => sys.ppu.ly(hot.clock()),
+        0x41 => sys.ppu.stat(hot.clock(), hot.mcycle == 2),
+        0x44 => sys.ppu.ly(hot.clock(), hot.mcycle == 2),
         0x45 => sys.ppu.lyc,
         0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
         0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },

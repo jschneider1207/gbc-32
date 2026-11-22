@@ -785,8 +785,14 @@ mod tests {
         assert_eq!(emu.clock(), clock);
     }
 
-    /// Clocks from LY=0 dot 0 to the start of VBlank (LY=144).
-    const VBLANK: u64 = 144 * 456;
+    /// The first `FRAME_READY` after reset: the next frame's VBlank (line
+    /// 144, dot 5), from the post-boot position, on the M-cycle grid.
+    const VBLANK: u64 =
+        ((FRAME_CLOCKS - ppu::POST_BOOT_POS + ppu::VBLANK_POS) as u64).next_multiple_of(4);
+
+    /// Clocks from an LCD enable to its first `FRAME_READY`: the frame
+    /// starts 7 dots before the enabling write (`ppu::ON_POS`).
+    const VBLANK_AFTER_ON: u64 = ((ppu::VBLANK_POS - ppu::ON_POS) as u64).next_multiple_of(4);
 
     #[test]
     fn run_frame_produces_white_frame_at_vblank() {
@@ -846,12 +852,15 @@ mod tests {
         let start = emu.clock();
         let r = emu.run_cycles(100_000, &mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
-        assert_eq!(emu.clock() - start, VBLANK);
+        assert_eq!(emu.clock() - start, VBLANK_AFTER_ON);
         assert!(emu.screen_blank());
         // The second frame is displayed.
         let r = emu.run_cycles(100_000, &mut fb, &mut []);
         assert_eq!(r.events, Events::FRAME_READY);
-        assert_eq!(emu.clock() - start, VBLANK + u64::from(FRAME_CLOCKS));
+        assert_eq!(
+            emu.clock() - start,
+            VBLANK_AFTER_ON + u64::from(FRAME_CLOCKS)
+        );
         assert!(!emu.screen_blank());
         // Writes that keep the LCD on don't blank it.
         write_lcdc(emu, 0x93);
@@ -1275,17 +1284,19 @@ mod tests {
             ));
         }
         // DIV is 26 after boot (`timer::POST_BOOT_COUNTER`) until STOP
-        // resets it.
+        // resets it. The PPU starts in VBlank (`ppu::POST_BOOT_POS`): line
+        // 144 (STAT 81), then line 153 with LY reading 0 = LYC (85) after
+        // the first pause, then line 17 in mode 3 (83) after the second.
         assert_eq!(
             seen,
             [
-                (8, 8, 0x26, 134, 0),
-                (12, 20, 0x26, 134, 0),
-                (4104, 4124, 0, 130, 9),
-                (2, 4126, 0, 130, 9),
-                (4, 4130, 0, 130, 9),
-                (6, 4136, 0, 130, 9),
-                (8202, 12338, 0, 130, 27),
+                (8, 8, 0x26, 0x81, 144),
+                (12, 20, 0x26, 0x81, 144),
+                (4104, 4124, 0, 0x85, 0),
+                (2, 4126, 0, 0x85, 0),
+                (4, 4130, 0, 0x85, 0),
+                (6, 4136, 0, 0x85, 0),
+                (8202, 12338, 0, 0x83, 17),
             ]
         );
         // A run target in the middle of a pause ends the call after it.
@@ -1418,9 +1429,14 @@ mod tests {
     fn ly_follows_the_line_timing() {
         let emu = emulator();
         let mut fb = frame();
-        assert_eq!(emu.peek(0xFF44), 0);
-        let _ = emu.run_cycles(456 * 3 + 8, &mut fb, &mut []);
+        // The boot ROM hands over in VBlank.
+        assert_eq!(emu.peek(0xFF44), 144);
+        assert_eq!(emu.peek(0xFF41) & 0x03, 1);
+        // Line 3 of the next frame, 8 dots in.
+        let line3 = u64::from(FRAME_CLOCKS - ppu::POST_BOOT_POS) + 456 * 3 + 8;
+        let _ = emu.run_cycles(line3, &mut fb, &mut []);
         assert_eq!(emu.peek(0xFF44), 3);
+        assert_eq!(emu.peek(0xFF41) & 0x03, 2);
         let _ = emu.run_frame(&mut fb, &mut []); // to VBlank
         assert_eq!(emu.peek(0xFF44), 144);
         assert_eq!(emu.peek(0xFF41) & 0x03, 1);

@@ -28,12 +28,19 @@ Current numbers (Ir) and wall time (valgrind run of all six, ~25 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,388,017,297 |
-| cgb_sound.gb | 607,486,659 |
-| cgb-acid2.gbc | 12,864,502 |
-| synth:event-storm (2 s) | 413,681,227 |
-| synth:dma-storm (3 s) | 372,085,388 |
-| synth:halt-irq (10 s) | 111,371,508 |
+| cpu_instrs.gb | 1,482,522,582 |
+| cgb_sound.gb | 709,805,227 |
+| cgb-acid2.gbc | 341,716,522 |
+| synth:event-storm (2 s) | 424,466,469 |
+| synth:dma-storm (3 s) | 405,698,738 |
+| synth:halt-irq (10 s) | 162,276,835 |
+
+PPU mode timing (ADR 0014) added one event per visible line (the end of
+mode 3, where the renderer will draw) plus STAT interrupt edges: from
+1,388.0 / 607.5 / 12.9 / 413.7 / 372.1 / 111.4 M (+6.8%, +16.8%, +274k Ir
+per frame on cgb-acid2, +2.6%, +9.0%, +45.7%). About 470 Ir per line event
+with no STAT source selected and no objects, 940 with sources and objects
+(cgb-acid2), dispatch included.
 
 The incremental event-table minimum (`schedule.rs`: the table is rescanned
 only when the earliest entry moves later or is taken; handlers re-arm
@@ -63,10 +70,15 @@ countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
 |---|---|---|
 | `Cpu::run::<Ctx>` | 28,560 | 30,000 |
 | `Cpu::execute_cb::<Ctx>` | 13,158 | 13,820 |
-| `Ctx::write_high` | 160 | 170 |
-| `Ctx::write_io` | 1,180 | 1,240 |
-| `bus::read_high` | 1,008 | 1,060 |
-| `Ctx::sync_ppu` | 496 | 520 |
+| `Ctx::write_high` | 168 | 170 |
+| `Ctx::write_io` | 884 | 930 |
+| `bus::read_high` | 912 | 960 |
+| `Ctx::sync_ppu` | 214 | 230 |
+| `Ppu::sync` | 2,720 | 2,860 |
+| `Ppu::next_event` | 482 | 510 |
+| `Ppu::next_point` | 412 | 440 |
+| `Ppu::point_irq` | 494 | 520 |
+| `Ctx::write_ppu` (PPU registers, out of `write_io`) | 1,058 | 1,110 |
 | `Ctx::write_mapped` | 428 | 440 |
 | `Ctx::write_timer_io` (cold) | 1,538 | 1,620 |
 | `Timer::read` (cold) | 362 | 380 |
@@ -119,9 +131,12 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,388,017,297 |
-| cgb_sound.gb | 607,486,659 |
-| cgb-acid2.gbc | 12,864,502 |
+| cpu_instrs.gb | 1,482,522,582 |
+| cgb_sound.gb | 709,805,227 |
+| cgb-acid2.gbc | 341,716,522 |
+
+(ADR 0014, PPU mode timing, took these from 1,388.0 M, 607.5 M and 12.9 M;
+see the table above.)
 
 (ADR 0011 step 4, the lazy timer, took these from 1,921.3 M, 922.7 M and
 928.5 M: -28.0%, -32.6% and -24.9%. ADR 0011 step 5, HALT/STOP idling
