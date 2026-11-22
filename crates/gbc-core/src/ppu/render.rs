@@ -267,7 +267,7 @@ impl Renderer {
         self.order = order;
         // The buffer (`Memory::obj_buf`) is all transparent unless an object
         // was fetched; it is cleared by the first `render` of the line.
-        self.obj_dirty = self.obj_fetched;
+        self.obj_dirty |= self.obj_fetched;
         self.obj_fetched = false;
     }
 
@@ -1137,6 +1137,23 @@ mod tests {
         let row = s.line(0);
         assert_eq!(row[..8], [102, 201, 202, 203, 102, 201, 202, 203]);
         assert_eq!(row[8..16], [102, 302, 301, 300, 102, 302, 301, 300]);
+    }
+
+    #[test]
+    fn pending_obj_clear_survives_a_line_without_render() {
+        // Line 0 fetches an object; line 1 latches but draws nothing (LCDC.7
+        // cleared before its first pixel). The clear owed to line 0's
+        // objects must still happen on the next line that renders.
+        let mut s = Scene::new();
+        s.solid_tile(0x10, 3);
+        s.obj(0, 16, 8, 1, 0); // line 0, screen x 0..8
+        s.line(0);
+        s.obj(0, 0, 0, 1, 0); // off screen from now on
+        s.begin(1); // latched, never rendered
+        s.obj(1, 18, 88, 1, 0); // line 2, screen x 80..88
+        let row = s.line(2);
+        run(&row, 0, 8, 100);
+        run(&row, 80, 88, 203);
     }
 
     #[test]
