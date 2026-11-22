@@ -649,6 +649,15 @@ mod tests {
         s.regs.wy = 200;
         let row = s.line(11);
         run(&row, 20, 28, 101);
+        // Next frame: WY moved to a line already passed never matches.
+        s.r.start_frame();
+        for ly in 0..5 {
+            run(&s.line(ly), 0, W, 100);
+        }
+        s.regs.wy = 2;
+        for ly in 5..10 {
+            run(&s.line(ly), 0, W, 100);
+        }
     }
 
     #[test]
@@ -884,6 +893,28 @@ mod tests {
         let row = s.line(0);
         run(&row, 8, 16, 101);
         run(&row, 16, 20, 203);
+    }
+
+    #[test]
+    fn scx_fine_bits_latched_at_line_start() {
+        // Pan Docs: Scrolling, the low 3 bits of SCX are only read at the
+        // start of the line; a later write moves only the tile column.
+        let mut s = Scene::new();
+        let mut t = [1; 8];
+        t[4..].fill(2);
+        s.tile_row(0x00, 0, t); // tile 0 row 0: left half 1, right half 2
+        let mut row = [0; W];
+        s.begin(0);
+        s.span(&mut row, 0, 40);
+        s.regs.scx = 3;
+        s.span(&mut row, 40, W);
+        for x in (0..W).step_by(8) {
+            assert_eq!(
+                row[x..x + 8],
+                [101, 101, 101, 101, 102, 102, 102, 102],
+                "x {x}"
+            );
+        }
     }
 
     #[test]
