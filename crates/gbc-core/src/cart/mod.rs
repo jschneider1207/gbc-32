@@ -229,6 +229,8 @@ enum Mapper {
     None,
     /// MBC1 (types 01-03). TODO(M4): MBC1M multicarts.
     Mbc1,
+    /// MBC2 (types 05-06): 16 ROM banks, 512x4 bits of built-in RAM.
+    Mbc2,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },
 }
@@ -237,9 +239,10 @@ impl Mapper {
     fn from_header(cart_type: u8) -> Self {
         match cart_type {
             0x01..=0x03 => Self::Mbc1,
+            0x05 | 0x06 => Self::Mbc2,
             0x19..=0x1B => Self::Mbc5 { rumble: false },
             0x1C..=0x1E => Self::Mbc5 { rumble: true },
-            // TODO(M4): MBC2, MBC3 and the rest; until then they
+            // TODO(M4): MBC3 and the rest; until then they
             // run as if they had no MBC.
             _ => Self::None,
         }
@@ -275,6 +278,12 @@ pub(crate) struct Cart<'a> {
     /// Offset of the RAM bank visible at A000-BFFF.
     ram_off: usize,
     ram_enabled: bool,
+    /// Bits forced to 1 in every stored RAM byte: 0xF0 for MBC2's 4-bit RAM
+    /// (Pan Docs: MBC2, the upper nibble reads as 1s), else 0. The buffer
+    /// holds the byte as the CPU reads it (SameBoy `Core/mbc.c` stores
+    /// `value | 0xF0` too), so `read_ram` needs no mapper check; `new`
+    /// normalizes a loaded save the same way. Writes OR it in.
+    ram_or: u8,
     /// MBC1 registers: BANK1 (5 bits, 2000-3FFF), BANK2 (2 bits,
     /// 4000-5FFF), MODE (1 bit, 6000-7FFF) (Pan Docs: MBC1; GBCTR: MBC1).
     bank1: u8,
@@ -300,6 +309,7 @@ impl<'a> Cart<'a> {
             rom_win: [&[]; 2],
             ram_off: 0,
             ram_enabled: false,
+            ram_or: 0,
             bank1: 1,
             bank2: 0,
             mode: 0,
@@ -313,16 +323,23 @@ impl<'a> Cart<'a> {
     pub(crate) fn new(rom: &'a [u8], ram: &'a mut [u8]) -> Result<Self, LoadError<'a>> {
         let kind = match cart_ram_size(rom) {
             Ok(needed) if ram.len() >= needed => {
+                let mapper = Mapper::from_header(rom[HEADER_CART_TYPE]);
                 let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
                 let mut cart = Self {
                     rom,
                     ram_buf: ram,
                     ram_len: needed,
                     has_rtc: has_rtc(rom),
-                    mapper: Mapper::from_header(rom[HEADER_CART_TYPE]),
+                    mapper,
+                    ram_or: if mapper == Mapper::Mbc2 { 0xF0 } else { 0 },
                     rom_mask: padded.next_power_of_two() - 1,
                     ..Self::empty()
                 };
+                if cart.ram_or != 0 {
+                    for b in cart.ram_buf[..needed].iter_mut() {
+                        *b |= cart.ram_or;
+                    }
+                }
                 cart.reset();
                 return Ok(cart);
             }
@@ -408,7 +425,7 @@ impl<'a> Cart<'a> {
         if self.ram_enabled && self.ram_len != 0 {
             let i = self.ram_index(addr);
             if let Some(b) = self.ram_buf.get_mut(i) {
-                *b = value;
+                *b = value | self.ram_or;
             }
         }
     }
@@ -436,6 +453,20 @@ impl<'a> Cart<'a> {
                 }
                 self.update_banks();
             }
+            Mapper::Mbc2 => {
+                // Pan Docs: MBC2; SameBoy Core/mbc.c (MBC2). Only 0000-3FFF
+                // has registers, and address bit 8 picks one: clear = RAM
+                // enable, set = ROM bank. Both use the low nibble of the value.
+                if addr < 0x4000 {
+                    if addr & 0x100 == 0 {
+                        self.ram_enabled = value & 0x0F == 0x0A;
+                    } else {
+                        // 0 selects 1 (checked on the 4-bit value).
+                        self.bank1 = (value & 0x0F).max(1);
+                    }
+                    self.update_banks();
+                }
+            }
             Mapper::Mbc5 { rumble } => {
                 // Pan Docs: MBC5. Registers decode on address bits 12-14.
                 match addr >> 12 {
@@ -457,6 +488,7 @@ impl<'a> Cart<'a> {
     fn update_banks(&mut self) {
         let (lo, hi, ram) = match self.mapper {
             Mapper::None => (0, 1, 0),
+            Mapper::Mbc2 => (0, usize::from(self.bank1), 0),
             Mapper::Mbc5 { .. } => (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram)),
             Mapper::Mbc1 => {
                 // Mode 1 also applies BANK2 to 0000-3FFF and to RAM (Pan
@@ -605,6 +637,98 @@ mod tests {
         let (_, whole) = cart.into_buffers().unwrap();
         assert_eq!(whole.len(), 0x8000);
         assert_eq!(whole[0x2000], 0x77);
+    }
+
+    fn mbc2_cart<'a>(rom: &'a mut [u8], ram: &'a mut [u8]) -> Cart<'a> {
+        for (i, chunk) in rom.chunks_mut(ROM_BANK).enumerate() {
+            chunk[0x100] = i as u8;
+        }
+        Cart::new(rom, ram).unwrap()
+    }
+
+    fn mbc2_rom() -> std::vec::Vec<u8> {
+        let mut rom = std::vec![0u8; 16 * ROM_BANK];
+        rom[HEADER_CART_TYPE] = 0x06;
+        rom
+    }
+
+    #[test]
+    fn mbc2_register_select_is_address_bit_8() {
+        let mut rom = mbc2_rom();
+        let mut ram = [0u8; 512];
+        let mut c = mbc2_cart(&mut rom, &mut ram);
+        // Bit 8 clear: RAM enable, never the bank, anywhere in 0000-3FFF.
+        c.write_rom(0x0000, 0x0A);
+        assert_eq!(c.read_rom(0x4100), 1);
+        c.write_rom(0x3EFF, 0x05);
+        assert_eq!(c.read_rom(0x4100), 1);
+        assert!(!c.ram_enabled);
+        // Bit 8 set: ROM bank, never RAM enable.
+        c.write_rom(0x2100, 0x0A);
+        assert_eq!(c.read_rom(0x4100), 0x0A);
+        c.write_rom(0x01FF, 0x03);
+        assert_eq!(c.read_rom(0x4100), 3);
+        // 4000-7FFF has no registers.
+        c.write_rom(0x4100, 0x05);
+        c.write_rom(0x6000, 0x0A);
+        assert_eq!(c.read_rom(0x4100), 3);
+        assert!(!c.ram_enabled);
+    }
+
+    #[test]
+    fn mbc2_bank_zero_maps_to_one_and_uses_4_bits() {
+        let mut rom = mbc2_rom();
+        let mut ram = [0u8; 512];
+        let mut c = mbc2_cart(&mut rom, &mut ram);
+        c.write_rom(0x2100, 0x00);
+        assert_eq!(c.read_rom(0x4100), 1);
+        // Upper bits are ignored, and the zero check is on the 4-bit value.
+        c.write_rom(0x2100, 0xF5);
+        assert_eq!(c.read_rom(0x4100), 5);
+        c.write_rom(0x2100, 0x10);
+        assert_eq!(c.read_rom(0x4100), 1);
+        assert_eq!(c.read_rom(0x0100), 0);
+    }
+
+    #[test]
+    fn mbc2_ram_enable_needs_0a_in_low_nibble() {
+        let mut rom = mbc2_rom();
+        let mut ram = [0u8; 512];
+        let mut c = mbc2_cart(&mut rom, &mut ram);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        c.write_rom(0x0000, 0xFA);
+        assert!(c.ram_enabled);
+        c.write_ram(0xA000, 0x05);
+        assert_eq!(c.read_ram(0xA000), 0xF5);
+        c.write_rom(0x0000, 0x0B);
+        assert!(!c.ram_enabled);
+        // Disabled RAM reads 0xFF and ignores writes.
+        c.write_ram(0xA000, 0x01);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        c.write_rom(0x0000, 0x0A);
+        assert_eq!(c.read_ram(0xA000), 0xF5);
+    }
+
+    #[test]
+    fn mbc2_ram_is_nibble_wide_and_echoed() {
+        let mut rom = mbc2_rom();
+        let mut ram = [0u8; 512];
+        ram[7] = 0xA3; // junk upper bits in a loaded save
+        let mut c = mbc2_cart(&mut rom, &mut ram);
+        c.write_rom(0x0000, 0x0A);
+        assert_eq!(c.read_ram(0xA007), 0xF3);
+        c.write_ram(0xA1FF, 0x5C);
+        assert_eq!(c.read_ram(0xA1FF), 0xFC);
+        // Only address bits 0-8 matter: echoed through A000-BFFF.
+        assert_eq!(c.read_ram(0xA3FF), 0xFC);
+        assert_eq!(c.read_ram(0xBFFF), 0xFC);
+        c.write_ram(0xB400, 0x02);
+        assert_eq!(c.read_ram(0xA000), 0xF2);
+        // The save buffer holds the byte as read (upper nibble 1s).
+        assert_eq!(c.ram()[0x1FF], 0xFC);
+        assert_eq!(c.ram()[0], 0xF2);
+        // A save loaded with 0 upper nibbles reads as 1s too.
+        assert_eq!(c.ram()[100], 0xF0);
     }
 
     #[test]
