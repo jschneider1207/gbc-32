@@ -31,7 +31,12 @@ Implemented in commit 17db555.
 ## Alternatives considered
 - Fetching (and sorting) objects by OAM index: rejected, since it would
   change the X-ordered mode-3 stalls that the timing already models.
-- A rank buffer in `Renderer`: rejected for the `Hw` size assert above.
+- A rank buffer in `Renderer`: rejected for the `Hw` size assert above
+  (`Hw` would be 1,008 B against the 864 B assert).
+- Calling `fetch_object` once per object (the first version): cgb-acid2
+  +4.21% x86 Ir, over the 3% bench gate. One out-of-line `fetch_objects`
+  call per span, with the rank compare only on overlap, replaced it
+  (implementing agent's measurement, session 07; not in the commit body).
 
 ## Consequences
 - cgb-acid2 passes; cgb-acid-hell goes from 23 to 2 differing pixels.
