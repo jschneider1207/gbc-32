@@ -33,6 +33,20 @@ const HASHES: &str = include_str!("../sm83-v1.sha256");
 /// Set to 1 to fail instead of skipping when the data is missing.
 const REQUIRE_ENV: &str = "GBC_REQUIRE_TEST_DATA";
 
+/// STOP (opcode 10) is two bytes on hardware when no interrupt is pending
+/// (IE & IF & 1F = 0): its second byte is read before the pause (SameBoy
+/// `Core/sm83_cpu.c` `stop()`, which encodes the Pan Docs "Using the STOP
+/// instruction" flowchart). SingleStepTests expects one byte in every case.
+/// The human's decision (2026-11-22, docs/STATUS.md; ADR 0020): keep the 10
+/// cases with an interrupt pending (where one byte is right) and skip only
+/// those with nothing pending; core unit tests cover those. IE and IF come
+/// from each case's flat RAM (FFFF and FF0F; absent means 0). The counts
+/// are pinned so the filter can't silently grow. No 10 case puts FFFF or
+/// FF0F in its RAM, so every case is skipped.
+const STOP_FILE: &str = "10";
+const STOP_KEPT: usize = 0;
+const STOP_SKIPPED: usize = 1000;
+
 /// One M-cycle as listed: address pins, data pins, "r-m" / "-wm" / "---".
 type RawCycle = (Option<u16>, Option<u8>, String);
 
@@ -90,6 +104,9 @@ enum Cycle {
 struct FlatBus {
     mem: Box<[u8; 0x10000]>,
     log: Vec<Cycle>,
+    /// IE and IF read from RAM (FFFF, FF0F): only for the STOP file, whose
+    /// length depends on them (see [`STOP_FILE`]).
+    irq_from_ram: bool,
 }
 
 impl Bus for FlatBus {
@@ -107,10 +124,18 @@ impl Bus for FlatBus {
     }
     // No interrupt controller: the suite has flat RAM only.
     fn interrupt_enable(&self) -> u8 {
-        0
+        if self.irq_from_ram {
+            self.mem[0xFFFF]
+        } else {
+            0
+        }
     }
     fn interrupt_flags(&self) -> u8 {
-        0
+        if self.irq_from_ram {
+            self.mem[0xFF0F]
+        } else {
+            0
+        }
     }
     fn set_interrupt_flags(&mut self, _: u8) {}
 }
@@ -179,6 +204,8 @@ fn run_case(case: &Case, bus: &mut FlatBus) -> (Option<String>, Option<String>) 
 struct FileResult {
     name: String,
     cases: usize,
+    /// Cases not run ([`STOP_FILE`] only).
+    skipped: usize,
     state_failures: usize,
     cycle_failures: usize,
     first_failure: Option<String>,
@@ -216,18 +243,25 @@ fn run_file(path: &Path, want: &str) -> FileResult {
     );
     let cases: Vec<Case> =
         serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let stop = name == STOP_FILE;
     let mut bus = FlatBus {
         mem: vec![0u8; 0x10000].into_boxed_slice().try_into().unwrap(),
         log: Vec::with_capacity(8),
+        irq_from_ram: stop,
     };
     let mut r = FileResult {
         name,
         cases: cases.len(),
+        skipped: 0,
         state_failures: 0,
         cycle_failures: 0,
         first_failure: None,
     };
     for case in &cases {
+        if stop && !stop_pending(case) {
+            r.skipped += 1;
+            continue;
+        }
         let (state, cycles) = run_case(case, &mut bus);
         if state.is_some() {
             r.state_failures += 1;
@@ -241,6 +275,19 @@ fn run_file(path: &Path, want: &str) -> FileResult {
         }
     }
     r
+}
+
+/// Whether a STOP case starts with an interrupt pending: IE & IF & 1F != 0,
+/// from its initial RAM (see [`STOP_FILE`]).
+fn stop_pending(case: &Case) -> bool {
+    let at = |addr| {
+        case.initial
+            .ram
+            .iter()
+            .find(|&&(a, _)| a == addr)
+            .map_or(0, |&(_, v)| v)
+    };
+    at(0xFFFF) & at(0xFF0F) & 0x1F != 0
 }
 
 fn data_dir() -> PathBuf {
@@ -317,7 +364,23 @@ fn sm83_single_step_tests() {
     });
     results.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let cases: usize = results.iter().map(|r| r.cases).sum();
+    // Only STOP cases with nothing pending are skipped, exactly as many as
+    // counted (see [`STOP_FILE`]).
+    for r in &results {
+        let (kept, skipped) = if r.name == STOP_FILE {
+            (STOP_KEPT, STOP_SKIPPED)
+        } else {
+            (r.cases, 0)
+        };
+        assert_eq!(
+            (r.cases - r.skipped, r.skipped),
+            (kept, skipped),
+            "{}: (run, skipped) cases",
+            r.name
+        );
+    }
+
+    let cases: usize = results.iter().map(|r| r.cases - r.skipped).sum();
     let failed: Vec<&FileResult> = results
         .iter()
         .filter(|r| r.state_failures + r.cycle_failures > 0)
@@ -325,8 +388,8 @@ fn sm83_single_step_tests() {
     let state_failures: usize = results.iter().map(|r| r.state_failures).sum();
     let cycle_failures: usize = results.iter().map(|r| r.cycle_failures).sum();
     eprintln!(
-        "SM83 single-step: {} files, {cases} cases; {state_failures} final-state and \
-         {cycle_failures} cycle failures in {} files",
+        "SM83 single-step: {} files, {cases} cases run ({STOP_SKIPPED} STOP cases skipped); \
+         {state_failures} final-state and {cycle_failures} cycle failures in {} files",
         results.len(),
         failed.len()
     );
