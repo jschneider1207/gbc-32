@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use gbc_core::{Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::Serialize;
 
+use crate::gambatte;
 use crate::manifest::{Check, CheckKind, Manifest, Recolor, expand_template, hex_color};
 
-const W: usize = SCREEN_WIDTH;
-const H: usize = SCREEN_HEIGHT;
+pub(crate) const W: usize = SCREEN_WIDTH;
+pub(crate) const H: usize = SCREEN_HEIGHT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,7 +78,127 @@ pub fn not_run(check: &Check, roms_dir: &Path, rom: &str) -> Result<CheckResult,
             return Ok(r);
         }
     }
+    if let Check::Gambatte = check {
+        // A name with no Gambatte CGB rule is a bad manifest even when the
+        // ROM never ran.
+        gambatte_rules(roms_dir, rom)?;
+    }
     Ok(CheckResult::new(check, CheckStatus::Skipped, String::new()))
+}
+
+/// The Gambatte rules (ADR 0018) that apply to a CGB run of `rom`: the
+/// `_out` result from its name, and the sibling reference PNG if one
+/// exists. `Err` (a runner error, exit 2) if the name's `_out` tag is
+/// malformed or neither rule applies: testrunner runs no CGB test for
+/// such a ROM, so the manifest should not select it, and it must never
+/// pass by default.
+fn gambatte_rules(
+    roms_dir: &Path,
+    rom: &str,
+) -> Result<(Option<gambatte::Expect>, Option<String>), String> {
+    let (dir, stem) = dir_and_stem(rom);
+    let out = gambatte::parse_out(stem).map_err(|e| format!("{rom}: {e}"))?;
+    let png = gambatte::png_candidates(dir, stem)
+        .into_iter()
+        .find(|p| roms_dir.join(p).is_file());
+    if out.is_none() && png.is_none() {
+        return Err(format!(
+            "{rom}: no Gambatte CGB rule applies (no cgb04c `_out` result in the name, \
+             no `_cgb04c.png` or `_dmg08_cgb04c.png` reference)"
+        ));
+    }
+    Ok((out, png))
+}
+
+/// `gambatte = true`: every rule that applies must pass. Colors go through
+/// Gambatte's CGB formula, also for DMG games (testrunner's CGB run uses
+/// it for every ROM), and are compared exactly.
+fn gambatte_check(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckResult, String> {
+    let (out, png) = gambatte_rules(ctx.roms_dir, ctx.rom)?;
+    let actual = gambatte::frame_to_gambatte_rgb(ctx.final_frame);
+    let mut details = Vec::new();
+    let mut unsupported = false;
+    let mut mismatched: Option<u64> = None;
+    // The expected image of the first failing comparison, for the failure
+    // PNGs.
+    let mut first_failure: Option<Rgb> = None;
+    match out {
+        Some(gambatte::Expect::Audio(sound)) => {
+            unsupported = true;
+            details.push(format!(
+                "`_outaudio{}` ({}) needs audio output, which the core doesn't have yet",
+                u8::from(sound),
+                if sound { "sound" } else { "silence" }
+            ));
+        }
+        Some(gambatte::Expect::Hex(digits)) => {
+            let expected = gambatte::expected_image(&actual, &digits);
+            let n = count_mismatches(&actual, &expected);
+            if n > 0 {
+                let hex: String = digits.iter().map(|d| format!("{d:X}")).collect();
+                // For triage only (it never changes the status): testrunner
+                // compares the top 5 bits of each channel, so near-black or
+                // near-white digits would pass there (ADR 0018).
+                let top5 = |p: &[u8; 3]| p.map(|c| c & 0xF8);
+                let loose = actual
+                    .data
+                    .iter()
+                    .zip(&expected.data)
+                    .all(|(a, e)| top5(a) == top5(e));
+                details.push(format!(
+                    "screen does not show `{hex}` at the top left: {n} of {} pixels differ{}",
+                    digits.len() * 64,
+                    if loose {
+                        " (colors off; testrunner's 5-bit compare would accept it)"
+                    } else {
+                        ""
+                    }
+                ));
+                first_failure.get_or_insert(expected);
+            }
+            *mismatched.get_or_insert(0) += n;
+        }
+        None => {}
+    }
+    if let Some(reference) = &png {
+        let path = ctx.roms_dir.join(reference);
+        let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        (ctx.verify)(reference, &bytes).map_err(|e| format!("reference {e}"))?;
+        let expected =
+            decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
+        let n = count_mismatches(&actual, &expected);
+        if n > 0 {
+            details.push(if (expected.width, expected.height) != (W, H) {
+                format!(
+                    "{reference} is {}x{}, not {W}x{H}",
+                    expected.width, expected.height
+                )
+            } else {
+                format!("{n} pixels differ from {reference}")
+            });
+            first_failure.get_or_insert(expected);
+        }
+        *mismatched.get_or_insert(0) += n;
+    }
+    let status = if first_failure.is_some() {
+        CheckStatus::Fail
+    } else if unsupported {
+        CheckStatus::Unsupported
+    } else {
+        CheckStatus::Pass
+    };
+    let mut r = CheckResult::new(check, status, details.join("; "));
+    if let Some(expected) = first_failure
+        && let Some((root, actual_rel, diff_rel)) = (ctx.failure_pngs)(index)
+    {
+        write_png(&root.join(&actual_rel), &actual)?;
+        write_png(&root.join(&diff_rel), &diff_image(&actual, &expected))?;
+        r.actual_png = Some(actual_rel);
+        r.diff_png = Some(diff_rel);
+    }
+    r.reference = png;
+    r.mismatched_pixels = mismatched;
+    Ok(r)
 }
 
 /// An 8-bit RGB image, row-major.
@@ -248,12 +369,7 @@ pub fn evaluate(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckResul
             };
             CheckResult::new(check, status(ok), detail)
         }
-        // Not implemented until M5 (docs/plan/stage-1.md).
-        Check::Gambatte => CheckResult::new(
-            check,
-            CheckStatus::Unsupported,
-            "gambatte check not implemented yet".into(),
-        ),
+        Check::Gambatte => gambatte_check(check, index, ctx)?,
         Check::Screenshot(template, recolor) => {
             screenshot(check, template, recolor.as_ref(), index, ctx)?
         }
@@ -507,11 +623,229 @@ mod tests {
         );
     }
 
+    /// Draws `hex` the way a passing Gambatte test does: black digits on
+    /// white from the top-left corner, each cell drawn independently from
+    /// this bitmap description (not from `GLYPHS`, which it checks).
+    fn draw_hex(frame: &mut Frame, hex: &str, dx: usize, dy: usize) {
+        // Each glyph as 7 rows of 7 columns (the cell's top row and left
+        // column are blank); '#' is black.
+        let shapes: [[&str; 7]; 16] = [
+            [
+                "#######", "#.....#", "#.....#", "#.....#", "#.....#", "#.....#", "#######",
+            ],
+            [
+                "...#...", "...#...", "...#...", "...#...", "...#...", "...#...", "...#...",
+            ],
+            [
+                "#######", "......#", "......#", "#######", "#......", "#......", "#######",
+            ],
+            [
+                "#######", "......#", "......#", ".######", "......#", "......#", "#######",
+            ],
+            [
+                "#.....#", "#.....#", "#.....#", "#######", "......#", "......#", "......#",
+            ],
+            [
+                "#######", "#......", "#......", "######.", "......#", "......#", "######.",
+            ],
+            [
+                "#######", "#......", "#......", "#######", "#.....#", "#.....#", "#######",
+            ],
+            [
+                "#######", "......#", ".....#.", "....#..", "...#...", "..#....", "..#....",
+            ],
+            [
+                ".#####.", "#.....#", "#.....#", ".#####.", "#.....#", "#.....#", ".#####.",
+            ],
+            [
+                "#######", "#.....#", "#.....#", "#######", "......#", "......#", "#######",
+            ],
+            [
+                "...#...", ".#...#.", "#.....#", "#######", "#.....#", "#.....#", "#.....#",
+            ],
+            [
+                "######.", "#.....#", "#.....#", "######.", "#.....#", "#.....#", "######.",
+            ],
+            [
+                ".#####.", "#.....#", "#......", "#......", "#......", "#.....#", ".#####.",
+            ],
+            [
+                "######.", "#.....#", "#.....#", "#.....#", "#.....#", "#.....#", "######.",
+            ],
+            [
+                "#######", "#......", "#......", "#######", "#......", "#......", "#######",
+            ],
+            [
+                "#######", "#......", "#......", "#######", "#......", "#......", "#......",
+            ],
+        ];
+        for (i, c) in hex.chars().enumerate() {
+            let shape = &shapes[c.to_digit(16).unwrap() as usize];
+            for (y, row) in shape.iter().enumerate() {
+                for (x, b) in row.bytes().enumerate() {
+                    let p = (dy + 1 + y) * W + dx + i * 8 + 1 + x;
+                    frame[p] = if b == b'#' { 0 } else { 0x7FFF };
+                }
+            }
+        }
+    }
+
+    fn gambatte(rom: &str, frame: &Frame) -> CheckResult {
+        evaluate(&Check::Gambatte, 0, &ctx(Path::new("."), rom, b"", frame)).unwrap()
+    }
+
     #[test]
-    fn gambatte_is_unsupported() {
+    fn gambatte_hex_each_digit() {
+        for (d, c) in "0123456789ABCDEF".chars().enumerate() {
+            let mut f = new_frame();
+            draw_hex(&mut f, &c.to_string(), 0, 0);
+            let rom = format!("x/t_cgb04c_out{c}.gbc");
+            let r = gambatte(&rom, &f);
+            assert_eq!(r.status, CheckStatus::Pass, "{c}: {}", r.detail);
+            assert_eq!(r.mismatched_pixels, Some(0));
+            // Every other digit's name fails against this screen.
+            for (e, o) in "0123456789ABCDEF".chars().enumerate() {
+                if e != d {
+                    let r = gambatte(&format!("x/t_cgb04c_out{o}.gbc"), &f);
+                    assert_eq!(r.status, CheckStatus::Fail, "{c} drawn, {o} expected");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gambatte_hex_multi_digit_and_location() {
+        let mut f = new_frame();
+        draw_hex(&mut f, "9A0F", 0, 0);
+        // Lowercase digits in the name count too.
+        assert_eq!(gambatte("t_out9a0f.gbc", &f).status, CheckStatus::Pass);
+        // Only the named digits are compared: a prefix passes, the rest
+        // of the screen is free.
+        assert_eq!(gambatte("t_out9A.gbc", &f).status, CheckStatus::Pass);
+        let r = gambatte("t_out9A0E.gbc", &f);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.detail.contains("`9A0E`"), "{}", r.detail);
+        assert_eq!(gambatte("t_out9A0F0.gbc", &f).status, CheckStatus::Fail);
+
+        // A blank (white) screen fails.
+        let blank = new_frame();
+        let r = gambatte("t_out0.gbc", &blank);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.mismatched_pixels.unwrap() > 0);
+        // So does a black one.
+        let black: Box<Frame> = vec![0u16; W * H].into_boxed_slice().try_into().unwrap();
+        assert_eq!(gambatte("t_out1.gbc", &black).status, CheckStatus::Fail);
+
+        // The right digits one pixel right or down of where testrunner
+        // looks fail.
+        for (dx, dy) in [(1, 0), (0, 1)] {
+            let mut f = new_frame();
+            draw_hex(&mut f, "3", dx, dy);
+            assert_eq!(gambatte("t_out3.gbc", &f).status, CheckStatus::Fail);
+        }
+        // So do digits drawn in another color than black on white.
+        let mut f = new_frame();
+        draw_hex(&mut f, "3", 0, 0);
+        for p in f.iter_mut().filter(|p| **p == 0) {
+            *p = 0x0001; // near-black
+        }
+        let r = gambatte("t_out3.gbc", &f);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(
+            r.detail.contains("5-bit compare would accept"),
+            "{}",
+            r.detail
+        );
+        let r = gambatte("t_out3.gbc", &new_frame());
+        assert!(!r.detail.contains("5-bit"), "{}", r.detail);
+    }
+
+    #[test]
+    fn gambatte_name_selects_the_cgb04c_result() {
+        let mut f = new_frame();
+        draw_hex(&mut f, "2", 0, 0);
+        // The cgb04c part of names with several device tags.
+        for rom in [
+            "a/t_dmg08_out0_cgb04c_out2.gbc",
+            "a/t_dmg08_cgb04c_out2.gbc",
+            "a/t_cgb04c_out2.gb",
+            "a/t_out2.gbc",
+        ] {
+            assert_eq!(gambatte(rom, &f).status, CheckStatus::Pass, "{rom}");
+        }
+        assert_eq!(
+            gambatte("a/t_dmg08_out2_cgb04c_out0.gbc", &f).status,
+            CheckStatus::Fail
+        );
+    }
+
+    #[test]
+    fn gambatte_audio_is_unsupported() {
         let f = new_frame();
-        let r = evaluate(&Check::Gambatte, 0, &ctx(Path::new("."), "a.gbc", b"", &f)).unwrap();
-        assert_eq!(r.status, CheckStatus::Unsupported);
+        for rom in ["a/t_cgb04c_outaudio0.gbc", "a/t_dmg08_cgb04c_outaudio1.gbc"] {
+            let r = gambatte(rom, &f);
+            assert_eq!(r.status, CheckStatus::Unsupported, "{rom}");
+            assert!(r.detail.contains("audio"), "{}", r.detail);
+            assert_eq!(r.mismatched_pixels, None);
+        }
+    }
+
+    #[test]
+    fn gambatte_without_a_rule_is_a_runner_error() {
+        let f = new_frame();
+        let dir = Path::new(".");
+        for rom in [
+            "a/t.gbc",
+            "a/t_dmg08_out1.gb",
+            "a/t_cgb04c_out.gbc",
+            "a/t_outxyz.gbc",
+        ] {
+            let e = evaluate(&Check::Gambatte, 0, &ctx(dir, rom, b"", &f)).unwrap_err();
+            assert!(e.contains(rom), "{e}");
+            assert!(not_run(&Check::Gambatte, dir, rom).is_err(), "{rom}");
+        }
+        // A ROM that has a rule but never ran is just skipped.
+        let r = not_run(&Check::Gambatte, dir, "a/t_out1.gbc").unwrap();
+        assert_eq!(r.status, CheckStatus::Skipped);
+    }
+
+    #[test]
+    fn gambatte_png_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut frame = new_frame();
+        frame[5] = 0x7C1F; // magenta: R=31, B=31
+        let expected = gambatte::frame_to_gambatte_rgb(&frame);
+        assert_eq!(expected.data[5], [217, 62, 217]);
+        write_ref(dir.path(), "g/t_cgb04c.png", &expected);
+        let c = Check::Gambatte;
+        let r = evaluate(&c, 0, &ctx(dir.path(), "g/t.gbc", b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Pass, "{}", r.detail);
+        assert_eq!(r.reference.as_deref(), Some("g/t_cgb04c.png"));
+        // The plain RGB555 expansion is not Gambatte's colors.
+        let plain = frame_to_rgb(&frame);
+        write_ref(dir.path(), "g/u_cgb04c.png", &plain);
+        let r = evaluate(&c, 0, &ctx(dir.path(), "g/u.gbc", b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Fail);
+        // `_dmg08_cgb04c.png` wins over `_cgb04c.png`.
+        write_ref(dir.path(), "g/u_dmg08_cgb04c.png", &expected);
+        let r = evaluate(&c, 0, &ctx(dir.path(), "g/u.gbc", b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.reference.as_deref(), Some("g/u_dmg08_cgb04c.png"));
+        // One pixel off fails.
+        let mut off = frame.clone();
+        off[100] = 0x7BFF;
+        let r = evaluate(&c, 0, &ctx(dir.path(), "g/t.gbc", b"", &off)).unwrap();
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.mismatched_pixels, Some(1));
+        // A name rule and a PNG both apply: both must pass.
+        write_ref(dir.path(), "g/v_out0_cgb04c.png", &expected);
+        let r = evaluate(&c, 0, &ctx(dir.path(), "g/v_out0.gbc", b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Fail, "blank screen has no 0");
+        // An unlisted PNG is a runner error.
+        let mut cx = ctx(dir.path(), "g/t.gbc", b"", &frame);
+        let none = |p: &str, _: &[u8]| Err(format!("{p} is not listed"));
+        cx.verify = &none;
+        assert!(evaluate(&c, 0, &cx).is_err());
     }
 
     fn write_ref(dir: &Path, rel: &str, img: &Rgb) {

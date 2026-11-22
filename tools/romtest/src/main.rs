@@ -14,6 +14,7 @@ compile_error!(
 mod app;
 mod checks;
 mod cli;
+mod gambatte;
 mod glob;
 mod integrity;
 mod machine;

@@ -82,7 +82,7 @@ checks = [{ serial = "OK" }, { screenshot = "{dir}/{stem}.png" }]
 [[group]]
 id = "g-gambatte"
 tier = "stretch"
-roms = ["t/white.gb"]
+roms = ["t/w_cgb04c_outaudio1.gb"]
 exit = { run_frames = 1 }
 checks = [{ gambatte = true }]
 "#;
@@ -113,6 +113,12 @@ impl Ws {
         ws.write_raw("test-roms/s/fibfail.gb", b"ldbb");
         ws.write_raw("test-roms/s/notes.txt", b"not a ROM");
         ws.write_raw("test-roms/t/white.gb", b"lcd-off serial:OK");
+        ws.write_raw("test-roms/t/w_cgb04c_outaudio1.gb", b"lcd-off serial:OK");
+        ws.write_raw(
+            "test-roms/t/w_cgb04c_outaudio1.png",
+            &encode_png(&img(255)).unwrap(),
+        );
+        ws.write_raw("test-roms/g/noref_cgb04c_outaudio0.gbc", b"lcd-off");
         ws.write_raw("test-roms/t/noref.gbc", b"lcd-off serial:OK");
         ws.write_raw("test-roms/t/noref-fail.gbc", b"lcd-off serial:NO");
         ws.write_raw("test-roms/t/noref-panic.gbc", b"serial:OK panic");
@@ -255,12 +261,13 @@ fn full_run_statuses_outputs_and_exit_code() {
             s("g-shot", "t/noref-panic.gbc", "crash"),
             // Missing PNG, everything else passes: no-reference.
             s("g-shot", "t/noref.gbc", "no-reference"),
+            s("g-shot", "t/w_cgb04c_outaudio1.gb", "pass"),
             s("g-shot", "t/white.gb", "pass"),
-            s("g-gambatte", "t/white.gb", "unsupported"),
+            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "unsupported"),
         ]
     );
     assert!(
-        out.contains("romtest: verified 20 test-roms files"),
+        out.contains("romtest: verified 23 test-roms files"),
         "{out}"
     );
     let json = ws.json();
@@ -341,7 +348,7 @@ fn baseline_create_regress_and_refuse() {
     assert_eq!(b.roms_release, "v7.0");
     assert_eq!(b.status("g-pass", "s/pass1.gb"), Some(Status::Pass));
     assert_eq!(b.status("g-mixed", "s/lock.gb"), Some(Status::Crash));
-    assert_eq!(b.results.values().map(|m| m.len()).sum::<usize>(), 13);
+    assert_eq!(b.results.values().map(|m| m.len()).sum::<usize>(), 14);
 
     // Break a passing ROM: regression, exit 1, printed first.
     ws.write("test-roms/s/pass1.gb", b"ldbb");
@@ -455,7 +462,7 @@ fn baseline_keys_without_a_result() {
             .values()
             .map(|m| m.len())
             .sum::<usize>(),
-        12
+        13
     );
 }
 
@@ -522,13 +529,13 @@ fn gate_passes_on_a_passing_selection() {
 #[test]
 fn filter_selects_every_group_containing_the_path() {
     let ws = Ws::new();
-    let (r, _) = ws.run(&["--filter", "t/white.gb"]);
+    let (r, _) = ws.run(&["--filter", "t/w_cgb04c_outaudio1.gb"]);
     assert_eq!(r, Ok(0));
     assert_eq!(
         ws.statuses(),
         [
-            s("g-shot", "t/white.gb", "pass"),
-            s("g-gambatte", "t/white.gb", "unsupported")
+            s("g-shot", "t/w_cgb04c_outaudio1.gb", "pass"),
+            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "unsupported")
         ]
     );
     ws.run(&["--filter", "s/{pass1,sub/load}.gb", "--group", "g-mixed"])
@@ -555,6 +562,7 @@ fn only_check_evaluates_one_kind() {
             s("g-shot", "t/noref-fail.gbc", "fail"),
             s("g-shot", "t/noref-panic.gbc", "crash"),
             s("g-shot", "t/noref.gbc", "pass"),
+            s("g-shot", "t/w_cgb04c_outaudio1.gb", "pass"),
             s("g-shot", "t/white.gb", "pass"),
         ]
     );
@@ -576,7 +584,10 @@ fn runner_errors() {
     assert!(ws.run(&[]).0.unwrap_err().contains("v6.0"));
     ws.write_raw("test-roms/.version", b"v7.0\n");
 
-    let bad = MANIFEST.replace("roms = [\"t/white.gb\"]", "roms = [\"t/missing.gb\"]");
+    let bad = MANIFEST.replace(
+        "roms = [\"t/w_cgb04c_outaudio1.gb\"]",
+        "roms = [\"t/missing.gb\"]",
+    );
     ws.write("acceptance/m.toml", bad.as_bytes());
     assert!(ws.run(&[]).0.unwrap_err().contains("not found"));
 
@@ -812,7 +823,7 @@ model = "cgb-c"
 [[group]]
 id = "u"
 tier = "must"
-roms = ["t/noref.gbc"]
+roms = ["g/noref_cgb04c_outaudio0.gbc"]
 exit = { run_frames = 1 }
 checks = [{ screenshot = "{dir}/{stem}.png" }, { gambatte = true }]
 "#;
@@ -820,9 +831,35 @@ checks = [{ screenshot = "{dir}/{stem}.png" }, { gambatte = true }]
     let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/u.toml"]);
     assert_eq!(code, 0, "{out}{err}");
     let json = ws.json_of("u");
-    assert_eq!(statuses_of(&json), [s("u", "t/noref.gbc", "unsupported")]);
+    assert_eq!(
+        statuses_of(&json),
+        [s("u", "g/noref_cgb04c_outaudio0.gbc", "unsupported")]
+    );
     assert_eq!(json["results"][0]["checks"][0]["status"], "no-reference");
     assert_eq!(json["summary"]["tiers"]["must"]["unsupported"], 1);
+}
+
+/// A ROM with no Gambatte CGB rule (no cgb04c `_out` result, no reference
+/// PNG) in a `gambatte` group is a bad manifest (exit 2), whether or not
+/// the ROM ran: it must never pass by default.
+#[test]
+fn gambatte_rom_without_a_rule_is_a_runner_error() {
+    let ws = Ws::new();
+    for rom in ["t/white.gb", "s/panic.gb", "g/x_dmg08_out0.gb"] {
+        if rom.starts_with("g/") {
+            ws.write_raw(&format!("test-roms/{rom}"), b"lcd-off");
+            ws.rehash();
+        }
+        let m = format!(
+            "roms_release = \"v7.0\"\nmodel = \"cgb-c\"\n\n[[group]]\nid = \"n\"\n\
+             tier = \"stretch\"\nroms = [\"{rom}\"]\nexit = {{ run_frames = 1 }}\n\
+             checks = [{{ gambatte = true }}]\n"
+        );
+        ws.write("acceptance/n.toml", m.as_bytes());
+        let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/n.toml"]);
+        assert_eq!(code, 2, "{rom}: {out}{err}");
+        assert!(err.contains("no Gambatte CGB rule applies"), "{rom}: {err}");
+    }
 }
 
 const TAMPER_MANIFEST: &str = r#"
