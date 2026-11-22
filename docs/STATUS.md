@@ -49,7 +49,10 @@ Working rules that matter here:
 
 ## Needs human
 
-None open. Decided in session 06 (2026-11-22): the mbc3-tester reference
+None open. Decided in session 07 (2026-11-22): the romtest `gambatte`
+check may re-encode the hex-digit glyphs clean-room (read GPL
+testrunner.cpp for the rules only; own data; ADR 0018). Decided in
+session 06 (2026-11-22): the mbc3-tester reference
 uses a counted, contract-constrained in-memory recolor (ADR 0007
 amendment; a recolor may only relabel a color absent from the reference);
 mbc3-tester `run_frames` 41; ADR 0015 extends ADR 0006 and doesn't
