@@ -78,6 +78,9 @@ pub struct Paths {
     pub baseline: PathBuf,
     /// `acceptance/test-roms.sha256`, next to the manifest.
     pub rom_hashes: PathBuf,
+    /// The manifest's directory (`acceptance/`): committed reference
+    /// overrides are relative to it.
+    pub manifest_dir: PathBuf,
     /// The manifest file name without extension (e.g. `stage1`).
     pub stem: String,
 }
@@ -98,6 +101,7 @@ impl Paths {
             out_dir: root.join("target").join("acceptance"),
             baseline: dir.join("results").join(format!("{stem}.json")),
             rom_hashes: dir.join(integrity::FILE_NAME),
+            manifest_dir: dir.to_path_buf(),
             stem,
         })
     }
@@ -143,6 +147,9 @@ pub fn run(
         resolved.iter().flatten().map(String::as_str),
         n_jobs,
     )?;
+    // Committed reference overrides are pinned in the manifest itself.
+    integrity::verify_pinned(&paths.manifest_dir, &manifest)
+        .map_err(|e| format!("checking committed references before running: {e}"))?;
     let hash_time = hash_start.elapsed();
 
     let baseline = match load_baseline(&paths.baseline)? {
@@ -537,6 +544,7 @@ fn run_job(
         };
         let ctx = Ctx {
             roms_dir: &paths.roms_dir,
+            manifest_dir: &paths.manifest_dir,
             rom: &job.rom,
             serial: &st.serial,
             registers: st.registers,

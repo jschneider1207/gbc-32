@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use gbc_core::{Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::Serialize;
 
+use crate::integrity::{self, Sha256Hash};
 use crate::manifest::{Check, CheckKind, expand_template};
 
 const W: usize = SCREEN_WIDTH;
@@ -202,6 +203,9 @@ pub type VerifyFn<'a> = dyn Fn(&str, &[u8]) -> Result<(), String> + 'a;
 /// Everything a check needs about one ROM run.
 pub struct Ctx<'a> {
     pub roms_dir: &'a Path,
+    /// The manifest's directory: committed reference overrides
+    /// (`Check::PinnedScreenshot`) are relative to it.
+    pub manifest_dir: &'a Path,
     /// The ROM path relative to `roms_dir`.
     pub rom: &'a str,
     pub serial: &'a [u8],
@@ -255,6 +259,9 @@ pub fn evaluate(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckResul
             "gambatte check not implemented yet".into(),
         ),
         Check::Screenshot(template) => screenshot(check, template, index, ctx)?,
+        Check::PinnedScreenshot { path, sha256 } => {
+            pinned_screenshot(check, path, sha256, index, ctx)?
+        }
     })
 }
 
@@ -295,35 +302,64 @@ fn screenshot(
         Err(e) => return Err(format!("reading {}: {e}", path.display())),
         Ok(bytes) => {
             (ctx.verify)(&reference, &bytes).map_err(|e| format!("reference {e}"))?;
-            let expected =
-                decode_png(&bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
-            let actual = frame_to_rgb(ctx.final_frame);
-            let mismatched = count_mismatches(&actual, &expected);
-            let mut r = if mismatched == 0 {
-                CheckResult::new(check, CheckStatus::Pass, String::new())
-            } else {
-                let mut detail = format!("{mismatched} pixels differ");
-                if (expected.width, expected.height) != (W, H) {
-                    detail = format!(
-                        "reference is {}x{}, not {W}x{H}",
-                        expected.width, expected.height
-                    );
-                }
-                let mut r = CheckResult::new(check, CheckStatus::Fail, detail);
-                if let Some((root, actual_rel, diff_rel)) = (ctx.failure_pngs)(index) {
-                    write_png(&root.join(&actual_rel), &actual)?;
-                    write_png(&root.join(&diff_rel), &diff_image(&actual, &expected))?;
-                    r.actual_png = Some(actual_rel);
-                    r.diff_png = Some(diff_rel);
-                }
-                r
-            };
-            r.mismatched_pixels = Some(mismatched);
-            r
+            compare(check, index, ctx, &bytes, &path)?
         }
     };
     result.reference = Some(reference);
     Ok(result)
+}
+
+/// A committed reference override: read from the manifest's directory and
+/// checked against its pinned SHA-256. Missing or altered is `Err` (a
+/// runner error), never `no-reference`, and `test-roms/` is never read.
+fn pinned_screenshot(
+    check: &Check,
+    rel: &str,
+    sha256: &Sha256Hash,
+    index: usize,
+    ctx: &Ctx<'_>,
+) -> Result<CheckResult, String> {
+    let path = ctx.manifest_dir.join(rel);
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("reading committed reference {}: {e}", path.display()))?;
+    integrity::check_pinned(rel, &bytes, sha256)?;
+    let mut result = compare(check, index, ctx, &bytes, &path)?;
+    result.reference = Some(rel.to_owned());
+    Ok(result)
+}
+
+/// Compares the final frame with verified reference PNG bytes.
+fn compare(
+    check: &Check,
+    index: usize,
+    ctx: &Ctx<'_>,
+    bytes: &[u8],
+    path: &Path,
+) -> Result<CheckResult, String> {
+    let expected = decode_png(bytes).map_err(|e| format!("decoding {}: {e}", path.display()))?;
+    let actual = frame_to_rgb(ctx.final_frame);
+    let mismatched = count_mismatches(&actual, &expected);
+    let mut r = if mismatched == 0 {
+        CheckResult::new(check, CheckStatus::Pass, String::new())
+    } else {
+        let mut detail = format!("{mismatched} pixels differ");
+        if (expected.width, expected.height) != (W, H) {
+            detail = format!(
+                "reference is {}x{}, not {W}x{H}",
+                expected.width, expected.height
+            );
+        }
+        let mut r = CheckResult::new(check, CheckStatus::Fail, detail);
+        if let Some((root, actual_rel, diff_rel)) = (ctx.failure_pngs)(index) {
+            write_png(&root.join(&actual_rel), &actual)?;
+            write_png(&root.join(&diff_rel), &diff_image(&actual, &expected))?;
+            r.actual_png = Some(actual_rel);
+            r.diff_png = Some(diff_rel);
+        }
+        r
+    };
+    r.mismatched_pixels = Some(mismatched);
+    Ok(r)
 }
 
 fn write_png(path: &Path, img: &Rgb) -> Result<(), String> {
@@ -359,6 +395,7 @@ mod tests {
     fn ctx<'a>(roms_dir: &'a Path, rom: &'a str, serial: &'a [u8], frame: &'a Frame) -> Ctx<'a> {
         Ctx {
             roms_dir,
+            manifest_dir: roms_dir,
             rom,
             serial,
             registers: Some(Registers::default()),

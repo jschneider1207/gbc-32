@@ -899,3 +899,86 @@ fn files_changed_after_the_upfront_check_are_caught_at_load() {
         "{e}"
     );
 }
+
+/// Committed reference overrides (acceptance/README.md): read from the
+/// manifest's directory, pinned by SHA-256 in the manifest, never falling
+/// back to `test-roms/`. Missing or altered is a runner error (exit 2).
+#[test]
+fn committed_reference_overrides_are_pinned() {
+    use sha2::{Digest, Sha256};
+    let ws = Ws::new();
+    let white = encode_png(&img(255)).unwrap();
+    let black = encode_png(&img(0)).unwrap();
+    let sha = integrity::to_hex(&Sha256::digest(&white).into());
+    let m = format!(
+        r#"
+roms_release = "v7.0"
+model = "cgb-c"
+
+[[group]]
+id = "pinned"
+tier = "must"
+roms = ["t/white.gb"]
+exit = {{ run_frames = 1 }}
+checks = [{{ screenshot = "references/x/white.png", sha256 = "{sha}" }}]
+"#
+    );
+    ws.write("acceptance/p.toml", m.as_bytes());
+    // A listed upstream file at the same relative path: a runner that fell
+    // back to test-roms/ would find it and pass.
+    ws.write("test-roms/references/x/white.png", &white);
+    let over = "acceptance/references/x/white.png";
+    let go = || ws.main(&["--manifest", "ws:acceptance/p.toml", "--jobs", "1"]);
+
+    // Present and matching: loads and passes.
+    ws.write_raw(over, &white);
+    let (code, out, err) = go();
+    assert_eq!(code, 0, "{out}{err}");
+    let json = ws.json_of("p");
+    assert_eq!(statuses_of(&json), [s("pinned", "t/white.gb", "pass")]);
+    assert_eq!(
+        json["results"][0]["checks"][0]["reference"],
+        "references/x/white.png"
+    );
+
+    // Altered (a valid PNG, but not the pinned bytes): integrity failure.
+    ws.write_raw(over, &black);
+    let (code, out, err) = go();
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(
+        err.contains(
+            "checking committed references before running: committed reference \
+             references/x/white.png has SHA-256"
+        ),
+        "{err}"
+    );
+
+    // Missing: a runner error, not `no-reference` and not the upstream file.
+    std::fs::remove_file(ws.root.join(over)).unwrap();
+    let (code, out, err) = go();
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(
+        err.contains("checking committed references before running: reading committed reference"),
+        "{err}"
+    );
+
+    // Altered after the up-front check, before the check reads it: the
+    // bytes loaded are hashed again.
+    ws.write_raw(over, &white);
+    let path = ws.root.join(over);
+    let tamper = |rom: &[u8], plan: &RunPlan, st: &mut RunState| {
+        std::fs::write(&path, &black).unwrap();
+        fake_backend(rom, plan, st)
+    };
+    let args = Args {
+        manifest: ws.root.join("acceptance/p.toml"),
+        jobs: Some(1),
+        ..Default::default()
+    };
+    let paths = Paths::new(&ws.root, &args.manifest).unwrap();
+    let e = run(&args, &paths, &tamper, &mut Vec::new()).unwrap_err();
+    assert!(
+        e.starts_with("committed reference references/x/white.png has SHA-256"),
+        "{e}"
+    );
+}
