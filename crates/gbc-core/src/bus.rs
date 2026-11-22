@@ -20,7 +20,7 @@
 use crate::apu::StereoSample;
 use crate::cart::Cart;
 use crate::config::Config;
-use crate::cpu::{Bus, INT_MASK};
+use crate::cpu::{Bus, INT_MASK, StopKind};
 use crate::dma::{self, Conflict, OamDma};
 use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
@@ -1020,29 +1020,90 @@ impl Ctx<'_, '_> {
         self.reschedule();
     }
 
-    /// A speed switch during a transfer: the remaining bytes keep their
-    /// M-cycle count at the new M-cycle length `m`, from `now`.
-    /// Unverified on hardware (`docs/reference/oam-dma.md`); the PPU's
-    /// window follows (not synced: unverified anyway).
+    /// A speed switch while the transfer is paused ([`Self::dma_pause`]):
+    /// what is still ahead keeps its M-cycle count at the new M-cycle
+    /// length `m`, around the pause (SameBoy counts the DMA in CPU cycles,
+    /// `dma_cycles`). Unverified on hardware (`docs/reference/oam-dma.md`).
     #[cold]
     #[inline(never)]
-    fn dma_rescale(&mut self, now: u64, old_m: u64, m: u64) {
-        self.dma_sync(now);
+    fn dma_retime(&mut self, m: u64) {
         let d = &mut self.sys.ppu.dma;
-        let k = u64::from(d.copied);
-        // M-cycles from `now` to the access that counts byte `k` (or the end).
-        let left = (d.start + k * old_m).saturating_sub(now) / old_m;
-        let start = (now + left * m).saturating_sub(k * m);
-        if d.block_from > now {
-            d.block_from = start;
+        let p = d.paused;
+        // Clocks from `p` (on the old M-cycle grid, as `p` is) scaled to
+        // the new M-cycle length: halved to double speed, else doubled.
+        let scale = |x: u64| if m == 2 { x >> 1 } else { x << 1 };
+        let at = |t: u64| {
+            if t >= p {
+                p + scale(t - p)
+            } else {
+                p - scale(p - t)
+            }
+        };
+        if d.block_from > p {
+            d.block_from = at(d.block_from);
         }
-        d.start = start;
-        d.end = start + u64::from(dma::LEN) * m;
+        d.start = at(d.start);
+        d.end = d.start + u64::from(dma::LEN) * m;
         d.mcycle = m as u8;
-        let from = d.ppu_from;
-        d.set_ppu_window();
-        d.ppu_from = d.ppu_from.min(from);
-        self.sys.sched.set(EventKind::Dma, d.end);
+    }
+
+    /// The CGB speed switch of a STOP ([`StopKind::Switch`]), after its second
+    /// byte if read; returns whether the CPU waits ([`Bus::speed_switch`]).
+    /// After SameBoy `stop()`
+    /// and `GB_advance_cycles` (MIT; ADR 0019 has the derivation):
+    ///
+    /// - KEY1 bit 0 clears and the speed toggles.
+    /// - Nothing pending: the CPU halts for 0x20008 T-cycles (0x8002
+    ///   M-cycles; `speed_switch_halt_countdown`) by the timer, which keeps
+    ///   running (Pan Docs: FF4D - KEY1). The rest of the machine is frozen
+    ///   for its first 5 T-cycles (`speed_switch_freeze`), so it sees
+    ///   0x8001 M-cycles at the new speed (exact to double speed, one clock
+    ///   long to single speed, where SameBoy itself avoids "odd mode"): the
+    ///   timer runs one M-cycle ahead, which cancels STOP's second byte,
+    ///   whose M-cycle it doesn't count (`timers_run` returns while
+    ///   `stopped`). An interrupt ends the halt early. OAM DMA is paused
+    ///   through it (`GB_dma_run` returns while `halted`), as in HALT.
+    /// - An interrupt pending: no halt; to double speed the next two
+    ///   M-cycles take 6 clocks for the PPU (one more M-cycle here, which
+    ///   the timer doesn't count).
+    /// - IME off: the timer starts 4 T-cycles late (`enter_stop_mode`:
+    ///   `div_cycles = -4`, the DIV reset held).
+    fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
+        self.sys.key1 = 0;
+        let m = 6 - self.hot.mcycle as u64;
+        if self.hot.dma != 0 {
+            self.dma_pause();
+        }
+        let dma_paused = self.sys.ppu.dma.paused != NEVER;
+        if dma_paused {
+            self.dma_retime(m);
+        }
+        self.hot.mcycle = m as i32;
+        let now = self.clock();
+        let mut freeze = if ime { 0 } else { 4 };
+        if pending && m == 2 {
+            freeze += 4;
+        }
+        // T-cycles to clocks at the new speed.
+        self.sys.timer.speed_switch(now, freeze * m / 4);
+        // The M-cycle grid changes, and with it the boundary a scheduled
+        // button change rounds down to (ADR 0012); `schedule_serial`
+        // reschedules the countdown.
+        self.sys.schedule_inputs(m);
+        self.set_timer_deadline();
+        self.schedule_serial();
+        if !pending {
+            self.sys.vdma.switch_end = (now + 0x8000 * m) as u32;
+            if self.sys.vdma.hblank {
+                self.vdma_halt(true);
+            }
+            return true;
+        }
+        if dma_paused {
+            self.dma_resume();
+        }
+        // The CPU idles one M-cycle to double speed.
+        m == 2
     }
 }
 
@@ -1242,35 +1303,49 @@ impl Bus for Ctx<'_, '_> {
         self.done
     }
 
-    fn stop(&mut self) -> bool {
-        // STOP resets DIV (Pan Docs: FF04 - DIV).
+    /// SameBoy `stop()`: a button held on a selected P1 line ends STOP at
+    /// once, with no DIV reset and no speed switch (Pan Docs: "Using the
+    /// STOP instruction"). Otherwise STOP resets DIV (Pan Docs: FF04).
+    fn stop_begin(&mut self) -> StopKind {
+        if p1_lines(self.sys.buttons, self.sys.joyp_select) != 0x0F {
+            return StopKind::Joypad;
+        }
         self.div_reset();
-        if !self.sys.cgb_mode || self.sys.key1 & 0x01 == 0 {
-            return false;
+        if self.sys.cgb_mode && self.sys.key1 & 0x01 != 0 {
+            StopKind::Switch
+        } else {
+            StopKind::Stop
         }
-        // CGB speed switch (Pan Docs: FF4D - KEY1): the armed bit clears,
-        // the speed toggles, and the CPU stops for 2050 M-cycles, during
-        // which DIV does not tick (the timer freezes its counter, and the
-        // overflow window with it). TODO(M5): the exact pause length and
-        // the PPU access freeze during it.
-        self.sys.key1 = 0;
-        if self.hot.dma != 0 {
-            let m = self.hot.mcycle as u64;
-            self.dma_rescale(self.clock(), m, 6 - m);
+    }
+
+    fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
+        Ctx::speed_switch(self, ime, pending)
+    }
+
+    fn speed_switch_over(&self) -> bool {
+        (self.clock() as u32).wrapping_sub(self.sys.vdma.switch_end) as i32 >= 0
+    }
+
+    /// As [`Self::halt_end`], except that the end of the countdown (not an
+    /// interrupt) starts no HDMA block: SameBoy clears `halted` in
+    /// `GB_advance_cycles` without the wake-up's `hdma_on`.
+    fn speed_switch_end(&mut self) {
+        if self.sys.vdma.halted && Bus::speed_switch_over(self) {
+            self.sys.vdma.halted = false;
         }
-        let h = &mut self.hot;
-        h.mcycle = if h.mcycle == 4 { 2 } else { 4 };
-        let (now, pause) = (self.clock(), 2050 * self.hot.mcycle as u64);
-        self.sys.timer.speed_switch(now, pause);
-        // The M-cycle grid changes, and with it the boundary a scheduled
-        // button change rounds down to (ADR 0012); `schedule_serial`
-        // reschedules the countdown.
-        self.sys.schedule_inputs(self.hot.mcycle as u64);
-        self.set_timer_deadline();
-        self.schedule_serial();
-        // The pause: 2050 idle M-cycles.
-        self.idle_mcycles(2050);
-        true
+        self.halt_end();
+    }
+
+    /// The halted skip ([`Self::idle_halted`]), stopping at the halt's
+    /// last M-cycle.
+    fn idle_speed_switch(&mut self) {
+        let m = self.hot.mcycle as u32;
+        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock() as u32) / m;
+        let n = self.mcycles_to_deadline().min(left);
+        self.hot.budget -= (n * m) as i32;
+        if self.hot.budget <= 0 {
+            self.boundary();
+        }
     }
 
     /// The halted skip (ADR 0011): nothing but a deadline can change IE &

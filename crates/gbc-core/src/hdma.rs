@@ -57,6 +57,13 @@ pub(crate) struct VramDma {
     /// HALT began outside mode 0 (`allow_hdma_on_wake`): waking up in
     /// mode 0 starts a block.
     pub(crate) wake_ok: bool,
+    /// Not VRAM DMA state: during the CGB speed-switch halt
+    /// (`Ctx::speed_switch`), the low 32 bits of the clock at which its
+    /// last M-cycle (the wake-up) starts; the halt is far shorter than
+    /// 2^31 clocks, so a wrapping compare is exact. Stale otherwise. Here
+    /// because it fits this struct's padding (the `Hw` size budget), next
+    /// to the other HALT state.
+    pub(crate) switch_end: u32,
     /// The mode-0 start clock of the last line whose HBlank trigger was
     /// scheduled or passed, so each line starts at most one block.
     pub(crate) line: u64,
@@ -72,6 +79,7 @@ impl VramDma {
             pending: false,
             halted: false,
             wake_ok: false,
+            switch_end: 0,
             line: crate::schedule::NEVER,
         }
     }

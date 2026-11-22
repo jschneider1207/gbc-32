@@ -1359,6 +1359,25 @@ mod tests {
     }
 
     #[test]
+    fn run_calls_match_single_steps_through_speed_switch_halts() {
+        run_calls_match_single_steps(
+            &[
+                0x3E, 0x05, 0xE0, 0x07, // LD A,05; LDH (07),A: TIMA at 262144 Hz
+                0x3E, 0x04, 0xE0, 0xFF, // LD A,04; LDH (FF),A: IE = timer
+                0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A: arm the speed switch
+                0x10, 0x00, // STOP 00: double speed, a halt the timer IRQ ends
+                0xAF, 0xE0, 0x0F, 0xE0, 0xFF, // XOR A; LDH (0F),A; LDH (FF),A
+                0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A
+                0x10, 0x00, // STOP 00: normal speed, the whole halt
+                0x04, 0x40, // INC B; LD B,B
+                0x18, 0xFC, // JR -4 (back to INC B)
+            ],
+            4 * u64::from(FRAME_CLOCKS) + 4321,
+            Events::FRAME_READY | Events::LD_B_B,
+        );
+    }
+
+    #[test]
     fn run_calls_match_single_steps_with_halt_and_lcd_writes() {
         run_calls_match_single_steps(
             &[
@@ -1414,8 +1433,17 @@ mod tests {
         fn event(&mut self, event: Events) {
             self.0.event(event);
         }
-        fn stop(&mut self) -> bool {
-            self.0.stop()
+        fn stop_begin(&mut self) -> cpu::StopKind {
+            self.0.stop_begin()
+        }
+        fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
+            cpu::Bus::speed_switch(self.0, ime, pending)
+        }
+        fn speed_switch_over(&self) -> bool {
+            self.0.speed_switch_over()
+        }
+        fn speed_switch_end(&mut self) {
+            self.0.speed_switch_end();
         }
         fn stop_wakeup(&self) -> bool {
             self.0.stop_wakeup()
@@ -1592,47 +1620,137 @@ mod tests {
         }
     }
 
-    #[test]
-    fn speed_switch_pause_is_unchanged() {
-        // LD A,01; LDH (4D),A; STOP (to double speed), the same again (back
-        // to single speed), then LD B,B.
-        let program = [
-            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40,
-        ];
-        // By single steps: each STOP step is its fetch plus the pause.
-        let emu = with_program(&program, 0x80);
-        let mut fb = frame();
-        let mut seen = vec![];
-        for _ in 0..7 {
-            let r = emu.step(&mut fb, &mut []);
-            seen.push((
-                r.clocks,
-                emu.clock(),
-                emu.peek(0xFF04),
-                emu.peek(0xFF41),
-                emu.peek(0xFF44),
-            ));
+    /// Runs `emu` to its next LD B,B; returns the clock, PC and the low 16
+    /// bits of the system counter (DIV is bits 8-15) there.
+    fn to_ld_b_b(emu: &mut Emulator) -> (u64, u16, u64) {
+        emu.set_stop_events(Events::LD_B_B);
+        let start = emu.clock();
+        // Frame-ready also ends a run call.
+        while !emu
+            .run_cycles(1000, &mut frame(), &mut [])
+            .events
+            .contains(Events::LD_B_B)
+        {
+            assert!(emu.clock() - start < 300_000);
         }
-        // DIV is 26 after boot (`timer::POST_BOOT_COUNTER`) until STOP
-        // resets it. The PPU starts in VBlank (`ppu::POST_BOOT_POS`): line
-        // 144 (STAT 81), then line 153 with LY reading 0 = LYC (85) after
-        // the first pause, then line 17 in mode 3 (83) after the second.
-        assert_eq!(
-            seen,
-            [
-                (8, 8, 0x26, 0x81, 144),
-                (12, 20, 0x26, 0x81, 144),
-                (4104, 4124, 0, 0x85, 0),
-                (2, 4126, 0, 0x85, 0),
-                (4, 4130, 0, 0x85, 0),
-                (6, 4136, 0, 0x85, 0),
-                (8202, 12338, 0, 0x83, 17),
-            ]
-        );
-        // A run target in the middle of a pause ends the call after it.
+        let now = emu.clock();
+        (now, emu.hw.cpu.regs.pc, emu.hw.sys.timer.sc(now) & 0xFFFF)
+    }
+
+    #[test]
+    fn speed_switch_halts_0x8002_mcycles_with_the_timer_running() {
+        // LD A,01; LDH (4D),A; STOP 00 (to double speed); LD B,B; LDH
+        // (4D),A; STOP 00 (back to normal speed); LD B,B. IE = 0, IME off.
+        let program = [
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0xE0, 0x4D, 0x10, 0x00, 0x40,
+        ];
         let emu = with_program(&program, 0x80);
-        let r = emu.run_until(emu.clock() + 100, &mut fb, &mut []);
-        assert_eq!((r.clocks, emu.clock()), (4124, 4124));
+        // SameBoy `stop()`: STOP's fetch (20-24, DIV reset at its end),
+        // its second byte (24-28), then the switch. The halt is 0x20008
+        // T-cycles (0x8002 M-cycles) by the timer; the PPU is frozen for
+        // the first 5 (`speed_switch_freeze`), so it sees 0x8001
+        // double-speed M-cycles (the last the wake-up), then LD B,B's
+        // fetch. The timer counts 0x20008 T-cycles from the DIV reset to
+        // the end of LD B,B: none for the second byte (`timers_run`
+        // returns while `stopped`), 4 fewer for the held DIV reset (IME
+        // off: `div_cycles = -4`), 4 more for LD B,B.
+        assert_eq!(to_ld_b_b(emu), (28 + 0x8001 * 2 + 2, 0x107, 0x0008));
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.peek(0xFF4D) & 0x81, 0x80, "double speed, disarmed");
+        // Back: LDH (6 clocks), STOP's two M-cycles (4), the halt (0x8001
+        // normal-speed M-cycles: SameBoy's 5 frozen T-cycles cost the PPU
+        // a whole M-cycle here, one clock more than SameBoy), LD B,B (4).
+        let back = 65568 + 10 + 0x8001 * 4 + 4;
+        assert_eq!(to_ld_b_b(emu), (back, 0x10C, 0x0008));
+        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+    }
+
+    #[test]
+    fn speed_switch_with_ime_on_does_not_hold_the_div_reset() {
+        // EI first: the same switch as above, one M-cycle later, and the
+        // timer is 4 T-cycles further on (no `div_cycles = -4`).
+        let program = [0xFB, 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40];
+        let emu = with_program(&program, 0x80);
+        assert_eq!(to_ld_b_b(emu), (32 + 0x8001 * 2 + 2, 0x108, 0x000C));
+    }
+
+    #[test]
+    fn speed_switch_with_an_interrupt_pending_does_not_halt() {
+        // LD A,01; LDH (FF),A; LDH (0F),A (IE = IF = VBlank, IME off);
+        // LDH (4D),A; STOP; LD B,B. STOP is one byte (its "second byte"
+        // runs as the next opcode) and no halt follows (SameBoy `stop()`).
+        // To double speed the PPU sees the next two M-cycles take 6 clocks
+        // (`speed_switch_countdown = 6`, `speed_switch_freeze = 1`): one
+        // M-cycle more here, which the timer doesn't count.
+        let program = [0x3E, 0x01, 0xE0, 0xFF, 0xE0, 0x0F, 0xE0, 0x4D, 0x10, 0x40];
+        let emu = with_program(&program, 0x80);
+        // STOP's fetch ends at 48 (DIV reset), then the idle M-cycle and
+        // LD B,B. The timer: the 4 T-cycles of LD B,B, less the held reset.
+        assert_eq!(to_ld_b_b(emu), (48 + 2 + 2, 0x10A, 0));
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+    }
+
+    #[test]
+    fn speed_switch_halt_ends_early_on_an_interrupt() {
+        // TAC = 05 (TIMA every 16 T-cycles), IE = timer, IME off; then
+        // the switch to double speed. TIMA overflows 256 increments after
+        // the DIV reset, about 0x1000 T-cycles: an interrupt wakes the halt
+        // as it wakes HALT (SameBoy `GB_cpu_run` clears the countdown).
+        let program = [
+            0x3E, 0x05, 0xE0, 0x07, 0x3E, 0x04, 0xE0, 0xFF, 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00,
+            0x40,
+        ];
+        let emu = with_program(&program, 0x80);
+        let (now, pc, _) = to_ld_b_b(emu);
+        assert_eq!(pc, 0x10F);
+        assert!((2000..2200).contains(&now), "{now}");
+        assert_eq!(emu.peek(0xFF0F) & 0x04, 0x04);
+    }
+
+    #[test]
+    fn stop_with_a_button_held_neither_switches_nor_resets_div() {
+        // P1 selects both groups and A is held: STOP (KEY1 armed) is a
+        // HALT with nothing pending: no DIV reset, no speed switch (SameBoy
+        // `stop()`: `exit_by_joyp`; Pan Docs: "Using the STOP
+        // instruction"). Its second byte is still read.
+        let program = [0xAF, 0xE0, 0x00, 0x3C, 0xE0, 0x4D, 0x10, 0x00, 0x40];
+        let emu = with_program(&program, 0x80);
+        emu.set_buttons(Buttons::A);
+        emu.set_stop_events(Events::LD_B_B);
+        let r = emu.run_cycles(20_000, &mut frame(), &mut []);
+        assert!(r.events.is_empty() && emu.hw.cpu.halted());
+        assert_eq!(emu.hw.cpu.regs.pc, 0x108);
+        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.peek(0xFF4D) & 0x81, 0x01, "still armed");
+        // DIV ran on from its post-boot value through the STOP.
+        let now = emu.clock();
+        assert_eq!(emu.hw.sys.timer.sc(now), timer::POST_BOOT_COUNTER + now);
+    }
+
+    #[test]
+    fn speed_switch_halt_pauses_oam_dma() {
+        // A transfer from C000 starts, then the switch to double speed
+        // with nothing pending: the DMA pauses for the halt (SameBoy
+        // `GB_dma_run` returns while `halted`), and what was left takes
+        // the same M-cycle count at double speed after it.
+        let emu = with_program(&[], 0x80);
+        write_reg(emu, 0xFF46, 0xC0);
+        let mut fb = frame();
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        cpu::Bus::idle(&mut ctx);
+        let (now, end) = (ctx.clock(), ctx.sys.ppu.dma.end);
+        assert!(end > now + 4);
+        assert!(cpu::Bus::speed_switch(&mut ctx, false, false));
+        assert_eq!(ctx.sys.ppu.dma.paused, now);
+        while !cpu::Bus::speed_switch_over(&ctx) {
+            cpu::Bus::idle_speed_switch(&mut ctx);
+        }
+        let wake = ctx.clock();
+        assert_eq!(wake, now + 0x8000 * 2);
+        cpu::Bus::speed_switch_end(&mut ctx);
+        assert_eq!(ctx.sys.ppu.dma.paused, schedule::NEVER);
+        assert_eq!(ctx.sys.ppu.dma.end, wake + (end - now) / 2);
     }
 
     #[test]
@@ -1819,7 +1937,10 @@ mod tests {
     }
 
     fn run_to(emu: &mut Emulator, target: u64) {
-        let _ = emu.run_until(target, &mut frame(), &mut []);
+        // Frame-ready also ends a run call.
+        while emu.clock() < target {
+            let _ = emu.run_until(target, &mut frame(), &mut []);
+        }
         assert_eq!(emu.clock(), target, "NOP ROM: runs end at the target");
     }
 
@@ -1843,11 +1964,12 @@ mod tests {
 
     #[test]
     fn scheduled_input_rounds_down_on_the_grid_after_a_speed_switch() {
-        // LD A,01; LDH (4D),A; STOP (to double speed); LD B,B; NOP;
-        // LDH (4D),A; STOP (back to normal speed); NOPs. An odd number of
-        // double-speed M-cycles leaves the normal-speed grid at 2 mod 4.
+        // LD A,01; LDH (4D),A; STOP 00 (to double speed); LD B,B; LDH
+        // (4D),A; STOP 00 (back to normal speed); NOPs. The first halt
+        // ends at 2 mod 4 and an even number of double-speed M-cycles
+        // follow, so the normal-speed grid is at 2 mod 4.
         let program = [
-            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0x00, 0xE0, 0x4D, 0x10, 0x00,
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0xE0, 0x4D, 0x10, 0x00,
         ];
         let emu = with_program(&program, 0x80);
         emu.set_stop_events(Events::LD_B_B);
@@ -1888,7 +2010,8 @@ mod tests {
             clocks[i] = emu.clock();
             // The stopped step's check after its idle M-cycle ending at d
             // sees the press; then the 00 after STOP (one byte here, a
-            // stub until M5) runs as a NOP, then LD B,B's fetch.
+            // stub until the STOP-accuracy task) runs as a NOP, then LD
+            // B,B's fetch.
             assert_eq!(emu.clock(), d + 8);
         }
         assert_eq!(clocks[0], clocks[1]);
@@ -2026,15 +2149,15 @@ mod tests {
     /// runs past the switch. Returns IF bit 4 and the P1 lines.
     fn across_switch_to_normal(changes: &[(u64, Buttons)]) -> (u8, u8) {
         let program = [
-            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0x00, 0xE0, 0x4D, 0x10, 0x00,
+            0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0xE0, 0x4D, 0x10, 0x00,
         ];
         let emu = with_program(&program, 0x80);
         emu.set_stop_events(Events::LD_B_B);
         let r = emu.run_cycles(100_000, &mut frame(), &mut []);
         assert_eq!(r.events, Events::LD_B_B);
-        // NOP (2 clocks), LDH (6), STOP's fetch (2), then the switch. T is
+        // LDH (6 clocks), STOP's two M-cycles (4), then the switch. T is
         // 2 mod 4: the normal-speed grid after it is too.
-        const T: u64 = 4138;
+        const T: u64 = 65578;
         assert_eq!(emu.clock(), T - 10);
         emu.set_stop_events(Events::EMPTY);
         for &(dt, buttons) in changes {
@@ -2050,8 +2173,8 @@ mod tests {
     #[test]
     fn scheduled_input_inside_the_speed_switch_pause_lands_on_its_mcycle() {
         // Each change lands on its own boundary on the new grid inside
-        // the 8200-clock pause (the pause idles a deadline at a time), not
-        // after the pause: a press and a release 2000 clocks apart raise
+        // the speed-switch halt (it idles a deadline at a time), not
+        // after it: a press and a release 2000 clocks apart raise
         // the joypad interrupt.
         let (a, none) = (Buttons::A, Buttons::EMPTY);
         assert_eq!(
@@ -2084,8 +2207,8 @@ mod tests {
 
     #[test]
     fn scheduled_input_lands_on_the_double_speed_grid() {
-        // LD A,01; LDH (4D),A; STOP (to double speed at clock 24, after
-        // the pause at 4124); NOPs. A change scheduled in normal speed
+        // LD A,01; LDH (4D),A; STOP 00 (to double speed at clock 28,
+        // after the halt); NOPs. A change scheduled in normal speed
         // lands on the double-speed grid (24 + 2k).
         let program = [0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00];
         let emu = with_program(&program, 0x80);

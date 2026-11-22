@@ -139,10 +139,33 @@ pub trait Bus {
     fn event(&mut self, event: Events) {
         let _ = event;
     }
-    /// STOP was executed. Returns true if it was a CGB speed switch, after
-    /// which the CPU keeps running; otherwise the CPU stops.
-    fn stop(&mut self) -> bool {
+    /// STOP was executed, at the end of its fetch M-cycle. Free: the
+    /// emulator resets DIV here unless the result is [`StopKind::Joypad`].
+    fn stop_begin(&mut self) -> StopKind {
+        StopKind::Stop
+    }
+    /// The CGB speed switch of a [`StopKind::Switch`], after STOP's second
+    /// byte (if read). `ime`: IME at the STOP; `pending`: IE & IF was
+    /// nonzero at it. Returns true if the CPU waits: without `pending`, it
+    /// halts until [`Bus::speed_switch_over`] or an interrupt; with it,
+    /// it idles one M-cycle. Free.
+    fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
+        let _ = (ime, pending);
         false
+    }
+    /// Whether the speed-switch halt has run its length (free).
+    fn speed_switch_over(&self) -> bool {
+        true
+    }
+    /// The speed-switch halt ends (its countdown or an interrupt), in place
+    /// of [`Bus::halt_end`].
+    fn speed_switch_end(&mut self) {
+        self.halt_end();
+    }
+    /// Idles a CPU in the speed-switch halt, like [`Bus::idle_halted`]
+    /// but never past the halt's end.
+    fn idle_speed_switch(&mut self) {
+        self.idle();
     }
     /// Whether a stopped CPU wakes up (a button is pressed).
     fn stop_wakeup(&self) -> bool {
@@ -155,6 +178,19 @@ pub trait Bus {
     }
 }
 
+/// What STOP does, decided at its first M-cycle ([`Bus::stop_begin`];
+/// SameBoy `stop()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopKind {
+    /// STOP mode: DIV reset, the CPU stops until a button is pressed.
+    Stop,
+    /// A CGB speed switch (KEY1 armed, no button held): DIV reset.
+    Switch,
+    /// A button held on a selected P1 line: no DIV reset, no STOP mode
+    /// and no speed switch; with nothing pending the CPU halts.
+    Joypad,
+}
+
 /// What the CPU does on its next step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -162,6 +198,10 @@ enum Mode {
     Running,
     /// HALT: idles until an interrupt is pending (IE & IF != 0).
     Halted,
+    /// The halt after a CGB speed switch: as `Halted`, but it also ends
+    /// when [`Bus::speed_switch_over`] (SameBoy
+    /// `speed_switch_halt_countdown`).
+    SpeedSwitch,
     /// The HALT bug: the next opcode fetch doesn't increment PC, so the
     /// byte after HALT is read twice (Pan Docs: halt, "Halt bug").
     HaltBug,
@@ -318,20 +358,35 @@ impl Cpu {
     fn step_not_running<B: Bus>(&mut self, bus: &mut B) -> Option<u16> {
         match self.mode {
             Mode::Running => Some(1),
-            Mode::Halted => {
+            Mode::Halted | Mode::SpeedSwitch => {
                 // Any pending interrupt ends HALT, even with IME off (then
                 // execution just continues after HALT). On CGB the wake-up
                 // costs one more idle M-cycle before the dispatch (IME on)
                 // or the next fetch (IME off): SameBoy `GB_cpu_run` samples
                 // IE & IF, then advances 4 clocks while halted, then takes
                 // either branch. See docs/reference/halt.md.
-                if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
-                    bus.halt_end();
+                //
+                // The speed-switch halt is a HALT (SameBoy `halted`) that
+                // its countdown also ends ([`Bus::speed_switch_over`]),
+                // with the same wake-up M-cycle, then the fetch.
+                let switch = self.mode == Mode::SpeedSwitch;
+                if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0
+                    || (switch && bus.speed_switch_over())
+                {
+                    if switch {
+                        bus.speed_switch_end();
+                    } else {
+                        bus.halt_end();
+                    }
                     bus.idle();
                     self.mode = Mode::Running;
                     Some(1)
                 } else {
-                    bus.idle_halted();
+                    if switch {
+                        bus.idle_speed_switch();
+                    } else {
+                        bus.idle_halted();
+                    }
                     None
                 }
             }
@@ -416,12 +471,52 @@ impl Cpu {
         }
     }
 
-    /// STOP (opcode 10). With a CGB speed switch armed (KEY1 bit 0), the
-    /// bus switches speed and execution continues. Otherwise a stub until
-    /// M5: the CPU idles until a button is pressed.
+    /// STOP (opcode 10), after SameBoy `stop()` (Pan Docs: "Using the
+    /// STOP instruction"). With nothing pending (IE & IF = 0) STOP is two
+    /// bytes: its second byte is read (one M-cycle) before the speed switch
+    /// or the halt. With an interrupt pending it is one byte, and the
+    /// second byte runs as the next opcode.
+    ///
+    /// - A button held on a selected P1 line: no DIV reset; with nothing
+    ///   pending the CPU halts (a plain HALT), else it just continues.
+    /// - KEY1 armed (CGB): the speed switch, then, with nothing pending,
+    ///   the speed-switch halt ([`Mode::SpeedSwitch`]).
+    /// - Otherwise STOP mode: a one-byte stub until the STOP-accuracy task
+    ///   (the CPU idles until a button is pressed). That task brings the
+    ///   two-byte rule here too; SingleStepTests expects one byte.
+    ///
+    /// Cold and out of line: it keeps `Cpu::run` small.
+    #[cold]
+    #[inline(never)]
     fn stop<B: Bus>(&mut self, bus: &mut B) {
-        if !bus.stop() {
+        let pending = bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0;
+        let kind = bus.stop_begin();
+        if kind == StopKind::Stop {
             self.mode = Mode::Stopped;
+            return;
+        }
+        if !pending {
+            let pc = self.regs.pc;
+            bus.read(pc);
+            self.regs.pc = pc.wrapping_add(1);
+        }
+        match kind {
+            StopKind::Stop => {}
+            StopKind::Switch => {
+                if bus.speed_switch(self.ime, pending) {
+                    if pending {
+                        bus.idle();
+                    } else {
+                        self.mode = Mode::SpeedSwitch;
+                    }
+                }
+            }
+            StopKind::Joypad => {
+                if !pending {
+                    self.mode = Mode::Halted;
+                    bus.halt_begin();
+                }
+            }
         }
     }
 

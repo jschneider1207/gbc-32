@@ -310,11 +310,11 @@ impl Timer {
         old
     }
 
-    /// A CGB speed switch at `now`, right after STOP's DIV reset: the
-    /// counter (and the overflow window, which the eager model advanced
-    /// only in M-cycle ticks) stays frozen for `pause` base clocks, then
-    /// runs at the other speed.
+    /// A CGB speed switch at `now`: the counter (and the overflow window,
+    /// which the eager model advanced only in M-cycle ticks) stays frozen
+    /// for `pause` base clocks (0 for none), then runs at the other speed.
     pub(crate) fn speed_switch(&mut self, now: u64, pause: u64) {
+        self.base = self.sc(now);
         self.shift ^= 1;
         self.base_clock = now + pause;
         if self.in_cycle_a(now) {

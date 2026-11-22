@@ -66,14 +66,17 @@ mod tests {
             }
         }
 
-        /// STOP: DIV reset, then (if `switch`) the speed switch, whose pause
-        /// doesn't tick the timer.
+        /// STOP: DIV reset, then (if `switch`) the speed switch with an
+        /// interrupt pending and IME on: to double speed, one M-cycle that
+        /// doesn't tick the timer (`Ctx::speed_switch`).
         fn stop(&mut self, switch: bool) {
             let fell = self.timer.write_div();
             self.clock_serial(fell);
             if switch {
                 self.mcycle = if self.mcycle == 4 { 2 } else { 4 };
-                self.clock += 2050 * self.mcycle;
+                if self.mcycle == 2 {
+                    self.clock += self.mcycle;
+                }
             }
         }
 
@@ -236,7 +239,13 @@ mod tests {
                 if switch { "+switch" } else { "" }
             );
             self.ctx.sys.key1 = u8::from(switch);
-            assert_eq!(self.ctx.stop(), switch);
+            let kind = crate::cpu::Bus::stop_begin(&mut self.ctx);
+            assert_eq!(kind == crate::cpu::StopKind::Switch, switch);
+            // With an interrupt pending (no halt) and IME on (no held DIV
+            // reset): the only switch this harness can mirror per M-cycle.
+            if switch && crate::cpu::Bus::speed_switch(&mut self.ctx, true, true) {
+                crate::cpu::Bus::idle(&mut self.ctx);
+            }
             self.eager.stop(switch);
             self.check("stop");
             if !switch {
