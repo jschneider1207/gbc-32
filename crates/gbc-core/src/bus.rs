@@ -22,6 +22,7 @@ use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK};
 use crate::dma::{self, Conflict, OamDma};
+use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{Frame, Ppu};
@@ -73,6 +74,8 @@ pub(crate) struct Sys<'a> {
     /// Scheduled button changes; the earliest is the `Input` deadline
     /// (ADR 0012).
     pub(crate) inputs: InputQueue,
+    /// CGB VRAM DMA (FF51-FF55, ADR 0017).
+    pub(crate) vdma: VramDma,
 }
 
 impl Sys<'_> {
@@ -81,6 +84,7 @@ impl Sys<'_> {
             hot: Hot::new(),
             sched: Schedule::new(),
             inputs: InputQueue::new(),
+            vdma: VramDma::new(),
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
@@ -530,6 +534,7 @@ impl Ctx<'_, '_> {
                     self.dma_sync(now);
                     self.hot.dma = 0;
                 }
+                EventKind::VramDma => self.vdma_hblank(),
                 // Not scheduled yet: the APU in M6.
                 EventKind::DivApu | EventKind::AudioBuffer => {}
             }
@@ -576,6 +581,9 @@ impl Ctx<'_, '_> {
         let s = &mut *self.sys;
         let events = s.ppu.sync(at, self.mem, self.frame, &mut s.iflags, double);
         self.raise(events);
+        if self.sys.vdma.hblank {
+            self.vdma_arm(at, true);
+        }
     }
 
     /// Sets the Ppu deadline and reschedules.
@@ -599,6 +607,13 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to(now);
                 let s = &mut *self.sys;
                 s.ppu.flush(now, self.mem, self.frame);
+                // Turning the LCD off outside mode 0 starts an HBlank
+                // transfer block (SameBoy `GB_lcd_off`).
+                if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
+                    s.vdma.pending = true;
+                    self.done = true;
+                }
+                let s = &mut *self.sys;
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem);
             }
@@ -791,6 +806,8 @@ impl Ctx<'_, '_> {
             0x10..=0x3F => self.mem.io[reg] = value,
             0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
             0x46 => self.oam_dma(value),
+            0x51..=0x54 if cgb => s.vdma.write_addr(reg - 0x50, value),
+            0x55 if cgb => self.write_hdma5(value),
             0x4D if cgb => s.key1 = value & 0x01,
             0x4F if cgb => {
                 s.vbk = value & 0x01;
@@ -1018,6 +1035,147 @@ impl Ctx<'_, '_> {
     }
 }
 
+/// CGB VRAM DMA (FF51-FF55; `hdma` module, ADR 0017).
+impl Ctx<'_, '_> {
+    /// `n` idle M-cycles (the CPU stalled), skipped a deadline at a time
+    /// (ADR 0011), each deadline handled on the M-cycle it was before.
+    fn idle_mcycles(&mut self, mut n: u32) {
+        while n > 0 {
+            let k = self.mcycles_to_deadline().min(n);
+            self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
+            n -= k;
+            if self.hot.budget <= 0 {
+                self.boundary();
+            }
+        }
+    }
+
+    /// STAT mode 0 now (also with the LCD off).
+    fn stat_mode0(&self) -> bool {
+        self.sys.ppu.stat(self.clock(), self.hot.mcycle == 2) & 3 == 0
+    }
+
+    /// A transfer step is due: the CPU stops after this instruction so
+    /// the run loop can run it ([`Emulator::run`]).
+    fn vdma_request(&mut self) {
+        self.sys.vdma.pending = true;
+        self.done = true;
+    }
+
+    /// FF55 write. An HBlank transfer that starts outside mode 0 waits
+    /// for the next HBlank; one that starts in mode 0 does its first
+    /// block now, and the current line's HBlank (if still ahead) doesn't
+    /// start another.
+    #[inline(never)]
+    fn write_hdma5(&mut self, value: u8) {
+        let now = self.clock();
+        if value & 0x80 != 0 {
+            // Latch the current line, if due, before the transfer is
+            // active.
+            self.run_ppu_to(now);
+            self.schedule_ppu();
+        }
+        let mode0 = self.stat_mode0();
+        self.sys.vdma.write_hdma5(value, mode0);
+        if self.sys.vdma.pending {
+            self.done = true;
+        }
+        if self.sys.vdma.hblank {
+            self.vdma_arm(now, false);
+        }
+    }
+
+    /// Schedules the HBlank trigger of the PPU's current visible line, once
+    /// per line. `fire_late`: a trigger at or before `now` fires at the
+    /// next boundary (the PPU sync that latched the line ran late by less
+    /// than an M-cycle); otherwise it is treated as passed.
+    fn vdma_arm(&mut self, now: u64, fire_late: bool) {
+        let s = &mut *self.sys;
+        let Some(start) = s.ppu.mode0_start() else {
+            return;
+        };
+        if start == s.vdma.line {
+            return;
+        }
+        s.vdma.line = start;
+        let at = start + hdma::HBLANK_DELAY;
+        if at > now || fire_late {
+            s.sched.set(EventKind::VramDma, at);
+            // `boundary` reschedules when called from an event handler.
+            self.reschedule();
+        }
+    }
+
+    /// The `VramDma` deadline: an HBlank starts a block, unless the CPU
+    /// is halted (SameBoy: `!gb->halted`) or the transfer was stopped.
+    fn vdma_hblank(&mut self) {
+        let v = &self.sys.vdma;
+        if v.hblank && !v.halted && self.sys.ppu.lcd_enabled() {
+            self.vdma_request();
+        }
+    }
+
+    /// HALT begins (`halt`) or ends during an HBlank transfer. Waking up
+    /// in mode 0 from a HALT that began outside it starts a block
+    /// (SameBoy `allow_hdma_on_wake`).
+    #[cold]
+    fn vdma_halt(&mut self, halt: bool) {
+        let mode0 = self.stat_mode0();
+        let v = &mut self.sys.vdma;
+        v.halted = halt;
+        if halt {
+            v.wake_ok = !mode0;
+        } else if v.hblank && v.wake_ok && mode0 {
+            self.vdma_request();
+        }
+    }
+
+    /// Runs the pending transfer step at an instruction fetch: all blocks
+    /// of a GDMA, or one HDMA block, then stalls the CPU for it
+    /// ([`hdma::stall_mcycles`]). The bytes are copied at once at the
+    /// start, after the PPU has drawn everything before it.
+    ///
+    /// Sources: ROM, cartridge RAM and WRAM are read; VRAM and E000-FFFF
+    /// read FF (SameBoy reads the CPU data bus there, which this core does
+    /// not model).
+    pub(crate) fn vram_dma(&mut self) {
+        let now = self.clock();
+        self.run_ppu_to(now);
+        if self.sys.ppu.drawing() {
+            self.sys.ppu.flush(now, self.mem, self.frame);
+        }
+        let hot = self.hot.without_dma();
+        let bank = self.sys.vram_off;
+        let mut v = self.sys.vdma;
+        v.pending = false;
+        let mut blocks = 0;
+        loop {
+            for _ in 0..16 {
+                let src = v.src;
+                let byte = if src < 0x8000 || matches!(src & 0xE000, 0xA000 | 0xC000) {
+                    read::<false>(self.mem, self.sys, &hot, src)
+                } else {
+                    0xFF
+                };
+                self.mem.vram[bank | usize::from(v.dest & 0x1FFF)] = byte;
+                v.src = src.wrapping_add(1);
+                v.dest = v.dest.wrapping_add(1);
+            }
+            blocks += 1;
+            v.blocks = v.blocks.wrapping_sub(1);
+            if v.blocks == 0 || v.dest == 0 {
+                v.hblank = false;
+                break;
+            }
+            if v.hblank {
+                break;
+            }
+        }
+        self.sys.vdma = v;
+        self.idle_mcycles(hdma::stall_mcycles(blocks, self.hot.mcycle as u32));
+    }
+}
+
 impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn read(&mut self, addr: u16) -> u8 {
@@ -1087,17 +1245,8 @@ impl Bus for Ctx<'_, '_> {
         self.sys.schedule_inputs(self.hot.mcycle as u64);
         self.set_timer_deadline();
         self.schedule_serial();
-        // The pause: 2050 idle M-cycles, skipped a deadline at a time
-        // (ADR 0011), each deadline handled on the M-cycle it was before.
-        let mut left = 2050;
-        while left > 0 {
-            let n = self.mcycles_to_deadline().min(left);
-            self.hot.budget -= (n * self.hot.mcycle as u32) as i32;
-            left -= n;
-            if self.hot.budget <= 0 {
-                self.boundary();
-            }
-        }
+        // The pause: 2050 idle M-cycles.
+        self.idle_mcycles(2050);
         true
     }
 
@@ -1121,11 +1270,17 @@ impl Bus for Ctx<'_, '_> {
         if self.hot.dma != 0 {
             self.dma_pause();
         }
+        if self.sys.vdma.hblank {
+            self.vdma_halt(true);
+        }
     }
 
     fn halt_end(&mut self) {
         if self.sys.ppu.dma.paused != NEVER {
             self.dma_resume();
+        }
+        if self.sys.vdma.halted {
+            self.vdma_halt(false);
         }
     }
 }
@@ -1291,6 +1446,8 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x44 => sys.ppu.ly(hot.clock(), hot.mcycle == 2),
         0x45 => sys.ppu.lyc,
         0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
+        // FF51-FF54 are write-only (the `_` arm: FF).
+        0x55 if cgb => sys.vdma.read_hdma5(),
         0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },
         // VBK reads FE | bank on a CGB in either mode (SameBoy
         // `read_high_memory`: only `GB_is_cgb`; Mooneye `misc/boot_hwio-C`

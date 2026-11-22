@@ -13,7 +13,7 @@
 //! `synth:worst-case`). The kinds after `Ppu` fire rarely (`Dma` at most
 //! every ~160 M-cycles, `Input` per button change, the APU ones in M6), so
 //! their minimum is cached in [`Schedule::slow`], and the per-event fold is
-//! over the three hot kinds and that cache: four values, not seven.
+//! over the three hot kinds and that cache: four values, not eight.
 
 /// No deadline.
 pub(crate) const NEVER: u64 = u64::MAX;
@@ -36,6 +36,8 @@ pub(crate) enum EventKind {
     Ppu,
     /// OAM DMA completion.
     Dma,
+    /// An HBlank starts a VRAM DMA block (HDMA, ADR 0017).
+    VramDma,
     /// A scheduled button change (`set_buttons_at`).
     Input,
     /// A DIV-APU frame-sequencer step.
@@ -46,11 +48,12 @@ pub(crate) enum EventKind {
 
 impl EventKind {
     /// Every kind, in dispatch (index) order.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Timer,
         Self::Serial,
         Self::Ppu,
         Self::Dma,
+        Self::VramDma,
         Self::Input,
         Self::DivApu,
         Self::AudioBuffer,

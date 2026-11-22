@@ -247,6 +247,14 @@ impl Cpu {
         self.mode == Mode::Halted
     }
 
+    /// Whether the next step fetches an opcode: running (not halted,
+    /// stopped, locked up or off) and no interrupt dispatch due. A pending
+    /// VRAM DMA runs there (ADR 0017).
+    pub(crate) fn fetches_next<B: Bus>(&self, bus: &B) -> bool {
+        matches!(self.mode, Mode::Running | Mode::HaltBug)
+            && !(self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0)
+    }
+
     /// Whether the CPU locked up on an invalid opcode.
     pub fn locked(&self) -> bool {
         self.mode == Mode::Locked

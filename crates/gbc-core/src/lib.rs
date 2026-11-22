@@ -177,6 +177,7 @@ mod config;
 mod cpu;
 mod dma;
 mod events;
+mod hdma;
 mod joypad;
 mod memory;
 mod ppu;
@@ -551,20 +552,32 @@ impl<'a> Emulator<'a> {
             };
         }
         let stop = Events::ALWAYS_STOP | *stop_on;
-        let mut ctx = Ctx::new(
-            self.mem,
-            sys,
-            frame,
-            audio,
-            stop,
-            // A single step's target is one clock ahead, so a halted CPU's
-            // skip to the next deadline (`Bus::idle_halted`) stops after
-            // one M-cycle.
-            target.unwrap_or(start + 1),
-        );
-        // A single step: done before it starts, so `run` stops after one.
-        ctx.done = target.is_none();
-        cpu.run(&mut ctx);
+        // A single step's target is one clock ahead, so a halted CPU's
+        // skip to the next deadline (`Bus::idle_halted`) stops after one
+        // M-cycle.
+        let end = target.unwrap_or(start + 1);
+        let mut ctx = Ctx::new(self.mem, sys, frame, audio, stop, end);
+        let single = target.is_none();
+        // The call is over: a single step, a stop event or the target.
+        let finished = |ctx: &Ctx| single || ctx.events.intersects(stop) || ctx.clock() >= end;
+        // A VRAM DMA step (ADR 0017) runs between instructions, where the
+        // next one would fetch its opcode: a pending one ends `cpu.run`
+        // (`Ctx::done`) after the current instruction. Steps one at a time
+        // while it waits for a dispatch or a wake-up.
+        loop {
+            if ctx.sys.vdma.pending && cpu.fetches_next(&ctx) {
+                ctx.vram_dma();
+                if !single && finished(&ctx) {
+                    break;
+                }
+            }
+            // A single step: done before it starts, so `run` stops after one.
+            ctx.done = finished(&ctx) || ctx.sys.vdma.pending;
+            cpu.run(&mut ctx);
+            if finished(&ctx) {
+                break;
+            }
+        }
         RunResult {
             events: ctx.events,
             clocks: ctx.clock() - start,

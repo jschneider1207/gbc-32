@@ -1053,6 +1053,17 @@ impl Ppu {
         self.colors.obj[pal][c] = render::cgb_color(&mem.obj_pal, index);
     }
 
+    /// The clock at which the current (or last) latched visible line
+    /// enters mode 0 (its `End` point: STAT reads mode 0 at single
+    /// speed), or `None` with the LCD off or no line latched since it was
+    /// turned on. For HDMA's HBlank trigger (ADR 0017).
+    pub(crate) fn mode0_start(&self) -> Option<u64> {
+        if !self.lcd_enabled() || self.line.start == NEVER {
+            return None;
+        }
+        Some(self.line.start.wrapping_add(u64::from(self.line.end)))
+    }
+
     /// Whether the PPU, synced to some clock, is between a visible line's
     /// `Latch` and `End` points (its next update point is `End`). Every
     /// clock where [`mode3_pixel`](Self::mode3_pixel) is `Some` is: that
