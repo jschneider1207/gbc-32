@@ -24,9 +24,7 @@ Remaining M4 work, in order (plan "M4"):
 3. CGB palette colors (BCPS/BCPD/OCPS/OCPD -> colors only), so the rtc3test
    screenshots (green PASS) match.
 4. Milestone close: reviews DONE (see log), fixes landed; waiting on the
-   human (Needs human 1-2), then baseline + tag. Was: reviewers
-   over `stage1-m3..HEAD`, fixes, baseline, tag `stage1-m4`. mbc3-tester
-   needs the human decision below before the gate can pass.
+   human (Needs human 1-2), then baseline + tag `stage1-m4`.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
