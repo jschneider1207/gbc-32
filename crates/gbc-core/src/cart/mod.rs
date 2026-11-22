@@ -153,6 +153,14 @@ pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
         return Err(LoadErrorKind::RomTooSmall { len: rom.len() });
     }
     // Pan Docs: The Cartridge Header, 0147 and 0149.
+    // ROM ONLY (00) has no RAM whatever 0149 says. SameBoy (Core/mbc.c,
+    // GB_configure_cart) zeroes the RAM size for a no-MBC type whose
+    // table entry has no RAM, but for MBC types without RAM and a nonzero
+    // 0149 it assumes the RAM exists ("Assuming cartridge has RAM"), which
+    // is what the table below does anyway (ADR 0016).
+    if rom[HEADER_CART_TYPE] == 0x00 {
+        return Ok(0);
+    }
     if matches!(rom[HEADER_CART_TYPE], 0x05 | 0x06) {
         return Ok(512);
     }
@@ -211,6 +219,22 @@ pub fn cart_info(rom: &[u8]) -> Result<CartInfo, LoadErrorKind> {
 }
 
 mod rtc;
+
+/// Whether an MBC1 ROM is a multicart (MBC1M), by its contents (ADR 0016).
+/// Each game of a multicart has its own header, so the Nintendo logo
+/// (0104-0133, 0x30 bytes) is repeated at the start of the game in bank
+/// 0x10 (offset 0x40104). Same test as SameBoy (`Core/mbc.c`,
+/// GB_configure_cart: ROM of at least 0x44000 bytes and the two logo
+/// copies equal).
+fn is_mbc1m(rom: &[u8]) -> bool {
+    if rom.len() < 0x4_4000 {
+        return false;
+    }
+    match (rom.get(0x104..0x134), rom.get(0x4_0104..0x4_0134)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
 
 /// Whether the cartridge type has an MBC3 real-time clock.
 fn has_rtc(rom: &[u8]) -> bool {
@@ -328,8 +352,13 @@ enum Mapper {
     /// No MBC: 32 KiB of ROM, optional RAM that is always enabled (Pan
     /// Docs: No MBC).
     None,
-    /// MBC1 (types 01-03). TODO(M4): MBC1M multicarts.
+    /// MBC1 (types 01-03), standard wiring: BANK2 is ROM bank bits 5-6.
     Mbc1,
+    /// MBC1 multicart (MBC1M, ADR 0016): types 01-03 whose ROM looks like
+    /// a multicart (`is_mbc1m`). BANK1 reaches the ROM address with 4 bits
+    /// and BANK2 sits above them (bits 4-5). A unit variant, like
+    /// `Mbc3Rtc`, to keep `Mapper` one byte.
+    Mbc1M,
     /// MBC2 (types 05-06): 16 ROM banks, 512x4 bits of built-in RAM.
     Mbc2,
     /// MBC3 (types 11-13), no clock. Also MBC30 (see `write_rom`).
@@ -343,8 +372,9 @@ enum Mapper {
 }
 
 impl Mapper {
-    fn from_header(cart_type: u8) -> Self {
-        match cart_type {
+    fn from_header(rom: &[u8]) -> Self {
+        match rom[HEADER_CART_TYPE] {
+            0x01..=0x03 if is_mbc1m(rom) => Self::Mbc1M,
             0x01..=0x03 => Self::Mbc1,
             0x05 | 0x06 => Self::Mbc2,
             0x0F | 0x10 => Self::Mbc3Rtc,
@@ -453,7 +483,7 @@ impl<'a> Cart<'a> {
     pub(crate) fn new(rom: &'a [u8], ram: &'a mut [u8]) -> Result<Self, LoadError<'a>> {
         let kind = match cart_ram_size(rom) {
             Ok(needed) if ram.len() >= needed => {
-                let mapper = Mapper::from_header(rom[HEADER_CART_TYPE]);
+                let mapper = Mapper::from_header(rom);
                 let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
                 let mut cart = Self {
                     rom,
@@ -668,7 +698,7 @@ impl<'a> Cart<'a> {
     pub(crate) fn write_rom(&mut self, addr: u16, value: u8, now: u64) {
         match self.mapper {
             Mapper::None => {}
-            Mapper::Mbc1 => {
+            Mapper::Mbc1 | Mapper::Mbc1M => {
                 match addr >> 13 {
                     // RAM enable: 0A in the low nibble.
                     0 => self.ram_enabled = value & 0x0F == 0x0A,
@@ -773,11 +803,20 @@ impl<'a> Cart<'a> {
                 usize::from(self.mbc5_ram & 7),
             ),
             Mapper::Mbc5 { .. } => (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram)),
-            Mapper::Mbc1 => {
+            Mapper::Mbc1 | Mapper::Mbc1M => {
+                // Multicart: only the low 4 bits of BANK1 reach the ROM
+                // address and BANK2 sits above them (Pan Docs: MBC1,
+                // "MBC1M"; SameBoy Core/mbc.c, GB_MBC1M_WIRING). The
+                // 0-selects-1 fix-up already ran on the 5-bit value.
+                let (shift, mask) = if self.mapper == Mapper::Mbc1M {
+                    (4, 0x0F)
+                } else {
+                    (5, 0x1F)
+                };
                 // Mode 1 also applies BANK2 to 0000-3FFF and to RAM (Pan
                 // Docs: MBC1, 6000-7FFF).
-                let upper = usize::from(self.bank2) << 5;
-                let hi = upper | usize::from(self.bank1);
+                let upper = usize::from(self.bank2) << shift;
+                let hi = upper | (usize::from(self.bank1) & mask);
                 if self.mode == 0 {
                     (0, hi, 0)
                 } else {
@@ -834,6 +873,7 @@ mod tests {
         );
         assert!(Cart::new(&[0; 0x14F], &mut []).is_err());
         let mut rom = [0u8; 0x150];
+        rom[HEADER_CART_TYPE] = 0x08; // ROM+RAM
         rom[HEADER_RAM_SIZE] = 0x02;
         assert_eq!(cart_ram_size(&rom), Ok(0x2000));
         assert!(Cart::new(&rom, &mut [0; 0x2000]).is_ok());
@@ -1407,5 +1447,104 @@ mod tests {
         assert!(Cart::new(&rom, &mut ram).unwrap().has_rtc());
         let rom = rom_with(0x13, 0x03);
         assert!(!Cart::new(&rom, &mut ram).unwrap().has_rtc());
+    }
+}
+
+#[cfg(test)]
+mod mbc1m_tests {
+    use super::*;
+    extern crate std;
+    use std::vec::Vec;
+
+    const LOGO: [u8; 0x30] = [0xCE; 0x30];
+
+    /// 1 MiB MBC1 ROM, 64 banks; each bank's first byte is its number.
+    /// `logo_at_10`: copy the logo to bank 0x10 (multicart layout).
+    fn rom(cart_type: u8, logo_at_10: bool) -> Vec<u8> {
+        let mut r = std::vec![0u8; 64 * ROM_BANK];
+        for b in 0..64 {
+            r[b * ROM_BANK] = b as u8;
+        }
+        r[HEADER_CART_TYPE] = cart_type;
+        r[0x104..0x134].copy_from_slice(&LOGO);
+        if logo_at_10 {
+            r[0x4_0104..0x4_0134].copy_from_slice(&LOGO);
+        }
+        r
+    }
+
+    fn bank_at(c: &Cart<'_>, addr: u16) -> u8 {
+        c.read_rom(addr)
+    }
+
+    #[test]
+    fn detection() {
+        assert!(is_mbc1m(&rom(0x01, true)));
+        assert!(!is_mbc1m(&rom(0x01, false)));
+        // One differing logo byte is not a copy.
+        let mut r = rom(0x01, true);
+        r[0x4_0110] ^= 1;
+        assert!(!is_mbc1m(&r));
+        // Too short to be 8 Mbit.
+        assert!(!is_mbc1m(&r[..0x4_0000]));
+        // Only MBC1 types are multicart candidates.
+        assert_eq!(Mapper::from_header(&rom(0x01, true)), Mapper::Mbc1M);
+        assert_eq!(Mapper::from_header(&rom(0x03, true)), Mapper::Mbc1M);
+        assert_eq!(Mapper::from_header(&rom(0x01, false)), Mapper::Mbc1);
+        assert_eq!(
+            Mapper::from_header(&rom(0x19, true)),
+            Mapper::Mbc5 { rumble: false }
+        );
+    }
+
+    #[test]
+    fn multicart_wires_bank2_at_bit_4() {
+        let r = rom(0x01, true);
+        let mut ram = [];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        assert_eq!(c.mapper, Mapper::Mbc1M);
+        // BANK2 = 2, BANK1 = 3: bank (2 << 4) | 3 = 0x23.
+        c.write_rom(0x4000, 2, 0);
+        c.write_rom(0x2000, 3, 0);
+        assert_eq!(bank_at(&c, 0x4000), 0x23);
+        // Only 4 bits of BANK1 count: 0x13 -> 3.
+        c.write_rom(0x2000, 0x13, 0);
+        assert_eq!(bank_at(&c, 0x4000), 0x23);
+        // Mode 0: 0000-3FFF stays bank 0; mode 1 applies BANK2 << 4.
+        assert_eq!(bank_at(&c, 0x0000), 0);
+        c.write_rom(0x6000, 1, 0);
+        assert_eq!(bank_at(&c, 0x0000), 0x20);
+        // 0 selects 1 is checked on the 5 bits: 0x10 selects 0 (low 4
+        // bits of 0x10), not 1.
+        c.write_rom(0x2000, 0x10, 0);
+        assert_eq!(bank_at(&c, 0x4000), 0x20);
+        c.write_rom(0x2000, 0, 0);
+        assert_eq!(bank_at(&c, 0x4000), 0x21);
+    }
+
+    #[test]
+    fn standard_mbc1_wires_bank2_at_bit_5() {
+        let r = rom(0x01, false);
+        let mut ram = [];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        c.write_rom(0x4000, 1, 0);
+        c.write_rom(0x2000, 3, 0);
+        assert_eq!(bank_at(&c, 0x4000), 0x23);
+        c.write_rom(0x6000, 1, 0);
+        assert_eq!(bank_at(&c, 0x0000), 0x20);
+    }
+
+    #[test]
+    fn rom_only_type_has_no_ram_but_mbc_types_trust_0149() {
+        let mut h = [0u8; MIN_ROM_SIZE];
+        h[HEADER_RAM_SIZE] = 0x02;
+        h[HEADER_CART_TYPE] = 0x00;
+        assert_eq!(cart_ram_size(&h), Ok(0));
+        // 01 is "MBC1" (no RAM) but 0149 says 8 KiB: RAM is assumed.
+        h[HEADER_CART_TYPE] = 0x01;
+        assert_eq!(cart_ram_size(&h), Ok(0x2000));
+        // 08 is ROM+RAM.
+        h[HEADER_CART_TYPE] = 0x08;
+        assert_eq!(cart_ram_size(&h), Ok(0x2000));
     }
 }

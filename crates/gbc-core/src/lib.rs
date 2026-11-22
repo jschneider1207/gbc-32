@@ -800,6 +800,7 @@ mod tests {
 
         // RAM buffer too small for the header.
         let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x147] = 0x08; // ROM+RAM
         rom[0x149] = 0x03;
         let err = emu.load(rom, ram, Config::default()).unwrap_err();
         assert_eq!(
@@ -827,6 +828,7 @@ mod tests {
     fn eject_returns_buffers_and_allows_reload() {
         let rom = vec![0u8; MIN_ROM_SIZE].leak();
         rom[0x100] = 0xAB;
+        rom[0x147] = 0x08; // ROM+RAM
         rom[0x149] = 0x02; // 8 KiB
         let ram = vec![0u8; 0x8000].leak(); // larger than needed
         ram[0] = 0x5A;
@@ -963,6 +965,7 @@ mod tests {
     #[test]
     fn cart_ram_is_trimmed_to_header_size() {
         let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x147] = 0x08; // ROM+RAM
         rom[0x149] = 0x02; // 8 KiB
         let ram = vec![0u8; 0x2_0000].leak();
         ram[0x2000] = 0x77;
@@ -1588,6 +1591,7 @@ mod tests {
     #[test]
     fn reset_rewinds_clock_and_keeps_cart_ram() {
         let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x147] = 0x08; // ROM+RAM
         rom[0x149] = 0x02;
         let ram = vec![0u8; 0x2000].leak();
         ram[0] = 0x5A;

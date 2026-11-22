@@ -1586,6 +1586,7 @@ mod tests {
         for bank in 1..64 {
             r[bank * 0x4000] = bank as u8;
         }
+        r[0x104] = 1; // not a multicart: no logo copy in bank 0x10
         let emu = load(r);
         assert_eq!(emu.peek(0x4000), 1);
         write(emu, 0x2000, 0x00); // 0 selects 1
