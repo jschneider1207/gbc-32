@@ -50,8 +50,15 @@
 # Object mixing fused into the tile decode (measured 2216, 792): render
 # went from 2684 to 2216 with the mixing copy of the tile loop moved out of
 # line into fill_mixed (2216 + 792 = 3008 in all, +324).
-2330 <gbc_core::ppu::render::Renderer>::render
-830 gbc_core::ppu::render::fill_mixed
+1765 <gbc_core::ppu::render::Renderer>::render
+1050 gbc_core::ppu::render::fill_mixed
+# The plain tile copy out of line too, whole tiles in their own loop, two
+# pixels per palette lookup (measured 1680, 1000, 1104, 118, 430 bytes):
+# render 2216 + fill_mixed 792 -> 1680 + 1000 + 1104 + 548 (+1,324 B) for
+# -14% cgb-acid2, -2% worst-case Ir (docs/perf.md "Pixel-pair lookups").
+1160 gbc_core::ppu::render::fill_plain
+125 gbc_core::ppu::render::fill_partial::<false>
+455 gbc_core::ppu::render::fill_partial::<true>
 4590 <gbc_core::ppu::Ppu>::latch
 510 <gbc_core::ppu::objects::LineObjects>::scan
 # OAM DMA as the PPU sees it (measured 138, 338): draw passes the

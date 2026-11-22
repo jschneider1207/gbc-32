@@ -24,7 +24,7 @@
 //!
 //! Cost per line: 21 BG/window tile fetches (one map byte and two data
 //! bytes each, plus two table lookups); spans without object pixels go
-//! straight from the tile bits to RGB555 (one lookup per pixel). With
+//! straight from the tile bits to RGB555 (one lookup per two pixels). With
 //! objects, up to 10 object fetches merge 8 pixels each into the object
 //! buffer (one 64-bit merge), and the tiles are mixed with it as they are
 //! decoded; a tile with no object pixel (one 8-byte test) takes the plain
@@ -376,6 +376,7 @@ impl Renderer {
             }
             return;
         }
+        let pairs = pair_table(&colors.bg[0]);
         let split = (win_from - x0).min(out.len());
         let (bg, win) = out.split_at_mut(split);
         let (obj_bg, obj_win) = if MIX {
@@ -395,7 +396,7 @@ impl Renderer {
                 0x1800
             };
             let y = self.ly.wrapping_add(regs.scy);
-            fill::<MIX>(bg, obj_bg, src.vram, colors, lcdc, map, y, col);
+            fill::<MIX>(bg, obj_bg, src.vram, colors, &pairs, lcdc, map, y, col);
         }
         if !win.is_empty() {
             let col =
@@ -410,6 +411,7 @@ impl Renderer {
                 obj_win,
                 src.vram,
                 colors,
+                &pairs,
                 lcdc,
                 map,
                 self.window_row,
@@ -470,9 +472,9 @@ impl Renderer {
     }
 }
 
-/// [`fill_tiles`], with the `MIX` copy out of line: it runs on fewer lines
-/// and its unrolled mixing would otherwise be inlined twice (BG and
-/// window) into `render` (code size, `docs/perf.md`).
+/// [`fill_tiles`], both copies out of line: inlined, each would be
+/// duplicated in `render` (BG and window; code size, `docs/perf.md`). One
+/// call per BG or window part of a span.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn fill<const MIX: bool>(
@@ -480,16 +482,32 @@ fn fill<const MIX: bool>(
     obj: &[u8],
     vram: &[u8; 0x4000],
     colors: &Colors,
+    pairs: &[u32; 16],
     lcdc: u8,
     map: usize,
     y: u8,
     col: u8,
 ) {
     if MIX {
-        fill_mixed(out, obj, vram, colors, lcdc, map, y, col);
+        fill_mixed(out, obj, vram, colors, pairs, lcdc, map, y, col);
     } else {
-        fill_tiles::<false>(out, obj, vram, colors, lcdc, map, y, col);
+        fill_plain(out, vram, colors, pairs, lcdc, map, y, col);
     }
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn fill_plain(
+    out: &mut [u16],
+    vram: &[u8; 0x4000],
+    colors: &Colors,
+    pairs: &[u32; 16],
+    lcdc: u8,
+    map: usize,
+    y: u8,
+    col: u8,
+) {
+    fill_tiles::<false>(out, &[], vram, colors, pairs, lcdc, map, y, col);
 }
 
 #[inline(never)]
@@ -499,12 +517,13 @@ fn fill_mixed(
     obj: &[u8],
     vram: &[u8; 0x4000],
     colors: &Colors,
+    pairs: &[u32; 16],
     lcdc: u8,
     map: usize,
     y: u8,
     col: u8,
 ) {
-    fill_tiles::<true>(out, obj, vram, colors, lcdc, map, y, col);
+    fill_tiles::<true>(out, obj, vram, colors, pairs, lcdc, map, y, col);
 }
 
 /// One pixel of a span with objects. An opaque object pixel `o` is drawn
@@ -528,66 +547,110 @@ fn mix(c: u8, o: u8, colors: &Colors) -> u16 {
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn fill_tiles<const MIX: bool>(
-    mut out: &mut [u16],
-    mut obj: &[u8],
+    out: &mut [u16],
+    obj: &[u8],
     vram: &[u8; 0x4000],
     colors: &Colors,
+    pairs: &[u32; 16],
     lcdc: u8,
     map: usize,
     y: u8,
     mut col: u8,
 ) {
-    let pal = &colors.bg[0];
     let map_row = map | (usize::from(y >> 3) << 5);
     let row_offset = usize::from(y & 7) << 1;
-    while !out.is_empty() {
+    let (base, flip) = tile_data(lcdc);
+    // The decoded row of the tile at map column `col`.
+    let row = |col: u8| {
         let tile = vram[(map_row | usize::from(col >> 3)) & 0x1FFF];
-        let addr = tile_address(tile, lcdc) | row_offset;
-        let mut w = decode(vram[addr & 0x1FFF], vram[(addr | 1) & 0x1FFF]);
-        let c = usize::from(col & 7);
-        w <<= 2 * c;
+        let addr = (base + (usize::from(tile ^ flip) << 4)) | row_offset;
+        decode(vram[addr & 0x1FFF], vram[(addr | 1) & 0x1FFF])
+    };
+    // Part of one tile from map column `col`: the span's start up to the
+    // next tile boundary, or its end.
+    let partial = |out: &mut [u16], obj: &[u8], col: u8| {
+        fill_partial::<MIX>(out, obj, row(col) << (2 * (col & 7)), colors);
+    };
+
+    let (mut out, mut obj) = (out, obj);
+    let c = usize::from(col & 7);
+    if c != 0 {
         let n = (8 - c).min(out.len());
-        let (head, rest) = core::mem::take(&mut out).split_at_mut(n);
+        let (head, rest) = out.split_at_mut(n);
         let (obj_head, obj_rest) = if MIX {
             obj.split_at_checked(n).unwrap_or((obj, &[]))
         } else {
             (&[][..], &[][..])
         };
+        partial(head, obj_head, col);
+        (out, obj) = (rest, obj_rest);
+        col = col.wrapping_add(n as u8);
+    }
+    // Whole tiles: fixed trip counts, unrolled.
+    let (tiles, tail) = out.as_chunks_mut::<8>();
+    let (obj_tiles, obj_tail) = if MIX {
+        obj.as_chunks::<8>()
+    } else {
+        (&[][..], &[][..])
+    };
+    for (i, tile) in tiles.iter_mut().enumerate() {
+        let w = row(col);
         let obj8 = if MIX {
-            <&[u8; 8]>::try_from(obj_head)
-                .ok()
-                .filter(|o| u64::from_ne_bytes(**o) != 0)
+            obj_tiles.get(i).filter(|o| u64::from_ne_bytes(**o) != 0)
         } else {
             None
         };
-        match (<&mut [u16; 8]>::try_from(&mut *head), obj8) {
-            // A whole tile without objects: fixed trip count, unrolled.
-            (Ok(tile), None) => {
-                for (i, p) in tile.iter_mut().enumerate() {
-                    *p = pal[usize::from((w >> (14 - 2 * i)) as u8 & 3)];
+        match obj8 {
+            // No object pixel: two pixels per lookup (and, merged by the
+            // compiler on little-endian targets, per store).
+            None => {
+                for (j, p) in tile.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                    let v = pairs[usize::from((w >> (12 - 4 * j)) as u8 & 15)];
+                    *p = [v as u16, (v >> 16) as u16];
                 }
             }
-            (Ok(tile), Some(o8)) => {
+            Some(o8) => {
                 for (i, (p, &o)) in tile.iter_mut().zip(o8).enumerate() {
                     *p = mix((w >> (14 - 2 * i)) as u8 & 3, o, colors);
                 }
             }
-            (Err(_), _) if MIX => {
-                for (p, &o) in head.iter_mut().zip(obj_head) {
-                    *p = mix((w >> 14) as u8, o, colors);
-                    w <<= 2;
-                }
-            }
-            (Err(_), _) => {
-                for p in head {
-                    *p = pal[usize::from(w >> 14)];
-                    w <<= 2;
-                }
-            }
         }
-        out = rest;
-        obj = obj_rest;
-        col = col.wrapping_add(n as u8);
+        col = col.wrapping_add(8);
+    }
+    if !tail.is_empty() {
+        partial(tail, obj_tail, col);
+    }
+}
+
+/// The colors of two adjacent pixels of palette `pal`: entry 4a + b holds
+/// color a (left pixel) in bits 0-15 and color b (right pixel) in bits
+/// 16-31, so a decoded tile row ([`decode`]) gives an index per 4 bits.
+/// Built per span (64 bytes of stack, 16 entries) rather than kept: the
+/// span's whole tiles then take 4 lookups each instead of 8.
+#[inline(always)]
+fn pair_table(pal: &[u16; 4]) -> [u32; 16] {
+    let mut t = [0u32; 16];
+    for (i, e) in t.iter_mut().enumerate() {
+        *e = u32::from(pal[i >> 2]) | (u32::from(pal[i & 3]) << 16);
+    }
+    t
+}
+
+/// Part of a tile: the pixels of the decoded row `w` from bits 15-14 on,
+/// mixed with `obj` with `MIX`. Out of line: at most two per span, and
+/// inlined it would be copied into every `fill_tiles` instance (code size).
+#[inline(never)]
+fn fill_partial<const MIX: bool>(out: &mut [u16], obj: &[u8], mut w: u16, colors: &Colors) {
+    if MIX {
+        for (p, &o) in out.iter_mut().zip(obj) {
+            *p = mix((w >> 14) as u8, o, colors);
+            w <<= 2;
+        }
+    } else {
+        for p in out {
+            *p = colors.bg[0][usize::from(w >> 14)];
+            w <<= 2;
+        }
     }
 }
 
@@ -611,15 +674,16 @@ fn opaque_bytes(v: u64) -> u64 {
     ((v | (v >> 1)) & BYTES_01) * 0xFF
 }
 
-/// VRAM offset of a BG/window tile. LCDC.4 = 1: 8000 + 16 * index;
-/// LCDC.4 = 0: 9000 + 16 * (signed index), i.e. 8800-97FF (Pan Docs: VRAM
-/// Tile Data). `index ^ 0x80` maps -128..127 to 0..255 from 8800.
+/// BG/window tile data addressing: the tile at `index` is at VRAM offset
+/// `base + 16 * (index ^ flip)`. LCDC.4 = 1: 8000 + 16 * index; LCDC.4 = 0:
+/// 9000 + 16 * (signed index), i.e. 8800-97FF (Pan Docs: VRAM Tile Data),
+/// where `index ^ 0x80` maps -128..127 to 0..255 from 8800.
 #[inline]
-fn tile_address(index: u8, lcdc: u8) -> usize {
+fn tile_data(lcdc: u8) -> (usize, u8) {
     if lcdc & LCDC_TILES_8000 != 0 {
-        usize::from(index) << 4
+        (0, 0)
     } else {
-        0x0800 + (usize::from(index ^ 0x80) << 4)
+        (0x0800, 0x80)
     }
 }
 

@@ -40,13 +40,13 @@ Current numbers (Ir) and wall time (valgrind run of all seven, ~30 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,705,666,917 |
-| cgb_sound.gb | 950,442,705 |
-| cgb-acid2.gbc | 599,044,146 |
-| synth:event-storm (2 s) | 443,445,759 |
-| synth:dma-storm (3 s) | 433,891,145 |
-| synth:halt-irq (10 s) | 280,514,521 |
-| synth:worst-case (2 s) | 482,065,134 |
+| cpu_instrs.gb | 1,598,254,766 |
+| cgb_sound.gb | 843,030,554 |
+| cgb-acid2.gbc | 514,287,199 |
+| synth:event-storm (2 s) | 432,681,063 |
+| synth:dma-storm (3 s) | 418,133,062 |
+| synth:halt-irq (10 s) | 226,677,895 |
+| synth:worst-case (2 s) | 472,244,651 |
 
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
@@ -137,6 +137,36 @@ inclusive (~680 Ir per line: OAM scan, sort, stalls, renderer line
 start); `render` + `fill_mixed` ~44 M. Drawing at the HBlank event instead
 of a separate `End` event would change behavior: CPU VRAM writes do not
 sync the PPU (`Ctx::write_vram`).
+
+**Pixel-pair lookups.** Whole BG/window tiles with no object pixel look
+up two pixels at a time in a 16-entry table of RGB555 pairs
+(`pair_table`: entry 4a + b = color a | color b << 16), built on the
+stack per span from BG palette 0 (64 B; not in `Hw`, which has 24 B
+left). The two u16 stores merge into one u32 store on little-endian
+targets. The tile loop is split into a partial head tile, whole tiles in
+a fixed-trip loop (no per-tile shift, min or length test; LCDC.4
+addressing hoisted, `tile_data`) and a partial tail (`fill_partial`, out
+of line). The plain copy is out of line too (`fill_plain`), so `render`
+holds neither copy. Ir (20 s / 2 s / 20 s), from d7a0481:
+
+| Step | cgb-acid2 | synth:worst-case | cpu_instrs | `render` + `fill_*` (B) |
+|---|---|---|---|---|
+| Before | 599,044,146 | 482,065,134 | 1,705,666,917 | 2,216 + 792 (last measured) |
+| Pair table only | 554,452,585 | 477,096,013 | 1,637,376,130 | 2,364 + 736 |
+| + whole-tile loop, inlined | 508,396,952 | 471,299,421 | 1,590,190,248 | 4,218 + 1,820 |
+| + plain copy and partial tiles out of line (chosen) | 514,287,199 | 472,244,651 | 1,598,254,766 | 1,680 + 1,000 + 1,104 + 548 |
+
+cgb-acid2 -14.1% (~71k Ir per frame), worst-case -2.0% (4.04 -> 3.95 M
+per frame, 98.3% of the line), cpu_instrs -6.3%, cgb_sound -11.3%,
+halt-irq -19.2%, dma-storm -3.6%, event-storm -2.4%. `diff-fingerprint`:
+identical on 3,822 ROMs. Code: +1.3 KB over the four functions.
+
+CGB palettes (M5): the table is per palette, so with 8 BG palettes it
+should not be rebuilt per span. The 8 pair tables (512 B) then live with
+the caller's `Memory` (next to palette RAM) and are updated on each BCPD
+write (a color change rewrites the 7 entries of its palette that hold
+it); the whole-tile loop indexes `pairs[attribute palette]` per tile and
+keeps its shape.
 
 PPU mode timing (ADR 0014) added one event per visible line (the end of
 mode 3, where the renderer draws) plus STAT interrupt edges: from
@@ -245,9 +275,9 @@ Current numbers (Ir) and wall time (valgrind run of all three, ~22-24 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,705,666,917 |
-| cgb_sound.gb | 950,442,705 |
-| cgb-acid2.gbc | 599,044,146 |
+| cpu_instrs.gb | 1,598,254,766 |
+| cgb_sound.gb | 843,030,554 |
+| cgb-acid2.gbc | 514,287,199 |
 
 (The scanline renderer took these from 1,464.1 M, 709.3 M and 341.7 M;
 ADR 0014, PPU mode timing, before it from 1,388.0 M, 607.5 M and 12.9 M;
