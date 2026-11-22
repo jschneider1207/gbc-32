@@ -213,3 +213,40 @@ not mistaken for bugs:
   The runner sums `weight × score` over the tiers that have a score and
   divides by the sum of their weights; with every tier scored this is
   exactly the README formula.
+
+### 2026-11-22: counted recolor of a listed reference (human-approved)
+
+Upstream `mbc3-tester/mbc3-tester-cgb.png` draws DMG BG color 2 as
+`#7BFF4A` (3,825 pixels); the contract's common palette and every other
+reference use `#7BFF31`. Commits a89713c and 3da7107 answered this with a
+committed, SHA-pinned override PNG in `acceptance/references/`. The M4
+test-integrity review found that this was a new pass route contradicting
+"a screenshot check may only load a listed PNG", added without this ADR
+being amended or the mechanism being approved, and that the override was
+not tied to its upstream file: a new upstream release could change the
+real reference while the stale override kept passing.
+
+The human approved this replacement on 2026-11-22, and it is the **single
+exception** to "a screenshot check may only load a listed PNG". The
+listed upstream PNG is still the only source. The only thing applied to
+it is a recolor that the manifest describes and counts:
+
+- `screenshot = "<fixed path>", recolor = { from = "#RRGGBB", to =
+  "#RRGGBB", count = N }`. The PNG is verified against
+  `acceptance/test-roms.sha256` as always, then every `from` pixel becomes
+  `to` in memory. The file on disk is never changed.
+- `to` must be a contract color (the common palette's BG/OBJ shades in
+  acceptance/README.md, "Colors used for screenshot comparison"). `from ==
+  to`, a templated path, `count < 1`, or `recolor` on a non-screenshot
+  check is a bad manifest (exit 2).
+- Exactly `count` pixels must have had color `from`, or the run is exit 2.
+  Every recolor in the manifest is counted before anything runs (whatever
+  the selection) and again when a check loads the PNG. A changed upstream
+  reference therefore stops the run instead of passing.
+- The frame is then compared exactly. Adding or changing a `recolor` is a
+  manifest change and needs the human.
+
+The override mechanism was removed: `Check::PinnedScreenshot`, the
+`screenshot = "references/...", sha256 = ...` form (`sha256` is an
+unknown check key again), `acceptance/references/`,
+`scripts/recolor-reference.exs` and the README rows that a89713c added.
