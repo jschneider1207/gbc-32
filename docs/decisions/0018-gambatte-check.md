@@ -102,6 +102,11 @@ The unit tests draw digits from a third, independent description (a
 - When the APU lands (M6), the audio rule needs a new runner capability
   (the core's audio output across the boundary). Until then 131 ROMs stay
   `unsupported`.
-- If a future test-ROM release adds `_cgb04c.png` references, they are
-  compared exactly in Gambatte's colors. If they turn out not to be
-  formula-exact, the exact compare will show it as failures, not hide it.
+- The pinned release already ships 198 `*_cgb04c.png` references (e.g.
+  `scy/`, `bgen/`, `bgtilemap/`, `scx_during_m3/`), but their ROM names
+  carry no `cgb04c` tag, so the `gambatte-cgb` glob never selects them and
+  the PNG path has only unit-test coverage. Selecting them is a manifest
+  change for the human (session 07 review); a directory glob would also
+  pick up ROMs with no CGB rule (runner error). Where pixels match in a
+  scratch run of 39 of them, the colors were formula-exact, so the exact
+  compare fits these references.

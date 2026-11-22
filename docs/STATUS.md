@@ -49,7 +49,18 @@ Working rules that matter here:
 
 ## Needs human
 
-None open. Decided in session 07 (2026-11-22): the romtest `gambatte`
+Open (session 07):
+1. `gambatte/undef_ops/undef_op_*_dmg08_cgb04c_out01` (10 ROMs) lock the
+   CPU on purpose and expect `01` on screen; the contract scores any
+   lockup as `crash`, so they can never pass. Allow it? (Loosening:
+   human's call.)
+2. 198 Gambatte ROMs with `*_cgb04c.png` references (`scy/`, `bgen/`,
+   `bgtilemap/`, `scx_during_m3/`, ...) have no `cgb04c` in the ROM name,
+   so `gambatte-cgb` never selects them. Add a group or glob for them?
+   (Manifest change. A directory glob would also select ROMs with no CGB
+   rule, which is a runner error; ADR 0018.)
+
+Decided in session 07 (2026-11-22): the romtest `gambatte`
 check may re-encode the hex-digit glyphs clean-room (read GPL
 testrunner.cpp for the rules only; own data; ADR 0018). Decided in
 session 06 (2026-11-22): the mbc3-tester reference
