@@ -50,17 +50,19 @@ Working rules that matter here:
 ## Needs human
 
 Open (session 07):
-1. `gambatte/undef_ops/undef_op_*_dmg08_cgb04c_out01` (10 ROMs) lock the
-   CPU on purpose and expect `01` on screen; the contract scores any
-   lockup as `crash`, so they can never pass. Allow it? (Loosening:
-   human's call.)
-2. 198 Gambatte ROMs with `*_cgb04c.png` references (`scy/`, `bgen/`,
+1. 198 Gambatte ROMs with `*_cgb04c.png` references (`scy/`, `bgen/`,
    `bgtilemap/`, `scx_during_m3/`, ...) have no `cgb04c` in the ROM name,
    so `gambatte-cgb` never selects them. Add a group or glob for them?
    (Manifest change. A directory glob would also select ROMs with no CGB
    rule, which is a runner error; ADR 0018.)
 
-Decided in session 07 (2026-11-22): the romtest `gambatte`
+Decided in session 07 (2026-11-22): the human approved loosening the
+lockup rule for `gambatte/undef_ops` ("Those specific tests should
+probably have looser restrictions then right? If the whole point is to
+crash."). Scope chosen: for the `gambatte` check only, an invalid-opcode
+CPU lockup is not `crash`; the machine runs on to `run_frames` and the
+screen check decides (as upstream testrunner). Panics, stalled time and
+lockups elsewhere stay `crash`. The romtest `gambatte`
 check may re-encode the hex-digit glyphs clean-room (read GPL
 testrunner.cpp for the rules only; own data; ADR 0018). Decided in
 session 06 (2026-11-22): the mbc3-tester reference
