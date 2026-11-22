@@ -304,7 +304,7 @@ pub(crate) struct Ppu {
     renderer: Renderer,
     /// BGP/OBP0/OBP1 resolved to RGB555 through the compatibility palettes
     /// when written (ADR 0013).
-    colors: Colors,
+    pub(crate) colors: Colors,
     /// Which lines have objects, so the OAM scan of the others is skipped.
     objects: ObjectLines,
     /// The screen shows white
@@ -988,6 +988,7 @@ impl Ppu {
             &regs,
             &src,
             &mut mem.obj_buf,
+            &mut mem.obj_rank,
         );
     }
 
@@ -1010,9 +1011,8 @@ impl Ppu {
     /// A BGP (FF47), OBP0 (FF48) or OBP1 (FF49) write: resolves that
     /// palette's colors now (ADR 0013), after the bus has flushed. In CGB
     /// mode BGP has no effect on colors (Pan Docs: FF47 BGP, "Non-CGB
-    /// Mode only"; the BG colors come from palette RAM).
-    // TODO(M5): OBP0/OBP1 too; CGB-mode objects still use them until the
-    // CGB object attributes (palette number) and OCPD colors are done.
+    /// Mode only"; the BG colors come from palette RAM). Nor do OBP0/OBP1 (the
+    /// OBJ colors come from OCPD palette RAM).
     pub(crate) fn write_palette(
         &mut self,
         reg: usize,
@@ -1022,7 +1022,7 @@ impl Ppu {
         pairs: &mut [[u32; 16]; 8],
     ) {
         match reg {
-            0x47 if cgb => {}
+            0x47..=0x49 if cgb => {}
             0x47 => {
                 self.colors.set_bgp(dmg, value);
                 pairs[0] = pair_table(&self.colors.bg[0]);
@@ -1043,6 +1043,16 @@ impl Ppu {
         set_pair_color(&mut mem.bg_pairs[pal], c, col);
     }
 
+    /// An OCPD write (CGB mode) to OBJ palette RAM byte `index` (0-63),
+    /// after the bus has flushed and stored it: re-resolves the one color
+    /// it is part of. The renderer looks object colors up per pixel in
+    /// `Colors::obj` (palette number from the object buffer), so there is
+    /// no pair table.
+    pub(crate) fn write_ocpd(&mut self, index: usize, mem: &Memory) {
+        let (pal, c) = ((index >> 3) & 7, (index >> 1) & 3);
+        self.colors.obj[pal][c] = render::cgb_color(&mem.obj_pal, index);
+    }
+
     /// Whether the PPU, synced to some clock, is between a visible line's
     /// `Latch` and `End` points (its next update point is `End`). Every
     /// clock where [`mode3_pixel`](Self::mode3_pixel) is `Some` is: that
@@ -1058,13 +1068,11 @@ impl Ppu {
     /// Resolves all palettes from the registers and palette RAM in `mem`
     /// (reset, or new compatibility colors from the front end): in DMG
     /// compatibility mode BG palette 0 and OBJ palettes 0-1 from BGP/OBP0/
-    /// OBP1, in CGB mode the BG palettes from palette RAM.
+    /// OBP1, in CGB mode the BG and OBJ palettes from palette RAM.
     pub(crate) fn resolve_palettes(&mut self, mem: &mut Memory, dmg: &DmgPalettes, cgb: bool) {
         self.colors = Colors::dmg_compat(dmg, mem.io[0x47], mem.io[0x48], mem.io[0x49]);
         if cgb {
-            for pal in 0..8 {
-                self.colors.set_cgb_bg(&mem.bg_pal, pal);
-            }
+            self.colors.set_cgb(&mem.bg_pal, &mem.obj_pal);
         }
         for (t, pal) in mem.bg_pairs.iter_mut().zip(&self.colors.bg) {
             *t = pair_table(pal);
@@ -1120,8 +1128,9 @@ impl Ppu {
                 LineObjects::EMPTY
             }
         };
-        // Priority order is ascending X (compatibility mode): sorted once
-        // for both the stalls and the renderer.
+        // Fetch order is ascending X in both modes: sorted once for both
+        // the stalls and the renderer (CGB-mode drawing priority by OAM
+        // index is resolved when the renderer merges fetched objects).
         let n = objs.len();
         let order = objs.priority_order();
         let mut xs = [0u8; objects::MAX_PER_LINE];
@@ -2055,6 +2064,58 @@ mod tests {
         assert_eq!(px(266), Some((5, 159)));
         assert_eq!(px(267), None, "mode 3 ends at 256 + 11");
         assert_eq!(r.stat(l5 + 267) & 3, 0);
+    }
+
+    /// CGB mode: objects draw by OAM index with colors from OBJ palette
+    /// RAM and tiles from either bank, but are still fetched in X order,
+    /// so mode 3 is as long as the X-order stalls say. OBP0/OBP1 writes
+    /// change no colors.
+    #[test]
+    fn cgb_objects_draw_by_oam_index_and_stall_in_x_order() {
+        let on = 1000;
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        r.ppu.renderer.cgb = true;
+        r.ppu.lcdc |= 0x02; // OBJ on
+        r.mem.bg_pal[..2].copy_from_slice(&0x0042u16.to_le_bytes());
+        r.mem.obj_pal[14..16].copy_from_slice(&0x1234u16.to_le_bytes()); // pal 1 color 3
+        r.mem.obj_pal[22..24].copy_from_slice(&0x0567u16.to_le_bytes()); // pal 2 color 3
+        r.ppu
+            .resolve_palettes(&mut r.mem, &DmgPalettes::GRAYSCALE, true);
+        let before = r.ppu.colors;
+        for reg in [0x48, 0x49] {
+            r.ppu.write_palette(
+                reg,
+                0x1B,
+                &DmgPalettes::GRAYSCALE,
+                true,
+                &mut r.mem.bg_pairs,
+            );
+        }
+        assert_eq!(r.ppu.colors, before);
+        // Tile 1: color 3, in both banks.
+        r.mem.vram[0x0010..0x0020].fill(0xFF);
+        r.mem.vram[0x2010..0x2020].fill(0xFF);
+        // OAM order is not X order: entry 0 at x 22-29 (palette 1, bank
+        // 1), entry 1 at x 20-27 (palette 2), in the same BG tile, where
+        // only the first object fetched waits for the tile.
+        r.mem.oam[..8].copy_from_slice(&[16, 30, 1, 0x09, 16, 28, 1, 0x02]);
+        r.ppu.oam_written();
+        let mut stalls = [(0, 0); 10];
+        let n = object_stalls(&[30, 28], 0, None, &mut stalls);
+        let end = 256 + stalls[..n].iter().map(|s| u64::from(s.1)).sum::<u64>();
+        let l1 = clock(on, 0, LINE);
+        r.sync(l1 + end - 1);
+        assert_eq!((r.stat(l1 + end - 1) & 3, r.stat(l1 + end) & 3), (3, 0));
+        r.sync(clock(on, 0, VBLANK_POS));
+        let row = &r.frame[SCREEN_WIDTH..][..SCREEN_WIDTH];
+        for (x, &p) in row.iter().enumerate() {
+            let want = match x {
+                20..22 => 0x0567,
+                22..30 => 0x1234,
+                _ => 0x0042,
+            };
+            assert_eq!(p, want, "x {x}");
+        }
     }
 
     #[test]

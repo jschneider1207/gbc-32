@@ -17,8 +17,14 @@
 //!   Core/memory.c sets `object_priority = GB_OBJECT_PRIORITY_X` when OPRI
 //!   bit 0 is written as 1, and Core/display.c then uses priority 0 for
 //!   every object, so the first object fetched (lowest X, then lowest OAM
-//!   index) keeps each pixel). CGB mode (OAM-index priority, OPRI = 0)
-//!   arrives in M5.
+//!   index) keeps each pixel). In CGB mode (OPRI = 0) the lower OAM index
+//!   wins; objects are still fetched in X order, so [`priority_order`]
+//!   (X order) stays the fetch order for the mode-3 timing in both modes,
+//!   and the renderer resolves OAM-index priority per pixel. A game can't
+//!   switch modes: SameBoy applies OPRI writes only while the boot ROM
+//!   runs (Core/memory.c, GB_IO_OPRI), and there is no boot ROM here.
+//!
+//! [`priority_order`]: LineObjects::priority_order
 
 /// At most this many objects are selected per line (Pan Docs: OAM).
 pub(crate) const MAX_PER_LINE: usize = 10;
@@ -111,9 +117,10 @@ impl LineObjects {
         (self.index[s], self.y[s], self.x[s])
     }
 
-    /// Slots (positions in OAM order) from highest to lowest drawing
-    /// priority, DMG-style (compatibility mode): ascending X, ties by OAM
-    /// order. Only the first [`len`](Self::len) entries are meaningful.
+    /// Slots (positions in OAM order) in fetch order: ascending X, ties by
+    /// OAM order. That is also the drawing priority in compatibility mode
+    /// (DMG-style), not in CGB mode (OAM order). Only the first
+    /// [`len`](Self::len) entries are meaningful.
     pub(crate) fn priority_order(&self) -> [u8; MAX_PER_LINE] {
         let mut order = [0u8; MAX_PER_LINE];
         let n = self.len();

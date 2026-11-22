@@ -756,6 +756,28 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// A BCPD (`obj` false) or OCPD (`obj` true) write in CGB mode: draws
+    /// the pixels output so far with the old colors, stores the byte at
+    /// BCPS/OCPS and re-resolves the color. Out of line: rare next to the
+    /// other I/O writes (hi-color raster effects do it a few times a line).
+    #[inline(never)]
+    fn write_palette_data(&mut self, obj: bool, value: u8) {
+        let now = self.clock();
+        self.run_ppu_to(now);
+        let s = &mut *self.sys;
+        // Synced to `now`: outside mode 3 there is nothing to draw.
+        if s.ppu.drawing() {
+            s.ppu.flush(now, self.mem, self.frame);
+        }
+        if obj {
+            let i = palette_data_write(&mut self.mem.io[0x6A], &mut self.mem.obj_pal, value);
+            s.ppu.write_ocpd(i, self.mem);
+        } else {
+            let i = palette_data_write(&mut self.mem.io[0x68], &mut self.mem.bg_pal, value);
+            s.ppu.write_bcpd(i, self.mem);
+        }
+    }
+
     /// FF00-FF7F, by the low 7 address bits.
     fn write_io(&mut self, reg: usize, value: u8) {
         let s = &mut *self.sys;
@@ -778,25 +800,12 @@ impl Ctx<'_, '_> {
             // a CGB in either mode, BCPD/OCPD only in CGB mode (SameBoy
             // `write_high_memory`). TODO(M5): access blocked in mode 3.
             0x68 | 0x6A => self.mem.io[reg] = value,
-            0x69 if cgb => {
-                // Draw the pixels output so far with the old colors.
-                let now = self.clock();
-                self.run_ppu_to(now);
-                let s = &mut *self.sys;
-                // Synced to `now`: outside mode 3 there is nothing to draw.
-                if s.ppu.drawing() {
-                    s.ppu.flush(now, self.mem, self.frame);
-                }
-                let i = palette_data_write(&mut self.mem.io[0x68], &mut self.mem.bg_pal, value);
-                s.ppu.write_bcpd(i, self.mem);
-            }
-            // TODO(M5): OBJ colors from OCPD (with the CGB object palette
-            // number); stored for read-back only.
-            0x6B if cgb => {
-                palette_data_write(&mut self.mem.io[0x6A], &mut self.mem.obj_pal, value);
-            }
-            // OPRI: writable in CGB mode only (after the boot ROM). Plain
-            // storage until the M3 renderer uses it.
+            0x69 | 0x6B if cgb => self.write_palette_data(reg == 0x6B, value),
+            // OPRI: writable in CGB mode only (after the boot ROM), and only
+            // stored: SameBoy applies a write to the object priority mode
+            // only while the boot ROM runs or in KEY0's PGB mode (Core/
+            // memory.c, GB_IO_OPRI; Pan Docs: OPRI), so after boot the
+            // mode stays what reset chose (OAM index in CGB mode).
             0x6C if cgb => self.mem.io[reg] = value,
             0x70 if cgb => {
                 s.svbk = value & 0x07;
@@ -1562,6 +1571,17 @@ mod tests {
         write(emu, 0xFF6A, 0x00);
         assert_eq!(emu.peek(0xFF6B), 0x66);
         assert_eq!(emu.mem.bg_pal[0x3F], 0x44);
+    }
+
+    /// An OCPD write resolves its OBJ color right away (bit 15 is not a
+    /// color bit; Pan Docs: LCD Color Palettes).
+    #[test]
+    fn ocpd_write_sets_the_obj_color() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF6A, 0x80 | 0x0E); // OBJ palette 1, color 3
+        write(emu, 0xFF6B, 0x34);
+        write(emu, 0xFF6B, 0x92);
+        assert_eq!(emu.hw.sys.ppu.colors.obj[1][3], 0x1234);
     }
 
     /// Line 5 of the first full frame of `emu` (striped BG).

@@ -42,6 +42,10 @@ pub struct Memory {
     /// 0 = transparent, else bits 0-1 color, bits 2-4 palette, bit 7 BG
     /// priority. Per-line scratch lives here, not in `Hw` (ADR 0009).
     pub(crate) obj_buf: [u8; OBJ_BUF_LEN],
+    /// Per `obj_buf` pixel, the drawing-priority rank of the object that
+    /// owns it (`ppu::render::Renderer::render`; meaningful only where
+    /// `obj_buf` is opaque).
+    pub(crate) obj_rank: [u8; OBJ_BUF_LEN],
     /// CGB BG palette RAM (BCPD, FF69): 8 palettes of 4 colors, RGB555
     /// little-endian, bytes as written (bit 15 included, for read-back).
     /// Pan Docs: LCD Color Palettes (CGB only).
@@ -71,6 +75,7 @@ impl Memory {
             extra_oam: [0; 0x60],
             io: [0; 0x80],
             obj_buf: [0; OBJ_BUF_LEN],
+            obj_rank: [0; OBJ_BUF_LEN],
             bg_pal: [0; 64],
             obj_pal: [0; 64],
             bg_pairs: [[0; 16]; 8],
@@ -89,6 +94,7 @@ impl Memory {
         self.extra_oam.fill(0);
         self.io.fill(0);
         self.obj_buf.fill(0);
+        self.obj_rank.fill(0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
@@ -114,11 +120,12 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
+            obj_rank,
             bg_pal,
             obj_pal,
             bg_pairs,
         } = &NEW;
-        let fields: [&[u8]; 10] = [
+        let fields: [&[u8]; 11] = [
             wram,
             vram,
             oam,
@@ -127,6 +134,7 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
+            obj_rank,
             bg_pal,
             obj_pal,
         ];

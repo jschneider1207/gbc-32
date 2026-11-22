@@ -11,8 +11,10 @@
 //! the master priority. Each tile fetch reads its attribute byte (masked to
 //! 0 in compatibility mode, so that path draws the same pixels as before)
 //! and turns it into a palette and a priority mask for the tile's pixels:
-//! no per-pixel work is added. CGB object attributes (VRAM bank, palettes
-//! 0-7, OAM-index priority) are not done yet.
+//! no per-pixel work is added. CGB-mode objects read their attributes the
+//! same way at fetch time (OBJ palette 0-7, VRAM bank) and win pixels by
+//! OAM index instead of X (a rank per object-buffer pixel, checked only in
+//! the 8-pixel merge of each object fetch).
 //!
 //! What the caller keeps:
 //! - per frame: [`Renderer::start_frame`] at line 0 (resets the window line
@@ -74,6 +76,8 @@ const ATTR_BEHIND_BG: u8 = 0x80;
 const ATTR_Y_FLIP: u8 = 0x40;
 const ATTR_X_FLIP: u8 = 0x20;
 const ATTR_DMG_OBP1: u8 = 0x10;
+// CGB mode: tile data in VRAM bank 1 (bits 0-2: OBJ palette).
+const CGB_ATTR_BANK: u8 = 0x08;
 
 // BG map attribute bits, CGB mode: the byte at the map entry's address in
 // VRAM bank 1 (Pan Docs: VRAM Tile Maps, "BG Map Attributes"). Bits 0-2
@@ -139,14 +143,16 @@ impl Colors {
         c
     }
 
-    /// CGB mode: BG palette `pal` from palette RAM `ram` (BCPD). Colors are
+    /// CGB mode: all 8 BG palettes from BG palette RAM `bg` (BCPD) and all
+    /// 8 OBJ palettes from OBJ palette RAM `obj` (OCPD). Colors are
     /// little-endian RGB555, the frame's format (ADR 0013); bit 15 is not
     /// a color bit (Pan Docs: LCD Color Palettes, "Palette data").
-    pub(crate) fn set_cgb_bg(&mut self, ram: &[u8; 64], pal: usize) {
-        let pal = pal & 7;
-        for (e, c) in self.bg[pal].iter_mut().enumerate() {
-            let i = pal * 8 + e * 2;
-            *c = u16::from_le_bytes([ram[i], ram[i + 1]]) & 0x7FFF;
+    pub(crate) fn set_cgb(&mut self, bg: &[u8; 64], obj: &[u8; 64]) {
+        // A loop of calls: reset-time only, and a plain conversion loop
+        // gets unrolled and vectorized into ~650 bytes (code size).
+        for i in 0..32 {
+            self.bg[i / 4][i % 4] = cgb_color(bg, 2 * i);
+            self.obj[i / 4][i % 4] = cgb_color(obj, 2 * i);
         }
     }
 
@@ -164,6 +170,14 @@ impl Colors {
             self.obj[1] = resolve_dmg(&dmg.obj1, value);
         }
     }
+}
+
+/// The color at byte `i` (even) of CGB palette RAM `ram`: little-endian
+/// RGB555, bit 15 not a color bit (Pan Docs: LCD Color Palettes).
+#[inline(never)]
+pub(crate) fn cgb_color(ram: &[u8; 64], i: usize) -> u16 {
+    let i = i & 0x3E;
+    u16::from_le_bytes([ram[i], ram[i + 1]]) & 0x7FFF
 }
 
 /// Memory the renderer reads.
@@ -299,8 +313,8 @@ impl Renderer {
 
     /// Draws pixels `[x0, x1)` of the current line into `row` with the
     /// registers `regs`. Spans must be consecutive and in order.
-    // The object buffer is a separate `&mut` (it lives in `Memory`, while
-    // `Sources` is shared borrows of other parts of it).
+    // The object buffer and its ranks are separate `&mut`s (they live in
+    // `Memory`, while `Sources` is shared borrows of other parts of it).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
@@ -310,6 +324,7 @@ impl Renderer {
         regs: &Regs,
         src: &Sources,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut [u8; OBJ_BUF_LEN],
     ) {
         let x1 = x1.min(W);
         if x0 >= x1 {
@@ -357,17 +372,8 @@ impl Renderer {
         // pixel, in priority order; a pixel keeps the first opaque object
         // written to it. Fetching per span (not per line) keeps split and
         // whole-line rendering identical.
-        for k in 0..self.objects.len() {
-            let slot = usize::from(self.order[k % MAX_PER_LINE]);
-            let (index, y, x) = self.objects.get(slot);
-            // X = 0 and X >= 168 are off-screen (Pan Docs: OAM byte 1).
-            if x == 0 || x >= 168 {
-                continue;
-            }
-            let first = usize::from(x.saturating_sub(8));
-            if (x0..x1).contains(&first) {
-                self.fetch_object(obj_buf, src, lcdc, slot, index, y, x);
-            }
+        if self.objects.len() != 0 {
+            self.fetch_objects(obj_buf, obj_rank, src, lcdc, x0, x1);
         }
 
         // LCDC.1 is checked when pixels are output, not at the scan (CGB;
@@ -458,11 +464,40 @@ impl Renderer {
         }
     }
 
+    /// Fetches the objects whose first visible pixel is in `[x0, x1)`, in
+    /// fetch order. Out of line: once per span with objects, and inlined
+    /// it would grow `render` past its size budget.
+    #[inline(never)]
+    fn fetch_objects(
+        &mut self,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut [u8; OBJ_BUF_LEN],
+        src: &Sources,
+        lcdc: u8,
+        x0: usize,
+        x1: usize,
+    ) {
+        for k in 0..self.objects.len() {
+            let slot = usize::from(self.order[k % MAX_PER_LINE]);
+            let (index, y, x) = self.objects.get(slot);
+            // X = 0 and X >= 168 are off-screen (Pan Docs: OAM byte 1).
+            if x == 0 || x >= 168 {
+                continue;
+            }
+            let first = usize::from(x.saturating_sub(8));
+            if (x0..x1).contains(&first) {
+                self.fetch_object(obj_buf, obj_rank, src, lcdc, slot, index, y, x);
+            }
+        }
+    }
+
     /// Decodes one object's row into the object buffer.
-    #[allow(clippy::too_many_arguments)] // Object fields plus the buffer.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)] // Object fields plus the buffers.
     fn fetch_object(
         &mut self,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut [u8; OBJ_BUF_LEN],
         src: &Sources,
         lcdc: u8,
         slot: usize,
@@ -490,31 +525,64 @@ impl Renderer {
             line ^= mask;
         }
         // Objects always use 8000-8FFF addressing (Pan Docs: VRAM Tile Data).
-        let addr = (usize::from(tile) << 4) + (usize::from(line) << 1);
-        let (mut lo, mut hi) = (src.vram[addr & 0x1FFF], src.vram[(addr + 1) & 0x1FFF]);
+        // Palette (buffer bits 2-4), tile data bank and drawing-priority
+        // rank. CGB mode (Pan Docs: OAM byte 3): bits 0-2 select OBJ
+        // palette 0-7 (OCPD), bit 3 the VRAM bank, bit 4 is unused; the
+        // object with the lower OAM index wins a pixel, whatever the fetch
+        // (X) order (SameBoy `fifo_overlay_object_row`: a pixel is replaced
+        // by an opaque one of a lower `priority`, the OAM index in CGB
+        // mode). The slot number orders the same way (slots are in OAM
+        // order). Compatibility mode: bit 4 selects OBP1 (OBJ palette 1),
+        // bank 0, and every object has rank 0, so the first fetch (lowest
+        // X, then OAM index) keeps the pixel (SameBoy: priority 0 with
+        // `GB_OBJECT_PRIORITY_X`). The mode is fixed after boot: SameBoy
+        // only applies OPRI writes while the boot ROM runs (or in the KEY0
+        // PGB mode, which a game can't reach), see `objects`.
+        let (pal, bank, rank) = if self.cgb {
+            (
+                (flags & 7) << 2,
+                usize::from(flags & CGB_ATTR_BANK) << 10,
+                (slot % MAX_PER_LINE) as u8,
+            )
+        } else {
+            (u8::from(flags & ATTR_DMG_OBP1 != 0) << 2, 0, 0)
+        };
+        let addr = ((usize::from(tile) << 4) + (usize::from(line) << 1)) | bank;
+        let (mut lo, mut hi) = (src.vram[addr & 0x3FFF], src.vram[(addr + 1) & 0x3FFF]);
         if flags & ATTR_X_FLIP != 0 {
             lo = lo.reverse_bits();
             hi = hi.reverse_bits();
         }
         let w = decode(lo, hi);
-        // DMG compatibility mode: OBP1 is OBJ palette 1.
-        let attr = if flags & ATTR_DMG_OBP1 != 0 {
-            1 << 2
-        } else {
-            0
-        } | (flags & ATTR_BEHIND_BG);
+        let attr = pal | (flags & ATTR_BEHIND_BG);
         // All 8 pixels at once: a byte per pixel, leftmost first. A pixel
-        // is written where the new color is opaque and the buffer is still
-        // transparent (an earlier, higher-priority object keeps it).
+        // is written where the new color is opaque and the buffer is either
+        // still transparent or holds an object of lower drawing priority
+        // (a higher rank).
         let x = usize::from(x);
-        if let Some(dst) = obj_buf
-            .get_mut(x..x + 8)
-            .and_then(|s| <&mut [u8; 8]>::try_from(s).ok())
-        {
+        if let (Some(dst), Some(ranks)) = (
+            obj_buf
+                .get_mut(x..x + 8)
+                .and_then(|s| <&mut [u8; 8]>::try_from(s).ok()),
+            obj_rank
+                .get_mut(x..x + 8)
+                .and_then(|s| <&mut [u8; 8]>::try_from(s).ok()),
+        ) {
             let new = spread_bytes(w);
             let old = u64::from_be_bytes(*dst);
-            let put = opaque_bytes(new) & !opaque_bytes(old);
-            *dst = (old | ((new | (u64::from(attr) * BYTES_01)) & put)).to_be_bytes();
+            let old_rank = u64::from_be_bytes(*ranks);
+            let taken = opaque_bytes(old);
+            let mut put = opaque_bytes(new) & !taken;
+            if taken != 0 {
+                // Overlap: also the bytes whose rank is above `rank` (ranks
+                // are at most 9: no borrow crosses a byte).
+                let lower = ((old_rank | BYTES_80).wrapping_sub(u64::from(rank + 1) * BYTES_01)
+                    & BYTES_80)
+                    >> 7;
+                put |= opaque_bytes(new) & (lower * 0xFF);
+            }
+            *dst = ((old & !put) | ((new | (u64::from(attr) * BYTES_01)) & put)).to_be_bytes();
+            *ranks = ((old_rank & !put) | ((u64::from(rank) * BYTES_01) & put)).to_be_bytes();
         }
     }
 }
@@ -837,6 +905,7 @@ fn fill_partial<const MIX: bool>(
 
 /// 0x01 in every byte of a u64.
 const BYTES_01: u64 = 0x0101_0101_0101_0101;
+const BYTES_80: u64 = 0x8080_8080_8080_8080;
 
 /// The 2-bit fields of a decoded tile row ([`decode`]) one per byte:
 /// field i (pixel 7 - i) to byte i, so `to_be_bytes` gives the pixels left
@@ -929,6 +998,7 @@ mod tests {
         regs: Regs,
         r: Renderer,
         obj_buf: [u8; OBJ_BUF_LEN],
+        obj_rank: [u8; OBJ_BUF_LEN],
     }
 
     impl Scene {
@@ -946,6 +1016,7 @@ mod tests {
                 },
                 r,
                 obj_buf: [0; OBJ_BUF_LEN],
+                obj_rank: [0; OBJ_BUF_LEN],
             }
         }
 
@@ -987,8 +1058,15 @@ mod tests {
                 colors: &self.colors,
                 pairs: &core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
             };
-            self.r
-                .render(row, x0, x1, &self.regs, &src, &mut self.obj_buf);
+            self.r.render(
+                row,
+                x0,
+                x1,
+                &self.regs,
+                &src,
+                &mut self.obj_buf,
+                &mut self.obj_rank,
+            );
         }
 
         fn line(&mut self, ly: u8) -> [u16; W] {
@@ -1550,6 +1628,81 @@ mod tests {
         }
     }
 
+    /// [`cgb_scene`] with CGB OBJ palette p color c = 2000 + 10p + c.
+    fn cgb_obj_scene() -> Scene {
+        let mut s = cgb_scene();
+        for (p, pal) in s.colors.obj.iter_mut().enumerate() {
+            for (c, col) in pal.iter_mut().enumerate() {
+                *col = (2000 + 10 * p + c) as u16;
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn cgb_object_palette_and_tile_bank() {
+        // Pan Docs: OAM byte 3 in CGB mode: bits 0-2 OBJ palette, bit 3
+        // VRAM bank, bit 4 (DMG palette) ignored.
+        let mut s = cgb_obj_scene();
+        s.solid_tile(0x0010, 1); // tile 1, bank 0
+        s.solid_tile(0x2010, 2); // tile 1, bank 1
+        s.obj(0, 16, 8, 1, 0x03); // palette 3, bank 0: x 0-7
+        s.obj(1, 16, 16, 1, 0x0D); // palette 5, bank 1: x 8-15
+        s.obj(2, 16, 24, 1, 0x17); // palette 7, bank 0, bit 4 set
+        let row = s.line(0);
+        run(&row, 0, 8, 2031);
+        run(&row, 8, 16, 2052);
+        run(&row, 16, 24, 2071);
+        run(&row, 24, W, 1000);
+    }
+
+    #[test]
+    fn cgb_object_priority_by_oam_index() {
+        // CGB mode: the lower OAM index wins, whatever the X (Pan Docs:
+        // Object Priority and Conflicts; SameBoy fifo_overlay_object_row).
+        let mut s = cgb_obj_scene();
+        s.solid_tile(0x10, 1);
+        s.solid_tile(0x20, 2);
+        s.obj(0, 16, 30, 1, 0); // x 22-29, palette 0
+        s.obj(1, 16, 28, 2, 1); // x 20-27, palette 1, fetched first
+        s.obj(2, 16, 58, 2, 0); // equal X: entry 2 beats entry 3
+        s.obj(3, 16, 58, 1, 1);
+        let row = s.line(0);
+        run(&row, 20, 22, 2012);
+        run(&row, 22, 30, 2001);
+        run(&row, 50, 58, 2002);
+        // A span boundary between the two fetches (a mid-line register
+        // write): entry 0, fetched in the second span, still takes the
+        // pixels not output yet from entry 1.
+        for split in [21, 22] {
+            let mut row = [0xFFFF; W];
+            s.begin(0);
+            s.span(&mut row, 0, split);
+            s.span(&mut row, split, W);
+            run(&row, 20, 22, 2012);
+            run(&row, 22, 30, 2001);
+        }
+    }
+
+    #[test]
+    fn cgb_bg_priority_comes_from_the_oam_index_winner() {
+        // Entry 0 (behind BG) wins x 12-15 over entry 1 (fetched first):
+        // the BG shows there (only the winning pixel is kept).
+        let mut s = cgb_obj_scene();
+        s.solid_tile(0x00, 1);
+        s.solid_tile(0x10, 3);
+        s.obj(0, 16, 20, 1, ATTR_BEHIND_BG); // x 12-19
+        s.obj(1, 16, 16, 1, 1); // x 8-15
+        let row = s.line(0);
+        run(&row, 8, 12, 2013);
+        run(&row, 12, 20, 1001);
+        // LCDC.0 clear: objects on top, entry 0's colors on 12-19.
+        s.regs.lcdc &= !LCDC_BG_ON;
+        let row = s.line(0);
+        run(&row, 8, 12, 2013);
+        run(&row, 12, 20, 2003);
+    }
+
     #[test]
     fn split_spans_match_one_span() {
         // Seeds 64-127: CGB mode, with attributes in VRAM bank 1, random BG
@@ -1588,6 +1741,7 @@ mod tests {
                 regs: s.regs,
                 r: Renderer::new(),
                 obj_buf: [0; OBJ_BUF_LEN],
+                obj_rank: [0; OBJ_BUF_LEN],
             };
             split.r.start_frame();
             split.r.cgb = cgb;
