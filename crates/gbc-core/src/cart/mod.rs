@@ -25,6 +25,54 @@ const HEADER_RAM_SIZE: usize = 0x149;
 /// size).
 pub type CartBuffers<'a> = (&'a [u8], &'a mut [u8]);
 
+/// A cartridge taken out of the emulator by
+/// [`Emulator::eject`](crate::Emulator::eject) or by loading another one
+/// over it ([`Emulator::load`](crate::Emulator::load)): the buffers the
+/// caller lent, plus the save state that lived inside the emulator, so
+/// nothing is lost on a game switch.
+#[non_exhaustive]
+pub struct EjectedCart<'a> {
+    /// The ROM passed to `load`.
+    pub rom: &'a [u8],
+    /// The whole cartridge RAM buffer passed to `load` (not trimmed to the
+    /// header size; [`EjectedCart::save_ram`] is the save file part).
+    pub cart_ram: &'a mut [u8],
+    /// The MBC3 RTC state at the moment the cartridge was removed, or
+    /// `None` if it has no RTC. Persist it with the save; it is not kept
+    /// anywhere else.
+    pub rtc: Option<RtcState>,
+    /// [`Emulator::save_dirty`](crate::Emulator::save_dirty) at removal:
+    /// the game changed its save since the caller last cleared the flag.
+    pub save_dirty: bool,
+}
+
+impl<'a> EjectedCart<'a> {
+    /// The save file part of `cart_ram`: its first
+    /// [`cart_ram_size`]`(rom)` bytes, the same bytes
+    /// [`Emulator::cart_ram`](crate::Emulator::cart_ram) returned.
+    pub fn save_ram(&self) -> &[u8] {
+        let n = cart_ram_size(self.rom).unwrap_or(0);
+        self.cart_ram.get(..n).unwrap_or(&[])
+    }
+
+    /// The buffers, for reuse (the RTC state and dirty flag are dropped).
+    pub fn into_buffers(self) -> CartBuffers<'a> {
+        (self.rom, self.cart_ram)
+    }
+}
+
+// Manual so that debug output doesn't dump the ROM and RAM.
+impl core::fmt::Debug for EjectedCart<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EjectedCart")
+            .field("rom_len", &self.rom.len())
+            .field("cart_ram_len", &self.cart_ram.len())
+            .field("rtc", &self.rtc)
+            .field("save_dirty", &self.save_dirty)
+            .finish()
+    }
+}
+
 /// Why a cartridge could not be loaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -124,11 +172,62 @@ pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     })
 }
 
+/// What the cartridge header says about saving, for a front end deciding
+/// what to persist (see [`cart_info`] and
+/// [`Emulator::cart_info`](crate::Emulator::cart_info)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CartInfo {
+    /// [`cart_ram_size`]: bytes of cartridge RAM (the save file length).
+    pub ram_size: usize,
+    /// The cartridge type (0147) is battery-backed: its RAM (and RTC)
+    /// keep their contents with the power off, so they are a save.
+    pub battery: bool,
+    /// The cartridge has an MBC3 real-time clock
+    /// ([`Emulator::rtc_state`](crate::Emulator::rtc_state) is `Some`).
+    pub rtc: bool,
+}
+
+impl CartInfo {
+    /// Whether the cartridge has anything to persist: a battery, and RAM
+    /// or an RTC behind it. Without a battery the cartridge RAM is lost at
+    /// power off on hardware, so a front end should not write a save file
+    /// (nor load one: a game may rely on RAM starting fresh).
+    pub const fn has_save(&self) -> bool {
+        self.battery && (self.ram_size != 0 || self.rtc)
+    }
+}
+
+/// [`CartInfo`] from the header, usable before
+/// [`Emulator::load`](crate::Emulator::load) (e.g. to decide whether to
+/// read a save file). Fails like [`cart_ram_size`].
+pub fn cart_info(rom: &[u8]) -> Result<CartInfo, LoadErrorKind> {
+    let ram_size = cart_ram_size(rom)?;
+    Ok(CartInfo {
+        ram_size,
+        battery: has_battery(rom),
+        rtc: has_rtc(rom),
+    })
+}
+
 mod rtc;
 
 /// Whether the cartridge type has an MBC3 real-time clock.
 fn has_rtc(rom: &[u8]) -> bool {
     matches!(rom[HEADER_CART_TYPE], 0x0F | 0x10)
+}
+
+/// Whether the cartridge type is battery-backed. Pan Docs ("The Cartridge
+/// Header", 0147): every type named "+BATTERY" (03 MBC1, 06 MBC2, 09 ROM,
+/// 0D MMM01, 0F/10/13 MBC3, 1B/1E MBC5, 22 MBC7, FF HuC1). SameBoy
+/// (`Core/mbc.c`, `GB_cart_defs`) also marks the Pocket Camera (FC),
+/// TAMA5 (FD) and HuC3 (FE) as battery-backed. (Mappers not emulated yet
+/// run as if they had no MBC, but their saves are still saves.)
+fn has_battery(rom: &[u8]) -> bool {
+    matches!(
+        rom[HEADER_CART_TYPE],
+        0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E | 0x22 | 0xFC..=0xFF
+    )
 }
 
 /// MBC3 clock registers (Pan Docs: MBC3, "The Clock Counter Registers").
@@ -274,6 +373,11 @@ pub(crate) struct Cart<'a> {
     rtc_synced: u64,
     /// Bit 0 of the last 6000-7FFF write (MBC3 latch: 0 then 1 latches).
     rtc_latch: bool,
+    /// The game changed the save since the caller last cleared this: a RAM
+    /// write that changed a byte, or an RTC register write. (Clock ticks
+    /// and latches don't count: the caller saves the RTC with the time
+    /// anyway, and games latch every frame.)
+    pub(crate) save_dirty: bool,
     mapper: Mapper,
     /// The ROM size rounded up to a whole bank, then to a power of two (at
     /// least 32 KiB), minus one. Bank offsets wrap with this mask, so bank
@@ -325,6 +429,7 @@ impl<'a> Cart<'a> {
             rtc: RtcState::zero(),
             rtc_synced: 0,
             rtc_latch: false,
+            save_dirty: false,
             mapper: Mapper::None,
             rom_mask: 0,
             rom_win: [&[]; 2],
@@ -395,10 +500,19 @@ impl<'a> Cart<'a> {
         &mut self.ram_buf[..self.ram_len]
     }
 
-    /// The caller's buffers (the RAM buffer untrimmed), or `None` for an
-    /// empty slot.
-    pub(crate) fn into_buffers(self) -> Option<CartBuffers<'a>> {
-        self.is_loaded().then_some((self.rom, self.ram_buf))
+    /// The caller's buffers (the RAM buffer untrimmed) with the RTC state
+    /// at clock `now` and the dirty flag, or `None` for an empty slot.
+    pub(crate) fn into_ejected(self, now: u64) -> Option<EjectedCart<'a>> {
+        if !self.is_loaded() {
+            return None;
+        }
+        let rtc = self.has_rtc.then(|| self.rtc_at(now));
+        Some(EjectedCart {
+            rom: self.rom,
+            cart_ram: self.ram_buf,
+            rtc,
+            save_dirty: self.save_dirty,
+        })
     }
 
     /// Mapper state back to power-on. Cartridge RAM and the RTC keep their
@@ -459,7 +573,11 @@ impl<'a> Cart<'a> {
         } else if self.ram_enabled && self.ram_len != 0 {
             let i = self.ram_index(addr);
             if let Some(b) = self.ram_buf.get_mut(i) {
-                *b = value | self.ram_or;
+                // Only a change dirties the save: games that keep work data
+                // in cartridge RAM rewrite the same bytes constantly.
+                let v = value | self.ram_or;
+                self.save_dirty |= *b != v;
+                *b = v;
             }
         }
     }
@@ -513,6 +631,7 @@ impl<'a> Cart<'a> {
         }
         // Count the time before the write with the old halt state.
         self.rtc_sync(now);
+        self.save_dirty = true;
         let t = &mut self.rtc.live;
         match self.rtc_sel {
             0x08 => {
@@ -790,7 +909,10 @@ mod tests {
         let mut cart = Cart::new(&rom, &mut buf).unwrap();
         assert_eq!(cart.ram().len(), 0x2000);
         assert_eq!(cart.ram_mut().len(), 0x2000);
-        let (_, whole) = cart.into_buffers().unwrap();
+        let ej = cart.into_ejected(0).unwrap();
+        assert_eq!(ej.save_ram().len(), 0x2000);
+        assert!(ej.rtc.is_none());
+        let (_, whole) = ej.into_buffers();
         assert_eq!(whole.len(), 0x8000);
         assert_eq!(whole[0x2000], 0x77);
     }
@@ -889,7 +1011,93 @@ mod tests {
 
     #[test]
     fn empty_cart_has_no_buffers() {
-        assert!(Cart::empty().into_buffers().is_none());
+        assert!(Cart::empty().into_ejected(0).is_none());
+    }
+
+    #[test]
+    fn battery_from_cart_type() {
+        // Pan Docs 0147: the "+BATTERY" types, plus FC-FE (SameBoy).
+        let battery = [
+            0x03, 0x06, 0x09, 0x0D, 0x0F, 0x10, 0x13, 0x1B, 0x1E, 0x22, 0xFC, 0xFD, 0xFE, 0xFF,
+        ];
+        for t in 0..=0xFFu8 {
+            let info = cart_info(&rom_with(t, 0x02)).unwrap();
+            assert_eq!(info.battery, battery.contains(&t), "type {t:02X}");
+            assert_eq!(info.rtc, matches!(t, 0x0F | 0x10), "type {t:02X}");
+        }
+        let info = |t, ram| cart_info(&rom_with(t, ram)).unwrap();
+        assert_eq!(
+            info(0x03, 0x03),
+            CartInfo {
+                ram_size: 0x8000,
+                battery: true,
+                rtc: false
+            }
+        );
+        assert_eq!(info(0x06, 0x00).ram_size, 512);
+        assert!(info(0x03, 0x02).has_save());
+        assert!(!info(0x02, 0x02).has_save()); // MBC1+RAM, no battery
+        assert!(!info(0x03, 0x00).has_save()); // battery, nothing behind it
+        assert!(info(0x0F, 0x00).has_save()); // RTC only
+        assert_eq!(
+            cart_info(&[0; 0x100]),
+            Err(LoadErrorKind::RomTooSmall { len: 0x100 })
+        );
+    }
+
+    #[test]
+    fn ram_write_dirties_only_on_change() {
+        let rom = rom_with(0x03, 0x02);
+        let mut buf = [0u8; 0x2000];
+        buf[5] = 0x42;
+        let mut c = Cart::new(&rom, &mut buf).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        c.write_ram(0xA005, 0x42, 0); // same value
+        assert!(!c.save_dirty);
+        c.write_ram(0xA006, 0x01, 0);
+        assert!(c.save_dirty);
+        assert!(c.into_ejected(0).unwrap().save_dirty);
+    }
+
+    #[test]
+    fn mbc2_ram_write_compares_stored_form() {
+        // The buffer holds F0 | nibble, so rewriting the nibble is no change.
+        let mut rom = mbc2_rom();
+        let mut ram = [0u8; 512];
+        let mut c = mbc2_cart(&mut rom, &mut ram);
+        c.write_rom(0x0000, 0x0A, 0);
+        c.write_ram(0xA000, 0x00, 0);
+        c.write_ram(0xA001, 0xF0, 0);
+        assert!(!c.save_dirty);
+        c.write_ram(0xA001, 0x01, 0);
+        assert!(c.save_dirty);
+    }
+
+    #[test]
+    fn rtc_register_write_dirties_latch_does_not() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        rtc_read(&mut c, 0x08, 5 * SEC); // latch + read
+        c.write_rom(0x4000, 0x0D, 0); // maps nothing
+        c.write_ram(0xA000, 1, 0);
+        assert!(!c.save_dirty);
+        rtc_write(&mut c, 0x0C, 0x40, 6 * SEC);
+        assert!(c.save_dirty);
+    }
+
+    #[test]
+    fn ejected_cart_carries_the_rtc_at_removal() {
+        let rom = rtc_rom();
+        let mut ram = [];
+        let mut c = Cart::new(&rom, &mut ram).unwrap();
+        c.write_rom(0x0000, 0x0A, 0);
+        rtc_write(&mut c, 0x09, 7, SEC / 2);
+        let ej = c.into_ejected(3 * SEC + SEC / 2).unwrap();
+        let rtc = ej.rtc.unwrap();
+        assert_eq!((rtc.live.minutes, rtc.live.seconds), (7, 3));
+        assert!(ej.save_dirty);
     }
 
     /// A ROM of `banks` 16 KiB banks whose bank `n` starts with `n as u8`

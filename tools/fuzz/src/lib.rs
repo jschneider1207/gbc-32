@@ -8,7 +8,7 @@
 //! and the coverage-guided cargo-fuzz targets (`fuzz/`).
 
 use gbc_core::{
-    Buttons, Config, DmgPalettes, Emulator, Events, Frame, Memory, RtcState, RtcTime,
+    Buttons, Config, DmgPalettes, EjectedCart, Emulator, Events, Frame, Memory, RtcState, RtcTime,
     SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, cart_ram_size,
 };
 
@@ -281,6 +281,8 @@ fn scenario(data: &[u8], profile: Profile) {
         let _ = emu.rtc_state();
         let _ = (emu.registers(), emu.serial_byte(), emu.lcd_enabled());
         let _ = (emu.screen_blank(), emu.cpu_locked(), emu.cart_ram().len());
+        let _ = (emu.cart_info(), emu.save_dirty());
+        emu.clear_save_dirty();
         if profile != Profile::Load || r.bool() {
             emu.reset();
             run(&mut emu, &mut rr, cycles / 4, &mut frame, &mut audio);
@@ -291,13 +293,14 @@ fn scenario(data: &[u8], profile: Profile) {
             let prev = emu.load(rom2, ram2, Config::default());
             let (prev_rom, prev_ram) = prev
                 .expect("rom2 is valid")
-                .expect("a cartridge was loaded");
+                .expect("a cartridge was loaded")
+                .into_buffers();
             rom_slot = Some(prev_rom);
             ram_slot = Some(prev_ram);
             run(&mut emu, &mut rr, 2_000, &mut frame, &mut audio);
-            spare = emu.eject();
+            spare = emu.eject().map(EjectedCart::into_buffers);
         } else {
-            let (rom, ram) = emu.eject().expect("a cartridge is loaded");
+            let (rom, ram) = emu.eject().expect("a cartridge is loaded").into_buffers();
             assert_eq!(ram.len(), ram_len);
             rom_slot = Some(rom);
             ram_slot = Some(ram);

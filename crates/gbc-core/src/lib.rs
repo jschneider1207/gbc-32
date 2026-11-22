@@ -37,11 +37,45 @@
 //! assert!(result.events.contains(Events::FRAME_READY));
 //! ```
 //!
-//! Saves: persist [`Emulator::cart_ram`] and, for MBC3+RTC carts,
-//! [`Emulator::rtc_state`] (with the wall-clock time). On the next run,
-//! [`Emulator::load`] first, then
+//! # Saves
+//!
+//! The caller owns persistence (ADR 0015). [`cart_info`]`(rom)` says,
+//! before loading, whether there is anything to save
+//! ([`CartInfo::has_save`]: a battery-backed cartridge with RAM or an
+//! RTC); cartridges without a battery get no save file. The save is
+//! [`Emulator::cart_ram`] plus, for MBC3+RTC carts,
+//! [`Emulator::rtc_state`] (stored with the wall-clock time).
+//! [`Emulator::save_dirty`] says when the game changed it, so a front end
+//! (or the MCU, writing to flash) saves only then and calls
+//! [`Emulator::clear_save_dirty`]. When the cartridge leaves,
+//! [`Emulator::eject`] (or a `load` over it) returns an [`EjectedCart`]
+//! with the buffers, the final RTC state and the dirty flag. On the next
+//! run, [`Emulator::load`] first, then
 //! `emu.set_rtc_state(saved.advance_seconds(elapsed_secs))`: `load` resets
 //! the clock, so setting it earlier is lost.
+//!
+//! ```
+//! use gbc_core::{Config, Emulator, Memory, cart_info};
+//!
+//! # let mut rom = vec![0u8; 0x8000];
+//! # rom[0x147] = 0x03; // MBC1+RAM+BATTERY
+//! # rom[0x149] = 0x02; // 8 KiB
+//! let info = cart_info(&rom).unwrap();
+//! let mut cart_ram = vec![0u8; info.ram_size]; // or read the .sav file
+//! let mut mem = Box::new(Memory::new());
+//! let mut emu = Emulator::new(&mut mem);
+//! emu.load(&rom, &mut cart_ram, Config::default()).unwrap();
+//! // ... run frames; now and then (e.g. once a second):
+//! if info.has_save() && emu.save_dirty() {
+//!     let _save: &[u8] = emu.cart_ram(); // write it out, with rtc_state()
+//!     emu.clear_save_dirty();
+//! }
+//! // On exit or a game switch:
+//! let ejected = emu.eject().unwrap();
+//! if info.has_save() && ejected.save_dirty {
+//!     let (_ram, _rtc) = (ejected.save_ram(), ejected.rtc); // write them out
+//! }
+//! ```
 //!
 //! An emulator stored in a long-lived struct borrows its memory, ROM and
 //! cartridge RAM for `'a`. A front end that switches games at run time
@@ -89,8 +123,14 @@
 //!     // Once per frame (the firmware's main loop):
 //!     emu.set_buttons(Buttons::EMPTY); // read from the GPIOs
 //!     let _ = emu.run_frame(frame, &mut []);
+//!     // Write the save to flash only when the game changed it:
+//!     if emu.save_dirty() {
+//!         let _ = (emu.cart_ram(), emu.rtc_state()); // to flash / eMMC
+//!         emu.clear_save_dirty();
+//!     }
 //!     // To switch games, `emu.eject()` (or the result of `load`) hands
-//!     // back the ROM and `save_ram` for the next `load`.
+//!     // back the ROM and `save_ram` for the next `load`, with the RTC
+//!     // state (`EjectedCart`).
 //! }
 //! # let mem = Box::leak(Box::new(Memory::new()));
 //! # let save = Box::leak(vec![0u8; 0x2_0000].into_boxed_slice());
@@ -119,7 +159,8 @@ mod timer;
 
 pub use apu::StereoSample;
 pub use cart::{
-    CartBuffers, LoadError, LoadErrorKind, MIN_ROM_SIZE, RtcState, RtcTime, cart_ram_size,
+    CartBuffers, CartInfo, EjectedCart, LoadError, LoadErrorKind, MIN_ROM_SIZE, RtcState, RtcTime,
+    cart_info, cart_ram_size,
 };
 pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
@@ -229,11 +270,12 @@ impl<'a> Emulator<'a> {
     /// bytes are used, so a larger buffer (e.g. one static buffer sized
     /// for the largest game) behaves exactly like one of the header's size.
     ///
-    /// Returns the previously inserted cartridge's buffers, if any, so a
-    /// game switch never loses them. Unlike [`Emulator::eject`] followed by
-    /// `load`, loading over a cartridge keeps the held buttons, stop events
-    /// and palettes (as [`Emulator::reset`] does); save the old cartridge's
-    /// [`Emulator::rtc_state`] first if needed. On error the emulator is
+    /// Returns the previously inserted cartridge, if any, as
+    /// [`Emulator::eject`] would (buffers, RTC state, dirty flag), so a
+    /// game switch never loses them. Unlike `eject` followed by `load`,
+    /// loading over a cartridge keeps the held buttons, stop events and
+    /// palettes (as [`Emulator::reset`] does). The new cartridge starts
+    /// with [`Emulator::save_dirty`] clear. On error the emulator is
     /// unchanged (the previous cartridge stays inserted) and the error
     /// hands back `rom` and `cart_ram`.
     pub fn load(
@@ -241,9 +283,10 @@ impl<'a> Emulator<'a> {
         rom: &'a [u8],
         cart_ram: &'a mut [u8],
         config: Config,
-    ) -> Result<Option<CartBuffers<'a>>, LoadError<'a>> {
+    ) -> Result<Option<EjectedCart<'a>>, LoadError<'a>> {
         let cart = Cart::new(rom, cart_ram)?;
-        let previous = core::mem::replace(&mut self.hw.sys.cart, cart).into_buffers();
+        let now = self.hw.sys.hot.clock();
+        let previous = core::mem::replace(&mut self.hw.sys.cart, cart).into_ejected(now);
         self.hw.sys.config = config;
         // Not `reset`: the new cartridge's RTC must not count the old
         // cartridge's run time.
@@ -251,24 +294,26 @@ impl<'a> Emulator<'a> {
         Ok(previous)
     }
 
-    /// Removes the cartridge and returns its buffers: the ROM and the whole
+    /// Removes the cartridge and returns it: the ROM and the whole
     /// cartridge RAM buffer as passed to [`Emulator::load`] (not trimmed to
-    /// the header size). Save [`Emulator::cart_ram`] (and
-    /// [`Emulator::rtc_state`]) first if needed.
+    /// the header size; [`EjectedCart::save_ram`] is the save file part),
+    /// the RTC state at this moment, and the [`Emulator::save_dirty`]
+    /// flag. Everything a save needs is in the result.
     ///
     /// Afterwards the emulator is in the state [`Emulator::new`] leaves it
     /// in: powered off, no cartridge, default settings (stop events, held
     /// buttons and palettes are cleared). Returns `None`, changing nothing,
     /// if no cartridge is inserted.
-    pub fn eject(&mut self) -> Option<CartBuffers<'a>> {
+    pub fn eject(&mut self) -> Option<EjectedCart<'a>> {
         if !self.hw.sys.cart.is_loaded() {
             return None;
         }
         self.mem.clear();
+        let now = self.hw.sys.hot.clock();
         core::mem::replace(&mut self.hw, Hw::new())
             .sys
             .cart
-            .into_buffers()
+            .into_ejected(now)
     }
 
     /// Changes the DMG compatibility palettes without a reset. Takes effect
@@ -552,9 +597,47 @@ impl<'a> Emulator<'a> {
     /// exactly [`cart_ram_size`]`(rom)` bytes (the header size), whatever
     /// the length of the buffer passed to [`Emulator::load`]. Empty if no
     /// cartridge is inserted.
+    ///
+    /// The bytes are what the CPU reads at A000-BFFF. For MBC2's 512x4-bit
+    /// RAM that is one byte per nibble with the upper four bits set
+    /// (`0xF0 | value`; Pan Docs: MBC2), as SameBoy stores it. A loaded
+    /// save is normalized to that form (upper bits forced to 1), so saves
+    /// with the upper bits clear also load.
     #[inline]
     pub fn cart_ram(&self) -> &[u8] {
         self.hw.sys.cart.ram()
+    }
+
+    /// The inserted cartridge's [`CartInfo`] (battery, RTC, RAM size), or
+    /// `None` if there is none.
+    pub fn cart_info(&self) -> Option<CartInfo> {
+        let cart = &self.hw.sys.cart;
+        if cart.is_loaded() {
+            cart_info(cart.rom).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the game changed its save since the cartridge was loaded or
+    /// [`Emulator::clear_save_dirty`] was last called: a cartridge RAM write
+    /// that changed a byte, or a write to an RTC register. The RTC counting
+    /// on its own, RTC latches and [`Emulator::set_rtc_state`] don't set it
+    /// (save the RTC state whenever the RAM is saved, and at exit). It is
+    /// set whatever the battery, so check [`CartInfo::has_save`] too.
+    ///
+    /// Lets the MCU write flash only when there is something new. A front
+    /// end usually waits until it has been set for a while (games write a
+    /// save over several frames) before saving.
+    #[inline]
+    pub fn save_dirty(&self) -> bool {
+        self.hw.sys.cart.save_dirty
+    }
+
+    /// Clears [`Emulator::save_dirty`], after the caller saved.
+    #[inline]
+    pub fn clear_save_dirty(&mut self) {
+        self.hw.sys.cart.save_dirty = false;
     }
 
     /// The MBC3 RTC state at [`Emulator::clock`], or `None` if the
@@ -753,7 +836,9 @@ mod tests {
         let mut fb = frame();
         let _ = emu.run_cycles(1000, &mut fb, &mut []);
 
-        let (rom, ram) = emu.eject().unwrap();
+        let ej = emu.eject().unwrap();
+        assert_eq!(ej.save_ram().len(), 0x2000);
+        let (rom, ram) = ej.into_buffers();
         // The whole buffer comes back, not the trimmed one.
         assert_eq!((rom.len(), ram.len()), (MIN_ROM_SIZE, 0x8000));
         assert_eq!(ram[0], 0x5A);
@@ -768,10 +853,111 @@ mod tests {
         assert!(emu.load(rom, ram, Config::default()).unwrap().is_none());
         assert_eq!(emu.peek(0x0100), 0xAB);
         let rom2 = vec![0u8; MIN_ROM_SIZE].leak();
-        let (old_rom, old_ram) = emu.load(rom2, &mut [], Config::default()).unwrap().unwrap();
+        let (old_rom, old_ram) = emu
+            .load(rom2, &mut [], Config::default())
+            .unwrap()
+            .unwrap()
+            .into_buffers();
         assert_eq!(old_rom[0x100], 0xAB);
         assert_eq!(old_ram.len(), 0x8000);
         assert_eq!(emu.peek(0x0100), 0x00);
+    }
+
+    /// An MBC3+TIMER+RAM+BATTERY ROM with 8 KiB of RAM.
+    fn rtc_rom() -> &'static mut [u8] {
+        let rom = vec![0u8; MIN_ROM_SIZE].leak();
+        rom[0x147] = 0x10;
+        rom[0x149] = 0x02;
+        rom
+    }
+
+    /// Runs whole run calls until at least `clocks` from now.
+    fn run_for(emu: &mut Emulator, clocks: u64) {
+        let mut fb = frame();
+        let target = emu.clock() + clocks;
+        while emu.clock() < target {
+            let _ = emu.run_until(target, &mut fb, &mut []);
+        }
+    }
+
+    #[test]
+    fn eject_and_load_over_return_the_rtc_state() {
+        let sec = u64::from(CLOCK_HZ);
+        let emu = fresh();
+        emu.load(rtc_rom(), vec![0u8; 0x2000].leak(), Config::default())
+            .unwrap();
+        let mut start = RtcState::default();
+        start.live.minutes = 5;
+        start.live.seconds = 10;
+        emu.set_rtc_state(start);
+        run_for(emu, 2 * sec);
+        // Loading over the RTC cart hands back its clock, caught up.
+        let ej = emu
+            .load(vec![0u8; MIN_ROM_SIZE].leak(), &mut [], Config::default())
+            .unwrap()
+            .unwrap();
+        let rtc = ej.rtc.unwrap();
+        assert_eq!((rtc.live.minutes, rtc.live.seconds), (5, 12));
+        assert!(!ej.save_dirty); // set_rtc_state and ticking don't dirty
+        let (rom, ram) = ej.into_buffers();
+
+        // Eject: the state at the moment of removal.
+        emu.load(rom, ram, Config::default()).unwrap();
+        emu.set_rtc_state(rtc);
+        run_for(emu, sec);
+        let before = emu.rtc_state();
+        let ej = emu.eject().unwrap();
+        assert_eq!(ej.rtc, before);
+        assert_eq!(ej.rtc.unwrap().live.seconds, 13);
+        // Carts without an RTC eject `None`.
+        emu.load(vec![0u8; MIN_ROM_SIZE].leak(), &mut [], Config::default())
+            .unwrap();
+        assert_eq!(emu.eject().unwrap().rtc, None);
+    }
+
+    #[test]
+    fn save_dirty_tracks_game_writes_until_cleared() {
+        let emu = fresh();
+        emu.load(rtc_rom(), vec![0u8; 0x2000].leak(), Config::default())
+            .unwrap();
+        assert!(!emu.save_dirty());
+        write_reg(emu, 0x0000, 0x0A); // RAM/RTC enable
+        write_reg(emu, 0xA000, 0x00); // same value: no change
+        assert!(!emu.save_dirty());
+        write_reg(emu, 0xA000, 0x33);
+        assert!(emu.save_dirty());
+        emu.clear_save_dirty();
+        assert!(!emu.save_dirty());
+        // An RTC register write is a save change too.
+        write_reg(emu, 0x4000, 0x08);
+        write_reg(emu, 0xA000, 0x20);
+        assert!(emu.save_dirty());
+        // A reset keeps the flag (the save is still unsaved)...
+        emu.reset();
+        assert!(emu.save_dirty());
+        // ...and it is handed back with the cartridge; the next one starts
+        // clean.
+        let ej = emu
+            .load(rtc_rom(), vec![0u8; 0x2000].leak(), Config::default())
+            .unwrap()
+            .unwrap();
+        assert!(ej.save_dirty);
+        assert_eq!(ej.save_ram()[0], 0x33);
+        assert!(!emu.save_dirty());
+    }
+
+    #[test]
+    fn cart_info_of_the_inserted_cartridge() {
+        let emu = fresh();
+        assert_eq!(emu.cart_info(), None);
+        emu.load(rtc_rom(), vec![0u8; 0x2000].leak(), Config::default())
+            .unwrap();
+        let info = emu.cart_info().unwrap();
+        assert_eq!(info, cart_info(rtc_rom()).unwrap());
+        assert!(info.battery && info.rtc && info.has_save());
+        assert_eq!(info.ram_size, 0x2000);
+        let _ = emu.eject();
+        assert_eq!(emu.cart_info(), None);
     }
 
     #[test]
