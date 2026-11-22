@@ -848,6 +848,53 @@ mod tests {
         assert!(evaluate(&c, 0, &cx).is_err());
     }
 
+    /// Contract precedence (acceptance/README.md, "Statuses"): within one
+    /// check, fail outranks unsupported.
+    #[test]
+    fn gambatte_fail_outranks_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        let frame = new_frame();
+        let rom = "g/x_cgb04c_outaudio1.gbc";
+        let rel = "g/x_cgb04c_outaudio1_cgb04c.png";
+        let c = Check::Gambatte;
+        // The PNG does not match the frame: Fail, even though the audio
+        // half is unsupported.
+        let mut wrong = gambatte::frame_to_gambatte_rgb(&frame);
+        wrong.data[7] = [1, 2, 3];
+        write_ref(dir.path(), rel, &wrong);
+        let r = evaluate(&c, 0, &ctx(dir.path(), rom, b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Fail, "{}", r.detail);
+        assert_eq!(r.mismatched_pixels, Some(1));
+        // The PNG matches: only the unsupported audio half is left.
+        write_ref(dir.path(), rel, &gambatte::frame_to_gambatte_rgb(&frame));
+        let r = evaluate(&c, 0, &ctx(dir.path(), rom, b"", &frame)).unwrap();
+        assert_eq!(r.status, CheckStatus::Unsupported, "{}", r.detail);
+        assert_eq!(r.mismatched_pixels, Some(0));
+    }
+
+    #[test]
+    fn gambatte_png_size_mismatch_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let frame = new_frame();
+        write_ref(
+            dir.path(),
+            "g/t_cgb04c.png",
+            &Rgb {
+                width: 2,
+                height: 2,
+                data: vec![[0; 3]; 4],
+            },
+        );
+        let r = evaluate(
+            &Check::Gambatte,
+            0,
+            &ctx(dir.path(), "g/t.gbc", b"", &frame),
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Fail, "{}", r.detail);
+        assert!(r.detail.contains("2x2"), "{}", r.detail);
+    }
+
     fn write_ref(dir: &Path, rel: &str, img: &Rgb) {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
