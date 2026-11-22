@@ -1876,9 +1876,6 @@ mod tests {
         assert_eq!(r.stat(l5 + 267) & 3, 0);
     }
 
-    /// Every case of Mooneye `acceptance/ppu/intr_2_mode0_timing_sprites`:
-    /// (extra M-cycles of mode 3, object X coordinates). The test's reads
-    /// see mode 0 one M-cycle later per 4 dots of penalty.
     #[test]
     fn object_stalls_come_out_in_x_order() {
         let mut out = [(0, 0); 10];
@@ -1892,6 +1889,9 @@ mod tests {
         assert_eq!(px, [0, 4, 12, 12, 22, 36, 52, 80, 92]);
     }
 
+    /// Every case of Mooneye `acceptance/ppu/intr_2_mode0_timing_sprites`:
+    /// (extra M-cycles of mode 3, object X coordinates). The test's reads
+    /// see mode 0 one M-cycle later per 4 dots of penalty.
     #[test]
     fn object_penalties_match_mooneye_sprite_timing() {
         let r = |x: u8, n: usize| [x; 10][..n].to_vec();
