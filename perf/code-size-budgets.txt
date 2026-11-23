@@ -113,4 +113,4 @@
 890 <gbc_core::Emulator>::load
 185 <gbc_core::cart::Cart>::into_ejected
 510 <gbc_core::cart::RtcTime>::add_seconds
-96000 (total .text)
+97500 (total .text)

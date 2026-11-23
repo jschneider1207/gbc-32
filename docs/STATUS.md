@@ -75,19 +75,6 @@ Working rules that matter here:
 
 ## Needs human
 Open (session 10):
-- **Code-size budget for mid-line PPU fidelity.** Steps 1-3 and D landed
-  within 96,000 B (+159 ROMs) after cold-code cuts freed 1,530 B; 270 B
-  are left (now 164 B after three more triage fixes). Steps E/F/G (window stall, objects, CGB glitch) need roughly
-  0.5-1 KB more (design estimates ran ~2-3x low in practice: step 1 was
-  930 B vs ~300 B estimated). Ask: raise gbc-core `.text` 96,000 ->
-  ~97,500 B, or stop the PPU work here. Numbers: design doc sec. 6-7.
-- **OAM DMA bus-conflict reference (M9, 65 ROMs; `docs/plan/m9-triage.md`
-  groups 2 and 13).** CPU pushes onto the bus an OAM DMA is using: we
-  follow SameBoy's CGB C rule (OAM byte cleared, reads 00); gambatte's
-  cgb04c expectations, captured on CGB C hardware, show the CPU's data.
-  Every pop/read variant already passes. Recommendation: follow gambatte
-  (hardware captures) for this case. Pick a reference, or sign the group
-  off.
 - **Sign-off candidates (M9):** 7 SameSuite APU ROMs whose names target
   other revisions (`*_extra_length_clocking-cgb0B` x3, `channel_3_*-cgb0`
   and `-cgbB`, `channel_1_freq_change_timing-A`, `-cgbDE`; a `-cgb0BC`
@@ -111,6 +98,14 @@ Open (session 10):
   down mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 10 (2026-11-23), human:
+- gbc-core total `.text` budget 96,000 -> 97,500 B (for mid-line PPU
+  steps E/F/G and the M9 fixes; per-function budgets unchanged). "That's
+  fine."
+- OAM DMA CPU writes during a conflicting transfer (M9 triage groups 2 and
+  13, ~65 ROMs): follow gambatte's CGB C hardware captures over SameBoy's
+  rule. "gambatte is fine."
 
 Decided in session 08 (2026-11-22), human:
 - APU perf budget. The exact optimizations brought the APU to 224.1k; the
