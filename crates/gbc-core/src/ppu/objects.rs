@@ -131,17 +131,24 @@ impl LineObjects {
     /// [`len`](Self::len) entries are meaningful.
     #[inline(never)]
     pub(crate) fn priority_order(&self) -> [u8; MAX_PER_LINE] {
+        let n = self.len().min(MAX_PER_LINE);
+        // Stable insertion sort by X on packed keys (X above the slot, so
+        // equal X keeps OAM order: the slots are in OAM order). Comparing
+        // keys kept beside the slots, not X looked up through each slot,
+        // keeps the loop small: the indirect version was unrolled to ~1.7 KB
+        // on thumbv7em.
+        let mut keys = [0u16; MAX_PER_LINE];
         let mut order = [0u8; MAX_PER_LINE];
-        let n = self.len() % (MAX_PER_LINE + 1);
-        // A stable sort by X, as ranks: slot `i` goes after every slot with
-        // a smaller X, or the same X and an earlier OAM position (the slots
-        // are in OAM order). Kept as plain loops rather than an insertion
-        // sort, which LLVM unrolled into ~1.7 KB on thumbv7em.
-        let key = |s: usize| u16::from(self.x[s]) << 4 | s as u16;
-        for i in 0..n {
-            let ki = key(i);
-            let rank = (0..n).filter(|&j| key(j) < ki).count();
-            order[rank % MAX_PER_LINE] = i as u8;
+        for (i, &x) in self.x[..n].iter().enumerate() {
+            let k = u16::from(x) << 4 | i as u16;
+            let mut j = i;
+            while j > 0 && keys[j - 1] > k {
+                keys[j] = keys[j - 1];
+                order[j] = order[j - 1];
+                j -= 1;
+            }
+            keys[j] = k;
+            order[j] = i as u8;
         }
         order
     }
