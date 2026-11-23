@@ -532,7 +532,7 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    fingerprint identical, size within +50 B.
    0b. The `tune` feature, `romtest --edge`, and the sweep script. Verify:
    default build byte-identical; a sweep of `CMP` over 8-11 on
-   `lcd_offset/**` reproduces dfb1c67`s 4 `lcd_offset` flips.
+   `lcd_offset/**` reproduces dfb1c67's 4 `lcd_offset` flips.
 1. **LYC compare (Walk) to t = 5, single speed, lines 1-152, with the
    view split (Walk mode-2 to 5, StatPhase1 m2 window to t <= 4,
    LycWrite/StatPhase2 unchanged).** Expect the 4 `lcd_offset` flips of dfb1c67 (6 on top of
