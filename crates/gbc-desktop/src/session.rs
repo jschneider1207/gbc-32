@@ -5,6 +5,7 @@ use std::path::Path;
 
 use gbc_core::{CLOCK_HZ, Config, Emulator, Memory, cart_info};
 
+use crate::compat_palette;
 use crate::save::{MAX_OWED_SECS, SaveFile, SettleTracker, sync_rtc};
 
 /// Unix time now, in seconds. The only wall clock the front end reads.
@@ -21,6 +22,8 @@ pub struct Options<'a> {
     pub now: fn() -> u64,
     /// Advance a stored RTC by the wall-clock time since it was saved.
     pub sync_rtc_on_load: bool,
+    /// Colors for DMG-only cartridges (ADR 0025).
+    pub dmg_palette: compat_palette::Mode,
 }
 
 /// Writes the save during play. The main loop calls
@@ -78,7 +81,10 @@ pub fn run<R>(
 
     let mut mem = Box::new(Memory::new());
     let mut emu = Emulator::new(&mut mem);
-    emu.load(&rom, &mut cart_ram, Config::default())
+    let config = Config {
+        dmg_palettes: compat_palette::select(opts.dmg_palette, &rom),
+    };
+    emu.load(&rom, &mut cart_ram, config)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if let Some((rtc, saved_at)) = stored_rtc {
         let now = opts.sync_rtc_on_load.then(opts.now);
@@ -126,6 +132,7 @@ mod tests {
             rom_path: &rom_path,
             now: || 1,
             sync_rtc_on_load: false,
+            dmg_palette: compat_palette::Mode::Auto,
         };
         let sav = dir.join("a.sav");
         let (early, late) = run(&opts, |emu, autosave| {

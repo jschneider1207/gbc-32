@@ -1,10 +1,12 @@
 //! Desktop front end (milestone M7, docs/plan/stage-1.md): CLI, ROM and save
 //! handling (ADR 0023), the headless run, and the interactive window
-//! (`window`, `video`, `input`), with audio output (`audio`, `dsp`) driving
+//! (`window`, `video`, `input`), DMG compatibility palettes
+//! (`compat_palette`, ADR 0025), with audio output (`audio`, `dsp`) driving
 //! frame pacing (`pacing`, ADR 0024).
 
 mod args;
 mod audio;
+mod compat_palette;
 mod dsp;
 mod headless;
 mod input;
@@ -35,6 +37,7 @@ fn main() -> ExitCode {
         rom_path: &args.rom,
         now: session::unix_now,
         sync_rtc_on_load: true,
+        dmg_palette: args.dmg_palette,
     };
     let Some(frames) = args.headless_frames else {
         let title = format!(

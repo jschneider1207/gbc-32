@@ -3,11 +3,17 @@
 
 use std::path::PathBuf;
 
+use crate::compat_palette::Mode;
+
 pub const USAGE: &str = "usage: gbc-desktop <rom.gb|rom.gbc> [--headless --frames N] [--scale K]
+                  [--dmg-palette auto|gray]
 
   --headless     run without a window or audio device (needs --frames)
   --frames N     with --headless: emulate N frames, then exit 0 (N >= 1)
   --scale K      window scale, integer 1-32 (default 4)
+  --dmg-palette auto|gray
+                 colors for DMG-only games: the CGB boot ROM's pick for
+                 the title (default), or grayscale
   -h, --help     print this text";
 
 pub const DEFAULT_SCALE: u32 = 4;
@@ -20,6 +26,8 @@ pub struct Args {
     pub headless_frames: Option<u64>,
     /// Integer window scale, for the later window step.
     pub scale: u32,
+    /// Colors for DMG-only cartridges.
+    pub dmg_palette: Mode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,6 +43,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     let mut headless = false;
     let mut frames: Option<u64> = None;
     let mut scale = DEFAULT_SCALE;
+    let mut dmg_palette = Mode::Auto;
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -61,6 +70,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                     }
                 };
             }
+            "--dmg-palette" => {
+                let v = it.next().ok_or("--dmg-palette needs a value")?;
+                dmg_palette = match v.as_str() {
+                    "auto" => Mode::Auto,
+                    "gray" => Mode::Gray,
+                    _ => return Err(format!("--dmg-palette: expected auto or gray, got `{v}`")),
+                };
+            }
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option `{s}`")),
             _ => {
                 if rom.replace(PathBuf::from(&arg)).is_some() {
@@ -80,6 +97,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         rom,
         headless_frames,
         scale,
+        dmg_palette,
     }))
 }
 
@@ -104,6 +122,7 @@ mod tests {
         assert_eq!(a.rom, PathBuf::from("game.gb"));
         assert_eq!(a.headless_frames, None);
         assert_eq!(a.scale, 4);
+        assert_eq!(a.dmg_palette, Mode::Auto);
     }
 
     #[test]
@@ -111,6 +130,18 @@ mod tests {
         let a = run(&["--headless", "--frames", "60", "x.gbc", "--scale", "2"]);
         assert_eq!(a.headless_frames, Some(60));
         assert_eq!(a.scale, 2);
+    }
+
+    #[test]
+    fn dmg_palette_choice() {
+        assert_eq!(
+            run(&["x.gb", "--dmg-palette", "gray"]).dmg_palette,
+            Mode::Gray
+        );
+        assert_eq!(
+            run(&["--dmg-palette", "auto", "x.gb"]).dmg_palette,
+            Mode::Auto
+        );
     }
 
     #[test]
@@ -132,6 +163,8 @@ mod tests {
             &["--scale", "x.gb"],
             &["a.gb", "b.gb"],
             &["--bogus", "a.gb"],
+            &["--dmg-palette", "grey", "a.gb"],
+            &["a.gb", "--dmg-palette"],
             &["--headless", "--frames", "1", "--frames", "2", "a.gb"],
         ] {
             assert!(p(bad).is_err(), "{bad:?} should be rejected");
