@@ -7,29 +7,36 @@
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
   review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
   (ad56c23). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, during session 12. Baseline b59d9a1 (gate
-  passed at 95e948d: must 86/86, should 40/40, stretch 3,252/3,461).
+- **Last updated:** 2026-11-23, session 12 (log
+  `logs/2026-11-23-12-m9-edges-window.md`). Baseline 5ad73ed (must 86/86,
+  should 40/40, stretch 3,267/3,461); full gate last run at 95e948d (passed).
 
-## Next up (session 12): M9
+## Next up: M9
 
 `docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
 checklist findings from the human become the first fixes when they arrive.
-1. Done in session 12: step 1b + `hdma-trigger` + design steps 3, 7 (VRAM
-   part) and 10 merged (95e948d, +51/-0; the HDMA period itself needed no
-   change); AGE `spsw-interrupts-cgbBC` fixed (1543bd8). In progress: drop
-   the now-dead per-speed LYC walk compare point (both speeds use t = 5),
-   fingerprint-identical. Remaining lcd-offset design steps 4-9.
-2. Remaining window group 4 (31): late_wy FFto*/10to0, ds late_wy,
-   late_enable_afterVblank, late_wx_ff, WX=A6/obj X=A7 edge, re-trigger.
+1. Design step 5, double-speed LYC=153 sync (agent running at log time,
+   branch `m9-ly153-ds`): `lyc153int_m2irq_*_ds_1` and the 5 ds late-WY
+   ROMs (`late_wy_ds_2`, `arg/late_wy_{1toFF_ds_2,FFto0_ly2_ds_1,
+   FFto2_ly2_ds_1,FFto2_ly2_scx5_ds_1}`), likely 3 dots late, then a ds
+   `WY_LEAD` of 2. Then lcd-offset design steps 4, 6-9.
+2. Window group 4 left (16): the 5 ds late-WY above, late_enable_afterVblank,
+   late_wx_ff, re-trigger (`on_screen/*`, Mealybug `m3_lcdc_win_*`,
+   `m3_wx_4_change_sprites`).
 3. Group 12 remaining: m0enable/disable_*, lycdisable_ff45_* edge positions;
    lycstatwirq ly00 pair.
 4. HDMA HALT sub-group leftovers (16), GDMA ds length (4), OAM DMA restart
    `srcchange0000_busyinc`.
 5. Mealybug step F leftovers (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch),
    step G, `LCDC_TILES_LATE` lead.
-6. Perf headroom is now the binding constraint (worst case 99.35%); consider a
-   hot-path saving pass before larger PPU work. M8 review lows still open
+6. Headroom is the binding constraint: `.text` 96,306 of 97,500 B and
+   cgb-acid2 +2.44% of its +3% guard. Consider a size/Ir saving pass
+   (fingerprint-identical) before larger PPU work. M8 review lows still open
    (ITCM globs, per-function budgets, `power_cycle`/`eject` stack frames).
+7. SameSuite group 15 fix targets (8): `channel_1_freq_change_timing-cgb0BC`
+   and the 7 unclear (ch1 sweep x2, volume x2, ch4 align/delay/
+   equivalent_frequencies).
+After M9: M10, in-depth review (human starts it on Fable).
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
@@ -49,11 +56,11 @@ arrows, Z = B, X = A, Enter = Start, Right Shift/Backspace = Select, Esc
 quits. Real-game headless smoke (scratch copies of `/mnt/x/gbc-roms`,
 3600 frames) is clean at c8e8626.
 
-Perf watch (`perf/bench-baseline.txt`): `synth:worst-case` is **99.35% of the
-4.02 M x86 Ir/frame line** (~26k headroom; was 99.2%). cgb-acid2 +2.10% of the
-+3% guard on main. APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
-`Ctx::write_apu` 498/508 B. `.text` 95,402 of 97,500 B on main (core size cut
-took 96,990 -> 94,242 earlier in session 11, then features). The 50% bar
+Perf watch (`perf/bench-baseline.txt`): `synth:worst-case` was 99.35% of the
+4.02 M x86 Ir/frame line at session 11 end; session 12 moved it -0.13%
+(475.84 M vs 476.47 M baseline Ir). cgb-acid2 +2.44% of the +3% guard on
+main. APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
+`Ctx::write_apu` 498/508 B. `.text` 96,306 of 97,500 B on main (5ad73ed). The 50% bar
 covers realistic worst cases; dense mid-mode-3 writes are outside it
 (docs/perf.md). ITCM set ~54.9 KB of 57,344 B (ADR 0026 Proposed). Gate checks:
 code size, ITCM set, byte-wide ROM loads (ADR 0027), bench. Fingerprint corpus
@@ -71,8 +78,9 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- `m9-cmp-cleanup` (worktree `../gbc-32-wt-cmp`): the per-speed compare
-  point cleanup above.
+- `m9-ly153-ds` (worktree `../gbc-32-wt-l153`): design step 5, see Next up 1.
+  If a fresh session finds it unmerged, check `git log main..m9-ly153-ds`
+  and the design doc step 5 entry before redoing it.
 
 ## Needs human
 Open:
@@ -254,13 +262,12 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 94b09ae (`acceptance/results/stage1.json`, session 11 end; M8 tag
-`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passes.
+Baseline 5ad73ed (`acceptance/results/stage1.json`, session 12; M8 tag
+`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` last run at 95e948d
+(passed); later merges ran every gate sub-check except the fuzz pass.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
-| should | 40 | 40 | `spsw-interrupts-cgbBC` fixed in session 12 (1543bd8; baseline not yet refreshed) |
-| stretch | 3,201 | 3,461 | 5 no-reference; 7 signed off (other CGB revisions) + 4 SameSuite align ROMs in `same-suite-apu-cgbE` (signed off as CGB E) |
-
-Overall 97.9%; audio 130/131.
+| should | 40 | 40 | |
+| stretch | 3,267 | 3,461 | 194 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |
