@@ -129,7 +129,6 @@ impl LineObjects {
     /// OAM order. That is also the drawing priority in compatibility mode
     /// (DMG-style), not in CGB mode (OAM order). Only the first
     /// [`len`](Self::len) entries are meaningful.
-    #[inline(never)]
     pub(crate) fn priority_order(&self) -> [u8; MAX_PER_LINE] {
         let n = self.len().min(MAX_PER_LINE);
         // Stable insertion sort by X on packed keys (X above the slot, so
