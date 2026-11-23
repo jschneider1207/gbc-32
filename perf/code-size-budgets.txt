@@ -37,6 +37,9 @@
 590 <gbc_core::ppu::Ppu>::next_event
 605 <gbc_core::ppu::Ppu>::seek
 520 <gbc_core::ppu::Ppu>::point_irq
+# Line 0, 144 and 153 update points, split out of point_irq (m9-perf;
+# measured 214 bytes, + 10%).
+236 <gbc_core::ppu::Ppu>::point_irq_rare
 1290 <gbc_core::bus::Ctx>::write_ppu
 # CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
 # 304, 240 bytes): VRAM accesses leave the inlined bus path for these.
