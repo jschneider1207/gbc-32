@@ -14,6 +14,7 @@
 mod exec;
 
 use crate::Events;
+use crate::rom::Rom;
 
 /// A snapshot of the CPU registers ([`Emulator::registers`](crate::Emulator::registers)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,7 +56,7 @@ impl Registers {
     /// 0134-0143) if the licensee is Nintendo (old licensee 01, or 33 with
     /// new licensee "01"), else 00; HL is 991A if B is 43 or 58, else 007C
     /// (the boot ROM's palette lookup leaves these behind).
-    pub(crate) fn post_boot(rom: &[u8], cgb_mode: bool) -> Self {
+    pub(crate) fn post_boot(rom: Rom<'_>, cgb_mode: bool) -> Self {
         let mut r = Self {
             a: 0x11,
             f: 0x80,
@@ -69,12 +70,13 @@ impl Registers {
             pc: 0x0100,
         };
         if !cgb_mode {
+            // Byte reads through `Rom::get` (ADR 0026); the caller checked
+            // that the header is there.
+            let at = |i| rom.get(i).unwrap_or(0);
             let nintendo =
-                rom[0x14B] == 0x01 || (rom[0x14B] == 0x33 && rom[0x144..0x146] == *b"01");
+                at(0x14B) == 0x01 || (at(0x14B) == 0x33 && at(0x144) == b'0' && at(0x145) == b'1');
             r.b = if nintendo {
-                rom[0x134..0x144]
-                    .iter()
-                    .fold(0u8, |s, &x| s.wrapping_add(x))
+                (0x134..0x144).fold(0u8, |s, i| s.wrapping_add(at(i)))
             } else {
                 0
             };
@@ -246,7 +248,7 @@ impl Cpu {
     }
 
     /// Power-on state after the boot ROM (see [`Registers::post_boot`]).
-    pub(crate) fn reset(&mut self, rom: &[u8], cgb_mode: bool) {
+    pub(crate) fn reset(&mut self, rom: Rom<'_>, cgb_mode: bool) {
         *self = Self::new();
         self.regs = Registers::post_boot(rom, cgb_mode);
     }

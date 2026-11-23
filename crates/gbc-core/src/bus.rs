@@ -148,7 +148,7 @@ impl Sys<'_> {
         self.cart.reset();
         self.config = config;
         self.buttons = buttons;
-        self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|&f| f & 0x80 != 0);
+        self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|f| f & 0x80 != 0);
         self.timer = Timer::post_boot(self.cgb_mode);
         // P1 select bits: in DMG compatibility mode the boot ROM reads the
         // joypad (palette selection) and leaves both select lines high,

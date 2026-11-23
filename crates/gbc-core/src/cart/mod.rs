@@ -151,6 +151,12 @@ impl core::error::Error for LoadError<'_> {
 /// [`Emulator::cart_ram`](crate::Emulator::cart_ram)). MBC2's built-in
 /// 512x4-bit RAM counts as 512 bytes. The caller owns this buffer and
 /// persists it (battery saves).
+/// Header byte `at` of `rom` (0 past the end: callers check the length
+/// first).
+fn header(rom: &[u8], at: usize) -> u8 {
+    Rom::new(rom).get(at).unwrap_or(0)
+}
+
 pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     if rom.len() < MIN_ROM_SIZE {
         return Err(LoadErrorKind::RomTooSmall { len: rom.len() });
@@ -161,17 +167,17 @@ pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     // table entry has no RAM, but for MBC types without RAM and a nonzero
     // 0149 it assumes the RAM exists ("Assuming cartridge has RAM"), which
     // is what the table below does anyway (ADR 0016).
-    if rom[HEADER_CART_TYPE] == 0x00 {
+    if header(rom, HEADER_CART_TYPE) == 0x00 {
         return Ok(0);
     }
-    if matches!(rom[HEADER_CART_TYPE], 0x05 | 0x06) {
+    if matches!(header(rom, HEADER_CART_TYPE), 0x05 | 0x06) {
         return Ok(512);
     }
     // Unknown codes mean no RAM rather than a load failure, as in SameBoy
     // (Core/mbc.c, GB_configure_cart: a 256-entry `ram_sizes` table where
     // only 0x00-0x05 are non-zero). Bad headers are common in homebrew and
     // test ROMs, which may still run fine without cartridge RAM.
-    Ok(match rom[HEADER_RAM_SIZE] {
+    Ok(match header(rom, HEADER_RAM_SIZE) {
         // "Unused" in Pan Docs; some homebrew uses it for 2 KiB (SameBoy
         // agrees).
         0x01 => 0x800,
@@ -223,6 +229,8 @@ pub fn cart_info(rom: &[u8]) -> Result<CartInfo, LoadErrorKind> {
 
 mod rtc;
 
+use crate::rom::Rom;
+
 /// Whether an MBC1 ROM is a multicart (MBC1M), by its contents (ADR 0016).
 /// Each game of a multicart has its own header, so the Nintendo logo
 /// (0104-0133, 0x30 bytes) is repeated at the start of the game in bank
@@ -233,15 +241,18 @@ fn is_mbc1m(rom: &[u8]) -> bool {
     if rom.len() < 0x4_4000 {
         return false;
     }
-    match (rom.get(0x104..0x134), rom.get(0x4_0104..0x4_0134)) {
-        (Some(a), Some(b)) => a == b,
+    // Byte by byte through `Rom::get`, not a slice compare (a `memcmp`
+    // may read words; ADR 0026).
+    let rom = Rom::new(rom);
+    match (rom.sub(0x104, 0x134), rom.sub(0x4_0104, 0x4_0134)) {
+        (Some(a), Some(b)) => (0..0x30).all(|i| a.get(i) == b.get(i)),
         _ => false,
     }
 }
 
 /// Whether the cartridge type has an MBC3 real-time clock.
 fn has_rtc(rom: &[u8]) -> bool {
-    matches!(rom[HEADER_CART_TYPE], 0x0F | 0x10)
+    matches!(header(rom, HEADER_CART_TYPE), 0x0F | 0x10)
 }
 
 /// Whether the cartridge type is battery-backed. Pan Docs ("The Cartridge
@@ -252,7 +263,7 @@ fn has_rtc(rom: &[u8]) -> bool {
 /// run as if they had no MBC, but their saves are still saves.)
 fn has_battery(rom: &[u8]) -> bool {
     matches!(
-        rom[HEADER_CART_TYPE],
+        header(rom, HEADER_CART_TYPE),
         0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E | 0x22 | 0xFC..=0xFF
     )
 }
@@ -376,7 +387,7 @@ enum Mapper {
 
 impl Mapper {
     fn from_header(rom: &[u8]) -> Self {
-        match rom[HEADER_CART_TYPE] {
+        match header(rom, HEADER_CART_TYPE) {
             0x01..=0x03 if is_mbc1m(rom) => Self::Mbc1M,
             0x01..=0x03 => Self::Mbc1,
             0x05 | 0x06 => Self::Mbc2,
@@ -396,7 +407,7 @@ const ROM_BANK: usize = 0x4000;
 const RAM_BANK: usize = 0x2000;
 
 pub(crate) struct Cart<'a> {
-    pub(crate) rom: &'a [u8],
+    pub(crate) rom: Rom<'a>,
     /// The caller's whole RAM buffer, kept so that eject returns all of it.
     /// Emulation must use only `ram()`, so behavior and the save file
     /// depend on the header, not on the buffer length.
@@ -426,7 +437,7 @@ pub(crate) struct Cart<'a> {
     /// file ends; reads past the end of a window return 0xFF, as if the
     /// ROM were padded with 0xFF (the M0 short-ROM rule). Indexed by
     /// address bit 14, so a read selects its window with one shift.
-    rom_win: [&'a [u8]; 2],
+    rom_win: [Rom<'a>; 2],
     /// Offset of the RAM bank visible at A000-BFFF.
     ram_off: usize,
     ram_enabled: bool,
@@ -459,7 +470,7 @@ impl<'a> Cart<'a> {
     /// No cartridge: reads return open-bus 0xFF.
     pub(crate) const fn empty() -> Self {
         Self {
-            rom: &[],
+            rom: Rom::EMPTY,
             ram_buf: &mut [],
             ram_len: 0,
             rtc: RtcState::zero(),
@@ -468,7 +479,7 @@ impl<'a> Cart<'a> {
             save_dirty: false,
             mapper: Mapper::None,
             rom_mask: 0,
-            rom_win: [&[]; 2],
+            rom_win: [Rom::EMPTY; 2],
             ram_off: 0,
             ram_enabled: false,
             ram_or: 0,
@@ -489,7 +500,7 @@ impl<'a> Cart<'a> {
                 let mapper = Mapper::from_header(rom);
                 let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
                 let mut cart = Self {
-                    rom,
+                    rom: Rom::new(rom),
                     ram_buf: ram,
                     ram_len: needed,
                     mapper,
@@ -548,7 +559,7 @@ impl<'a> Cart<'a> {
         }
         let rtc = self.has_rtc().then(|| self.rtc_at(now));
         Some(EjectedCart {
-            rom: self.rom,
+            rom: self.rom.into_inner(),
             cart_ram: self.ram_buf,
             rtc,
             save_dirty: self.save_dirty,
@@ -577,10 +588,9 @@ impl<'a> Cart<'a> {
     pub(crate) fn read_rom(&self, addr: u16) -> u8 {
         let window = self.rom_win[usize::from(addr >> 14) & 1];
         // One compare against the window length (ADR 0008).
-        match window.get(usize::from(addr) & (ROM_BANK - 1)) {
-            Some(&v) => v,
-            None => 0xFF,
-        }
+        window
+            .get(usize::from(addr) & (ROM_BANK - 1))
+            .unwrap_or(0xFF)
     }
 
     /// A read of A000-BFFF.
@@ -607,7 +617,9 @@ impl<'a> Cart<'a> {
 
     /// The 16 bytes [`Self::read_rom`] or [`Self::read_ram`] return for
     /// `addr..addr + 16` (`addr` 16-aligned, below C000), for VRAM DMA
-    /// blocks: one copy from the ROM bank window or the RAM bank. The RTC
+    /// blocks: 16 byte reads from the ROM bank window (never a wide copy:
+    /// the ROM may be in memory without unaligned reads, ADR 0026) or one
+    /// copy from the RAM bank. The RTC
     /// register doesn't depend on the address. Every RAM size is 0 or a
     /// power of two of at least 512 (`cart_ram_size`), so the
     /// `ram_len - 1` mask keeps the low 4 bits and the 16 bytes are one
@@ -615,7 +627,10 @@ impl<'a> Cart<'a> {
     pub(crate) fn dma_block(&self, addr: u16) -> [u8; 16] {
         let (mem, off): (&[u8], usize) = if addr < 0x8000 {
             let window = self.rom_win[usize::from(addr >> 14) & 1];
-            (window, usize::from(addr) & (ROM_BANK - 1))
+            let off = usize::from(addr) & (ROM_BANK - 1);
+            // Bytes past the end of a short last bank read FF, as in
+            // `read_rom`.
+            return core::array::from_fn(|i| window.get(off + i).unwrap_or(0xFF));
         } else if !self.ram_enabled || (self.rtc_sel == 0 && self.ram_len == 0) {
             return [0xFF; 16];
         } else if self.rtc_sel != 0 {
@@ -630,9 +645,9 @@ impl<'a> Cart<'a> {
         }
     }
 
-    /// A block from `off` in a ROM window that ends inside it (a ROM that
-    /// isn't a whole number of banks): the bytes past the end read FF, as
-    /// in [`Self::read_rom`] and [`Self::read_ram`].
+    /// A block from `off` in `mem` that ends inside it: the bytes past the
+    /// end read FF, as in [`Self::read_ram`]. Never taken for the RAM bank
+    /// (see [`Self::dma_block`]); the fallback replaces a panic path.
     #[cold]
     #[inline(never)]
     fn block_tail(mem: &[u8], off: usize) -> [u8; 16] {
@@ -883,11 +898,11 @@ impl<'a> Cart<'a> {
         self.ram_off = ram * RAM_BANK;
     }
 
-    fn rom_window(&self, bank: usize) -> &'a [u8] {
-        let rom: &'a [u8] = self.rom;
+    fn rom_window(&self, bank: usize) -> Rom<'a> {
         let start = (bank * ROM_BANK) & self.rom_mask;
-        rom.get(start..rom.len().min(start + ROM_BANK))
-            .unwrap_or(&[])
+        self.rom
+            .sub(start, self.rom.len().min(start + ROM_BANK))
+            .unwrap_or(Rom::EMPTY)
     }
 }
 
