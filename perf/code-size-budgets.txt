@@ -85,7 +85,15 @@
 # step, the channel register decode (`Square::write` is inlined into
 # `Apu::write`), the bus side of APU writes and reads, the DIV-APU event
 # and the deadline it sets.
-1600 <gbc_core::apu::Apu>::sync
+# M6 review (perf) lows, M8: `Apu::sync` tightened to its measured 760 B
+# +5% (after the mixer loop lost its panic paths), and the channel
+# integrators the sync calls, plus their shared DAC-only loop, budgeted
+# (measured 1142, 642, 410, 96 bytes; +5%).
+800 <gbc_core::apu::Apu>::sync
+1200 <gbc_core::apu::noise::Noise>::integrate
+675 <gbc_core::apu::wave::Wave>::integrate
+431 <gbc_core::apu::square::Square>::integrate
+101 gbc_core::apu::mix::constant
 167 <gbc_core::apu::Apu>::step
 438 <gbc_core::apu::Apu>::write
 508 <gbc_core::bus::Ctx>::write_apu
