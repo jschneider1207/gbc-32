@@ -152,6 +152,13 @@ edges) to half-dot resolution, not the halt length. Refs: SameBoy
 `display.c` (8 MHz `cycles` resolution), gambatte `lcd_offset` naming.
 Also flips some `dma` `lcdoffset` ROMs (group 8).
 
+Status (session 11): design `docs/design/lcd-offset-phase.md`. Step 0
+(edge table, no value change) merged. Step 1 (LYC comparison at t = 5,
+single speed, with write views) held on branch `lcd-offset-step1`: +5 /
+-1 (`dma/hdma_late_enable_lcdoffset3_1`), +718 B, cgb-acid2 +3.24%;
+with `hdma-trigger` on top +36 / -2. Next: cut its size/Ir (design 4.3
+step 1 options) and pair it with the step-10 HDMA edge.
+
 ### 7. APU square trigger and duty phase (27)
 `speedchange/speedchange*_ch1_duty0_pos6_to_pos7_timing_*` (17),
 `sound/ch1_duty0_*`, `ch1_init_pos_*`, `ch1_init_reset_sweep_counter_*`,

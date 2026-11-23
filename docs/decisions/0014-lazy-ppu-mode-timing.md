@@ -100,3 +100,26 @@ only 171 satisfies both halves. With it, the CGB B/C line-0 dot-3 mode-0
 read (AGE `stat-mode.inc` `M1E`) no longer breaks `stat_irq_blocking`. One
 position serves both cartridge modes; no test we have measures the DMG-mode
 handover separately (compare ADR 0022 for DIV).
+
+## Amendment 2 (2026-11-23, session 11): one edge table
+
+Every line-relative PPU edge the CPU observes (LY, the comparison, the
+modes, the VRAM/OAM/palette windows, the walk's update points, line 153,
+the WY check) and the two sub-M-cycle write observers (LYC write and STAT
+phase 2, as T-cycle offsets) now live in `crates/gbc-core/src/ppu/edges.rs`
+as named `const`s, defined in half-dots
+(`docs/design/lcd-offset-phase.md` 3.1, step 0). They compile to the same
+immediates: `diff-fingerprint.sh` identical on all 4,020 runs and gbc-core
+`.text` byte-identical. Calibrating an edge is now a one-line change there.
+The HDMA trigger (`hdma::HBLANK_DELAY`) stays with the HDMA model (design
+step 10).
+
+The design's step 0b (a `tune` Cargo feature with runtime edge overrides)
+is not done: no runtime knobs in gbc-core; sweeps edit the constants and
+rebuild.
+
+Step 1 (the walk's LYC comparison at `t = 5` in single speed, with
+per-write views of the STAT sources) was built and measured but **not
+merged**: +5 ROMs, 1 regression (`dma/hdma_late_enable_lcdoffset3_1`),
++718 B `.text` and cgb-acid2 +3.24% Ir (guard 3%). It is held on branch
+`lcd-offset-step1`; numbers in the design doc, step 1.

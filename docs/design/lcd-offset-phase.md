@@ -1,7 +1,8 @@
 # Design: PPU edges at every CPU/PPU clock phase (`lcd_offset`)
 
-- Status: Proposed (design only; no code). M9 triage groups 6 and 9, and
-  the phase-dependent ROMs of groups 8 and 12.
+- Status: Proposed. Step 0 done (8e3d711); step 0b dropped; step 1
+  measured and held (branch `lcd-offset-step1`, see 4.3). M9 triage
+  groups 6 and 9, and the phase-dependent ROMs of groups 8 and 12.
 - Date: 2026-11-23. Written against 65fe096 (main), with branches
   `hdma-trigger` (1a110de) and `lcd-offset-phase` (dfb1c67) read but not
   built. No romtest runs were made for this doc: every "ours" outcome
@@ -530,14 +531,50 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
 0. **Edges table, no value change.** Move the constants in 3.5 into
    `edges.rs` (half-dots and observers, `const fn` thresholds). Verify:
    fingerprint identical, size within +50 B.
+   **Done** (8e3d711): fingerprint identical (4,020 runs), `.text` and
+   every budgeted function byte-identical, bench within noise.
+   `hdma::HBLANK_DELAY` stays in `hdma.rs` (step 10 replaces it).
    0b. The `tune` feature, `romtest --edge`, and the sweep script. Verify:
    default build byte-identical; a sweep of `CMP` over 8-11 on
    `lcd_offset/**` reproduces dfb1c67's 4 `lcd_offset` flips.
+   **Dropped** (orchestrator, session 11): no runtime knobs in gbc-core;
+   sweeps edit the constants in `edges.rs` and rebuild.
 1. **LYC compare (Walk) to t = 5, single speed, lines 1-152, with the
    view split (Walk mode-2 to 5, StatPhase1 m2 window to t <= 4,
    LycWrite/StatPhase2 unchanged).** Expect the 4 `lcd_offset` flips of dfb1c67 (6 on top of
    `hdma-trigger`) and no regressions (3.6). Rebase `hdma-trigger` on it and re-check the
    `hdma_late_m0halt_*` pair.
+   **Measured, held** (branch `lcd-offset-step1`, 32c017b; full manifest
+   against step 0, which is fingerprint-identical to main):
+   - On main: +5 (the 4 `lcd_offset` ROMs predicted, plus
+     `dma/hdma_late_m0halt_lcdoffset3_2`, predicted only with
+     `hdma-trigger`), **-1: `dma/hdma_late_enable_lcdoffset3_1`**. The
+     prediction "its write at t = 4 is phase 1" was wrong: it is an FF55
+     write, which no STAT view covers. At offset 3 the LYC sync moves one
+     M-cycle and the HDMA period edge would have to move with it (step
+     10). `HBLANK_UNTIL` 3, 5, 6, 7 on top of `hdma-trigger` don't fix it
+     (5 loses `_2` and `hdma_late_m0halt_lcdoffset3_2`; 6-7 lose 5; 3
+     loses 6 default-phase ROMs). Its source isn't in our ROM set.
+   - With `hdma-trigger` rebased on top (clean rebase): +36 / -2 (the
+     same ROM plus `hdma_late_m0halt_ds_lcdoffset1_2`, the known swap).
+     The doc predicted +6 over `hdma-trigger`'s +30: measured +6 flips,
+     but one regression stays.
+   - The `m2enable/late_enable_lcdoffset3_1` and the three phase-0
+     sentinels held, as 3.6 predicted (the views work).
+   - Cost, as built (`edges::cmp_walk(double)` threaded through `step`,
+     `next_point` and `seek`; `point_irq` splits `Ly4` for line 0; an
+     `early_cmp` on writes; a re-seek on speed switches): `.text`
+     +718 B (over the 600 B stop line); over budget `Ppu::seek` 672/605,
+     `next_event` 626/590, `point_irq` 560/520, `sync` 962/960; bench
+     cgb-acid2 +3.24% (guard 3%), worst-case +0.16%. The 4.1/4.2
+     estimates (~0.05% Ir, 300-400 B) were low again.
+   - Unit tests for the views, mutation-checked (6 mutations caught).
+   Options: (a) a per-speed comparison offset kept in a `Ppu` field set
+   at speed changes, instead of computing from `double` in the walk, and
+   keep `point_irq`'s `Ly4` arm uniform, to win back size and Ir; (b)
+   land step 1 together with a step-10 HDMA fix for
+   `hdma_late_enable_lcdoffset3_1`; (c) accept the 1-ROM regression
+   (the human's call).
 2. *(merged into 1 if 1 alone regresses
    `m2enable/late_enable_lcdoffset3_1`)*
 3. **The same in double speed.** Targets: the ds-even rows with LYC sync
