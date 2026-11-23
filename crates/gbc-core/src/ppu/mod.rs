@@ -227,18 +227,41 @@ struct Cursor {
 
 /// The STAT interrupt line and the LY=LYC part of it (SameBoy
 /// `stat_interrupt_line`, `lyc_interrupt_line`), and the mode part of the
-/// line: bits [`IrqLine::STAT`], [`IrqLine::LYC`], [`IrqLine::MODE`]. One
-/// byte, aligned to two as the two-`bool` struct before the mode part was:
-/// three `bool`s grow `Hw` past its limit (`lib.rs`), and the old layout
-/// keeps `Ppu` code 62 B smaller than one byte unaligned (thumbv7em).
+/// line: `bits` [`IrqLine::STAT`] and [`IrqLine::MODE`], and `lyc`. Two
+/// bytes, as the two-`bool` struct before the mode part was: three `bool`s
+/// grow `Hw` past its limit (`lib.rs`), and the old layout keeps `Ppu` code
+/// 62 B smaller than one byte unaligned (thumbv7em). `lyc` in a byte of
+/// its own is a plain store in [`IrqLine::eval`] (perf: one byte for all
+/// three cost ~3 Ir per update point).
 #[derive(Clone, Copy)]
-#[repr(align(2))]
-struct IrqLine(u8);
+struct IrqLine {
+    bits: u8,
+    lyc: bool,
+}
 
 impl IrqLine {
     const STAT: u8 = 1;
-    const LYC: u8 = 2;
-    const MODE: u8 = 4;
+    const MODE: u8 = 2;
+    const LOW: Self = Self {
+        bits: 0,
+        lyc: false,
+    };
+    /// [`IrqLine::eval`]'s mode source by `mode`: the selects that raise
+    /// the mode part, and [`Self::KEEP`] if the old mode part stays
+    /// (`MODE_HOLD`; `MODE_1_STICKY` may rise and not fall; 7 is unused,
+    /// held as before). Branch-free in `eval` (perf: `point_irq` runs at
+    /// every update point).
+    const KEEP: u8 = 1;
+    const SOURCE: [u8; 8] = [
+        SEL_MODE0,
+        SEL_MODE1,
+        SEL_MODE2,
+        0,
+        SEL_MODE0 | SEL_MODE2,
+        Self::KEEP,
+        SEL_MODE1 | Self::KEEP,
+        Self::KEEP,
+    ];
 
     /// `GB_STAT_update` with mode source `mode` (`NO_MODE`: none;
     /// `MODE_HOLD`: the mode part holds) and comparison value `cmp`
@@ -246,31 +269,30 @@ impl IrqLine {
     /// the line rose.
     #[inline]
     fn eval(&mut self, select: u8, lyc: u8, mode: u8, cmp: Option<u8>) -> bool {
-        let mut s = self.0;
+        self.eval_inline(select, lyc, mode, cmp)
+    }
+
+    /// The LY=LYC part goes low: the line drops to its mode part.
+    fn drop_lyc(&mut self) {
+        let m = self.bits & Self::MODE;
+        self.bits = m | if m != 0 { Self::STAT } else { 0 };
+        self.lyc = false;
+    }
+
+    /// [`Self::eval`], inlined: [`Ppu::point_irq`] specializes it per
+    /// update point (constant mode source and comparison).
+    #[inline(always)]
+    fn eval_inline(&mut self, select: u8, lyc: u8, mode: u8, cmp: Option<u8>) -> bool {
         if let Some(v) = cmp {
-            s = if v == lyc {
-                s | Self::LYC
-            } else {
-                s & !Self::LYC
-            };
+            self.lyc = v == lyc;
         }
-        // By mode source: modes 0-2, `NO_MODE`, `MODE_0_2` (`MODE_HOLD`:
-        // none, the mode part holds).
-        const SOURCE: [u8; 5] = [SEL_MODE0, SEL_MODE1, SEL_MODE2, 0, SEL_MODE0 | SEL_MODE2];
-        if mode == MODE_1_STICKY {
-            if select & SEL_MODE1 != 0 {
-                s |= Self::MODE;
-            }
-        } else if let Some(&source) = SOURCE.get(usize::from(mode)) {
-            s = if select & source != 0 {
-                s | Self::MODE
-            } else {
-                s & !Self::MODE
-            };
-        }
-        let new = s & Self::MODE != 0 || (s & Self::LYC != 0 && select & SEL_LYC != 0);
+        let s = self.bits;
+        let src = Self::SOURCE[usize::from(mode & 7)];
+        let held = src & Self::KEEP != 0 && s & Self::MODE != 0;
+        let m = select & src != 0 || held;
+        let new = m || (self.lyc && select & SEL_LYC != 0);
         let rose = new && s & Self::STAT == 0;
-        self.0 = if new { s | Self::STAT } else { s & !Self::STAT };
+        self.bits = if m { Self::MODE } else { 0 } | u8::from(new);
         rose
     }
 }
@@ -589,7 +611,7 @@ impl Ppu {
             frame_start: 0,
             synced: 0,
             first_frame: false,
-            line_irq: IrqLine(0),
+            line_irq: IrqLine::LOW,
             cursor: Cursor {
                 pos: 0,
                 line: 0,
@@ -1148,31 +1170,47 @@ impl Ppu {
     fn point_irq(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
         let (sel, lyc) = (self.stat_select, self.lyc);
         let ly = l as u8;
-        // One `eval` call site (code size): the point's mode source and
-        // comparison.
-        let (mode, cmp) = match pt {
-            Pt::Ly3 if l == 0 => (1, Some(0)),
-            Pt::Ly3 => (2, None),
+        // The points of lines 1-143 and 145-153 inline `eval`, specialized
+        // to their mode source and comparison; the rest (line 0's `Ly3`,
+        // line 144's, line 153's) go to `point_irq_rare` as a tail call
+        // (perf: one shared `eval` for all cost ~7 Ir per point, 1% on
+        // cgb-acid2; all of them inlined grow this past its thumbv7em
+        // budget).
+        match pt {
+            Pt::Ly3 if l != 0 => line.eval_inline(sel, lyc, 2, None),
             // The mode-2 source ends (line 0: a pulse). Lines 1-143 had it
             // from `Ly3`, and a write since kept the line up for it
             // ([`Self::update_at`]), so only line 0 can rise for it here.
             Pt::Ly4 => {
-                let a = line.eval(sel, lyc, 2, Some(ly));
-                return a | line.eval(sel, lyc, NO_MODE, Some(ly));
+                let a = line.eval_inline(sel, lyc, 2, Some(ly));
+                a | line.eval_inline(sel, lyc, NO_MODE, Some(ly))
             }
-            Pt::Latch | Pt::End => return false,
-            Pt::HBlank => (0, Some(ly)),
-            Pt::V0 => (if l == 144 { 0 } else { 1 }, None),
+            Pt::HBlank => line.eval_inline(sel, lyc, 0, Some(ly)),
+            Pt::V0 if l != 144 => line.eval_inline(sel, lyc, 1, None),
+            Pt::V4 if l != 144 => line.eval_inline(sel, lyc, 1, Some(ly)),
+            Pt::Latch | Pt::End => false,
+            _ => self.point_irq_rare(line, pt, l, double),
+        }
+    }
+
+    /// [`Self::point_irq`] for line 0's `Ly3`, line 144's points and
+    /// line 153's.
+    #[inline(never)]
+    fn point_irq_rare(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
+        let (mode, cmp) = match pt {
+            Pt::V0 => (0, None),
             Pt::Quirk2 => (MODE_0_2, None),
             // Line 144: the mode part holds from `Quirk2` (the selects as
             // of there block the mode-1 interrupt, `edges::QUIRK2`).
-            Pt::V4 => (if l == 144 { MODE_HOLD } else { 1 }, Some(ly)),
+            Pt::V4 => (MODE_HOLD, Some(l as u8)),
             Pt::VBlank => (1, Some(144)),
             Pt::L153Cmp => (1, Some(153)),
             Pt::L153Off => (1, if double { Some(153) } else { None }),
             Pt::L153Zero => (1, Some(0)),
+            // `Ly3` on line 0 (`point_irq` handles the others).
+            _ => (1, Some(0)),
         };
-        line.eval(sel, lyc, mode, cmp)
+        line.eval(self.stat_select, self.lyc, mode, cmp)
     }
 
     /// When [`Ppu::sync`] must next run: the first update point after the
@@ -2327,8 +2365,7 @@ impl Ppu {
             && a.t == edges::CMP_OFF
             && (1..=152).contains(&a.line)
         {
-            let m = self.line_irq.0 & IrqLine::MODE;
-            self.line_irq.0 = m | if m != 0 { IrqLine::STAT } else { 0 };
+            self.line_irq.drop_lyc();
         }
         if self.line_irq.eval(self.stat_select, self.lyc, mode, cmp) {
             *iflags |= INT_STAT;
@@ -2341,7 +2378,7 @@ impl Ppu {
             && (edges::MODE2_SOURCE_END..edges::CMP_WALK).contains(&a.t)
             && self.stat_select & SEL_MODE2 != 0
         {
-            self.line_irq.0 |= IrqLine::STAT | IrqLine::MODE;
+            self.line_irq.bits = IrqLine::STAT | IrqLine::MODE;
         }
     }
 
@@ -2412,9 +2449,9 @@ impl Ppu {
             let lyc = match Self::cmp(a, double) {
                 (Some(v), _) | (None, v) => v == self.lyc,
             };
-            self.line_irq = IrqLine(if lyc { IrqLine::LYC } else { 0 });
+            self.line_irq = IrqLine { bits: 0, lyc };
         }
-        let low = self.line_irq.0 & IrqLine::STAT == 0;
+        let low = self.line_irq.bits & IrqLine::STAT == 0;
         self.update_at(now, iflags, double, view);
         // Double speed, line 0: a first phase at t = 4-5 that newly selects
         // mode 2 (mode 0 not selected) requests the line-0 mode-2
@@ -2469,8 +2506,7 @@ impl Ppu {
         // `_lcdoffset1_1` (IRQ), `_2`, `_4` (none).
         if !double && l == 153 && t < edges::LYC153_SS_UNTIL {
             if t >= edges::L153_CMP - 1 {
-                let m = self.line_irq.0 & IrqLine::MODE;
-                self.line_irq.0 = m | if m != 0 { IrqLine::STAT } else { 0 };
+                self.line_irq.drop_lyc();
             }
             if self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153)) {
                 *iflags |= INT_STAT;
