@@ -11,8 +11,10 @@
 #  - Raising a budget is committed with the change that needs it, with the
 #    measured size and the reason in the commit body.
 # Initial budgets are the measured size plus about 5% headroom.
-29150 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-13250 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+# Cpu::run / Cpu::execute_cb lowered to measured (25,504 / 12,078) + 5% so their
+# slack cannot eat the ITCM-set margin (scripts/check-itcm-set.sh, docs/perf.md).
+26800 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+12700 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
 90 <gbc_core::bus::Ctx>::write_high
 930 <gbc_core::bus::Ctx>::write_io
 890 gbc_core::bus::read_high

@@ -49,6 +49,9 @@ cargo build -p gbc-core --release --target thumbv7em-none-eabihf || fail "gbc-co
 step "Code-size budgets (thumbv7em, cortex-m7)"
 ./scripts/check-code-size.sh || fail "code-size budgets (perf/code-size-budgets.txt, docs/perf.md)"
 
+step "ITCM set fits (perf/itcm-sections.txt, thumbv7em)"
+./scripts/check-itcm-set.sh || fail "ITCM set (perf/itcm-sections.txt, docs/perf.md ITCM placement plan)"
+
 step "ROM reads are byte loads (thumbv7em, ES0491 2.7.3)"
 ./scripts/check-rom-loads.sh || fail "wide ROM load (docs/decisions/0027-byte-wide-rom-reads.md)"
 

@@ -645,6 +645,8 @@ follow-ups replace the target:
 2. Add the ITCM-set total (56 KiB) to `check-code-size.sh`, read from
    `perf/itcm-sections.txt`.
 
+   Done 2026-11-22 (`scripts/check-itcm-set.sh`, wired into `gate-stage1.sh`; the `run`/`execute_cb` budgets are now 26,800 / 12,700 for measured 25,504 / 12,078). `perf/itcm-sections.txt` has 55 globs (grouped: one glob covers the three `integrate`s, the three `advance`s and the two `frame_step`s; `Ppu::scan_line` needs a `.text.unlikely.` glob), matching 55,742 B of the 57,344 B budget (margin 1,602 B) at 54e7f26. Mutation-checked: a typo in a glob and a budget of 55,000 both fail.
+
 On the H735 with 128 KB ITCM the question goes away.
 
 ## Instruction-count benchmark

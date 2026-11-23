@@ -1,0 +1,74 @@
+# ITCM-resident gbc-core functions: one linker input-section glob per line,
+# `<glob>  # <demangled name>`; '#' starts a comment. Single source of truth
+# for the front ends' `.itcm` linker rules (docs/perf.md "ITCM placement
+# plan (M8)", ADR 0026) and for scripts/check-itcm-set.sh.
+#
+# The globs match the length-prefixed path segments of rustc's v0-mangled
+# section names, never the crate hash (it changes with the compiler/build).
+# `*` has the same meaning in the shell's `[[ == ]]` as in GNU ld / lld.
+#
+# ITCM_BUDGET_BYTES: the budget for the summed size of every section matched
+# below. Assumption (docs/perf.md): H753 ITCM 64 KiB minus an 8 KiB front-end
+# reserve (ISRs, blit, compiler_builtins, veneers) = 56 KiB.
+ITCM_BUDGET_BYTES=57344
+#
+# Tier A: per instruction / bus access
+.text._R*8gbc_core3cpu*3Cpu3run*                               # Cpu::run
+.text._R*8gbc_core3cpu*3Cpu10execute_cb*                       # Cpu::execute_cb
+.text._R*8gbc_core3cpu*3Cpu16step_not_running*                 # Cpu::step_not_running
+.text._R*8gbc_core3cpu*3Cpu12fetches_next*                     # Cpu::fetches_next
+.text._R*8gbc_core3bus9read_high*                              # bus::read_high
+.text._R*8gbc_core3bus9read_vram*                              # bus::read_vram
+.text._R*8gbc_core3bus8read_oam*                               # bus::read_oam
+.text._R*8gbc_core3bus*3Ctx12write_mapped*                     # Ctx::write_mapped
+.text._R*8gbc_core3bus*3Ctx10write_high*                       # Ctx::write_high
+.text._R*8gbc_core3bus*3Ctx8write_io*                          # Ctx::write_io
+.text._R*8gbc_core3bus*3Ctx10write_vram*                       # Ctx::write_vram
+.text._R*8gbc_core3bus*3Ctx9write_oam*                         # Ctx::write_oam
+.text._R*8gbc_core3bus*3Ctx8sync_ppu*                          # Ctx::sync_ppu
+.text._R*8gbc_core3bus*3Ctx8boundary*                          # Ctx::boundary
+.text._R*8gbc_core3ppu*3Ppu12vram_blocked*                     # Ppu::vram_blocked
+.text._R*8gbc_core3ppu*3Ppu11oam_blocked*                      # Ppu::oam_blocked
+.text._R*8gbc_core3bus*3Bus10halt_begin*                       # Bus::halt_begin
+.text._R*8gbc_core3bus*3Bus8halt_end*                          # Bus::halt_end
+.text._R*8gbc_core3bus*3Bus11idle_halted*                      # Bus::idle_halted
+.text._R*8gbc_core8schedule*8Schedule3set*                     # Schedule::set
+# Tier D: frame driver
+.text._R*8gbc_core*8Emulator3run*                               # Emulator::run
+.text._R*8gbc_core*8Emulator9run_frame*                         # Emulator::run_frame
+.text._R*8gbc_core*8Emulator9run_until*                         # Emulator::run_until
+.text._R*8gbc_core*8Emulator10run_cycles*                       # Emulator::run_cycles
+# Tier C: APU, per sync
+.text._R*8gbc_core3apu3mix*3Apu4sync*                          # Apu::sync
+.text._R*8gbc_core3apu*3Apu4step*                              # Apu::step
+.text._R*8gbc_core3apu*3Apu5write*                             # Apu::write
+.text._R*8gbc_core3apu*9integrate*                             # Square/Wave/Noise::integrate (3)
+.text._R*8gbc_core3apu*7advance*                               # Square/Wave/Noise::advance (3)
+.text._R*8gbc_core3apu*10frame_step*                           # Square/Noise::frame_step (2)
+.text._R*8gbc_core3apu6square*5Sweep5clock*                    # Sweep::clock
+.text._R*8gbc_core3apu3mix8constant*                           # mix::constant
+.text._R*8gbc_core3bus*3Ctx13div_apu_event*                    # Ctx::div_apu_event
+.text._R*8gbc_core3bus*3Ctx8apu_sync*                          # Ctx::apu_sync
+.text._R*8gbc_core3bus*3Sys20set_div_apu_deadline*             # Sys::set_div_apu_deadline
+.text._R*8gbc_core3bus*3Ctx11start_audio*                      # Ctx::start_audio
+.text._R*8gbc_core3bus*3Ctx6finish*                            # Ctx::finish
+.text._R*8gbc_core3bus*3Ctx18audio_buffer_event*               # Ctx::audio_buffer_event
+.text._R*8gbc_core3bus*3Ctx9write_apu*                         # Ctx::write_apu
+# Tier B (cheap, per-event PPU functions)
+.text._R*8gbc_core3ppu*3Ppu4sync*                              # Ppu::sync
+.text._R*8gbc_core3ppu*3Ppu10next_event*                       # Ppu::next_event
+.text._R*8gbc_core3ppu*3Ppu9point_irq*                         # Ppu::point_irq
+.text._R*8gbc_core3ppu*3Ppu4draw*                              # Ppu::draw
+.text._R*8gbc_core3ppu*3Ppu5flush*                             # Ppu::flush
+.text._R*8gbc_core3ppu*3Ppu4stat*                              # Ppu::stat
+.text._R*8gbc_core3ppu*3Ppu2ly*                                # Ppu::ly
+.text._R*8gbc_core3ppu*3Ppu11check_wy_at*                      # Ppu::check_wy_at
+.text.unlikely._R*8gbc_core3ppu*3Ppu9scan_line*    # Ppu::scan_line (rustc puts it in .text.unlikely)
+.text._R*8gbc_core3bus*3Ctx9write_ppu*                         # Ctx::write_ppu
+.text._R*8gbc_core3ppu6render9frame_row*                       # render::frame_row
+.text._R*8gbc_core3ppu6render9cgb_color*                       # render::cgb_color
+# Tier B, plain tile path (plan: first to drop if the firmware build is over budget)
+.text._R*8gbc_core3ppu6render*8Renderer6render*                # Renderer::render
+.text._R*8gbc_core3ppu6render10fill_plain*                     # render::fill_plain
+.text._R*8gbc_core3ppu6render12fill_partialKb0_*               # render::fill_partial::<false>
+.text._R*8gbc_core3ppu6render12partial_tileKb0_*               # render::partial_tile::<false>
