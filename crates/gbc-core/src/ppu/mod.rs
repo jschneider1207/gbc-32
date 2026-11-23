@@ -1632,7 +1632,9 @@ impl Ppu {
             match view {
                 PpuView::Off => {
                     for e in i..=last {
-                        self.scan.objs.consider(e, read(e, 0), read(e, 1), ly, tall);
+                        self.scan
+                            .objs
+                            .consider_cold(e, read(e, 0), read(e, 1), ly, tall);
                     }
                     self.bus = [read(last, 0), read(last, 1)];
                     self.bus_live = true;
@@ -1648,7 +1650,7 @@ impl Ppu {
                     let [y, x] = self.bus;
                     if LineObjects::covers(y, ly, tall) {
                         for e in i..=last {
-                            self.scan.objs.consider(e, y, x, ly, tall);
+                            self.scan.objs.consider_cold(e, y, x, ly, tall);
                         }
                     }
                 }
@@ -1801,6 +1803,7 @@ impl Ppu {
     /// A STAT update at clock `now` (a STAT or LYC write): re-evaluates the
     /// interrupt line with the mode source and comparison of that
     /// position.
+    #[inline(never)]
     fn update_at(&mut self, now: u64, iflags: &mut u8, double: bool) {
         let a = self.at(now);
         let mode = self.mode_source(now, a, double);
@@ -1815,6 +1818,7 @@ impl Ppu {
     /// write bug on CGB). The bus writes in two phases (SameBoy
     /// `GB_CONFLICT_STAT_CGB`: the LYC select keeps its old value for the
     /// first dot; double speed: the mode-0 select).
+    #[inline(never)]
     pub(crate) fn write_stat(&mut self, now: u64, value: u8, iflags: &mut u8, double: bool) {
         let was_quiet = self.quiet();
         self.stat_select = value & 0x78;
@@ -1851,6 +1855,7 @@ impl Ppu {
     /// the PPU's own next one while LY is changing (SameBoy states 35, 26,
     /// 15 and 16), and in two windows of line 153 the new value is first
     /// compared with 153 (SameBoy's states 14 and 29 "hacks", measured).
+    #[inline(never)]
     pub(crate) fn write_lyc(&mut self, now: u64, value: u8, iflags: &mut u8, double: bool) {
         self.lyc = value;
         if !self.lcd_enabled() {
@@ -1865,20 +1870,16 @@ impl Ppu {
         if deferred {
             return;
         }
-        let (sel, lyc) = (self.stat_select, self.lyc);
-        let mut rose = false;
-        if l == 153 && (2..6).contains(&t) {
-            rose = self.line_irq.eval(sel, lyc, 1, Some(153));
-        } else {
-            if l == 153 && (12..24).contains(&t) {
-                rose = self.line_irq.eval(sel, lyc, 1, Some(153));
-            }
-            let mode = self.mode_source(now, a, double);
-            let cmp = Self::cmp(a, double).0;
-            rose |= self.line_irq.eval(sel, lyc, mode, cmp);
-        }
-        if rose {
+        // Line 153, dots 2-5 and 12-23 (6-11 were deferred above): first
+        // compared with 153; in 12-23 the usual update follows.
+        if l == 153
+            && (2..24).contains(&t)
+            && self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153))
+        {
             *iflags |= INT_STAT;
+        }
+        if !(l == 153 && (2..6).contains(&t)) {
+            self.update_at(now, iflags, double);
         }
     }
 

@@ -91,6 +91,14 @@ impl LineObjects {
         }
     }
 
+    /// [`Self::consider`] out of line, for the cold incremental scan
+    /// (`Ppu::scan_to`): a call in its loops keeps LLVM from unrolling them
+    /// (code size).
+    #[inline(never)]
+    pub(crate) fn consider_cold(&mut self, index: u8, y: u8, x: u8, ly: u8, tall: bool) {
+        self.consider(index, y, x, ly, tall);
+    }
+
     #[inline]
     pub(crate) const fn len(&self) -> usize {
         self.len as usize
@@ -121,19 +129,19 @@ impl LineObjects {
     /// OAM order. That is also the drawing priority in compatibility mode
     /// (DMG-style), not in CGB mode (OAM order). Only the first
     /// [`len`](Self::len) entries are meaningful.
+    #[inline(never)]
     pub(crate) fn priority_order(&self) -> [u8; MAX_PER_LINE] {
         let mut order = [0u8; MAX_PER_LINE];
-        let n = self.len();
-        // Stable insertion sort by X; the slots are already in OAM order,
-        // so equal X keeps the earlier OAM entry first.
-        for slot in 0..n {
-            let x = self.x[slot];
-            let mut j = slot;
-            while j > 0 && self.x[order[j - 1] as usize % MAX_PER_LINE] > x {
-                order[j] = order[j - 1];
-                j -= 1;
-            }
-            order[j] = slot as u8;
+        let n = self.len() % (MAX_PER_LINE + 1);
+        // A stable sort by X, as ranks: slot `i` goes after every slot with
+        // a smaller X, or the same X and an earlier OAM position (the slots
+        // are in OAM order). Kept as plain loops rather than an insertion
+        // sort, which LLVM unrolled into ~1.7 KB on thumbv7em.
+        let key = |s: usize| u16::from(self.x[s]) << 4 | s as u16;
+        for i in 0..n {
+            let ki = key(i);
+            let rank = (0..n).filter(|&j| key(j) < ki).count();
+            order[rank % MAX_PER_LINE] = i as u8;
         }
         order
     }
