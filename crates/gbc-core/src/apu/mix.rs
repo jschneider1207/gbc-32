@@ -75,7 +75,13 @@ pub(crate) fn mix(levels: [i32; 4], w: &[[i32; 4]; 2]) -> [i32; 2] {
 /// `i16` without clamping.
 #[inline]
 pub(crate) fn sample(acc: i32) -> i16 {
-    ((acc << 6) >> SAMPLE_PERIOD_LOG2) as i16
+    // `(acc << 6) >> SAMPLE_PERIOD_LOG2` as one shift: |acc| <= 480 *
+    // SAMPLE_PERIOD, far from overflowing either way.
+    if SAMPLE_PERIOD_LOG2 >= 6 {
+        (acc >> (SAMPLE_PERIOD_LOG2 - 6)) as i16
+    } else {
+        (acc << (6 - SAMPLE_PERIOD_LOG2)) as i16
+    }
 }
 
 impl Apu {
@@ -108,43 +114,50 @@ impl Apu {
         }
         self.start_output();
         let w = weights(io[0x24], io[0x25]);
+        let [mut acc_l, mut acc_r] = self.out.acc;
+        let mut pos = u64::from(self.out.pos);
+        let mut n = *len;
         while dt != 0 {
             // A batch: the rest of the current window, then whole windows,
-            // the last one perhaps partial.
-            let mut segs = [0u8; BATCH];
-            let mut k = 0;
-            let mut pos = u64::from(self.out.pos);
-            while k < BATCH && dt != 0 {
-                let seg = (SAMPLE_PERIOD - pos).min(dt);
-                segs[k] = seg as u8;
-                dt -= seg;
-                pos = 0;
-                k += 1;
+            // the last one perhaps partial; at most `BATCH` spans, all
+            // `SAMPLE_PERIOD` but the first and the last.
+            let take = dt.min((BATCH as u64 * SAMPLE_PERIOD) - pos);
+            let end = pos + take;
+            let k = end.div_ceil(SAMPLE_PERIOD) as usize;
+            let mut segs = [SAMPLE_PERIOD as u8; BATCH];
+            if let Some(last) = segs.get_mut(k.wrapping_sub(1)) {
+                *last = (end - (k as u64 - 1) * SAMPLE_PERIOD) as u8;
             }
+            segs[0] -= pos as u8;
+            dt -= take;
+            pos = end % SAMPLE_PERIOD;
+            // Every span but the last ends its window; the last does
+            // unless `pos` is left inside one.
+            let done = k - usize::from(pos != 0);
             let mut lv = [[0; BATCH]; 4];
             self.integrate(&segs[..k], io, &mut lv);
-            for (i, &seg) in segs[..k].iter().enumerate() {
+            for i in 0..k {
                 // Opaque: no unrolling (code size).
-                let seg = core::hint::black_box(seg);
+                let i = core::hint::black_box(i);
                 let sums = mix([lv[0][i], lv[1][i], lv[2][i], lv[3][i]], &w);
-                self.out.acc[0] += sums[0];
-                self.out.acc[1] += sums[1];
-                let pos = u64::from(self.out.pos) + u64::from(seg);
-                if pos < SAMPLE_PERIOD {
-                    self.out.pos = pos as u8;
+                acc_l += sums[0];
+                acc_r += sums[1];
+                if i >= done {
                     continue;
                 }
-                self.out.pos = 0;
-                let [l, r] = core::mem::take(&mut self.out.acc);
-                if let Some(slot) = audio.get_mut(*len) {
+                if let Some(slot) = audio.get_mut(n) {
                     *slot = StereoSample {
-                        left: sample(l),
-                        right: sample(r),
+                        left: sample(acc_l),
+                        right: sample(acc_r),
                     };
-                    *len += 1;
+                    n += 1;
                 }
+                (acc_l, acc_r) = (0, 0);
             }
         }
+        self.out.acc = [acc_l, acc_r];
+        self.out.pos = pos as u8;
+        *len = n;
     }
 
     /// Starts integrating: after an advance-only stretch, the window grid
