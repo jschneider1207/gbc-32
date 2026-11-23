@@ -792,9 +792,13 @@ impl Ctx<'_, '_> {
         match reg {
             0x40 => {
                 self.run_ppu_to_call(now);
+                // Double speed: the fetcher sees the write one dot earlier
+                // (as SCX, SCY below; SameBoy `GB_CONFLICT_LCDC_CGB_DOUBLE`
+                // writes at `pending_cycles - 2`, 8 MHz ticks).
+                let at = now - u64::from(double);
                 let s = &mut *self.sys;
-                s.ppu.flush(now, self.mem, self.frame);
-                s.ppu.hold_fetch(now, self.mem, reg, value);
+                s.ppu.flush(at, self.mem, self.frame);
+                s.ppu.hold_fetch(at, self.mem, reg, value);
                 // Turning the LCD off outside mode 0 starts an HBlank
                 // transfer block (SameBoy `GB_lcd_off`).
                 if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
@@ -836,10 +840,15 @@ impl Ctx<'_, '_> {
             // CGB C (`GB_CONFLICT_PALETTE_CGB`, `pending_cycles - 1`;
             // Mealybug `m3_bgp_change`, `m3_obp0_change` CGB C
             // screenshots); WX one dot later (`GB_CONFLICT_WRITE_CPU`).
-            // Double speed: at the access (a CPU cycle is half a dot
-            // there; approximation).
+            // Double speed: SCX and SCY (and LCDC above) one dot before the
+            // access (SameBoy `GB_CONFLICT_SCX_DMG_AND_CGB_DOUBLE`:
+            // `pending_cycles - 2` 8 MHz ticks; SameBoy keeps SCY at the
+            // access, but gambatte `scy_during_m3_*ds*` want the same dot
+            // as SCX: docs/design/mid-line-ppu.md step D), the others at
+            // the access (approximation).
             _ => {
                 let at = match reg {
+                    0x42 | 0x43 if double => now - 1,
                     _ if double => now,
                     0x47..=0x49 => now - 1,
                     0x4B => now + 1,
@@ -2250,6 +2259,36 @@ mod tests {
             };
             assert_eq!(p, want, "x = {x}");
         }
+    }
+
+    /// Double speed: an SCX write reaches the fetcher one dot before the
+    /// access (SameBoy `GB_CONFLICT_SCX_DMG_AND_CGB_DOUBLE`; gambatte
+    /// `scx_during_m3_ds_*`). The access at t = 145, one dot after tile 6's
+    /// first pixel (x = 48) is output, lands at 144, before tile 7's map
+    /// entry is read (`FETCH_SAMPLED`): tile 7 (56-63) has the new SCX.
+    #[test]
+    fn double_speed_scx_write_lands_a_dot_before_the_access() {
+        let emu = striped_bg();
+        let ly = 7;
+        let line = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 456 * ly as u64;
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(line + 143, &mut fb, &mut []);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        // 2-clock M-cycles (`write_ppu` keys double speed on them; the
+        // switch's own timing is not under test).
+        ctx.hot.mcycle = 2;
+        ctx.idle();
+        assert_eq!(ctx.clock(), line + 145);
+        ctx.write(0xFF43, 8);
+        while ctx.clock() < line + 400 {
+            ctx.idle();
+        }
+        drop(ctx);
+        let row = fb.as_chunks::<160>().0[ly];
+        assert_ne!(row[47], row[48], "SCX = 0 up to tile 6");
+        assert_eq!(row[56], row[48], "tile 7 with SCX = 8");
+        assert_ne!(row[64], row[48], "tile 8 with SCX = 8");
     }
 
     /// CPU accesses to VRAM in mode 3 and to OAM in modes 2-3 are blocked;
