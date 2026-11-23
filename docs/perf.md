@@ -374,7 +374,7 @@ ROM list or durations also needs a baseline update in the same commit.
 
 ## Behavior fingerprint
 
-`bench --fingerprint [--seconds N] [--root DIR]` (N defaults to 3 and must be
+`bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N]` (N defaults to 3 and must be
 at least 1, root to `test-roms`) prints one line per run, `<16-hex FNV-1a
 hash> <path>`, sorted by path, so two builds can be compared bit for bit (ADR
 0011 "Verification"). Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`,
@@ -398,6 +398,15 @@ access: the unmapped VRAM bank and WRAM banks, and CGB palette RAM. The
 (one change every 1/8 s, at clocks inside chunks), so the joypad and
 scheduled-input paths are covered. Runs are parallel; output order does not
 depend on it.
+
+`--audio-buffer N` passes an N-sample audio buffer to every call instead of
+an empty one. `AUDIO_BUFFER_FULL` then ends calls early; each 456-clock chunk
+is finished with more calls to the same target and hashed as one (summed
+clocks, events without `AUDIO_BUFFER_FULL`), and samples are not hashed, so
+the output must be identical to the run without it: the APU sync invariant
+(ADR 0021 section 3), checked over the corpus (plan M6 task 7). A small N
+(e.g. 3) splits most chunks mid-way, the strictest setting. Compare the two
+outputs with `diff`; it is a heavy step, so run it alone.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
 worktree and the working tree, runs both fingerprints with the same args,

@@ -20,10 +20,11 @@ use gbc_core::{
 mod fingerprint;
 mod synth;
 
-/// `bench --fingerprint [--seconds N] [--root DIR]`.
+/// `bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N]`.
 fn fingerprint_main(args: &[String]) -> ExitCode {
     let mut secs = 3u64;
     let mut root = "test-roms".to_string();
+    let mut audio = 0usize;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let v = it.next();
@@ -34,13 +35,21 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
                 secs = v.parse().unwrap_or(3);
             }
             ("--root", Some(v)) => root = v.clone(),
+            // Per-call audio buffers of N samples (the hash must not change:
+            // ADR 0021 section 3, fingerprint.rs).
+            ("--audio-buffer", Some(v)) if v.parse::<usize>().is_ok_and(|n| n >= 1) => {
+                audio = v.parse().unwrap_or(1);
+            }
             _ => {
-                eprintln!("usage: bench --fingerprint [--seconds N (>= 1)] [--root DIR]");
+                eprintln!(
+                    "usage: bench --fingerprint [--seconds N (>= 1)] [--root DIR] \
+                     [--audio-buffer N (>= 1)]"
+                );
                 return ExitCode::from(2);
             }
         }
     }
-    fingerprint::run(Path::new(&root), secs)
+    fingerprint::run(Path::new(&root), secs, audio)
 }
 
 /// The measured region: callgrind collects only while this function is on

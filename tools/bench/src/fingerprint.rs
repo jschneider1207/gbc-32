@@ -25,6 +25,16 @@
 //! second time (`<path>#input`) with a fixed press/release sequence
 //! scheduled through `set_buttons_at` at clocks inside chunks, so the
 //! joypad and scheduled-input paths are fingerprinted too.
+//!
+//! `--audio-buffer N` passes an N-sample audio buffer to every call instead
+//! of an empty one (as the MCU will). `AUDIO_BUFFER_FULL` then ends calls
+//! early; a chunk is completed by further calls to the same target, and the
+//! hash folds the merged chunk (summed clocks, events without
+//! `AUDIO_BUFFER_FULL`), so it is defined exactly as without audio. The
+//! hash must not change: the APU state, and so every register read, is the
+//! same whether the syncs integrated or only advanced, however the calls
+//! split the run (ADR 0021 section 3, the sync invariant; plan M6 task 7).
+//! The samples themselves are not hashed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -32,7 +42,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gbc_core::{
     Buttons, CLOCK_HZ, Config, DmgPalettes, Emulator, Events, Frame, Memory, SCREEN_HEIGHT,
-    SCREEN_WIDTH, WHITE, cart_ram_size,
+    SCREEN_WIDTH, StereoSample, WHITE, cart_ram_size,
 };
 
 /// A corpus entry: a directory (relative to the root) searched recursively
@@ -171,8 +181,9 @@ fn collect(dir: &Path, name_contains: Option<&str>, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `Err` if the ROM fails to read or load.
-fn fingerprint(path: &Path, end: u64, input: bool) -> Result<u64, String> {
+/// `Err` if the ROM fails to read or load. `audio`: the per-call audio
+/// buffer length (0: empty).
+fn fingerprint(path: &Path, end: u64, input: bool, audio: usize) -> Result<u64, String> {
     let rom = std::fs::read(path).map_err(|e| e.to_string())?;
     let ram_size = cart_ram_size(&rom).map_err(|e| format!("{e:?}"))?;
     let mut cart_ram = vec![0u8; ram_size];
@@ -183,7 +194,11 @@ fn fingerprint(path: &Path, end: u64, input: bool) -> Result<u64, String> {
     };
     emu.load(&rom, &mut cart_ram, config)
         .map_err(|e| e.to_string())?;
-    emu.set_stop_events(Events::LD_B_B | Events::SERIAL_TX);
+    let stop = Events::LD_B_B | Events::SERIAL_TX;
+    emu.set_stop_events(stop);
+    // The stops a call would have had without audio.
+    let stop = (stop | Events::ALWAYS_STOP) - Events::AUDIO_BUFFER_FULL;
+    let mut samples = vec![StereoSample::default(); audio];
     let mut frame: Box<Frame> = vec![WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]
         .into_boxed_slice()
         .try_into()
@@ -202,14 +217,26 @@ fn fingerprint(path: &Path, end: u64, input: bool) -> Result<u64, String> {
                 next_input += 1;
             }
         }
-        let r = emu.run_until(target, &mut frame, &mut []);
+        let (mut clocks, mut events) = (0, Events::EMPTY);
+        loop {
+            let r = emu.run_until(target, &mut frame, &mut samples);
+            clocks += r.clocks;
+            let ev = r.events - Events::AUDIO_BUFFER_FULL;
+            events |= ev;
+            if ev.intersects(stop)
+                || emu.clock() >= target
+                || !r.events.contains(Events::AUDIO_BUFFER_FULL)
+            {
+                break;
+            }
+        }
         h.u64(emu.clock());
-        h.u64(r.clocks);
-        h.bytes(&r.events.bits().to_le_bytes());
-        if r.events.contains(Events::SERIAL_TX) {
+        h.u64(clocks);
+        h.bytes(&events.bits().to_le_bytes());
+        if events.contains(Events::SERIAL_TX) {
             h.byte(emu.serial_byte());
         }
-        if r.events.contains(Events::FRAME_READY) {
+        if events.contains(Events::FRAME_READY) {
             h.frame(&frame);
         }
         let g = emu.registers();
@@ -234,7 +261,7 @@ struct Run {
     input: bool,
 }
 
-pub fn run(root: &Path, secs: u64) -> std::process::ExitCode {
+pub fn run(root: &Path, secs: u64, audio: usize) -> std::process::ExitCode {
     let mut runs = Vec::new();
     for s in CORPUS {
         let mut roms = Vec::new();
@@ -274,7 +301,7 @@ pub fn run(root: &Path, secs: u64) -> std::process::ExitCode {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(r) = runs.get(i) else { break };
-                    let h = fingerprint(&r.path, r.end, r.input);
+                    let h = fingerprint(&r.path, r.end, r.input, audio);
                     results.lock().expect("lock")[i] = Some(h);
                 }
             });
