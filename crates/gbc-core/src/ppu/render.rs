@@ -60,7 +60,7 @@
 use super::objects::{LineObjects, MAX_PER_LINE};
 use super::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::DmgPalettes;
-use crate::memory::ObjRank;
+use crate::memory::{Held, ObjRank};
 
 const W: usize = SCREEN_WIDTH;
 
@@ -361,7 +361,7 @@ impl Renderer {
         if x0 >= x1 {
             return;
         }
-        if usize::from(obj_rank.hold[1].0) > x0 {
+        if usize::from(obj_rank.hold[1].end) > x0 {
             return self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank);
         }
         if self.obj_dirty {
@@ -425,10 +425,12 @@ impl Renderer {
     }
 
     /// [`Renderer::render`] while pixels the fetcher fetched before a
-    /// map-select or SCX write in mode 3 are still to be drawn
-    /// (`Ppu::hold_fetch`): each held part with the LCDC bits 3 and 6 and
-    /// the SCX its tiles were fetched with, then the rest with `regs`. Out
-    /// of line and cold: only after such a write.
+    /// map-select, tile-data, SCX or SCY write in mode 3 are still to be
+    /// drawn (`Ppu::hold_fetch`): each held part with the LCDC bits 3, 4
+    /// and 6, the SCX and the SCY its tiles were fetched with (and the
+    /// planes of its last tile read after the write redrawn, see
+    /// [`Renderer::mix_planes`]), then the rest with `regs`. Out of line
+    /// and cold: only after such a write.
     #[cold]
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
@@ -442,25 +444,102 @@ impl Renderer {
         obj_buf: &mut [u8; OBJ_BUF_LEN],
         obj_rank: &mut ObjRank,
     ) {
-        const MAPS: u8 = LCDC_BG_MAP | LCDC_WIN_MAP;
+        const FETCHED: u8 = LCDC_BG_MAP | LCDC_TILES_8000 | LCDC_WIN_MAP;
+        let regs_of = |h: &Held| Regs {
+            lcdc: (regs.lcdc & !FETCHED) | (h.lcdc & FETCHED),
+            scx: h.scx,
+            scy: h.scy,
+            ..*regs
+        };
         // Taken while the parts are drawn, so they are drawn as usual.
         let hold = core::mem::take(&mut obj_rank.hold);
-        for &(end, lcdc, scx) in &hold {
-            let end = usize::from(end);
+        for (i, h) in hold.iter().enumerate() {
+            let end = usize::from(h.end);
             if end <= x0 {
                 continue;
             }
-            let held = Regs {
-                lcdc: (regs.lcdc & !MAPS) | (lcdc & MAPS),
-                scx,
-                ..*regs
-            };
+            let held = regs_of(h);
             let to = end.min(x1);
             self.render(row, x0, to, &held, src, obj_buf, obj_rank);
+            let from = x0.max(end.saturating_sub(8));
+            if h.planes != 0 && from < to {
+                let next = if i == 0 { regs_of(&hold[1]) } else { *regs };
+                self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src);
+            }
             x0 = to;
         }
         self.render(row, x0, x1, regs, src, obj_buf, obj_rank);
         obj_rank.hold = hold;
+    }
+
+    /// Redraws pixels `[x0, x1)` of one BG or window tile, just drawn with
+    /// `held`, with the bit planes in `planes` (bit 0 low, bit 1 high) read
+    /// with `next`'s LCDC.4 and SCY instead: the fetcher read the map entry
+    /// and the other planes before a write and these after it (CGB C;
+    /// Mealybug "mixing tile bitplane data from different rows" and "from
+    /// two different tile patterns"). The window row ignores SCY.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn mix_planes(
+        &self,
+        row: &mut [u16; W],
+        obj_buf: &[u8; OBJ_BUF_LEN],
+        x0: usize,
+        x1: usize,
+        held: &Regs,
+        next: &Regs,
+        planes: u8,
+        src: &Sources,
+    ) {
+        let lcdc = held.lcdc;
+        let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
+        let attr_mask = if self.cgb {
+            0xFF
+        } else if master == 0 {
+            // Color 0 whatever the tile data.
+            return;
+        } else {
+            0
+        };
+        let win = self.window_active && x0 >= usize::from(self.window_start);
+        let (map_bit, y, y_next, col) = if win {
+            let col = ((x0 - usize::from(self.window_start)) as u8).wrapping_add(self.window_skip);
+            (LCDC_WIN_MAP, self.window_row, self.window_row, col)
+        } else {
+            (
+                LCDC_BG_MAP,
+                self.ly.wrapping_add(held.scy),
+                self.ly.wrapping_add(next.scy),
+                bg_column(held.scx, self.fine_scx, x0 as u8),
+            )
+        };
+        let map = if lcdc & map_bit != 0 { 0x1C00 } else { 0x1800 };
+        let fetch = |row_y: u8, tiles: u8| {
+            let (base, flip) = tile_data(tiles);
+            Fetch {
+                vram: src.vram,
+                map_row: map | (usize::from(y >> 3) << 5),
+                row_offset: usize::from(row_y & 7) << 1,
+                base,
+                flip,
+                attr_mask,
+            }
+            .row(col)
+        };
+        let (old, attr) = fetch(y, lcdc);
+        let (new, _) = fetch(y_next, next.lcdc);
+        // Decoded rows: the low plane in the even bits ([`decode`]).
+        let m = (u16::from(planes & 1) * 0x5555) | (u16::from(planes >> 1) * 0xAAAA);
+        let w = ((old & !m) | (new & m)) << (2 * (col & 7));
+        // One instance (mixed with no object pixels when none are shown):
+        // calling the plain one too grows it past its size budget.
+        let obj = if lcdc & LCDC_OBJ_ON != 0 && self.obj_fetched {
+            &obj_buf[x0 + 8..x1 + 8]
+        } else {
+            &[0; 8]
+        };
+        fill_partial::<true>(&mut row[x0..x1], obj, w, attr, master, src.colors);
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`
@@ -1087,7 +1166,7 @@ mod tests {
                 obj_buf: [0; OBJ_BUF_LEN],
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
-                    hold: [(0, 0, 0); 2],
+                    hold: [Held::default(); 2],
                 },
             }
         }
@@ -1848,7 +1927,7 @@ mod tests {
                 obj_buf: [0; OBJ_BUF_LEN],
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
-                    hold: [(0, 0, 0); 2],
+                    hold: [Held::default(); 2],
                 },
             };
             split.r.start_frame();

@@ -848,7 +848,7 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to_call(now.max(at));
                 let s = &mut *self.sys;
                 s.ppu.flush(at, self.mem, self.frame);
-                if reg == 0x43 {
+                if matches!(reg, 0x42 | 0x43) {
                     s.ppu.hold_fetch(at, self.mem, reg, value);
                 }
                 self.mem.io[reg] = value;

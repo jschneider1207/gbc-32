@@ -85,7 +85,13 @@ impl Memory {
             obj_buf: [0; OBJ_BUF_LEN],
             obj_rank: ObjRank {
                 rank: [0; OBJ_BUF_LEN],
-                hold: [(0, 0, 0); 2],
+                hold: [Held {
+                    end: 0,
+                    lcdc: 0,
+                    scx: 0,
+                    scy: 0,
+                    planes: 0,
+                }; 2],
             },
             bg_pal: [0; 64],
             obj_pal: [0; 64],
@@ -124,18 +130,33 @@ impl Memory {
 pub(crate) struct ObjRank {
     /// Meaningful only where `obj_buf` is opaque.
     pub(crate) rank: [u8; OBJ_BUF_LEN],
-    /// Pixels of the current line the fetcher had already fetched with
-    /// older map-select (LCDC.3/6) and SCX values when those were written
-    /// in mode 3 (`ppu::Ppu::hold_fetch`): `(end, LCDC, SCX)`, the pixels
-    /// before `end` drawn with that LCDC's bits 3 and 6 and that SCX. In
-    /// `end` order; `[1]` is the last; `[1].0 == 0`: none.
-    pub(crate) hold: [(u8, u8, u8); 2],
+    /// Pixels of the current line the fetcher had already fetched (in
+    /// part) with older map-select (LCDC.3/6), tile-data (LCDC.4), SCX and
+    /// SCY values when those were written in mode 3 (`ppu::Ppu::hold_fetch`):
+    /// the pixels before `end` are drawn with these values. In `end`
+    /// order; `[1]` is the last; `[1].end == 0`: none.
+    pub(crate) hold: [Held; 2],
+}
+
+/// One held part of a line ([`ObjRank::hold`]).
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
+pub(crate) struct Held {
+    pub(crate) end: u8,
+    pub(crate) lcdc: u8,
+    pub(crate) scx: u8,
+    pub(crate) scy: u8,
+    /// The bit planes of the part's last tile (`[end - 8, end)`) that the
+    /// fetcher read after the write, with the next part's LCDC.4 and SCY:
+    /// bit 0 the low plane, bit 1 the high plane (its map entry was read
+    /// before; `docs/design/mid-line-ppu.md` step 3).
+    pub(crate) planes: u8,
 }
 
 #[cfg(test)]
 mod tests {
 
-    use super::Memory;
+    use super::{Held, Memory};
     use crate::apu::Apu;
 
     #[test]
@@ -174,7 +195,7 @@ mod tests {
         ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
-        assert!(obj_rank.hold.iter().all(|&h| h == (0, 0, 0)));
+        assert!(obj_rank.hold.iter().all(|&h| h == Held::default()));
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).

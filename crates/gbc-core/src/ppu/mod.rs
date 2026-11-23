@@ -65,7 +65,7 @@
 //! source that changes between update points is seen at the next one.
 
 use crate::dma::{OamDma, PpuView};
-use crate::memory::Memory;
+use crate::memory::{Held, Memory};
 use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
@@ -255,6 +255,23 @@ const NO_STALL: u8 = 0xFF;
 /// ([`Ppu::hold_fetch`]). SameBoy pops a pixel, then advances the fetcher,
 /// in the same dot.
 const FETCH_SAMPLED: i32 = 1;
+
+/// Dots after a tile's first pixel is output at which the next tile's low
+/// and high bit planes have been read: their addresses (LCDC.4, SCY) are
+/// computed 2 and 4 dots after the map entry's (SameBoy
+/// `advance_fetcher_state_machine`: 2-dot GET_TILE, DATA_LOW and
+/// DATA_HIGH steps, registers read at each step's first dot). Calibrated
+/// with SCY writes (gambatte `scy_during_m3`, Mealybug `m3_scy_change2`).
+const FETCH_LOW: i32 = FETCH_SAMPLED + 2;
+const FETCH_HIGH: i32 = FETCH_SAMPLED + 4;
+
+/// Dots by which an LCDC write's tile-data select (LCDC.4) reaches the
+/// DATA_LOW/DATA_HIGH steps after an SCY write at the same dot would. CGB
+/// LCDC writes land in phases (SameBoy `GB_CONFLICT_LCDC_CGB`: the
+/// TILE_SEL change takes effect one dot after the access dot). Calibrated
+/// over the full manifest (vs 0 extra dots): 0 -> 30 flips, 1 -> 45 (15
+/// gambatte `bgtiledata_spx*` more), 2 -> 39; no regressions.
+const LCDC_TILES_LATE: i32 = 1;
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -1035,11 +1052,17 @@ impl Ppu {
     }
 
     /// After [`Ppu::flush`], before a write at clock `now` of `value` to
-    /// LCDC (`reg` 0x40) or SCX (0x43): if it changes the map select
-    /// (LCDC.3, LCDC.6) or SCX in mode 3, the tiles the fetcher already has
-    /// keep the old values (`ObjRank::hold`). The fetcher reads them at each
-    /// tile's GET_TILE step (SameBoy `advance_fetcher_state_machine`, MIT;
-    /// Pan Docs: Pixel FIFO). When pixel `x` is the next out, the tile it
+    /// LCDC (`reg` 0x40), SCY (0x42) or SCX (0x43): if it changes the map
+    /// select (LCDC.3, LCDC.6), the tile data select (LCDC.4), SCY or SCX in
+    /// mode 3, the tiles the fetcher already has keep the old values
+    /// (`ObjRank::hold`). The fetcher reads the map select, SCX and SCY at
+    /// each tile's GET_TILE step, and LCDC.4 and SCY again (CGB C) at the
+    /// DATA_LOW and DATA_HIGH steps, `FETCH_LOW` and `FETCH_HIGH` dots in
+    /// (SameBoy `advance_fetcher_state_machine`, MIT; Pan Docs: Pixel FIFO;
+    /// Mealybug: SCY "read during the B, 0 and 1 stages", TILE_SEL "during
+    /// the 0 and 1 stages"). A tile caught between them keeps its map entry
+    /// and the planes read before the write (`Held::planes`: the others
+    /// with the new values). When pixel `x` is the next out, the tile it
     /// belongs to is in the FIFO, and the next one is fetched from the dot
     /// the first pixel of that tile is output (its map entry is read
     /// `FETCH_SAMPLED` dots later) or completely during an object or window
@@ -1052,9 +1075,9 @@ impl Ppu {
         let a = self.at(now);
         let t = a.t as i32;
         let changed = if reg == 0x40 {
-            (value ^ self.lcdc) & 0x48 != 0
+            (value ^ self.lcdc) & 0x58 != 0
         } else {
-            value != mem.io[0x43]
+            value != mem.io[reg]
         };
         // In mode 3 (as `mode3_pixel`; LCD off or a line without one never
         // matches `lt.start`); `flush` drew up to the pixel being output.
@@ -1083,28 +1106,49 @@ impl Ppu {
             && lt.stalls[..usize::from(lt.n_stalls)]
                 .iter()
                 .any(|&(sx, _)| (tile..=x).contains(&i32::from(sx)));
-        let mut end = tile
-            + if phase >= FETCH_SAMPLED || stalled {
-                16
-            } else {
-                8
-            };
+        // Tile j + 1 (from `tile + 8`): fetched with the old values, its
+        // map entry only (`planes`: the planes still to read), or not yet.
+        // An LCDC.4 change reaches the data steps one dot later
+        // (`LCDC_TILES_LATE`).
+        // Only SCY and LCDC.4 reach the data steps: other writes leave
+        // `planes` 0 (no redraw, `Renderer::mix_planes`).
+        let late = i32::from(reg == 0x40) * LCDC_TILES_LATE;
+        let data = reg == 0x42 || (reg == 0x40 && (value ^ self.lcdc) & 0x10 != 0);
+        let (mut end, mut planes) = if phase >= FETCH_HIGH + late || stalled || !data {
+            (
+                tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !stalled),
+                0,
+            )
+        } else if phase >= FETCH_SAMPLED {
+            (tile + 16, if phase >= FETCH_LOW + late { 2 } else { 3 })
+        } else {
+            (tile + 8, 0)
+        };
         // The window's first tile is fetched after it starts (from WX).
         let wx = mem.io[0x4B];
         if !active && self.renderer.wy_triggered() && self.lcdc & 0x20 != 0 && wx <= 166 {
             let s = i32::from(wx.saturating_sub(7));
-            if s >= x {
-                end = end.min(s);
+            if s >= x && s < end {
+                // Tile j + 1 cut by the window start: its planes as of
+                // its map entry (approximation).
+                end = s;
+                planes = 0;
             }
         }
         if end <= x {
             return;
         }
-        let seg = (end.min(176) as u8, self.lcdc, mem.io[0x43]);
+        let seg = Held {
+            end: end.min(176) as u8,
+            lcdc: self.lcdc,
+            scx: mem.io[0x43],
+            scy: mem.io[0x42],
+            planes,
+        };
         let hold = &mut mem.obj_rank.hold;
-        if i32::from(hold[1].0) <= x {
-            *hold = [(0, 0, 0), seg];
-        } else if seg.0 > hold[1].0 {
+        if i32::from(hold[1].end) <= x {
+            *hold = [Held::default(), seg];
+        } else if seg.end > hold[1].end {
             *hold = [hold[1], seg];
         }
     }
@@ -1290,7 +1334,7 @@ impl Ppu {
         t.n_stalls = k as u8;
         t.end = first_pixel + 160 + total;
         self.drawn = 0;
-        mem.obj_rank.hold[1].0 = 0;
+        mem.obj_rank.hold[1].end = 0;
         self.renderer.start_line(l as u8, scx, &objs, order);
         self.attr_on = false;
         if aware {
@@ -2309,6 +2353,58 @@ mod tests {
         assert_eq!(first_of(&r, 1, 24, 1), Some(40));
     }
 
+    /// The pixels of tile 3 (x 24-31) and pixel 32 on line `ly`.
+    fn tile3(r: &Rig, ly: usize) -> ([u16; 8], u16) {
+        let row = &r.frame[ly * SCREEN_WIDTH..][..SCREEN_WIDTH];
+        (row[24..32].try_into().unwrap(), row[32])
+    }
+
+    #[test]
+    fn tile_data_write_mixes_the_planes_of_the_tile_being_fetched() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // Map 9800 is tile 0: color 0 at 8000 (LCDC.4 = 1), color 3 at
+        // 9000 (LCDC.4 = 0). SCX = 0: pixel x is out at line position
+        // 96 + x; tile 3's fetch starts as pixel 16 is output.
+        r.mem.vram[0x1000..0x1010].fill(0xFF);
+        for (ly, p, want) in [
+            // Before its map entry is read: tile 3 all new (color 3).
+            (1u32, 0u64, [4u16; 8]),
+            // Map entry read, no plane: both planes new.
+            (2, FETCH_SAMPLED as u64, [4; 8]),
+            // The LCDC.4 change reaches the low plane a dot late: none read.
+            (3, FETCH_LOW as u64, [4; 8]),
+            // Low plane read with 8000 (0), high plane with 9000 (1):
+            // color 2.
+            (4, (FETCH_LOW + LCDC_TILES_LATE) as u64, [3; 8]),
+            // Both planes read: tile 3 old (color 0).
+            (5, (FETCH_HIGH + LCDC_TILES_LATE) as u64, [1; 8]),
+        ] {
+            let l = clock(on, 0, ly * LINE);
+            write_fetch_reg(&mut r, l + 96 + 16 + p, 0x40, 0x81);
+            write_fetch_reg(&mut r, l + 300, 0x40, 0x91);
+            r.sync(l + u64::from(LINE));
+            assert_eq!(tile3(&r, ly as usize), (want, 4), "line {ly}");
+        }
+    }
+
+    #[test]
+    fn scy_write_mixes_the_rows_of_the_tile_being_fetched() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // Tile 0 (map 9800) row 1: color 1 (low plane); row 2: color 2
+        // (high plane). Line 1 reads row 1 with SCY = 0, row 2 with 1.
+        r.mem.vram[2..4].copy_from_slice(&[0xFF, 0]);
+        r.mem.vram[4..6].copy_from_slice(&[0, 0xFF]);
+        let l = clock(on, 0, LINE);
+        write_fetch_reg(&mut r, l + 96 + 16 + FETCH_LOW as u64, 0x42, 1);
+        write_fetch_reg(&mut r, l + 300, 0x42, 0);
+        r.sync(l + u64::from(LINE));
+        // Tiles 0-2 row 1, tile 3 the low plane of row 1 and the high
+        // plane of row 2 (color 3), then row 2.
+        let row = &r.frame[SCREEN_WIDTH..][..SCREEN_WIDTH];
+        assert_eq!((row[23], row[24], row[31], row[32]), (2, 4, 4, 3));
+    }
     #[test]
     fn mode3_pixel_follows_the_stalls() {
         let on = 1000;
