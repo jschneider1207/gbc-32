@@ -4,7 +4,8 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M9 (test-ROM completion), in progress. M8 is `stage1-m8`
+- **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
+  review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
   (ad56c23). M1-M7 tagged likewise.
 - **Last updated:** 2026-11-23, end of session 11 (log
   `logs/2026-11-23-11-m9-fixes.md`). Baseline 94b09ae; gate passes.

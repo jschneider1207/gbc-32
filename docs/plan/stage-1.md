@@ -3,7 +3,8 @@
 **Stage goal:** `gbc-core` passes every `must` ROM in `acceptance/stage1.toml`
 and plays real games correctly on the desktop.
 
-**Stage gate:** `./scripts/gate-stage1.sh` exits 0, **and** the human signs
+**Stage gate:** `./scripts/gate-stage1.sh` exits 0, M10 (the in-depth review) is
+closed, **and** the human signs
 off on the real-game checklist at the bottom of this file.
 
 Each milestone closes when its acceptance command passes **and** the
@@ -333,6 +334,74 @@ in the manifest passes, whatever its tier (README.md "Done when").
 - [ ] M8 review lows (test integrity): timer differential reference shares `stop_edge`'s rule (state it in the test doc); `--allow-corpus-change` turns a dropped ROM into a warning (consider listing expected one-sided ROMs); `screenshot_writes_a_160x144_png` checks header/size only; `LCDC_TILES_LATE`, `DISCARD_LEAD` are manifest-calibrated (partly referenced)
 
 **Acceptance:** every manifest ROM passes, or belongs to a group the human signed off with a recorded reason.
+
+---
+
+## M10: In-depth Stage 1 review
+
+Added by the human (2026-11-23). A full, in-depth review of the Stage 1
+code before the stage is declared complete. The human starts it, in a
+session run on Fable (`claude-fable-5-2`). It starts after `stage1-m9` is
+tagged, so the review reads code that has stopped moving. It covers the
+whole tree at that tag, not a diff: `crates/gbc-core` first, and
+`crates/gbc-desktop` and `tools/*` where a dimension says so. This is in
+addition to the per-milestone reviews (AGENTS.md "Independent review"),
+and those rules apply: fresh, read-only reviewers that are not told why
+the code is believed correct, and findings verified before they are fixed.
+
+**Dimensions.** There is one reviewer per dimension, split further by
+subsystem where it is large (CPU/bus/interrupts/timer; PPU; APU;
+DMA/HDMA/speed switch; cartridges/MBC/RTC). The dimensions must not
+overlap:
+- **A. Emulation correctness.** Does the behavior match the references
+  (Pan Docs, GBCTR, SameBoy; gambatte is read-only, GPL)? What edge cases
+  does no ROM test? Each finding cites a reference and, where possible,
+  names a ROM, an existing test or a sketch of a new unit test that would
+  expose it. A finding against an Accepted ADR or a human sign-off goes
+  to the human, not to a fix.
+- **B. Performance.** The hot paths (CPU, bus, PPU, APU, scheduler),
+  judged against the README's 50% bar on an H753 at 480 MHz and the
+  Cortex-M7 (16 KiB I-cache, ITCM/DTCM, u64 arithmetic, bounds checks,
+  panics, dynamic dispatch, stack frames). Findings come with a number
+  (`check-bench.sh` Ir, or a reasoned cycle estimate marked as such).
+- **C. Code size.** gbc-core `.text` on thumbv7em, per-function budgets,
+  the ITCM set (ADR 0026), monomorphization, inlining, panic and
+  formatting machinery, tables. Findings state the bytes saved
+  (`check-code-size.sh`). Where a fix trades size against speed, B and C
+  both report it and the trade is decided with both numbers.
+- **D. Idiomatic, maintainable Rust.** Module boundaries, naming, types
+  (newtypes, enums vs flags), dead code, duplication, comments and source
+  citations, test structure, `gbc-desktop` and `tools/romtest` code
+  quality. Proposals must keep the hard rules (no_std, no alloc, no
+  unsafe in the core) and must not cost Ir or bytes without saying how
+  much.
+
+**Report.** Each finding gives file:line, severity (high/medium/low), and
+a concrete failure scenario or measurement. All findings and their triage
+are recorded in `docs/reviews/stage1-m10.md`.
+
+- [ ] Run the four reviews (A-D) in parallel. They are read-only, so the
+  machine-resource limits on builds still apply to any measurement runs.
+- [ ] Triage (AGENTS.md "Triage"): verify each finding and give each
+  rejected one a one-line reason.
+- [ ] Fix the confirmed high and medium findings, one theme per fix
+  agent, in this order:
+  1. A, correctness. Each fix is a behavior change: a regression test
+     that has been seen failing, and the full manifest with 0
+     regressions.
+  2. B and C, performance and size. Each fix is behavior-preserving:
+     `diff-fingerprint.sh` identical, plus measured Ir and bytes.
+  3. D, refactors. Each is behavior-preserving and fingerprint
+     identical, with bench and size within noise. They go last because
+     they touch the most code.
+- [ ] Turn the lows into one-line tasks in the Stage 2 plan (or here, if
+  they're Stage 1 only).
+- [ ] Budget changes: tightening one is an agent decision (record it);
+  raising one needs the human, with numbers.
+
+**Acceptance:** `./scripts/gate-stage1.sh` exits 0; no confirmed high or
+medium finding is open; `docs/reviews/stage1-m10.md` records every
+finding's outcome. Then update the baseline and tag `stage1-m10`.
 
 ---
 
