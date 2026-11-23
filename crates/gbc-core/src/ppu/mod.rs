@@ -136,9 +136,9 @@ const SEL_LYC: u8 = 0x40;
 const NO_MODE: u8 = 3;
 
 /// How a CPU write sees the STAT interrupt sources (design doc
-/// `docs/design/lcd-offset-phase.md` 3.2). Single speed, lines 1-152, the
-/// walk compares the new LY and ends the mode-2 source at
-/// [`edges::CMP_WALK_SS`], one dot after the STAT bit
+/// `docs/design/lcd-offset-phase.md` 3.2). Lines 1-152, the walk compares
+/// the new LY and ends the mode-2 source at [`edges::cmp_walk`] (`t = 5`,
+/// both speeds), one dot after the STAT bit
 /// ([`edges::CMP_ON`]); the writes see that dot their own way:
 /// - `StatPhase1`, the first phase of a STAT write (at the access): the
 ///   mode-2 source still live, as gambatte's `statChangeTriggersM2IrqCgb`
@@ -177,7 +177,7 @@ enum Pt {
     Ly3,
     /// Lines 0-143: comparison against LY and the end of the mode-2
     /// source; line 0 at `t = 4` (with its mode-2 source), lines 1-143 at
-    /// [`edges::cmp_walk`] (single speed `t = 5`).
+    /// [`edges::cmp_walk`] (`t = 5`).
     Ly4,
     /// The pixel pipeline starts: the line's mode-3 length is fixed
     /// ([`LineTiming`]).
@@ -190,7 +190,7 @@ enum Pt {
     V0,
     /// Line 144, `t = 2`: the mode-2 interrupt quirk.
     Quirk2,
-    /// Lines 144-152, [`edges::cmp_walk`] (single speed `t = 5`):
+    /// Lines 144-152, [`edges::cmp_walk`] (`t = 5`):
     /// comparison against LY. On line 144 in single speed at the same
     /// position as `VBlank`, and before it.
     V4,
@@ -797,8 +797,8 @@ impl Ppu {
         if a.first {
             return if t >= end { 0 } else { NO_MODE };
         }
-        let m2_end = if view == View::StatPhase1 && !double && l != 0 {
-            edges::CMP_WALK_SS
+        let m2_end = if view == View::StatPhase1 && l != 0 {
+            edges::cmp_walk(double)
         } else {
             edges::MODE2_SOURCE_END
         };
@@ -2008,8 +2008,8 @@ impl Ppu {
     }
 
     /// A write landing between the STAT bit's comparison of the new LY
-    /// ([`edges::CMP_ON`]) and the walk's ([`edges::CMP_WALK_SS`]; single
-    /// speed, lines 1-152): the write's view has seen the comparison with
+    /// ([`edges::CMP_ON`]) and the walk's ([`edges::cmp_walk`], lines
+    /// 1-152): the write's view has seen the comparison with
     /// the old LYC and selects (where the walk compared before design step
     /// 1), so the line takes it before the write changes them.
     ///
@@ -2092,8 +2092,13 @@ impl Ppu {
         }
         let a = self.at(now);
         let (l, t) = (a.line, a.t);
+        let defer_until = if double {
+            edges::LYC_DEFER_UNTIL_DS
+        } else {
+            edges::LYC_DEFER_UNTIL_SS
+        };
         let deferred = match l {
-            0..=152 => t < edges::LYC_DEFER_UNTIL && !a.first,
+            0..=152 => t < defer_until && !a.first,
             _ => (edges::L153_CMP..edges::L153_ZERO).contains(&t),
         };
         if deferred {
@@ -2646,8 +2651,50 @@ mod tests {
         assert_eq!(r.iflags, INT_STAT);
     }
 
-    /// Double speed keeps the walk's comparison at `t = 4` (design step 3
-    /// moves it); a speed change re-seeks the walk without losing it.
+    /// Design step 3: in double speed too the walk compares at `t = 5`,
+    /// and the writes see it through their views (`ds_lcdoffset1`, whose
+    /// M-cycle boundaries are at even `t`, tells these apart).
+    #[test]
+    fn double_speed_write_views() {
+        let on = 1000;
+        let l5 = clock(on, 0, 5 * LINE);
+        let l6 = l5 + u64::from(LINE);
+        let dsync = |r: &mut Rig, now: u64| {
+            let (p, m, f) = (&mut r.ppu, &mut *r.mem, &mut *r.frame);
+            p.sync(now, m, f, &mut r.iflags, true);
+        };
+        // STAT phase 1 at t = 4 still sees the mode-2 source: enabling it
+        // interrupts (gambatte `m2enable/late_enable_ds_lcdoffset1_1`).
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        r.ppu
+            .write_stat(0, SEL_MODE0, &mut r.iflags, false, View::StatPhase2);
+        r.ppu.speed_changed(&mut r.iflags, true);
+        dsync(&mut r, l5 + 4);
+        r.iflags = 0;
+        r.ppu
+            .write_stat(l5 + 4, SEL_MODE2, &mut r.iflags, true, View::StatPhase1);
+        assert_eq!(r.iflags, INT_STAT);
+        // LYC = the new LY written at t = 2, the old LYC matching the old
+        // LY: deferred to the walk, so the line stays high through the
+        // comparison and nothing interrupts (`lycEnable/
+        // ff45_enable_weirdpoint_ds_lcdoffset1_3`).
+        let mut r = Rig::on_at(on, SEL_LYC, 5);
+        r.ppu.speed_changed(&mut r.iflags, true);
+        dsync(&mut r, l6 + 2);
+        r.iflags = 0;
+        r.ppu.write_lyc(l6 + 2, 6, &mut r.iflags, true);
+        loop {
+            let at = r.ppu.next_event(true);
+            if at > l6 + 10 {
+                break;
+            }
+            dsync(&mut r, at);
+        }
+        assert_eq!(r.iflags, 0);
+    }
+
+    /// Both speeds compare at `t = 5`; a speed change re-seeks the walk
+    /// without losing the point.
     #[test]
     fn walk_comparison_point_by_speed() {
         let on = 1000;
@@ -2656,7 +2703,8 @@ mod tests {
         r.sync(l5);
         assert_eq!(r.ppu.next_event(false), l5 + 5);
         r.ppu.speed_changed(&mut r.iflags, true);
-        assert_eq!(r.ppu.next_event(true), l5 + 4);
+        // Double speed: also t = 5 (design step 3; `ds_lcdoffset1`).
+        assert_eq!(r.ppu.next_event(true), l5 + 5);
         // A switch while the LCD is off still moves the point (the walk
         // seeks with it at the enable).
         let mut off = Ppu::new();
@@ -2664,19 +2712,18 @@ mod tests {
         assert_eq!(u32::from(off.cursor.cmp), edges::CMP_WALK_DS);
         off.speed_changed(&mut r.iflags, false);
         assert_eq!(u32::from(off.cursor.cmp), edges::CMP_WALK_SS);
-        // To double speed at t = 4: the comparison (at 5 in single speed,
-        // at 4 in double) runs at the switch.
+        // To double speed at t = 4: the comparison is still ahead, at 5.
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 4);
         r.iflags = 0;
         r.ppu.speed_changed(&mut r.iflags, true);
-        assert_eq!(r.iflags, INT_STAT);
-        assert_eq!(r.ppu.cursor, r.ppu.seek_point());
-        // To single speed at t = 3: the comparison moves to t = 5.
+        assert_eq!(r.iflags, 0);
+        assert_eq!(r.ppu.next_event(true), l5 + 5);
+        // And back to single speed at t = 3.
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 3);
         r.ppu.speed_changed(&mut r.iflags, true);
-        assert_eq!(r.ppu.next_event(true), l5 + 4);
+        assert_eq!(r.ppu.next_event(true), l5 + 5);
         r.ppu.speed_changed(&mut r.iflags, false);
         assert_eq!(r.ppu.next_event(false), l5 + 5);
     }
@@ -2792,18 +2839,19 @@ mod tests {
             ],
             [true, false, true, true, false]
         );
-        // Double speed: one dot later at both ends.
+        // Double speed: OAM writes from dot 3, VRAM from 85, both to one
+        // dot after the mode-3 end.
         assert_eq!(
             [
-                p.oam_blocked(l5 + 1, true, true),
-                p.oam_blocked(l5 + 2, true, true)
+                p.oam_blocked(l5 + 2, true, true),
+                p.oam_blocked(l5 + 3, true, true)
             ],
             [false, true]
         );
         assert_eq!(
             [
-                p.vram_blocked(l5 + 83, true),
                 p.vram_blocked(l5 + 84, true),
+                p.vram_blocked(l5 + 85, true),
                 p.vram_blocked(l5 + 256, true),
                 p.vram_blocked(l5 + 257, true)
             ],

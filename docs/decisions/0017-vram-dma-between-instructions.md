@@ -107,3 +107,15 @@ only), replacing parts of the SameBoy-based rules above:
   off from the same tests without the lcd_offset phase, so they depend
   on the lcd_offset CPU/PPU phase fix (M9 triage); `_1` now passes and
   `_2` fails.
+
+## Amendment (2026-11-23, M9 design step 10): the swap was the sync
+
+The "known swap" above was not an HDMA-period edge. Traced, the FF55
+enable and HALT samples of `hdma_late_{enable,m0halt}_*` fit the period
+as stated (in up to `t = 3` of the next line, out from 4) at every CPU
+phase and in both speeds, once the PPU edges around them are right:
+the double-speed LYC comparison at `t = 5` (it syncs the
+`ds_lcdoffset1` rows; design step 3) and the single-speed VRAM block
+from dot 86 (`hdma_late_enable_lcdoffset3_1` reads VRAM after its
+block's stall; design step 7). `HBLANK_DELAY` and `HBLANK_UNTIL` are
+unchanged; all 8 `hdma_late_{enable,m0halt}_*lcdoffset*` ROMs pass.

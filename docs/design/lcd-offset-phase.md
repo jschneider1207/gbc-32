@@ -606,6 +606,12 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
 3. **The same in double speed.** Targets: the ds-even rows with LYC sync
    or LYC write. Re-measure dfb1c67's -6 and fix or move each one under
    the views.
+   **Done with step 10** (branch `m9-step1b-hdma`): `CMP_WALK_DS` = 5
+   alone measured +13 / -5 against the branch (all 4 `hdma_*ds_lcdoffset1`
+   rows pass); the -5 were write views that moved with it, each
+   fixed by one double-speed constant: the STAT phase-1 mode-2 window to
+   `t <= 4` (as single speed), VRAM from 85, OAM writes from 3, LYC-write
+   deferral to `t < 3`. Unit tests mutation-checked (5 of 5 caught).
 4. **STAT phase 2 at the half-dot in double speed.** Targets: 5-6 ds-even
    STAT-write rows.
 5. **Line-0 / line-144 / line-153 edges.** Coincidence read view on lines
@@ -615,7 +621,9 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
 6. **LY read edge re-check** after 1/3 (`ly_count_ds_{2,3}`). Possibly no
    change.
 7. **Access windows:**
-   - VRAM read/write start at r = 1 (2)
+   - VRAM read/write start at r = 1 (2). **Done** (with step 10): single
+     speed from 86, two dots after the mode-3 STAT change (gambatte
+     `vramReadable` `< 79`); double speed 85 (with step 3).
    - OAM write start at r = 2 (1)
    - OAM read in double speed (1)
    - palette mode-3 start in double speed (2)
@@ -627,6 +635,19 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
 10. **HDMA view and HALT wake:** merge `hdma-trigger` and fix the
     `hdma_late_m0halt` pair, `hdma_late_enable_*lcdoffset*` (4). This
     takes the human's open "merge with a 1-ROM swap?" item off the table.
+    **Done, without an HDMA change** (branch `m9-step1b-hdma`, two
+    commits on 39fb3cb). Traced sample positions (next line's `t`) fit
+    one HDMA period at every phase once the syncs are right: in up to
+    t = 3, out from 4, both speeds (`HBLANK_UNTIL` 4 holds).
+    - `hdma_late_enable_lcdoffset3_1`: the enable is in the period (block
+      at once); the block's stall moves the test's VRAM read to t = 84,
+      which we blocked. Fixed by the VRAM edge (step 7).
+    - `hdma_late_{enable,m0halt}_ds_lcdoffset1_*`: their LYC=1 sync
+      dispatched one M-cycle early (double-speed compare at 4), putting
+      the samples 2 dots early (the "~3 clocks off" of ADR 0017). Fixed
+      by step 3.
+    - Full manifest vs baseline: +51 / -0 (the branch's 36, plus 15);
+      `.text` +24 B, ITCM set +16 B.
 
 ## 5. Open questions, risks, human decisions
 

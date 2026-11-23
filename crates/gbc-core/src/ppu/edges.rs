@@ -138,15 +138,20 @@ pub(crate) const HBLANK_AFTER_END: u32 = 1;
 /// speed edge at every CPU phase: `vram_m3/pre{read,write}_lcdoffset2_1`
 /// access at 85 and `dma/hdma_late_enable_lcdoffset3_1` reads at 84 (both
 /// allowed), `pre{read,write}_lcdoffset1_2` at 86 (blocked).
+/// Double speed: the same `cc` threshold one dot earlier (gambatte's `+ ds`)
+/// gives 85: `vram_m3/pre{read,write}_ds_2` access at 85 (blocked),
+/// `_ds_lcdoffset1_1` at 84 (allowed), `_ds_lcdoffset1_2` at 86.
 pub(crate) const VRAM_FROM_SS: u32 = t(h(86));
-pub(crate) const VRAM_FROM_DS: u32 = MODE3;
+pub(crate) const VRAM_FROM_DS: u32 = t(h(85));
 pub(crate) const VRAM_FROM_FIRST_SS: u32 = t(h(91));
 pub(crate) const VRAM_FROM_FIRST_DS: u32 = t(h(86));
 
 /// OAM writes / reads blocked from here (single / double speed), to the
-/// mode-3 end; the first line after LCD enable from `_FIRST`.
+/// mode-3 end; the first line after LCD enable from `_FIRST`. Double-speed
+/// writes from 3: `oam_access/prewrite_ds_lcdoffset1_1` writes at 2
+/// (allowed); `prewrite_ds_2` (default phase) stays blocked.
 pub(crate) const OAM_WRITE_FROM_SS: u32 = t(h(0));
-pub(crate) const OAM_WRITE_FROM_DS: u32 = t(h(2));
+pub(crate) const OAM_WRITE_FROM_DS: u32 = t(h(3));
 pub(crate) const OAM_WRITE_FROM_FIRST: u32 = t(h(84));
 pub(crate) const OAM_READ_FROM_SS: u32 = t(h(3));
 pub(crate) const OAM_READ_FROM_DS: u32 = t(h(4));
@@ -165,8 +170,13 @@ pub(crate) const PALETTE_EXTRA_DS: u32 = 2;
 pub(crate) const WY_CHECK_AT: [u32; 2] = [t(h(7)), t(h(3))];
 
 /// A LYC write is deferred to the PPU's next update before this dot
-/// (lines 0-152, while LY changes).
-pub(crate) const LYC_DEFER_UNTIL: u32 = 2;
+/// (lines 0-152, while LY changes): single speed at the write's view (one
+/// dot after the access), double speed at the access. Double speed:
+/// `lycEnable/ff45_enable_weirdpoint_ds_lcdoffset1_{2,3}` write at 0 and 2
+/// (deferred: no interrupt); `_1`, `_4` and the default-phase
+/// `ff45_enable_weirdpoint_ds_*` keep their results.
+pub(crate) const LYC_DEFER_UNTIL_SS: u32 = 2;
+pub(crate) const LYC_DEFER_UNTIL_DS: u32 = 3;
 
 // --- VBlank (lines 144-153) ---
 
@@ -209,8 +219,16 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 /// `docs/design/lcd-offset-phase.md` 2.1, step 1.
 pub(crate) const CMP_WALK_SS: u32 = t(h(5));
 
-/// The same in double speed: unchanged for now (design step 3).
-pub(crate) const CMP_WALK_DS: u32 = CMP_ON;
+/// The same in double speed (design step 3), where only `ds_lcdoffset1`
+/// (M-cycle boundaries at even `t`) can tell 4 from 5. Its LYC=1 handler
+/// syncs `dma/hdma_late_{enable,m0halt}_ds_lcdoffset1_*`: at 4 the FF55
+/// enables and HALTs land 3 dots off the same tests at the default phase
+/// (the HDMA period seemed phase-dependent); at 5 one HDMA period fits
+/// both phases. Also `lcd_offset/offset1_*_ds_*` and the
+/// `lycEnable/*_ds_lcdoffset1_2` rows. The write views move with it:
+/// [`VRAM_FROM_DS`], [`OAM_WRITE_FROM_DS`], [`LYC_DEFER_UNTIL_DS`] and the
+/// STAT phase-1 mode-2 window (`Ppu::mode_source`).
+pub(crate) const CMP_WALK_DS: u32 = t(h(5));
 
 /// [`CMP_WALK_SS`] or [`CMP_WALK_DS`].
 #[inline]
