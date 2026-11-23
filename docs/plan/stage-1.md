@@ -270,7 +270,7 @@ section 12), not part of the M6 gate:
 - [ ] SameBoy envelope lock/clock model with the secondary (rising-edge)
   DIV event and the CGB-C `_nrx2_glitch`
 - [ ] Square trigger delay / `lf_div` fit (gambatte `ch1_duty*_pos*`, `ch2_init_pos*`)
-- [ ] SameBoy noise counter (14-bit counter, rising edge of the selected bit, alignment-dependent trigger)
+- [ ] SameBoy noise counter phase at trigger (alignment-dependent start, background counting while off) and the NR43 write glitch steps (the free-running counter and plain NR43 writes are done, ADR 0021 amendment "CH4 NR43 writes")
 - [ ] Sweep calculation delay; DAC fade to 0
 
 **Acceptance:** group `blargg-cgb-sound` passing.

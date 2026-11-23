@@ -16,8 +16,9 @@ and AGB differences are noted only where the code deliberately differs.
   differ per channel, so each conversion below is explicit:
   square and wave `sample_countdown` n fires after **n + 1** ticks; the
   noise divisor countdown n fires after **n** ticks.
-- A frequency or NR43 write changes the period used at the next reload,
-  not the running countdown (SameBoy keeps `sample_countdown`).
+- A frequency write changes the period used at the next reload, not the
+  running countdown (SameBoy keeps `sample_countdown`). NR43 writes
+  follow the noise divisor counter instead (noise section).
 - State is a function of the clock and the register writes only; register
   reads are pure (ADR 0021 section 3).
 
@@ -150,12 +151,33 @@ clocks. Per LFSR step: `divisor * 2^(s+1)` ticks, times 2 base clocks =
   `cycles_left >= counter_countdown` (n fires after n ticks, unlike the
   square/wave `>` with n + 1). The core counts the LFSR step period
   directly in base clocks: `Noise::countdown` = clocks to the next step,
-  reloaded with the period at each step; a trigger loads one full period.
-  SameBoy's trigger loads `r * 4 + 6` ticks (r = 0: 6) plus
-  alignment-dependent corrections into the divisor countdown, and the
-  free-running counter's phase decides the first edge; that start, and
-  NR43 writes landing on a counter reload, are deferred (ADR 0021
-  section 12). An NR43 write takes effect at the next step.
+  reloaded with the period at each step. SameBoy's trigger loads `r * 4 +
+  6` ticks (r = 0: 6) plus alignment-dependent corrections into the
+  divisor countdown, and the free-running counter's phase decides the
+  first edge; the core loads one full period (deferred, ADR 0021 section
+  12).
+- **The counter and NR43 writes** (`noise.rs` `rebase`; SameBoy
+  `GB_apu_run`, `GB_apu_write` NR43): the counter is never reset by a
+  trigger or an NR43 write (only by APU power off), and NR43 is read at
+  each increment. A write keeps the counter and the divisor countdown;
+  only if the countdown has just reloaded (`countdown_reloaded`: the
+  write lands on an increment) does the new divisor load at once (SameBoy
+  adds `{2, 1, 4, 3}[alignment & 3]` ticks there on CGB-C, `{2, 1, 0, 3}`
+  on CGB-D+, for r > 0; not modelled). The next step is the first
+  increment after which counter bit `s` (new shift) is set and was clear:
+  counter `== 2^s` modulo `2^(s+1)`. So a new shift or divisor applies
+  within the rest of the old divisor countdown (at most 56 clocks) plus
+  one new period; changing `s` alone never steps the LFSR. The core keeps
+  the counter implied between steps: `counter` is its value after the
+  increment at `countdown`, with at most `pre` earlier increments every
+  divisor clocks back from there (`pre` bounds the first, longer gap
+  after a write that shortened the divisor). A trigger keeps the counter
+  bits above `s` and sets bit `s` as just risen.
+- **NR43 write glitches (not modelled):** SameBoy's `nr43_write` steps
+  or corrupts the LFSR when the shift selector passes through an
+  intermediate value whose bit differs from the old and new bits
+  (revision-specific and partly non-deterministic on hardware; CGB-C
+  also goes through an intermediate 0xFF write).
 - **Shift 14 and 15:** counter bits 14 and 15 never rise (14-bit counter),
   so the LFSR is frozen; the output holds bit 0.
 - **LFSR:** 15 bits, 0 on trigger. A step computes `fb = !(b0 ^ b1)`,
@@ -231,8 +253,9 @@ gambatte `sound/` and SameSuite APU ROMs:
   tick), the extra delay when retriggering an active channel (gambatte
   `ch*_duty*_pos*`).
 - The noise counter's phase at trigger (SameBoy loads `r * 4 + 6` plus
-  alignment corrections; the core loads one full period) and NR43 writes
-  that land on a counter reload.
+  alignment corrections; the core loads one full period), its background
+  counting while the channel is off, the alignment term when an NR43
+  write lands on a reload, and the NR43 write glitch steps.
 - The sweep calculation delay and the DAC fade.
 - DMG and AGB behaviours (wave RAM corruption, length counters surviving
   power off, the DMG read window).

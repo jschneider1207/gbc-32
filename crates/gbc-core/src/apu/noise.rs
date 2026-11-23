@@ -15,11 +15,22 @@ const LENGTH_MAX: u16 = 64;
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) struct Noise {
-    /// Base clocks to the next LFSR step (>= 1 while on). With shift 14 or
-    /// 15 the steps still come but leave the LFSR alone.
+    /// Base clocks to the next LFSR step (>= 1 while on): the divisor
+    /// counter increment on which its bit `s` rises. With shift 14 or 15
+    /// the steps come every `2^(s+1)` increments but leave the LFSR alone.
     pub(crate) countdown: u32,
     /// The 15-bit LFSR (bit 15 always 0). Bit 0 is the output.
     pub(crate) lfsr: u16,
+    /// SameBoy's free-running 14-bit divisor counter
+    /// (`noise_channel.counter`) as it will be right after the increment
+    /// at `countdown`. Between steps it is implied: `k` increments before
+    /// that one, every `divisor()` clocks (docs/reference/apu.md, noise).
+    pub(crate) counter: u16,
+    /// At most this many increments before the one at `countdown`: after
+    /// an NR43 write the first increment comes when the old divisor
+    /// countdown runs out, up to 56 clocks, which may be longer than the
+    /// new divisor. `u16::MAX` once a step has passed.
+    pub(crate) pre: u16,
     /// The last NR43 written: shift (bits 4-7), 7-bit mode (bit 3),
     /// divisor code `r` (bits 0-2). Read at each step, as in SameBoy.
     pub(crate) nr43: u8,
@@ -196,6 +207,8 @@ impl Noise {
     pub(crate) const ZERO: Self = Self {
         countdown: 0,
         lfsr: 0,
+        counter: 0,
+        pre: 0,
         nr43: 0,
         on: false,
         len: Length::ZERO,
@@ -208,9 +221,74 @@ impl Noise {
     /// rising edge of its bit `s`). At most 112 << 15, so u32.
     #[inline]
     fn period(&self) -> NonZeroU32 {
+        NonZeroU32::new(self.divisor() << ((self.nr43 >> 4) + 1)).unwrap_or(NonZeroU32::MIN)
+    }
+
+    /// Base clocks per divisor counter increment: SameBoy's `divisor`
+    /// (`r * 4`, r = 0: 2) 2 MHz ticks, times 2.
+    #[inline]
+    fn divisor(&self) -> u32 {
         let r = u32::from(self.nr43 & 7);
-        let base = if r == 0 { 8 } else { 16 * r };
-        NonZeroU32::new(base << (self.nr43 >> 4)).unwrap_or(NonZeroU32::MIN)
+        if r == 0 { 4 } else { 8 * r }
+    }
+
+    /// Moves `counter` on by `n` steps: `2^(s+1)` increments each (a
+    /// multiple of 2^14, so no change, for s >= 13).
+    #[inline]
+    fn bump(&mut self, n: u32) {
+        let inc = n << ((self.nr43 >> 4) + 1);
+        self.counter = (u32::from(self.counter).wrapping_add(inc) & 0x3FFF) as u16;
+        if n != 0 {
+            self.pre = u16::MAX;
+        }
+    }
+
+    /// Writes NR43 (`trigger` false) or restarts the step phase (a trigger,
+    /// `nr43` unchanged) and re-derives the next step from the divisor
+    /// counter, which keeps running (SameBoy `GB_apu_write` NR43 and
+    /// `GB_apu_run`: the LFSR steps when an increment raises counter bit
+    /// `s`, read from NR43 at each increment). An NR43 write keeps the
+    /// counter and the divisor countdown, unless that has just reloaded
+    /// (the write lands on an increment), when the new divisor loads.
+    /// The next step is then at the first increment that raises the new
+    /// bit `s`: within the rest of the old divisor countdown (at most 56
+    /// clocks) plus one new period. A trigger keeps the counter's bits
+    /// above `s` and loads one full period, as before (SameBoy's
+    /// alignment-dependent start is deferred, ADR 0021 section 12).
+    #[inline(never)]
+    fn rebase(&mut self, nr43: u8, trigger: bool) {
+        let d = self.divisor();
+        // `k` more increments come before the one at `countdown` (at most
+        // `pre`), so the counter is now `counter - k - 1` and its next increment is `t`
+        // clocks away (1..=d; 0 only in the power-off state).
+        let k = (self.countdown.saturating_sub(1) / d).min(u32::from(self.pre));
+        let mut t = self.countdown - k * d;
+        let mut v = u32::from(self.counter).wrapping_sub(k + 1);
+        self.nr43 = nr43;
+        let s = u32::from(nr43 >> 4);
+        if trigger {
+            // Bit `s` has just risen: the next rise is a full period away.
+            v = v & !((2 << s) - 1) | 1 << s;
+            t = 0;
+        }
+        // SameBoy `countdown_reloaded` (an increment landed just now; not
+        // the end of a long first gap): the new divisor loads (its
+        // alignment term, `{2, 1, 4, 3}[alignment & 3]` ticks on CGB-C, is
+        // not modelled).
+        if t == 0 || t == d && k < u32::from(self.pre) {
+            t = self.divisor();
+        }
+        // Increments after the next one up to the one where bit `s` rises:
+        // the counter after it is `2^s` modulo `2^(s+1)`. Shift 14 and 15
+        // never rise; any increment serves as the reference.
+        let j = if s < 14 {
+            (1u32 << s).wrapping_sub(v.wrapping_add(1)) & ((2 << s) - 1)
+        } else {
+            0
+        };
+        self.countdown = t + j * self.divisor();
+        self.pre = j as u16;
+        self.counter = (v.wrapping_add(1 + j) & 0x3FFF) as u16;
     }
 
     /// `n` steps of the LFSR; returns the number of steps after which bit
@@ -262,7 +340,10 @@ impl Noise {
         let p = self.period().get();
         let rest = dt - cd;
         self.countdown = p - (rest % u64::from(p)) as u32;
-        self.clock(reduce(rest / u64::from(p) + 1, self.nr43 & 8 != 0));
+        let n = rest / u64::from(p) + 1;
+        // Modulo 2^32, a multiple of the counter's 2^14.
+        self.bump(n as u32);
+        self.clock(reduce(n, self.nr43 & 8 != 0));
     }
 
     /// Adds to `out[i]` the analog level times clocks over the `i`-th of
@@ -289,6 +370,7 @@ impl Noise {
         let p = self.period();
         let mut run = Run::new(self.lfsr, self.nr43 & 8 != 0);
         let mut cd = self.countdown;
+        let mut steps = 0u32;
         for (o, &dt) in out.iter_mut().zip(segs) {
             let dt = u32::from(dt);
             // At most one window: at most 16 steps (p >= 8).
@@ -306,7 +388,9 @@ impl Noise {
             } else {
                 let rest = dt - cd;
                 let left = p.get() - rest % p;
-                let ones = run.take(rest / p + 1);
+                let n = rest / p + 1;
+                steps = steps.wrapping_add(n);
+                let ones = run.take(n);
                 let h = bit * cd + ones * p.get() - run.out() * left;
                 cd = left;
                 h
@@ -315,6 +399,7 @@ impl Noise {
         }
         self.countdown = cd;
         self.lfsr = run.lfsr();
+        self.bump(steps);
     }
 
     /// One span through `integrate` (tests).
@@ -337,10 +422,9 @@ impl Noise {
                     self.on = false;
                 }
             }
-            // Takes effect at the next step (SameBoy reads NR43 per
-            // counter step; its mid-period phase quirks are deferred,
-            // ADR 0021 section 12).
-            3 => self.nr43 = value,
+            // The new shift and divisor apply from the running counter,
+            // within one new period (`rebase`).
+            3 => self.rebase(value, false),
             4 => {
                 if self.len.write_nrx4(LENGTH_MAX, value, fs) {
                     self.on = false;
@@ -351,7 +435,7 @@ impl Noise {
                     // one period (SameBoy's alignment-dependent start is
                     // deferred, ADR 0021 section 12).
                     self.lfsr = 0;
-                    self.countdown = self.period().get();
+                    self.rebase(self.nr43, true);
                     self.env.trigger();
                     self.on = self.env.dac();
                 }
@@ -549,6 +633,131 @@ mod tests {
         let mut ch = playing(0xD0);
         ch.advance(1 << 24);
         assert_ne!(ch.lfsr, 0, "shift 13 clocks");
+    }
+
+    /// The review scenario: NR43 = F7 freezes the LFSR, then 0x11 without
+    /// a retrigger. The LFSR must step within the old divisor countdown
+    /// (r = 7: 56 clocks) plus the new period (32), not when the old step
+    /// countdown (up to 112 << 15 clocks) runs out.
+    #[test]
+    fn nr43_write_applies_within_one_new_period() {
+        for frozen in [0xF7, 0xE7, 0xD7] {
+            let mut ch = playing(0x11);
+            ch.advance(5000);
+            ch.write(3, frozen, 0);
+            ch.advance(12_345);
+            let x = ch.lfsr;
+            assert_ne!(x, 0x7FFF);
+            ch.write(3, 0x11, 0);
+            assert!(ch.countdown <= 56 + 32, "{frozen:#x}: {}", ch.countdown);
+            ch.advance(56 + 32);
+            assert_ne!(ch.lfsr, x, "{frozen:#x}: no step within 88 clocks");
+        }
+        // A shift lowered mid-run (period 1024 -> 8) and a divisor lowered
+        // with it (r 7, s 4: 1792 clocks -> r 7, s 0: 112).
+        let mut ch = playing(0x70);
+        ch.advance(100);
+        ch.write(3, 0x00, 0);
+        assert!(ch.countdown <= 4 + 8, "{}", ch.countdown);
+        let mut ch = playing(0x47);
+        ch.advance(3);
+        ch.write(3, 0x07, 0);
+        assert!(ch.countdown <= 56 + 112, "{}", ch.countdown);
+    }
+
+    /// SameBoy's counter, clock by clock: a 14-bit counter incremented
+    /// every `divisor` clocks, the LFSR stepping when bit `s` (NR43 at
+    /// that increment) rises; an NR43 write keeps the counter and the
+    /// divisor countdown unless that has just reloaded (`GB_apu_run`,
+    /// `GB_apu_write` NR43, without the glitch steps and alignment term).
+    struct Counter {
+        counter: u16,
+        /// Clocks to the next increment.
+        cd: u32,
+        lfsr: u16,
+        nr43: u8,
+        /// The last clock incremented (SameBoy `countdown_reloaded`).
+        reloaded: bool,
+    }
+
+    impl Counter {
+        fn tick(&mut self) {
+            self.cd -= 1;
+            self.reloaded = self.cd == 0;
+            if self.cd == 0 {
+                self.cd = divisor(self.nr43);
+                let s = self.nr43 >> 4;
+                let old = u32::from(self.counter) >> s & 1;
+                self.counter = (self.counter + 1) & 0x3FFF;
+                if old == 0 && u32::from(self.counter) >> s & 1 == 1 {
+                    self.lfsr = naive(self.lfsr, 1, self.nr43 & 8 != 0).0;
+                }
+            }
+        }
+
+        fn write(&mut self, nr43: u8) {
+            if self.reloaded {
+                self.cd = divisor(nr43);
+            }
+            self.nr43 = nr43;
+        }
+    }
+
+    fn divisor(nr43: u8) -> u32 {
+        match nr43 & 7 {
+            0 => 4,
+            r => 8 * u32::from(r),
+        }
+    }
+
+    /// Random NR43 writes (shift, divisor and width) at random times
+    /// against the clock-by-clock counter, through `advance` and
+    /// `integrate`.
+    #[test]
+    fn nr43_writes_follow_the_free_running_counter() {
+        let mut seed = 0x5EED_0043_u32;
+        for case in 0..300 {
+            let mut ch = playing((xorshift(&mut seed) & 0x3F) as u8);
+            ch.advance(u64::from(xorshift(&mut seed) % 5000));
+            // The reference starts from the same counter and phase.
+            let d = divisor(ch.nr43);
+            let k = ((ch.countdown - 1) / d).min(u32::from(ch.pre));
+            let mut r = Counter {
+                counter: ch.counter.wrapping_sub(k as u16 + 1) & 0x3FFF,
+                cd: ch.countdown - k * d,
+                lfsr: ch.lfsr,
+                nr43: ch.nr43,
+                reloaded: ch.countdown - k * d == d && k < u32::from(ch.pre),
+            };
+            for _ in 0..30 {
+                // Mostly small shifts (audible steps), some frozen.
+                let x = xorshift(&mut seed);
+                let s = if x & 0x300 == 0 {
+                    15 - (x >> 4 & 3)
+                } else {
+                    x >> 4 & 7
+                };
+                let nr43 = (s << 4 | x & 0xF) as u8;
+                ch.write(3, nr43, 0);
+                r.write(nr43);
+                // Writes are at least 2 clocks apart (an M-cycle at double speed).
+                let dt = 2 + xorshift(&mut seed) % 600;
+                if case % 2 == 0 {
+                    ch.advance(u64::from(dt));
+                } else {
+                    let mut left = dt;
+                    while left != 0 {
+                        let seg = left.min(128);
+                        ch.integrate1(seg);
+                        left -= seg;
+                    }
+                }
+                for _ in 0..dt {
+                    r.tick();
+                }
+                assert_eq!(ch.lfsr, r.lfsr, "case {case} nr43={nr43:#x}");
+            }
+        }
     }
 
     #[test]

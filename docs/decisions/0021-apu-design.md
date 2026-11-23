@@ -372,8 +372,9 @@ Exactness that no M6 acceptance ROM needs, each a later task driven by
 gambatte `sound/` and SameSuite APU ROMs: SameBoy's envelope lock/clock
 model with the secondary DIV event and its CGB-C `_nrx2_glitch`; the
 square trigger delay fit (`lf_div`, gambatte `ch1_duty*_pos*`); SameBoy's
-noise counter (14-bit counter, rising edge of the selected bit,
-alignment-dependent trigger); the sweep calculation delay; the DAC fade.
+noise counter phase at a trigger (alignment-dependent start; the counter
+itself and NR43 writes are modelled, amendment "CH4 NR43 writes"); the
+NR43 write glitch steps; the sweep calculation delay; the DAC fade.
 
 ## Consequences
 - The APU costs nothing per M-cycle: 512 Hz `DivApu` events plus output
@@ -523,3 +524,25 @@ test samples the counter at the end of the NR52 write's M-cycle
 (`sc(now) + 4`; SameBoy `cycle_write` advances the pending cycles before
 the write). Together with the CGB-mode post-boot counter (ADR 0022) this
 fixes the 5 gambatte `ch2_*nr52*` regressions against the M5 baseline.
+
+### 2026-11-22: CH4 NR43 writes (M6 hardware review, medium)
+
+An NR43 write used to keep the running step countdown, so a new shift or
+divisor applied only when the old countdown ran out: up to `112 << 15`
+clocks (~0.9 s) after shift 14/15, e.g. NR43 = F7 then 0x11 with no
+retrigger. `Noise` now carries SameBoy's free-running 14-bit divisor
+counter (`GB_apu_run` noise path, `GB_apu_write` NR43), implied between
+steps so the hot path is unchanged: `counter` is its value right after
+the increment at `countdown`, the earlier increments are every divisor
+clocks back from there (at most `pre` of them), and `integrate`/`advance`
+add `2^(s+1)` per step. An NR43 write (`Noise::rebase`) keeps the counter
+and the divisor countdown (the new divisor loads only if the write lands
+on an increment, SameBoy `countdown_reloaded`) and puts the next step at
+the first increment that raises the new bit `s`: within the old divisor's
+rest (at most 56 clocks) plus one new period. This supersedes the NR43
+half of section 5's "next reload" rule. A trigger keeps the counter's
+bits above `s` and loads one full period, as before. Remaining
+differences from SameBoy (docs/reference/apu.md): the trigger phase and
+its alignment terms, the alignment term on an NR43 reload, the counter
+not running while the channel is off, and the revision-specific NR43
+glitch steps (`nr43_write`, including CGB-C's intermediate 0xFF write).
