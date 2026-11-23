@@ -185,6 +185,9 @@ pub fn run(
         .iter()
         .map(|g| RunPlan {
             lockup_runs_on: g.lockup_runs_on,
+            // The gambatte check's audio rule judges the last frame's
+            // sound (ADR 0018, audio amendment).
+            audio_last_frame: g.checks.iter().any(|c| matches!(c, Check::Gambatte)),
             ..RunPlan::new(g.exit, &g.input)
         })
         .collect();
@@ -557,6 +560,7 @@ fn run_job(
             serial: &st.serial,
             registers: st.registers,
             final_frame: &frame,
+            audio: st.audio.as_ref(),
             failure_pngs: &failed,
             verify: &|p, bytes| loaded.verify(rom_hashes, p, bytes),
         };

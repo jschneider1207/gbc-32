@@ -9,6 +9,7 @@
 use gbc_core::Frame;
 
 use crate::checks::{Rgb, W};
+use crate::machine::AudioCapture;
 
 /// What a ROM's file name asks of the CGB run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +161,52 @@ pub fn expected_image(actual: &Rgb, digits: &[u8]) -> Rgb {
         }
     }
     img
+}
+
+/// The `_outaudio0/1` rule (ADR 0018, audio amendment): `sound` = false
+/// (`audio0`) wants silence over the last frame, true (`audio1`) wants
+/// sound. As in testrunner, silent means every sample of that frame equals
+/// the first one (both sides; any constant level, so DC is silence).
+/// `Ok(None)` passes, `Ok(Some(why))` fails, `Err` is a runner error.
+pub fn audio_failure(
+    sound: bool,
+    capture: Option<&AudioCapture>,
+) -> Result<Option<String>, String> {
+    let Some(c) = capture else {
+        return Ok(Some(
+            "the run never reached its last frame, so there is no audio to judge".into(),
+        ));
+    };
+    if c.full {
+        return Err(format!(
+            "runner error: the last frame's audio filled all {} slots, so samples may be \
+             missing",
+            c.samples.len()
+        ));
+    }
+    if c.end < c.until {
+        return Ok(Some(format!(
+            "the run ended at clock {} before the last frame's audio was complete (clock {})",
+            c.end, c.until
+        )));
+    }
+    let Some(&first) = c.samples.first() else {
+        return Ok(Some("the last frame produced no audio samples".into()));
+    };
+    let differs = c.samples.iter().position(|&s| s != first);
+    let n = c.samples.len();
+    Ok(match (sound, differs) {
+        (false, None) | (true, Some(_)) => None,
+        (false, Some(i)) => Some(format!(
+            "`_outaudio0` expects silence, but the last frame has sound: sample {i} of {n} \
+             ({}, {}) differs from sample 0 ({}, {})",
+            c.samples[i].left, c.samples[i].right, first.left, first.right
+        )),
+        (true, None) => Some(format!(
+            "`_outaudio1` expects sound, but all {n} samples of the last frame are ({}, {})",
+            first.left, first.right
+        )),
+    })
 }
 
 #[cfg(test)]

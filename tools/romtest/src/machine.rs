@@ -8,8 +8,9 @@
 //! `crash`), while a panic in the runner's own code propagates (exit 2).
 
 use gbc_core::{
-    Buttons, Config, DmgPalettes, Emulator, Events, Frame, Memory, Registers, SCREEN_HEIGHT,
-    SCREEN_WIDTH, WHITE, cart_ram_size, rgb888_to_555,
+    AUDIO_SAMPLE_CLOCKS, Buttons, Config, DmgPalettes, Emulator, Events, FRAME_CLOCKS, Frame,
+    Memory, Registers, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, WHITE, cart_ram_size,
+    rgb888_to_555,
 };
 
 use crate::manifest::{Exit, InputEntry};
@@ -22,8 +23,16 @@ pub trait Machine {
     /// Schedules a button change at `clock` (applied now if that has
     /// passed); `false` if the machine's queue is full (ADR 0012).
     fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool;
-    /// Runs until `clock() >= target` or a stop event; returns the events.
-    fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events;
+    /// Runs until `clock() >= target` or a stop event; returns the events
+    /// and how many audio samples were written to the start of `audio`
+    /// (an empty `audio` discards sound; a full one stops the call with
+    /// `AUDIO_BUFFER_FULL`).
+    fn run_until(
+        &mut self,
+        target: u64,
+        frame: &mut Frame,
+        audio: &mut [StereoSample],
+    ) -> (Events, usize);
     fn clock(&self) -> u64;
     fn registers(&self) -> Registers;
     fn serial_byte(&self) -> u8;
@@ -42,8 +51,14 @@ impl Machine for Emulator<'_> {
     fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool {
         Emulator::set_buttons_at(self, clock, buttons)
     }
-    fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events {
-        Emulator::run_until(self, target, frame, &mut []).events
+    fn run_until(
+        &mut self,
+        target: u64,
+        frame: &mut Frame,
+        audio: &mut [StereoSample],
+    ) -> (Events, usize) {
+        let r = Emulator::run_until(self, target, frame, audio);
+        (r.events, r.audio_samples)
     }
     fn clock(&self) -> u64 {
         Emulator::clock(self)
@@ -105,6 +120,11 @@ pub struct RunPlan {
     /// acceptance/README.md; ADR 0018, amendments 2026-11-22). Otherwise a
     /// lockup is [`End::Locked`], a crash.
     pub lockup_runs_on: bool,
+    /// Capture the audio of the last frame of the run ([`AudioCapture`]),
+    /// for the gambatte check's `_outaudio0/1` rule (ADR 0018, audio
+    /// amendment; ADR 0021 section 10). Before that frame every run call
+    /// gets an empty audio buffer.
+    pub audio_last_frame: bool,
 }
 
 impl RunPlan {
@@ -113,8 +133,35 @@ impl RunPlan {
             exit,
             input: input_timeline(entries),
             lockup_runs_on: false,
+            audio_last_frame: false,
         }
     }
+}
+
+/// Audio slots for the last frame: the most samples one frame of clocks
+/// can complete (`(FRAME_CLOCKS / AUDIO_SAMPLE_CLOCKS) + 2`, the core's
+/// bound for one call: 550 at 32,768 Hz). Filling them is a runner error
+/// ([`AudioCapture::full`]), so the core never stops early on
+/// `AUDIO_BUFFER_FULL` within the window.
+pub const AUDIO_SLOTS: usize = (FRAME_CLOCKS / AUDIO_SAMPLE_CLOCKS) as usize + 2;
+
+/// The audio of the last frame of a run ([`RunPlan::audio_last_frame`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioCapture {
+    /// Where the window should end: the exit's clock limit. It starts one
+    /// frame (`FRAME_CLOCKS`) before.
+    pub until: u64,
+    /// The clock where the first run call with room started (the first
+    /// call to end at or past `until - FRAME_CLOCKS`).
+    pub start: u64,
+    /// The clock when the run ended. `end < until`: the run stopped before
+    /// the window was complete.
+    pub end: u64,
+    /// Every sample the core returned from `start` on, in order.
+    pub samples: Vec<StereoSample>,
+    /// All [`AUDIO_SLOTS`] filled: more samples than a frame can hold, so
+    /// some may have been dropped (a runner or core bug).
+    pub full: bool,
 }
 
 /// Where the CPU locked up, when the run went on past it
@@ -206,6 +253,9 @@ pub struct RunState {
     pub screen_blank_at_exit: bool,
     /// The CPU locked up and the run went on ([`RunPlan::lockup_runs_on`]).
     pub lockup: Option<Lockup>,
+    /// With [`RunPlan::audio_last_frame`]: the last frame's audio, if the
+    /// run reached it.
+    pub audio: Option<AudioCapture>,
 }
 
 pub fn new_frame() -> Box<Frame> {
@@ -250,6 +300,16 @@ pub fn run<M: Machine + ?Sized>(
     })?;
 
     let mut fb = new_frame();
+    // The last frame's audio: run calls before `audio_from` get no buffer;
+    // one call ends there, and from then on every call gets the free rest
+    // of `audio`.
+    let audio_from = plan
+        .audio_last_frame
+        .then(|| limit.saturating_sub(u64::from(FRAME_CLOCKS)));
+    let mut audio =
+        vec![StereoSample::default(); if audio_from.is_some() { AUDIO_SLOTS } else { 0 }];
+    let mut audio_len = 0;
+    let mut audio_start = None;
     // Input changes before `next_input` have been handed to the machine.
     let mut next_input = 0;
     let mut stalled_calls = 0u32;
@@ -287,7 +347,16 @@ pub fn run<M: Machine + ?Sized>(
                 .unwrap_or(waiting)
                 .min(limit),
         };
-        let events = core_call(|| m.run_until(target, &mut fb))?;
+        let (target, room) = match audio_from {
+            Some(from) if now < from => (target.min(from), &mut audio[..0]),
+            Some(_) => {
+                audio_start.get_or_insert(now);
+                (target, &mut audio[audio_len..])
+            }
+            None => (target, &mut audio[..0]),
+        };
+        let (events, written) = core_call(|| m.run_until(target, &mut fb, room))?;
+        audio_len += written;
         if events.contains(Events::SERIAL_TX) {
             st.serial.push(core_call(|| m.serial_byte())?);
         }
@@ -324,6 +393,13 @@ pub fn run<M: Machine + ?Sized>(
     st.end = Some(end);
     (st.clock, st.registers, st.screen_blank_at_exit) =
         core_call(|| (m.clock(), Some(m.registers()), m.screen_blank()))?;
+    st.audio = audio_start.map(|start| AudioCapture {
+        until: limit,
+        start,
+        end: st.clock,
+        samples: audio[..audio_len].to_vec(),
+        full: audio_len == AUDIO_SLOTS,
+    });
     Ok(())
 }
 
@@ -408,7 +484,18 @@ pub mod fake {
         /// If set, every completed frame shows this image instead of the
         /// frame number.
         pub image: Option<Box<Frame>>,
+        /// Sound plays in `[.0, .1)`: a sample window (one per
+        /// `AUDIO_SAMPLE_CLOCKS`, on the absolute clock grid) that ends in
+        /// it alternates between two levels; every other window has the
+        /// constant level `FAKE_DC`.
+        pub sound: Option<(u64, u64)>,
+        /// Every run call: its start clock and the audio room it got.
+        pub audio_calls: Vec<(u64, usize)>,
     }
+
+    /// The fake's level while silent: a constant, not 0, as the core's
+    /// output keeps DC (ADR 0021 section 8).
+    pub const FAKE_DC: StereoSample = StereoSample { left: 7, right: -3 };
 
     impl FakeMachine {
         pub fn new(script: Vec<(u64, Action)>) -> Self {
@@ -431,6 +518,27 @@ pub mod fake {
                 stalled: None,
                 locked: false,
                 image: None,
+                sound: None,
+                audio_calls: Vec::new(),
+            }
+        }
+
+        /// The sample whose window ends at `clock` (a multiple of
+        /// `AUDIO_SAMPLE_CLOCKS`).
+        fn sample_at(&self, clock: u64) -> StereoSample {
+            match self.sound {
+                Some((from, to)) if (from..to).contains(&clock) => {
+                    let level = if (clock / u64::from(AUDIO_SAMPLE_CLOCKS)).is_multiple_of(2) {
+                        100
+                    } else {
+                        -100
+                    };
+                    StereoSample {
+                        left: level,
+                        right: level,
+                    }
+                }
+                _ => FAKE_DC,
             }
         }
 
@@ -522,19 +630,38 @@ pub mod fake {
             }
             true
         }
-        fn run_until(&mut self, target: u64, frame: &mut Frame) -> Events {
+        fn run_until(
+            &mut self,
+            target: u64,
+            frame: &mut Frame,
+            audio: &mut [StereoSample],
+        ) -> (Events, usize) {
             let stop = Events::ALWAYS_STOP | self.stop;
             let mut ev = Events::EMPTY;
+            let mut written = 0;
+            self.audio_calls.push((self.clock, audio.len()));
             if let Some(stalled) = self.stalled {
-                return stalled;
+                return (stalled, 0);
             }
+            let period = u64::from(AUDIO_SAMPLE_CLOCKS);
             while self.clock < target && self.stalled.is_none() {
+                let before = self.clock;
                 ev |= self.step_once(frame);
+                // A window ends in this step: write its sample if there's
+                // room (an empty buffer discards sound).
+                let end = (before / period + 1) * period;
+                if end <= self.clock && written < audio.len() {
+                    audio[written] = self.sample_at(end);
+                    written += 1;
+                    if written == audio.len() {
+                        ev |= Events::AUDIO_BUFFER_FULL;
+                    }
+                }
                 if ev.intersects(stop) {
                     break;
                 }
             }
-            ev
+            (ev, written)
         }
         fn clock(&self) -> u64 {
             self.clock
@@ -553,7 +680,7 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::fake::{Action, FakeMachine, VBLANK};
+    use super::fake::{Action, FAKE_DC, FakeMachine, VBLANK};
     use super::*;
     use gbc_core::{CLOCK_HZ, FRAME_CLOCKS, rgb555_to_888};
 
@@ -947,5 +1074,75 @@ mod tests {
             run_core(&rom[..100], &plan(Exit::RunFrames { frames: 1 }), &mut st),
             Err(CoreFailure::Load(_))
         ));
+    }
+
+    fn audio_plan(frames: u64) -> RunPlan {
+        RunPlan {
+            audio_last_frame: true,
+            ..plan(Exit::RunFrames { frames })
+        }
+    }
+
+    const F: u64 = FRAME_CLOCKS as u64;
+    const P: u64 = AUDIO_SAMPLE_CLOCKS as u64;
+
+    #[test]
+    fn audio_is_captured_over_the_last_frame_only() {
+        let mut m = FakeMachine::new(vec![]);
+        let st = run_fake(&mut m, &audio_plan(3));
+        let a = st.audio.as_ref().unwrap();
+        assert_eq!((a.until, a.start, a.end), (3 * F, 2 * F, 3 * F));
+        // One sample per window that ends in (2F, 3F].
+        assert_eq!(a.samples.len() as u64, 3 * F / P - 2 * F / P);
+        assert!(a.samples.iter().all(|&s| s == FAKE_DC));
+        assert!(!a.full);
+        // Calls before the last frame get no room; one call ends exactly
+        // where it starts, and every call from there on gets the rest.
+        assert!(
+            m.audio_calls
+                .iter()
+                .all(|&(at, room)| (room > 0) == (at >= 2 * F))
+        );
+        assert!(m.audio_calls.contains(&(2 * F, AUDIO_SLOTS)));
+        assert_eq!(AUDIO_SLOTS, 550);
+
+        // Without the plan flag: no capture, never any room.
+        let mut m = FakeMachine::new(vec![]);
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 3 }));
+        assert_eq!(st.audio, None);
+        assert!(m.audio_calls.iter().all(|&(_, room)| room == 0));
+    }
+
+    #[test]
+    fn only_sound_in_the_last_frame_counts() {
+        let silent = |sound: (u64, u64)| {
+            let mut m = FakeMachine::new(vec![]);
+            m.sound = Some(sound);
+            let st = run_fake(&mut m, &audio_plan(3));
+            let a = st.audio.unwrap();
+            a.samples.iter().all(|&s| s == a.samples[0])
+        };
+        // Sound up to the start of the last frame is not heard.
+        assert!(silent((0, 2 * F)));
+        assert!(silent((F, 2 * F)));
+        // Sound anywhere in the last frame is.
+        assert!(!silent((2 * F, 2 * F + 2 * P)));
+        assert!(!silent((2 * F + 5000, 2 * F + 6000)));
+        assert!(!silent((3 * F - 2 * P, 3 * F)));
+    }
+
+    #[test]
+    fn audio_capture_records_an_early_end() {
+        // A lockup (a crash here) in the last frame: the window is
+        // incomplete.
+        let mut m = FakeMachine::new(vec![(2 * F + 1000, Action::Lock)]);
+        let st = run_fake(&mut m, &audio_plan(3));
+        assert_eq!(st.end, Some(End::Locked));
+        let a = st.audio.unwrap();
+        assert!(a.end < a.until, "{} {}", a.end, a.until);
+        // One before it: no capture at all.
+        let mut m = FakeMachine::new(vec![(F, Action::Lock)]);
+        let st = run_fake(&mut m, &audio_plan(3));
+        assert_eq!(st.audio, None);
     }
 }

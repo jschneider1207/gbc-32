@@ -22,6 +22,7 @@ fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
     let mut script = Vec::new();
     let mut regs = Registers::default();
     let mut image = None;
+    let mut sound = None;
     for word in spec.split_whitespace() {
         match word {
             "load-error" => return Err(CoreFailure::Load("bad header".into())),
@@ -30,6 +31,7 @@ fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
             "lock" => script.push((100, Action::Lock)),
             "ldbb" => script.push((1000, Action::LdBB)),
             "lcd-off" => script.push((10, Action::LcdOff)),
+            "sound" => sound = Some((0, u64::MAX)),
             "fib" => {
                 regs = Registers {
                     b: 3,
@@ -57,6 +59,7 @@ fn fake_backend(rom: &[u8], plan: &RunPlan, st: &mut RunState) -> Result<(), Cor
     let mut m = FakeMachine::new(script);
     m.regs = regs;
     m.image = image;
+    m.sound = sound;
     run_machine(&mut m, plan, st)
 }
 
@@ -121,7 +124,10 @@ impl Ws {
         ws.write_raw("test-roms/s/fibfail.gb", b"ldbb");
         ws.write_raw("test-roms/s/notes.txt", b"not a ROM");
         ws.write_raw("test-roms/t/white.gb", b"lcd-off serial:OK");
-        ws.write_raw("test-roms/t/w_cgb04c_outaudio1.gb", b"lcd-off serial:OK");
+        ws.write_raw(
+            "test-roms/t/w_cgb04c_outaudio1.gb",
+            b"lcd-off serial:OK sound",
+        );
         ws.write_raw(
             "test-roms/t/w_cgb04c_outaudio1.png",
             &encode_png(&img(255)).unwrap(),
@@ -271,7 +277,7 @@ fn full_run_statuses_outputs_and_exit_code() {
             s("g-shot", "t/noref.gbc", "no-reference"),
             s("g-shot", "t/w_cgb04c_outaudio1.gb", "pass"),
             s("g-shot", "t/white.gb", "pass"),
-            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "unsupported"),
+            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "pass"),
         ]
     );
     assert!(
@@ -543,7 +549,7 @@ fn filter_selects_every_group_containing_the_path() {
         ws.statuses(),
         [
             s("g-shot", "t/w_cgb04c_outaudio1.gb", "pass"),
-            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "unsupported")
+            s("g-gambatte", "t/w_cgb04c_outaudio1.gb", "pass")
         ]
     );
     ws.run(&["--filter", "s/{pass1,sub/load}.gb", "--group", "g-mixed"])
@@ -822,8 +828,10 @@ fn allow_removed_keeps_real_regressions() {
 }
 
 #[test]
-fn missing_reference_does_not_hide_an_unsupported_check() {
+fn missing_reference_does_not_hide_a_failing_audio_check() {
     let ws = Ws::new();
+    // Sound where `_outaudio0` expects silence: the gambatte check fails.
+    ws.write("test-roms/g/noref_cgb04c_outaudio0.gbc", b"lcd-off sound");
     let m = r#"
 roms_release = "v7.0"
 model = "cgb-c"
@@ -841,10 +849,10 @@ checks = [{ screenshot = "{dir}/{stem}.png" }, { gambatte = true }]
     let json = ws.json_of("u");
     assert_eq!(
         statuses_of(&json),
-        [s("u", "g/noref_cgb04c_outaudio0.gbc", "unsupported")]
+        [s("u", "g/noref_cgb04c_outaudio0.gbc", "fail")]
     );
     assert_eq!(json["results"][0]["checks"][0]["status"], "no-reference");
-    assert_eq!(json["summary"]["tiers"]["must"]["unsupported"], 1);
+    assert_eq!(json["summary"]["tiers"]["must"]["fail"], 1);
 }
 
 /// A ROM with no Gambatte CGB rule (no cgb04c `_out` result, no reference

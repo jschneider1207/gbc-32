@@ -7,6 +7,7 @@ use gbc_core::{Frame, Registers, SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::Serialize;
 
 use crate::gambatte;
+use crate::machine::AudioCapture;
 use crate::manifest::{Check, CheckKind, Manifest, Recolor, expand_template, hex_color};
 
 pub(crate) const W: usize = SCREEN_WIDTH;
@@ -117,19 +118,19 @@ fn gambatte_check(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckRes
     let (out, png) = gambatte_rules(ctx.roms_dir, ctx.rom)?;
     let actual = gambatte::frame_to_gambatte_rgb(ctx.final_frame);
     let mut details = Vec::new();
-    let mut unsupported = false;
+    let mut audio_failed = false;
     let mut mismatched: Option<u64> = None;
     // The expected image of the first failing comparison, for the failure
     // PNGs.
     let mut first_failure: Option<Rgb> = None;
     match out {
         Some(gambatte::Expect::Audio(sound)) => {
-            unsupported = true;
-            details.push(format!(
-                "`_outaudio{}` ({}) needs audio output, which the core doesn't have yet",
-                u8::from(sound),
-                if sound { "sound" } else { "silence" }
-            ));
+            let failure = gambatte::audio_failure(sound, ctx.audio)
+                .map_err(|e| format!("{}: {e}", ctx.rom))?;
+            if let Some(why) = failure {
+                audio_failed = true;
+                details.push(why);
+            }
         }
         Some(gambatte::Expect::Hex(digits)) => {
             let expected = gambatte::expected_image(&actual, &digits);
@@ -180,10 +181,8 @@ fn gambatte_check(check: &Check, index: usize, ctx: &Ctx<'_>) -> Result<CheckRes
         }
         *mismatched.get_or_insert(0) += n;
     }
-    let status = if first_failure.is_some() {
+    let status = if first_failure.is_some() || audio_failed {
         CheckStatus::Fail
-    } else if unsupported {
-        CheckStatus::Unsupported
     } else {
         CheckStatus::Pass
     };
@@ -328,6 +327,10 @@ pub struct Ctx<'a> {
     pub serial: &'a [u8],
     pub registers: Option<Registers>,
     pub final_frame: &'a Frame,
+    /// The last frame's audio, for groups whose plan captures it
+    /// (`machine::RunPlan::audio_last_frame`); `None` if the run never
+    /// reached that frame.
+    pub audio: Option<&'a AudioCapture>,
     /// Where to write failure images: `(actual, diff)` paths for this
     /// check, relative to the output root, or `None` to skip writing.
     pub failure_pngs: &'a dyn Fn(usize) -> Option<(PathBuf, String, String)>,
@@ -540,6 +543,7 @@ pub fn selected(checks: &[Check], only: Option<CheckKind>) -> Vec<(usize, &Check
 pub(crate) mod tests {
     use super::*;
     use crate::machine::new_frame;
+    use gbc_core::StereoSample;
 
     fn no_pngs(_: usize) -> Option<(PathBuf, String, String)> {
         None
@@ -556,6 +560,7 @@ pub(crate) mod tests {
             serial,
             registers: Some(Registers::default()),
             final_frame: frame,
+            audio: None,
             failure_pngs: &no_pngs,
             verify: &all_listed,
         }
@@ -779,14 +784,80 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn gambatte_audio_is_unsupported() {
+    const AUDIO0: &str = "a/t_cgb04c_outaudio0.gbc";
+    const AUDIO1: &str = "a/t_dmg08_cgb04c_outaudio1.gbc";
+
+    fn s(left: i16, right: i16) -> StereoSample {
+        StereoSample { left, right }
+    }
+
+    /// A complete last frame with these samples.
+    fn capture(samples: Vec<StereoSample>) -> AudioCapture {
+        AudioCapture {
+            until: 1000,
+            start: 0,
+            end: 1000,
+            samples,
+            full: false,
+        }
+    }
+
+    fn gambatte_audio(rom: &str, audio: Option<&AudioCapture>) -> Result<CheckResult, String> {
         let f = new_frame();
-        for rom in ["a/t_cgb04c_outaudio0.gbc", "a/t_dmg08_cgb04c_outaudio1.gbc"] {
-            let r = gambatte(rom, &f);
-            assert_eq!(r.status, CheckStatus::Unsupported, "{rom}");
-            assert!(r.detail.contains("audio"), "{}", r.detail);
+        let mut c = ctx(Path::new("."), rom, b"", &f);
+        c.audio = audio;
+        evaluate(&Check::Gambatte, 0, &c)
+    }
+
+    #[test]
+    fn gambatte_audio_silence_is_every_sample_equal() {
+        let status = |rom: &str, samples: Vec<StereoSample>| {
+            let r = gambatte_audio(rom, Some(&capture(samples))).unwrap();
+            assert!(r.status == CheckStatus::Pass || !r.detail.is_empty());
             assert_eq!(r.mismatched_pixels, None);
+            r.status
+        };
+        // A constant at any level is silence: DC and zero alike.
+        let dc = vec![s(7, -3); 549];
+        for silent in [dc.clone(), vec![s(0, 0); 548], vec![s(5, 5)]] {
+            assert_eq!(status(AUDIO0, silent.clone()), CheckStatus::Pass);
+            assert_eq!(status(AUDIO1, silent), CheckStatus::Fail);
+        }
+        // One sample that differs, on either side, first, middle or last,
+        // is sound.
+        for (i, d) in [(0, s(8, -3)), (300, s(7, -2)), (548, s(-7, -3))] {
+            let mut v = dc.clone();
+            v[i] = d;
+            assert_eq!(status(AUDIO0, v.clone()), CheckStatus::Fail, "{i}");
+            assert_eq!(status(AUDIO1, v), CheckStatus::Pass, "{i}");
+        }
+    }
+
+    #[test]
+    fn gambatte_audio_needs_a_complete_last_frame() {
+        // Samples that would pass for each ROM, so only the window fails.
+        for (rom, ok) in [
+            (AUDIO0, vec![s(1, 1); 10]),
+            (AUDIO1, vec![s(1, 1), s(2, 2)]),
+        ] {
+            let pass = gambatte_audio(rom, Some(&capture(ok.clone()))).unwrap();
+            assert_eq!(pass.status, CheckStatus::Pass, "{rom}");
+            // The run never reached the last frame.
+            let r = gambatte_audio(rom, None).unwrap();
+            assert_eq!(r.status, CheckStatus::Fail, "{rom}");
+            // The run ended inside it.
+            let mut early = capture(ok.clone());
+            early.end = early.until - 1;
+            let r = gambatte_audio(rom, Some(&early)).unwrap();
+            assert_eq!(r.status, CheckStatus::Fail, "{rom}");
+            assert!(r.detail.contains("before"), "{}", r.detail);
+            // No samples at all.
+            let r = gambatte_audio(rom, Some(&capture(Vec::new()))).unwrap();
+            assert_eq!(r.status, CheckStatus::Fail, "{rom}");
+            // Every slot filled: samples may be missing (runner error).
+            let mut full = capture(ok);
+            full.full = true;
+            assert!(gambatte_audio(rom, Some(&full)).is_err(), "{rom}");
         }
     }
 
@@ -848,28 +919,35 @@ pub(crate) mod tests {
         assert!(evaluate(&c, 0, &cx).is_err());
     }
 
-    /// Contract precedence (acceptance/README.md, "Statuses"): within one
-    /// check, fail outranks unsupported.
+    /// A ROM with an audio result and a reference PNG passes only if both
+    /// rules pass.
     #[test]
-    fn gambatte_fail_outranks_unsupported() {
+    fn gambatte_audio_and_png_must_both_pass() {
         let dir = tempfile::tempdir().unwrap();
         let frame = new_frame();
         let rom = "g/x_cgb04c_outaudio1.gbc";
         let rel = "g/x_cgb04c_outaudio1_cgb04c.png";
         let c = Check::Gambatte;
-        // The PNG does not match the frame: Fail, even though the audio
-        // half is unsupported.
+        let sound = capture(vec![s(1, 1), s(2, 2)]);
+        let silence = capture(vec![s(1, 1); 2]);
+        let run = |audio: &AudioCapture| {
+            let mut cx = ctx(dir.path(), rom, b"", &frame);
+            cx.audio = Some(audio);
+            evaluate(&c, 0, &cx).unwrap()
+        };
+        // The PNG does not match the frame: Fail, though the audio passes.
         let mut wrong = gambatte::frame_to_gambatte_rgb(&frame);
         wrong.data[7] = [1, 2, 3];
         write_ref(dir.path(), rel, &wrong);
-        let r = evaluate(&c, 0, &ctx(dir.path(), rom, b"", &frame)).unwrap();
+        let r = run(&sound);
         assert_eq!(r.status, CheckStatus::Fail, "{}", r.detail);
         assert_eq!(r.mismatched_pixels, Some(1));
-        // The PNG matches: only the unsupported audio half is left.
+        // The PNG matches: the audio decides.
         write_ref(dir.path(), rel, &gambatte::frame_to_gambatte_rgb(&frame));
-        let r = evaluate(&c, 0, &ctx(dir.path(), rom, b"", &frame)).unwrap();
-        assert_eq!(r.status, CheckStatus::Unsupported, "{}", r.detail);
+        let r = run(&silence);
+        assert_eq!(r.status, CheckStatus::Fail, "{}", r.detail);
         assert_eq!(r.mismatched_pixels, Some(0));
+        assert_eq!(run(&sound).status, CheckStatus::Pass);
     }
 
     #[test]
