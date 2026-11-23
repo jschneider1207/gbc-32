@@ -187,3 +187,25 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 
 // The HDMA trigger (`hdma::HBLANK_DELAY`) stays with the HDMA model: it is
 // relative to the mode-0 start, and design step 10 replaces it.
+
+// --- Design step 1: the walk's comparison point ---
+
+/// Single speed, lines 1-152: the walk (interrupt dispatch and IF reads)
+/// compares the new LY, and the mode-2 source of lines 1-143 ends, here:
+/// one dot after the STAT bit ([`CMP_ON`]). gambatte (behaviour only) puts
+/// the LYC interrupt 2 dots after the mode-2 interrupt (`lyc_irq.cpp`
+/// `lyc*456 - 2` vs `mode2_irq_line_cycle = 456 - 4`), which with the
+/// sync of `lcd_offset/offset3_lyc8fint_m1irq` (CGB04C) gives this dot.
+/// The default CPU phase (M-cycle boundaries at `t = 3 mod 4`) cannot
+/// tell 4 from 5; offset 3 (boundaries at `t = 0 mod 4`) can. Design doc
+/// `docs/design/lcd-offset-phase.md` 2.1, step 1.
+pub(crate) const CMP_WALK_SS: u32 = t(h(5));
+
+/// The same in double speed: unchanged for now (design step 3).
+pub(crate) const CMP_WALK_DS: u32 = CMP_ON;
+
+/// [`CMP_WALK_SS`] or [`CMP_WALK_DS`].
+#[inline]
+pub(crate) const fn cmp_walk(double: bool) -> u32 {
+    if double { CMP_WALK_DS } else { CMP_WALK_SS }
+}

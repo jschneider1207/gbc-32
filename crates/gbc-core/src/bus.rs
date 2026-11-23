@@ -25,7 +25,7 @@ use crate::dma::{self, Conflict, OamDma};
 use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
-use crate::ppu::{Frame, Ppu, edges};
+use crate::ppu::{Frame, Ppu, View, edges};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
@@ -859,11 +859,13 @@ impl Ctx<'_, '_> {
                 }
                 self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
-                s.ppu.write_stat(now, first, &mut s.iflags, double);
+                s.ppu
+                    .write_stat(now, first, &mut s.iflags, double, View::StatPhase1);
                 let at = now + edges::STAT_PHASE2.delay(double);
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
-                s.ppu.write_stat(at, value, &mut s.iflags, double);
+                s.ppu
+                    .write_stat(at, value, &mut s.iflags, double, View::StatPhase2);
             }
             0x44 => {} // LY is read-only.
             0x45 => {
@@ -1347,6 +1349,8 @@ impl Ctx<'_, '_> {
             self.dma_retime(m);
         }
         self.hot.mcycle = m as i32;
+        let s = &mut *self.sys;
+        s.ppu.speed_changed(&mut s.iflags, m == 2);
         let now = self.clock();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
         // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`

@@ -575,6 +575,32 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    land step 1 together with a step-10 HDMA fix for
    `hdma_late_enable_lcdoffset3_1`; (c) accept the 1-ROM regression
    (the human's call).
+   **Step 1b** (branch `ppu-edges-step1b`, option (a); held, not merged):
+   - The walk's comparison point rides in `Cursor::cmp` (the struct's
+     padding; a `Ppu` field grew `Ppu` 416 -> 424 B and shifted field
+     offsets, +200 B of MCU code), set by `Ppu::speed_changed`, so
+     `step`/`next_point`/`seek` take no speed. `sync` writes back only
+     `pos`/`line`/`pt` (-96 B).
+   - `point_irq` keeps main's `Ly4` arm (`eval(2) | eval(NO_MODE)`):
+     instead of splitting it by line, `update_at` keeps the line up for
+     the walk's still-live mode-2 source when a write's view saw it end
+     (lines 1-143, `MODE2_SOURCE_END <= t < cmp`), with no interrupt. Same
+     results as the split, and the split cost +2.8 M x86 Ir on cgb-acid2.
+   - `early_cmp` tests the cursor (synced to the write) instead of
+     dividing; `speed_changed` moves a pending `Ly4`/`V4` and runs it at
+     once if it is then due, instead of a full re-seek.
+   - Line 0 stays at `t = 4`: moving it too measured +2/-2
+     (`offset3_lyc99int_m2irq_count_1`, `lycstatwirq_trigger_ly00_10_50_1`
+     vs `lycwirq_trigger_ly00_stat50_2`, `lyc0_late_m2enable_lycdisable_2`;
+     step 5).
+   - Result: the same +5/-1 as 32c017b. `.text` +412 B vs main (95,654);
+     `point_irq` 502 (= main), `seek` 560, `next_event` 570, `sync` 882
+     (below main's 914); no budget raised. Bench vs baseline: cgb-acid2
+     +2.44% (main alone +2.10%), worst-case +0.04%. 7 mutations caught.
+   - Still held for `dma/hdma_late_enable_lcdoffset3_1` (FF55=80 written
+     97 M-cycles into a LYC=1 handler; out 1 = the block runs at once,
+     its `_2` one M-cycle later expects 0, and the default-phase `_2`
+     fails on main too). It needs the HDMA-period edge (step 10).
 2. *(merged into 1 if 1 alone regresses
    `m2enable/late_enable_lcdoffset3_1`)*
 3. **The same in double speed.** Targets: the ds-even rows with LYC sync
