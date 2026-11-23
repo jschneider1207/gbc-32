@@ -131,7 +131,9 @@ impl Sys<'_> {
     pub(crate) fn set_div_apu_deadline(&mut self, powered: bool, now: u64) {
         let at = if powered {
             let k = self.timer.div_apu_bit() + 1;
-            self.timer.clock_at(((self.timer.sc(now) >> k) + 1) << k)
+            // Bit 13 (double speed) with the delay armed: 2 clocks late.
+            let late = (u64::from(self.timer.apu_ds_delay) & u64::from(k - 13)) << 1;
+            self.timer.clock_at(((self.timer.sc(now) >> k) + 1) << k) + late
         } else {
             NEVER
         };
@@ -598,6 +600,7 @@ impl Ctx<'_, '_> {
             self.mem.apu.power_off();
             self.mem.io[0x10..=0x25].fill(0);
         }
+        self.sys.timer.apu_ds_delay = false;
         // The first edge is the next one after the end of the write's
         // M-cycle, consistent with the skip test above: an edge at that
         // end falls while the APU is still off (SameBoy `cycle_write` runs
@@ -1251,7 +1254,9 @@ impl Ctx<'_, '_> {
         self.sys
             .timer
             .speed_switch(now, (freeze * m / 4) as i64 - short);
-        // The DIV-APU bit changes (12 <-> 13) with the counter speed.
+        // The DIV-APU bit changes (12 <-> 13) with the counter speed, and
+        // a switch to double speed toggles the frame sequencer's delay
+        // (`Timer::apu_ds_delay`).
         let powered = self.mem.apu.powered();
         self.sys.set_div_apu_deadline(powered, now);
         if !pending && self.sys.vdma.hblank {
@@ -2375,17 +2380,40 @@ mod tests {
         assert_eq!(emu.mem.apu.fs.step, 3);
     }
 
+    /// In double speed the edge is counter bit 13's fall, and each switch
+    /// to double speed with the APU on toggles a 1 M-cycle (2 clock) delay:
+    /// the 1st and 3rd switches delay the frame sequencer, the 2nd doesn't,
+    /// single speed never does, and NR52 power on/off clears it (AGE
+    /// `spsw-ch2-lc-delay`: `TEST_DS`, `TEST_DS_NS_DS`, `TEST_DS_OFF_ON`).
     #[test]
     fn div_apu_follows_counter_bit_13_after_a_switch_to_double_speed() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
         let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
         let Emulator { mem, hw } = emu;
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        // The deadline less the bare edge of the current DIV-APU bit.
+        let late = |ctx: &Ctx| {
+            let t = &ctx.sys.timer;
+            let k = t.div_apu_bit() + 1;
+            let edge = t.clock_at(((t.sc(ctx.clock()) >> k) + 1) << k);
+            ctx.sys.sched.deadline(EventKind::DivApu) - edge
+        };
+        let mut lates = [0; 6];
+        for l in &mut lates {
+            assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
+            *l = late(&ctx);
+        }
+        assert_eq!(ctx.sys.timer.div_apu_bit(), 12);
+        assert_eq!(lates, [2, 0, 0, 0, 2, 0], "DS, NS, DS, NS, DS, NS");
         assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
-        let t = &ctx.sys.timer;
-        assert_eq!(t.div_apu_bit(), 13);
-        let want = t.clock_at(((t.sc(ctx.clock()) >> 14) + 1) << 14);
-        assert_eq!(ctx.sys.sched.deadline(EventKind::DivApu), want);
+        assert_eq!(late(&ctx), 0, "4th switch to double speed");
+        assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
+        assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
+        assert_eq!(late(&ctx), 2, "5th switch to double speed");
+        let now = ctx.clock();
+        ctx.write_nr52(0x00, now);
+        ctx.write_nr52(0x80, now);
+        assert_eq!(late(&ctx), 0, "power cycle in double speed");
     }
 
     #[test]
