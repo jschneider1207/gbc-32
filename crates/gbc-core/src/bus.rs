@@ -2417,6 +2417,18 @@ mod tests {
     }
 
     #[test]
+    fn ch2_envelope_steps_at_fs_step_0() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF1); // volume 15, down, period 1
+        write(emu, 0xFF19, 0x80);
+        // Steps 1-7 don't clock the envelope; step 0 (the 8th) does.
+        let _ = run_audio(emu, first_div_apu_edge() + 6 * 8192 + 100, &mut []);
+        assert_eq!(emu.mem.apu.sq[1].env.volume, 15);
+        let _ = run_audio(emu, 8192, &mut []);
+        assert_eq!(emu.mem.apu.sq[1].env.volume, 14);
+    }
+
+    #[test]
     fn ch2_dac_off_clears_nr52_bit_1() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
         write(emu, 0xFF17, 0xF0);
@@ -2471,6 +2483,8 @@ mod tests {
         };
         // f = 2044: one duty period per 128-clock window, every window.
         assert!(ch2_tone(2044, 2, 20).iter().all(|&s| s == want));
+        // f = 2047: four whole periods per window (the closed-form path).
+        assert!(ch2_tone(2047, 2, 20).iter().all(|&s| s == want));
         // f = 2016: one step per window; eight windows are one period.
         let tone = ch2_tone(2016, 10, 32);
         assert!(tone.iter().any(|&s| s != want));
