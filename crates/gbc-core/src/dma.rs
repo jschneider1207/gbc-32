@@ -9,6 +9,9 @@
 //! `Hot::dma` is set (`Ctx::read_during_dma`), so the conflict rules cost
 //! the normal path one flag test.
 
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering::Relaxed;
+
 use crate::schedule::NEVER;
 
 /// The PPU sees each step of a transfer this many dots before the CPU
@@ -54,6 +57,73 @@ pub(crate) struct OamDma {
     /// past `ppu_to` (`Ppu::dma_touches`), so lines after the transfer
     /// skip the DMA-aware path with one flag test.
     pub(crate) ppu_live: bool,
+}
+
+/// The OAM bytes cleared by conflicting CPU reads during a transfer from
+/// VRAM and not yet applied to OAM: bit `i % 32` of word `i / 32` for byte
+/// `i` (`bus::dma_read_clear` records, `Ctx::dma_sync` applies; ADR 0028
+/// amendment). Interior mutability, because the CPU read path takes shared
+/// references and stays that way; atomics (relaxed loads and stores, plain
+/// `ldr`/`str` on the MCU) rather than `Cell`, so `Memory`, where this
+/// lives, stays `Sync` and can be a `static`. All zero when idle.
+pub(crate) struct ReadClears([AtomicU32; 5]);
+
+impl ReadClears {
+    pub(crate) const fn new() -> Self {
+        Self([const { AtomicU32::new(0) }; 5])
+    }
+
+    /// Records a clear of byte `i` (below 160).
+    #[inline(always)]
+    pub(crate) fn record(&self, i: u8) {
+        if let Some(w) = self.0.get(usize::from(i >> 5)) {
+            w.store(w.load(Relaxed) | 1 << (i & 31), Relaxed);
+        }
+    }
+
+    /// Whether byte `i` (below 160) is recorded.
+    #[cfg(test)]
+    pub(crate) fn has(&self, i: usize) -> bool {
+        self.0[i / 32].load(Relaxed) & 1 << (i % 32) != 0
+    }
+
+    /// Clears the recorded bytes in `oam` and empties the record; whether
+    /// any was recorded. Cold and small: one out-of-line loop per word.
+    pub(crate) fn apply(&self, oam: &mut [u8; LEN as usize]) -> bool {
+        let mut any = false;
+        for (k, w) in self.0.iter().enumerate() {
+            let bits = w.load(Relaxed);
+            if bits != 0 {
+                w.store(0, Relaxed);
+                clear_bits(&mut oam[k * 32..], bits);
+                any = true;
+            }
+        }
+        any
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.iter().all(|w| w.load(Relaxed) == 0)
+    }
+}
+
+/// Zeroes `oam[b]` for each set bit `b` of `bits`.
+#[inline(never)]
+fn clear_bits(oam: &mut [u8], mut bits: u32) {
+    while bits != 0 {
+        if let Some(b) = oam.get_mut(bits.trailing_zeros() as usize) {
+            *b = 0;
+        }
+        bits &= bits - 1;
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for ReadClears {
+    fn eq(&self, other: &Self) -> bool {
+        (0..usize::from(LEN)).all(|i| self.has(i) == other.has(i))
+    }
 }
 
 /// What a PPU read of OAM at some clock sees of the transfer
@@ -176,6 +246,9 @@ pub(crate) enum Conflict {
     /// just written gets its data (ROM/SRAM source), 00 (VRAM source) or
     /// stays (WRAM source). gambatte cgb04c captures, ADR 0028.
     Dma,
+    /// [`Self::Dma`] with a VRAM source: a read also clears the OAM byte
+    /// being transferred (gambatte cgb04c, ADR 0028 amendment).
+    DmaVram,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -218,6 +291,11 @@ pub(crate) fn conflict(base: u16, cur: u16, addr: u16) -> Conflict {
         Conflict::Open
     } else if cpu == Bus::Wram && (src != Bus::Wram || high) {
         Conflict::Wram((base & 0x1000) | (addr & 0x0FFF) | 0xC000)
+    } else if cpu == Bus::Vram {
+        // Here `cpu == src` (both VRAM): tested on `cpu`, so `src` is
+        // dead by now (one saved register less on every read during a
+        // transfer, measured on `synth:dma-storm`).
+        Conflict::DmaVram
     } else {
         Conflict::Dma
     }
@@ -254,8 +332,8 @@ mod tests {
         assert_eq!(conflict(0x5000, 0x5010, 0xC123), Wram(0xD123));
         // The address the DMA reads next doesn't conflict.
         assert_eq!(conflict(0x4000, 0x4010, 0x4011), None);
-        // VRAM source: only VRAM conflicts.
-        assert_eq!(conflict(0x8000, 0x8010, 0x9000), Dma);
+        // VRAM source: only VRAM conflicts (and a read clears OAM).
+        assert_eq!(conflict(0x8000, 0x8010, 0x9000), DmaVram);
         assert_eq!(conflict(0x8000, 0x8010, 0x0100), None);
         assert_eq!(conflict(0x8000, 0x8010, 0xC100), None);
         // WRAM source: WRAM conflicts with the DMA's address, the rest

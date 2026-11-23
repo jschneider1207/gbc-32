@@ -1142,6 +1142,21 @@ impl Ctx<'_, '_> {
             self.sys.ppu.oam_written();
         }
         self.sys.ppu.dma.copied = d.copied.max(due);
+        // Only a transfer from VRAM records any (`dma_read_clear`).
+        if d.base & 0xE000 == 0x8000 {
+            self.dma_apply_read_clears();
+        }
+    }
+
+    /// Clears the OAM bytes recorded by [`dma_read_clear`] (all copied by
+    /// now: each was due by its read) and empties the record.
+    #[cold]
+    #[inline(never)]
+    fn dma_apply_read_clears(&mut self) {
+        let mem = &mut *self.mem;
+        if mem.dma_read_clears.apply(&mut mem.oam) {
+            self.sys.ppu.oam_written();
+        }
     }
 
     /// A CPU write while an OAM DMA transfer runs: OAM writes are dropped
@@ -1164,7 +1179,7 @@ impl Ctx<'_, '_> {
         match dma_conflict(&self.sys.ppu.dma, now, self.hot.mcycle, addr) {
             (Conflict::None, _) => self.write_to(addr, value),
             (Conflict::Wram(a), _) => self.write_to(a, value),
-            (Conflict::Open | Conflict::Dma, i) => {
+            (Conflict::Open | Conflict::Dma | Conflict::DmaVram, i) => {
                 // CGB C (gambatte cgb04c `oamdma_src*_busypush*`, ADR
                 // 0028): the CPU's data replaces the OAM byte just
                 // transferred, except that a VRAM source gets 00 there
@@ -1701,8 +1716,11 @@ impl Bus for Ctx<'_, '_> {
     }
 }
 
-/// A read as the CPU sees it at the current clock, without side effects
-/// (no read on this hardware has any). Shared by the CPU bus and
+/// A read as the CPU sees it at the current clock, through shared
+/// references: the one read side effect (a conflicting read during an OAM
+/// DMA from VRAM) is recorded in a `Cell` ([`dma_read_clear`]), so the CPU
+/// and `peek` keep sharing one `read_high` (ADR 0028 amendment). Shared by
+/// the CPU bus and
 /// [`Emulator::peek`]. `hot` is the live clock: [`Ctx::hot`]
 /// during a run call, [`Sys::hot`] otherwise. While an OAM DMA transfer
 /// runs, every address goes to `read_high` and the conflict path
@@ -1743,7 +1761,8 @@ fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) 
 /// A CPU read while an OAM DMA transfer runs (`Hot::dma`): OAM reads FF
 /// (Pan Docs: OAM DMA bus conflicts; SameBoy `read_high_memory`), HRAM and
 /// I/O are unaffected, and the rest follows [`dma::conflict`]. Side-effect
-/// free, like [`read`].
+/// free like [`read`], except a conflicting read with a VRAM source
+/// ([`dma_read_clear`]).
 #[inline(never)]
 fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let now = hot.clock();
@@ -1761,9 +1780,27 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
         (Conflict::None, _) => addr,
         (Conflict::Open, _) => return 0xFF,
         (Conflict::Wram(a), _) => a,
+        (Conflict::DmaVram, i) => {
+            dma_read_clear(mem, i);
+            sys.ppu.dma.base + u16::from(i)
+        }
         (Conflict::Dma, i) => sys.ppu.dma.base + u16::from(i),
     };
     read::<true>(mem, sys, &plain, addr)
+}
+
+/// A CPU read on the VRAM bus in the M-cycle of byte `i` of a transfer
+/// from VRAM (`Conflict::DmaVram`): besides returning the byte the DMA reads,
+/// on CGB C it clears OAM byte `i` (gambatte cgb04c
+/// `oamdma_src{8000,9F00}_busypop{7FFF,9FFF}*`, which gambatte
+/// `Memory::nontrivial_read` reproduces; ADR 0028 amendment). Recorded
+/// here and applied by the next `Ctx::dma_sync`, which copies byte `i`
+/// first (it is due by now), so the lazy copy can't overwrite the 00.
+/// Inline: a call here would cost every read during a transfer saved
+/// registers (measured on `synth:dma-storm`).
+#[inline(always)]
+fn dma_read_clear(mem: &Memory, i: u8) {
+    mem.dma_read_clears.record(i);
 }
 
 /// One VRAM DMA block's 16 source bytes from `src` (16-aligned, so the
@@ -3477,6 +3514,48 @@ mod dma_tests {
                 0xD123 => assert_eq!(emu.mem.wram[0x1123], 0),
                 _ => {}
             }
+        }
+    }
+
+    /// A CPU read on the VRAM bus during a transfer from VRAM returns the
+    /// byte being transferred and clears that OAM byte (gambatte cgb04c
+    /// `oamdma_src{8000,9F00}_busypop{7FFF,9FFF}*`, ADR 0028 amendment):
+    /// byte 5 (not yet copied when read), byte 6 (copied by a sync at the
+    /// same clock, before the read) and byte 40 (a second word of the
+    /// record), all applied by the next sync. A WRAM source's conflicting
+    /// read leaves OAM alone.
+    #[test]
+    fn conflicting_vram_read_clears_the_oam_byte() {
+        for (src, addr) in [(0x80u8, 0x9123), (0xC1, 0xD123)] {
+            let emu = setup();
+            for (i, b) in emu.mem.vram[..0xA0].iter_mut().enumerate() {
+                *b = i as u8 ^ 0x69;
+            }
+            let byte = |i: usize| {
+                if src == 0x80 {
+                    i as u8 ^ 0x69
+                } else {
+                    i as u8 ^ 0xA5
+                }
+            };
+            with_ctx(emu, |ctx| {
+                let t0 = ctx.clock();
+                ctx.write(0xFF46, src);
+                idle_to(ctx, t0, 2 + 5);
+                assert_eq!(ctx.read(addr), byte(5));
+                ctx.dma_sync(ctx.clock());
+                assert_eq!(ctx.read(addr), byte(6));
+                idle_to(ctx, t0, 2 + 40);
+                assert_eq!(ctx.read(addr), byte(40));
+                ctx.idle();
+                ctx.dma_sync(ctx.clock());
+            });
+            let cleared = |i: usize| src == 0x80 && matches!(i, 5 | 6 | 40);
+            for (i, &b) in emu.mem.oam[..=41].iter().enumerate() {
+                let want = if cleared(i) { 0 } else { byte(i) };
+                assert_eq!(b, want, "source {src:02X}, byte {i}");
+            }
+            assert!(emu.mem.dma_read_clears.is_empty());
         }
     }
 

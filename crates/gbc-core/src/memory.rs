@@ -1,6 +1,7 @@
 //! Large internal RAM arrays.
 
 use crate::apu::Apu;
+use crate::dma::ReadClears;
 use crate::ppu::OBJ_BUF_LEN;
 
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
@@ -62,6 +63,11 @@ pub struct Memory {
     pub(crate) bg_pal: [u8; 64],
     /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
     pub(crate) obj_pal: [u8; 64],
+    /// OAM bytes cleared by conflicting CPU reads during an OAM DMA from
+    /// VRAM, not yet applied to `oam` ([`ReadClears`]). Here, not in `Sys`,
+    /// for `Hw`'s size limit. Empty outside a transfer and between run
+    /// calls.
+    pub(crate) dma_read_clears: ReadClears,
     /// The APU's internal state (ADR 0021 section 2): here, not in `Hw`, as
     /// it is only touched on cold paths. All zero is powered off.
     pub(crate) apu: Apu,
@@ -98,6 +104,7 @@ impl Memory {
             obj_pal: [0; 64],
             bg_pairs: [[0; 16]; 8],
             apu: Apu::new(),
+            dma_read_clears: ReadClears::new(),
         }
     }
 
@@ -185,7 +192,9 @@ mod tests {
             obj_pal,
             bg_pairs,
             apu,
+            dma_read_clears,
         } = &NEW;
+        assert!(dma_read_clears.is_empty());
         let fields: [&[u8]; 11] = [
             wram,
             vram,
@@ -210,7 +219,8 @@ mod tests {
             + size_of_val(bg_pairs)
             + size_of_val(&obj_rank.hold)
             + size_of_val(&obj_rank.next)
-            + size_of::<Apu>();
+            + size_of::<Apu>()
+            + size_of_val(dma_read_clears);
         assert_eq!(
             size_of::<Memory>(),
             total.next_multiple_of(align_of::<Memory>())
