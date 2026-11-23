@@ -55,6 +55,15 @@ step "Instruction-count benchmark (valgrind)"
 step "Fuzz pass over untrusted inputs (fixed seed + corpus)"
 ./scripts/check-fuzz.sh || fail "fuzz pass (docs/fuzzing.md; failing input in target/fuzz-failures/)"
 
+step "Desktop front end: release build + headless run (M7)"
+# Run the binary cargo just built, wherever CARGO_TARGET_DIR or a cargo
+# config put it: a hard-coded target/release path may be stale.
+desktop=$(cargo build -p gbc-desktop --release --bin gbc-desktop --message-format=json-render-diagnostics \
+    | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1) || fail "gbc-desktop build"
+[ -n "${desktop}" ] && [ -x "${desktop}" ] || fail "cannot find the gbc-desktop binary cargo built"
+"${desktop}" test-roms/blargg/cpu_instrs/cpu_instrs.gb --headless --frames 600 \
+    || fail "gbc-desktop --headless --frames 600 did not exit 0"
+
 step "Acceptance ROMs (must tier + regressions)"
 set +e
 cargo run -p romtest --release -- --manifest acceptance/stage1.toml --gate must

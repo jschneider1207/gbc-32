@@ -269,7 +269,11 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
 7. `scripts/check-fuzz.sh` passes: every input in `tools/fuzz/corpus/` and
    the fixed-seed generated inputs run through the core's public API
    without a panic or a hang (`docs/fuzzing.md`).
-8. The runner exits 0 with `--gate must` on the full manifest: every `must`
+8. The desktop front end builds (`cargo build -p gbc-desktop --release`)
+   and the binary cargo just built runs
+   `test-roms/blargg/cpu_instrs/cpu_instrs.gb --headless --frames 600`
+   and exits 0 (M7 acceptance).
+9. The runner exits 0 with `--gate must` on the full manifest: every `must`
    ROM passes and there are no regressions against
    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
    runner error.
