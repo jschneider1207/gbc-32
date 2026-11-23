@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+cpal = "0.18.2"
 gbc-core = { path = "../gbc-core" }
+ringbuf = "0.6.0"
 softbuffer = "0.4"
 winit = "0.30"

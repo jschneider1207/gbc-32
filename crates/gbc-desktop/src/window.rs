@@ -16,7 +16,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::input::key_to_button;
-use crate::pacing::Pacer;
+use crate::pacing::Pacing;
 use crate::session::Autosave;
 use crate::video;
 
@@ -39,12 +39,13 @@ struct App<'e, 'a> {
     shown: Box<Frame>,
     audio: [StereoSample; AUDIO_SLOTS],
     held: Buttons,
-    pacer: Pacer,
+    pacing: Pacing,
     error: Option<String>,
 }
 
 impl App<'_, '_> {
-    fn run_one_frame(&mut self) {
+    /// Runs one frame and returns how many audio samples it wrote.
+    fn run_one_frame(&mut self) -> usize {
         self.emu.set_buttons(self.held);
         let r = self.emu.run_frame(&mut self.draw, &mut self.audio);
         if r.events.contains(Events::FRAME_READY) {
@@ -54,6 +55,7 @@ impl App<'_, '_> {
             }
         }
         self.autosave.after_frame(self.emu);
+        r.audio_samples.min(AUDIO_SLOTS)
     }
 
     fn redraw(&mut self) {
@@ -98,7 +100,7 @@ impl ApplicationHandler for App<'_, '_> {
             });
         match made {
             Ok(g) => {
-                self.pacer = Pacer::new(Instant::now());
+                self.pacing.restart(Instant::now());
                 g.window.request_redraw();
                 self.gfx = Some(g);
             }
@@ -131,10 +133,15 @@ impl ApplicationHandler for App<'_, '_> {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        for _ in 0..self.pacer.due(Instant::now()) {
-            self.run_one_frame();
+        self.pacing.begin(Instant::now());
+        let mut ran = 0;
+        while self.pacing.should_run(ran) {
+            let n = self.run_one_frame();
+            self.pacing.push_audio(&self.audio[..n]);
+            ran += 1;
         }
-        el.set_control_flow(ControlFlow::WaitUntil(self.pacer.next_deadline()));
+        let wake = self.pacing.next_wake(Instant::now());
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
 
@@ -157,7 +164,7 @@ pub fn run(
         shown: Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]),
         audio: [StereoSample::default(); AUDIO_SLOTS],
         held: Buttons::default(),
-        pacer: Pacer::new(Instant::now()),
+        pacing: Pacing::open(Instant::now()),
         error: None,
     };
     el.run_app(&mut app)

@@ -1,11 +1,13 @@
-//! Wall-clock frame pacing. This is the seam the audio step replaces: the
-//! window loop asks "how many frames should I run now?" ([`Pacer::due`])
+//! Frame pacing. [`Pacer`] is the wall-clock fallback: the window loop asks
+//! it "how many frames should I run now?" ([`Pacer::due`])
 //! and "when should I wake next?" ([`Pacer::next_deadline`]). Audio-driven
-//! pacing provides the same two answers from the audio buffer fill.
+//! pacing ([`Pacing::Audio`], ADR 0024) answers both from the buffer fill.
 
 use std::time::{Duration, Instant};
 
-use gbc_core::CLOCK_HZ;
+use gbc_core::{CLOCK_HZ, StereoSample};
+
+use crate::audio::AudioOut;
 
 /// Base clocks in one frame (154 lines x 456 dots).
 const FRAME_CLOCKS: u64 = 70_224;
@@ -58,6 +60,107 @@ impl Pacer {
     }
 }
 
+/// Most frames one wake-up runs under audio pacing, so input and redraws
+/// are still handled when the emulator can't keep up.
+pub const AUDIO_MAX_FRAMES_PER_WAKE: u32 = 4;
+
+/// Bounds on the audio-paced sleep: wake at least this often to top up.
+const AUDIO_WAKE_MIN: Duration = Duration::from_millis(1);
+const AUDIO_WAKE_MAX: Duration = Duration::from_millis(8);
+
+/// Audio pacing: run another frame while the buffer is below its target,
+/// up to the per-wake-up cap.
+pub fn audio_should_run(fill: usize, target: usize, ran: u32) -> bool {
+    ran < AUDIO_MAX_FRAMES_PER_WAKE && fill < target
+}
+
+/// Audio pacing: how long until `fill` device frames drain to `target` at
+/// `rate`, within [`AUDIO_WAKE_MIN`]..=[`AUDIO_WAKE_MAX`]; zero when
+/// already below target (the cap stopped the frame loop).
+pub fn audio_wake_after(fill: usize, target: usize, rate: u32) -> Duration {
+    if fill < target {
+        return Duration::ZERO;
+    }
+    let drain = Duration::from_secs_f64((fill - target) as f64 / f64::from(rate.max(1)));
+    drain.clamp(AUDIO_WAKE_MIN, AUDIO_WAKE_MAX)
+}
+
+/// How the window loop paces frames: by the audio buffer when a device is
+/// open (ADR 0024), else by the wall clock, silently. Each wake-up calls
+/// [`Pacing::begin`], runs frames while [`Pacing::should_run`] (feeding
+/// each one's audio to [`Pacing::push_audio`]), then sleeps until
+/// [`Pacing::next_wake`].
+pub enum Pacing {
+    Audio(Box<AudioOut>),
+    Clock { pacer: Pacer, due: u32 },
+}
+
+impl Pacing {
+    /// Audio pacing if the default device opens, else the clock with one
+    /// warning. `GBC_NO_AUDIO=1` skips the device (silent, clock-paced).
+    pub fn open(now: Instant) -> Self {
+        if std::env::var_os("GBC_NO_AUDIO").is_some_and(|v| v == "1") {
+            return Self::clock(now);
+        }
+        match AudioOut::open() {
+            Ok(a) => Pacing::Audio(Box::new(a)),
+            Err(e) => {
+                eprintln!("warning: no audio ({e}); running silent on the wall clock");
+                Self::clock(now)
+            }
+        }
+    }
+
+    pub fn clock(now: Instant) -> Self {
+        Pacing::Clock {
+            pacer: Pacer::new(now),
+            due: 0,
+        }
+    }
+
+    /// Restarts the clock schedule (the window just appeared).
+    pub fn restart(&mut self, now: Instant) {
+        if let Pacing::Clock { pacer, .. } = self {
+            *pacer = Pacer::new(now);
+        }
+    }
+
+    /// Starts a wake-up. A failed audio stream switches to the clock here.
+    pub fn begin(&mut self, now: Instant) {
+        if let Pacing::Audio(a) = self
+            && let Some(e) = a.failure(now)
+        {
+            eprintln!("warning: audio stopped ({e}); running silent on the wall clock");
+            *self = Self::clock(now);
+        }
+        if let Pacing::Clock { pacer, due } = self {
+            *due = pacer.due(now);
+        }
+    }
+
+    /// Whether to run frame number `ran` (from 0) of this wake-up.
+    pub fn should_run(&self, ran: u32) -> bool {
+        match self {
+            Pacing::Audio(a) => audio_should_run(a.fill(), a.target(), ran),
+            Pacing::Clock { due, .. } => ran < *due,
+        }
+    }
+
+    /// One frame's samples (dropped under the clock).
+    pub fn push_audio(&mut self, samples: &[StereoSample]) {
+        if let Pacing::Audio(a) = self {
+            a.push(samples);
+        }
+    }
+
+    pub fn next_wake(&self, now: Instant) -> Instant {
+        match self {
+            Pacing::Audio(a) => now + audio_wake_after(a.fill(), a.target(), a.rate()),
+            Pacing::Clock { pacer, .. } => pacer.next_deadline(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +210,37 @@ mod tests {
         assert_eq!(p.next_deadline(), now + P);
         assert_eq!(p.due(now), 0, "no remaining debt");
         assert_eq!(p.due(now + P), 1);
+    }
+
+    #[test]
+    fn audio_runs_below_target_and_waits_above() {
+        assert!(audio_should_run(0, 2400, 0));
+        assert!(audio_should_run(2399, 2400, 1));
+        assert!(!audio_should_run(2400, 2400, 0), "at target: wait");
+        assert!(!audio_should_run(3000, 2400, 0));
+    }
+
+    #[test]
+    fn audio_runs_at_most_the_cap_per_wakeup() {
+        assert!(audio_should_run(0, 2400, AUDIO_MAX_FRAMES_PER_WAKE - 1));
+        assert!(!audio_should_run(0, 2400, AUDIO_MAX_FRAMES_PER_WAKE));
+        // An empty buffer refills over several wake-ups, not one.
+        let (mut fill, mut ran) = (0, 0);
+        while audio_should_run(fill, 48_000, ran) {
+            fill += 800;
+            ran += 1;
+        }
+        assert_eq!(ran, AUDIO_MAX_FRAMES_PER_WAKE);
+    }
+
+    #[test]
+    fn audio_wakes_when_the_fill_reaches_target() {
+        assert_eq!(audio_wake_after(100, 2400, 48_000), Duration::ZERO);
+        assert_eq!(
+            audio_wake_after(2400 + 240, 2400, 48_000),
+            Duration::from_millis(5)
+        );
+        assert_eq!(audio_wake_after(2400, 2400, 48_000), AUDIO_WAKE_MIN);
+        assert_eq!(audio_wake_after(2400 * 3, 2400, 48_000), AUDIO_WAKE_MAX);
     }
 }

@@ -1,8 +1,11 @@
 //! Desktop front end (milestone M7, docs/plan/stage-1.md): CLI, ROM and save
 //! handling (ADR 0023), the headless run, and the interactive window
-//! (`window`, `video`, `input`, `pacing`). Audio comes next.
+//! (`window`, `video`, `input`), with audio output (`audio`, `dsp`) driving
+//! frame pacing (`pacing`, ADR 0024).
 
 mod args;
+mod audio;
+mod dsp;
 mod headless;
 mod input;
 mod pacing;
