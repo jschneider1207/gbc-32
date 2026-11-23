@@ -501,6 +501,13 @@ mod wave_tests {
         write_wave(&mut mem, 0x1C, 0x40); // 50%
         // Nibbles 0-15 twice with 2, 3 replaced by 15, 15, each halved.
         assert_eq!(mem.apu.wave.sum, 112 - 2 + 14, "resummed on NR32");
+        // A retrigger while on never corrupts wave RAM on CGB (blargg 10).
+        for t in [518 + 512 - 2, 518 + 512 + 1, 518 + 3 * 512 - 2] {
+            let io = mem.io;
+            mem.apu.sync(t, &io, &mut [], &mut 0);
+            write_wave(&mut mem, 0x1E, 0x87);
+            assert_eq!(mem.io[0x30..0x40], io[0x30..0x40], "retrigger at {t}");
+        }
     }
 
     #[test]
