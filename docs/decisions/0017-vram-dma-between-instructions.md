@@ -47,3 +47,34 @@ hook (ADR 0008), and the hot path must not gain one.
   corruptions SameBoy models, STOP, HALT with IME off (the woken
   instruction runs before the block here), and the CPU data bus as the
   source for VRAM/E000+ addresses.
+
+## Amendment (2026-11-23, M9 group 8): HALT wake-up and the HDMA block
+
+The deferral "HALT with IME off (the woken instruction runs before the
+block)" no longer holds:
+- **Block before the woken instruction.** SameBoy `GB_cpu_run` checks
+  STAT for the wake-up's block after the wake-up M-cycle (`halted` is
+  cleared after its `GB_advance_cycles(4)`), then fetches the next opcode
+  and runs `GB_hdma_run` before executing it. A new `Bus::wake_stalls`
+  hook, called after the wake-up idle, does the mode-0 check there and
+  ends the CPU step when a block is due, so the run loop runs the block
+  (stall included) before the instruction; with IME on the dispatch still
+  goes first. gambatte `dma/hdma_late_m0unhalt_{1,ds_1}` (a wake-up that
+  ends in the next line's mode 2 starts none), `hdma_transition_halt_
+  hdmadst_unhalt` and `hdma_transition_oamdma_2` (the instruction after
+  the HALT sees the block's effects).
+- **The HALT's sample** (`allow_hdma_on_wake`) treats the HBlank as
+  starting at the HDMA trigger (`HBLANK_DELAY` after the mode-0 STAT
+  change), not at the STAT change: a HALT between the two lets the wake-up
+  start a block. Fitted to gambatte's CGB C captures
+  (`hdma_late_m3halt_m0unhalt_scx{1_3,2_2}` need it, `hdma_late_m0halt_*`
+  bound the other side); SameBoy samples raw STAT at the HALT's fetch,
+  which differs from our grid by a few dots.
+- **Kept as before:** the speed-switch halt's interrupt wake-up still
+  checks at the wake-up M-cycle's start and runs the block after the next
+  instruction (moving it, in a trial that also suppressed HBlanks in the
+  wake-up M-cycle, regressed 5 `hdma_*speedchange*` ROMs), and
+  HBlanks start blocks again from the wake-up M-cycle on, where SameBoy
+  still suppresses them. Only the `hdma_late_m0halt_ds_lcdoffset1_{1,2}`
+  pair tells the latter apart, and which half passes depends on the
+  `lcd_offset` CPU/PPU phase (M9 triage), so it stays until that is fixed.

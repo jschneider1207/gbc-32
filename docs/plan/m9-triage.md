@@ -30,7 +30,7 @@
 | 5 | Live SCX&7 discard at mode-3 start | 19 | renderer line start, mode-3 length | M | ~+100 B; check on the line-start path | **done** (21 flips; 5 residual) |
 | 6 | STAT/LY sub-dot edges at the other CPU phase (`lcd_offset`) | 33 | PPU lazy timing (ADR 0014) | M | ~+100 B; medium (STAT event math) | none (existing M5 task) |
 | 7 | APU square trigger/duty phase (gambatte `sound`, `speedchange`) | 27 | APU trigger delay, 1 MHz phase | M | ~+100 B; low (trigger path) | none |
-| 8 | HDMA timing (4 sub-groups) | 75 | `vdma`, CPU HALT/speed switch, IRQ dispatch | L (M each) | ~+100-300 B, cold; low | none |
+| 8 | HDMA timing (4 sub-groups) | 75 | `vdma`, CPU HALT/speed switch, IRQ dispatch | L (M each) | ~+100-300 B, cold; low | HALT/wake: **6 flips** |
 | 9 | STAT/LY edges in double speed | 31 | PPU lazy timing | M | as 6 | none |
 | 10 | Line-0 mid-line SCX write | 7 | PPU line 0 start timing | S-M | small | A residual |
 | 11 | Object stall vs mid-line writes | 12 | renderer stall/fetch state | M | ~+150 B; cgb-raster | **F** |
@@ -190,6 +190,18 @@ one mechanism (`docs/reference/apu.md` has the details):
 - **HDMA vs HALT/wake** (22): `hdma_*halt*unhalt*`, `hdma_transition_*halt*`.
   ADR 0017 deferral "HALT wake with IME off runs the instruction before
   the block (SameBoy: block first)".
+  **Status (`hdma-halt`, ADR 0017 amendment):** 6 fixed: block before the
+  woken instruction, wake-up mode-0 check at the end of the wake-up
+  M-cycle, HALT sample against the HDMA trigger (`late_m0unhalt_{1,ds_1}`,
+  `late_m3halt_m0unhalt_scx{1_3,2_2}`, `transition_halt_hdmadst_unhalt`,
+  `transition_oamdma_2` from Misc). 16 left, not yet analysed: wake in
+  mode 2 after a mode-3 HALT (`late_{,ei_}m3halt_m2unhalt_*` 5), the
+  `transition_*halt*` set (8: `late_unhalt` with/without `ei`/`ldaaimm`,
+  `7fffhalt_inc_m3unhalt`, `halt_m0unhalt_ldaaimm`),
+  `m0halt_late_m3unhalt_scx1_2`, `late_if_and_ie_halt_2`, and the
+  `lcd_offset`-phase pair `late_m0halt_{ds_lcdoffset1_1,lcdoffset3_2}`
+  (SameBoy's HBlank suppression in the wake-up M-cycle would swap
+  `lcdoffset1_1` for `_2`; wait for the lcd_offset phase fix).
 - **Trigger vs mode-0 start and IRQ dispatch** (19): `hdma_late_enable*`,
   `hdma_start_scx5*`, `hdma_late_disable_scx5*`, `irq_precedence` hdma.
 - **GDMA length in double speed** (4): `gdma_cycles_*_ds` (S).
