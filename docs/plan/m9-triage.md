@@ -113,9 +113,13 @@ design step E (`docs/design/mid-line-ppu.md` section 5, step 4); Mealybug
 Needs the `.text` raise.
 
 **Status (E1, `ppu-midline-e`):** 41 fixed (window stall rebuilt on
-WX/WY/LCDC.5 writes in mode 3; design doc section 7 "Step E1"). 56 left:
-CGB `late_disable*_1` (disable after the stall began), `late_wy` `1toFF`/`2toFF`,
-the WX=A6/obj X=A7 edge, Mealybug `m3_lcdc_win_*`.
+WX/WY/LCDC.5 writes in mode 3; design doc section 7 "Step E1").
+**Status (E2, `ppu-window-e2`):** 25 more fixed (CGB LCDC.5 clear during the
+stall shortens it; a WY write after the line's WY check keeps the old
+match; section 7 "Step E2"). 31 left: double-speed `late_wy_1toFF_ds_2`/
+`late_wy_ds_2`, `late_wy_FFto*`/`10to0`, `late_enable_afterVblank*`,
+`late_wx_ff_*`, the WX=A6/obj X=A7 edge (10), re-trigger (`on_screen/*`,
+Mealybug `m3_lcdc_win_*`, `m3_wx_4_change_sprites`).
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-

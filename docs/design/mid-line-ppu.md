@@ -573,3 +573,52 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   with the mid-line-SCX worst case (branch `bench-worst-case-midline-scx`)
   476,334,993 -> 476,467,536 Ir (99.19% -> 99.22% of the 4.02 M Ir/frame
   line).
+
+### Step E2 (late window disable and WY change, branch `ppu-window-e2`)
+
+- **Rule 1, LCDC.5 clear during the window stall (CGB).** E1 kept the
+  full 6-dot stall once it began. On CGB, clearing LCDC.5 during the
+  stall ends it: each remaining stall step outputs a pixel instead
+  (gambatte ppu.cpp `StartWindowDraw::inc`, `!lcdcWinEn(p) && p.cgb`;
+  read for behaviour only, GPL). SameBoy display.c doesn't model it (its
+  DMG-only pixel insertion is a different glitch). The test ROMs show it:
+  `late_disable_{0,1,2}` move the write 4 dots at a time against a fixed
+  STAT read; dmg08 gives out0/out3/out3, cgb04c out0/out0/out3.
+  `window_write` now trims the window stall to the dots before the write
+  plus `WINDOW_OFF_LEAD` (0) and moves `end` with it. Pixels unchanged
+  (the renderer still draws the window from the decided start).
+- **Rule 2, WY write after the line's WY check.** The WY == LY condition
+  was checked only at mode-3 start (`latch`) and on writes, with the new
+  value, so WY changed from LY to FF in mode 2 lost the match. Hardware
+  samples it near the line start and the match is sticky for the frame
+  (SameBoy `wy_check` at each line start; gambatte `weMaster` at the
+  previous line's cycle 454 for lines 1-143, at cycle 2 of line 0).
+  `Ppu::wy_write` (cold, bus FF4A before the store) compares the old WY
+  once past the line's check point `WY_CHECK_AT` = [7 (line 0), 3
+  (others)] dots as `at` counts them; the 4-dot gap is gambatte's.
+- **Calibration** (full manifest vs main + rule 1 where noted):
+  `WINDOW_OFF_LEAD` -3/-2/-1 -> 15 flips with 15/12/5 regressions, 0 ->
+  15/0, 1/2/3 -> 5/3/2 flips, 0 regressions. `WY_CHECK_AT` with one value
+  for all lines (lead form): 7 -> 6 flips / 0, 8 -> 2/0, 3-6 -> 2-4
+  regressions (`late_wy_1`, `late_wy_lcdoffset1_1`, line 0), 0-2 and
+  -2..-12 -> 2-8 regressions; split [line 0, others]: [7, 3] -> 10 / 0,
+  [7, 4] 8/0, [7, 5] 7/0, [8, 3] 8/0, [7, 1], [7, 2], [6, 3] -> 2
+  regressions.
+- **Result.** 25 fail->pass, 0 regressions: rule 1, 15 CGB
+  `window/late_disable*_1` / `scx2_0` / `late_scx_late_disable_1` (out0);
+  rule 2, 10: `arg/late_wy_{1,2}toFF_{2,3}`,
+  `arg/late_wy_1toFF_{,ds_}lcdoffset1_2`, `{arg/,}late_wy_2`,
+  `late_wy_{,ds_}lcdoffset1_2`. `diff-fingerprint.sh main`: exactly those
+  25. Tests: `window_writes_in_mode_3_move_its_stall` (LCDC.5 clear at
+  dots 160-166 of a stall at 160), `wy_write_after_the_line_check_keeps_the_old_match`;
+  both mutation-checked (rule off, lead 1; [999, 999], [3, 3], [7, 7]).
+  `window_pixels_follow_the_timing_decision` expected the old full stall
+  for a clear 2 dots in; now 2 stall dots.
+- **Not done.** Double-speed `late_wy_1toFF_ds_2`, `late_wy_ds_2`, the
+  `late_wy_FFto*`/`10to0` new-value timing (WY_LEAD, phase-dependent in
+  SameBoy), `late_enable_afterVblank`, `late_wx_ff_*`, the WX = A6 /
+  object X = A7 edge, re-trigger (`on_screen/*`, Mealybug `m3_lcdc_win_*`).
+- **Cost.** `.text` 96,990 -> 97,198 B (+88 rule 1 in `window_write`,
+  +120 `wy_write`; folding it into `check_wy_at` as a flag measured +54 B
+  more; 94,450 B after rebasing on the cold-code cut 65dc4a9). Bench: all `check-bench.sh` rows +0.00% before the rebase (`synth:worst-case`
+  476,467,536 -> 476,467,546 Ir; `cgb-acid2` +4,748).
