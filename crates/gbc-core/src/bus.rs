@@ -1414,7 +1414,7 @@ impl Ctx<'_, '_> {
 
     /// STAT mode 0 now (also with the LCD off).
     fn stat_mode0(&self) -> bool {
-        self.sys.ppu.stat(self.clock(), self.hot.mcycle == 2) & 3 == 0
+        self.sys.ppu.stat_hw(self.clock(), self.hot.mcycle == 2) & 3 == 0
     }
 
     /// A transfer step is due: the CPU stops after this instruction so
@@ -3581,6 +3581,31 @@ mod dma_tests {
             idle_to(ctx, e, 346); // Line 3, t = 23: mode 2, transfer over.
             assert_eq!(ctx.hot.dma, 0);
             assert_eq!(ctx.read(0xFF41) & 3, 2);
+        });
+    }
+
+    /// CGB B/C read STAT mode 0 at line 0 dot 3 in single speed, but an
+    /// HBlank-HDMA start in that M-cycle must not see HBlank: no block
+    /// starts now (review finding; SameBoy keeps mode 1 there).
+    #[test]
+    fn hblank_hdma_write_at_line_0_dot_3_does_not_start_a_block() {
+        // Frame position = clock - E + 7; line 0 begins at 154 * 456.
+        let m = (154 * 456 + 3 - 7) / 4;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let e = ctx.clock();
+            ctx.write(0xFF40, 0x91);
+            idle_to(ctx, e, m);
+            assert_eq!(ctx.read(0xFF41) & 3, 0, "STAT read keeps the quirk");
+        });
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let e = ctx.clock();
+            ctx.write(0xFF40, 0x91);
+            idle_to(ctx, e, m);
+            ctx.write(0xFF55, 0x80);
+            assert!(!ctx.sys.vdma.pending, "no immediate block");
+            assert!(ctx.sys.vdma.hblank);
         });
     }
 }

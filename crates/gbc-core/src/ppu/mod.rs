@@ -564,7 +564,7 @@ impl Ppu {
     }
 
     /// STAT mode bits at `a` (Pan Docs: LCD Status Registers).
-    fn mode(&self, now: u64, a: At, double: bool) -> u8 {
+    fn mode(&self, now: u64, a: At, double: bool, quirk: bool) -> u8 {
         let (l, t) = (a.line, a.t);
         if l >= LINES {
             return if l == 144 && t < 5 { 0 } else { 1 };
@@ -584,7 +584,9 @@ impl Ppu {
             // dmgC-cgbBC`, `-ncmBC`); Gambatte `ly0/lycint152_ly0stat_2`
             // and `enable_display/frame1_m2stat_count_1` (CGB04C). SameBoy
             // clears the mode there on DMG only: it models CGB-E here.
-            u8::from(l == 0 && (t != 3 || double))
+            // `quirk` is for STAT register reads only: internal HBlank
+            // users (HDMA start) see mode 1 here, as SameBoy does.
+            u8::from(l == 0 && (t != 3 || double || !quirk))
         } else if t < 84 {
             2
         } else if t < self.mode3_end(now, a, double) {
@@ -598,12 +600,22 @@ impl Ppu {
     /// with the coincidence bit kept from when it was turned off (Pan
     /// Docs: LCD Status Registers; SameBoy `GB_lcd_off`).
     pub(crate) fn stat(&self, now: u64, double: bool) -> u8 {
+        self.stat_with(now, double, true)
+    }
+
+    /// [`Self::stat`] without the CGB B/C line-0 mode-0 read quirk, for
+    /// internal mode checks (HDMA start, LCD-off HBlank block).
+    pub(crate) fn stat_hw(&self, now: u64, double: bool) -> u8 {
+        self.stat_with(now, double, false)
+    }
+
+    fn stat_with(&self, now: u64, double: bool, quirk: bool) -> u8 {
         let v = 0x80 | self.stat_select;
         if !self.lcd_enabled() {
             return v | if self.lyc_flag_off { 0x04 } else { 0 };
         }
         let a = self.at(now);
-        v | self.mode(now, a, double) | if self.lyc_bit(a, double) { 0x04 } else { 0 }
+        v | self.mode(now, a, double, quirk) | if self.lyc_bit(a, double) { 0x04 } else { 0 }
     }
 
     /// [`Self::stat`] while an OAM DMA transfer runs (from the FF46 write
