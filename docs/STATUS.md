@@ -75,15 +75,9 @@ Working rules that matter here:
 
 ## Needs human
 Open (session 10):
-- **Sign-off candidates (M9):** 7 SameSuite APU ROMs whose names target
-  other revisions (`*_extra_length_clocking-cgb0B` x3, `channel_3_*-cgb0`
-  and `-cgbB`, `channel_1_freq_change_timing-A`, `-cgbDE`; a `-cgb0BC`
-  variant exists for ours); possibly AGE `spsw-interrupts-cgbBC` (AGE
+- **Sign-off candidate (M9):** possibly AGE `spsw-interrupts-cgbBC` (AGE
   `caution/`: breaks the halt Nintendo requires; its source still needs a
   read before asking).
-- **Benchmark coverage:** should `synth:worst-case` gain one mid-line SCX
-  write per line so the new slow path is measured (~+45k Ir/frame,
-  estimate)? It makes the perf check stricter but moves the baseline.
 - **Real-game checklist** (plan, bottom), on native Windows. Extra checks
   this session: Ctrl+C in the window still saves; change the default audio
   output device mid-game (expect `audio stopped`, then within ~2 s
@@ -106,6 +100,16 @@ Decided in session 10 (2026-11-23), human:
 - OAM DMA CPU writes during a conflicting transfer (M9 triage groups 2 and
   13, ~65 ROMs): follow gambatte's CGB C hardware captures over SameBoy's
   rule. "gambatte is fine."
+- M9 sign-off: the 7 SameSuite APU ROMs that target other CGB revisions
+  (`channel_{1,2,4}_extra_length_clocking-cgb0B`,
+  `channel_3_extra_length_clocking-cgb0`, `-cgbB`,
+  `channel_1_freq_change_timing-A`, `-cgbDE`) are signed off as "targets
+  another CGB revision" (ADR 0003: we emulate CPU CGB C). They stay in the
+  manifest and keep running; they don't block Stage 1. "Sign off on the 7."
+- `synth:worst-case` gains one mid-line SCX write per line so the
+  held-fetch slow path counts against the 4.02 M line (stricter; moves the
+  bench baseline). "Do the other thing." Queued after the OAM DMA and
+  window-timing work lands.
 
 Decided in session 08 (2026-11-22), human:
 - APU perf budget. The exact optimizations brought the APU to 224.1k; the

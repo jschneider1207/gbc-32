@@ -240,8 +240,9 @@ revisions the expected result holds for (0/B, D/E, AGB "A"); CGB C is not
 among them, and `freq_change_timing` ships a separate `-cgb0BC` ROM for
 our revision (group 15). Evidence: file-name convention of SameSuite plus
 the howto note above; ADR 0003 (target CPU CGB C). Passing them would mean
-modelling another revision. **Needs the human:** accept as not
-applicable (or exclude from the manifest, which is the human's call).
+modelling another revision. **Signed off by the human (2026-11-23,
+session 10):** "targets another CGB revision"; kept in the manifest,
+not blocking Stage 1.
 
 ### 17. AGE `spsw-interrupts-cgbBC` (1, should tier)
 Registers end as garbage (`B=0 C=107 ...`), so the run goes off the
