@@ -237,7 +237,7 @@ directory is a full separate build.
 - **Never run the desktop front end's window under WSL/WSLg** (human,
   2026-11-22). That means no `gbc-desktop <rom>` without `--headless`, and no
   other GUI program either. On 2026-11-22 it crashed WSLg's compositor (weston), and
-  then the Windows host blue-screened (bugcheck 0x7E in
+  then the Windows host blue-screened (details: `docs/reference/incident-2026-11-22-wslg-bsod.md`; bugcheck 0x7E in
   `dxgmms2!VIDMM_GLOBAL::CreateOneAllocation`, the WSLg GPU path).
   `--headless` is fine. Interactive play happens on native Windows, and
   the human runs it.
