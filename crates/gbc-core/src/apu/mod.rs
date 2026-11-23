@@ -270,13 +270,16 @@ impl Apu {
     ///   speed switch, read back after it). The grid runs on through
     ///   switches, so after one to single speed (odd CPU grid) the delay
     ///   still ends on it.
-    /// - double speed: SameBoy's `6 - lf_div` ticks (the CGB-E sign; the
-    ///   CGB-C rule is a revision conflict with SameSuite, m9-triage
-    ///   group 7).
+    /// - double speed: gambatte's CGB-C linear rule, `6 + 2 * lf_div`
+    ///   (`DutyUnit::nr4Change`: `3 + lf_div` 2 MHz ticks; cgb04c
+    ///   `ch1_duty0_pos6_to_pos7_timing_ds_6`,
+    ///   `speedchange*_ch1_duty0_pos6_to_pos7_timing*ds_2`). SameBoy's
+    ///   `6 - lf_div` is the CGB-E result SameSuite `channel_{1,2}_align*`
+    ///   expect (signed off by the human, 2026-11-23; m9-triage group 7).
     #[inline]
     fn trigger_delay(&self, now: u64, double: bool) -> u8 {
         if double {
-            10 - 2 * self.lf_div(now)
+            6 + 2 * self.lf_div(now)
         } else {
             5 + ((now as u8).wrapping_neg() & 3)
         }
@@ -507,14 +510,24 @@ mod tests {
             assert_eq!(first % 4, 1, "on, trigger at {now}");
             assert!((now + 128 + 1..now + 128 + 5).contains(&first), "{now}");
         }
-        // Double speed keeps SameBoy's `6 - lf_div` ticks (CGB-E sign):
-        // lf_div is 1 at power on (clock 0) and toggles every 2 clocks.
-        for (now, extra) in [(100, 8), (102, 10)] {
+    }
+
+    #[test]
+    fn double_speed_triggers_follow_gambattes_linear_rule() {
+        // gambatte `DutyUnit::nr4Change` (CGB C, cgb04c
+        // `ch1_duty0_pos6_to_pos7_timing_ds_6`, `speedchange*_..._ds_2`):
+        // the first step comes one period plus `6 + 2 * lf_div` clocks
+        // after an off-channel trigger, 4 fewer for an on channel.
+        // SameBoy's CGB-E `10 - 2 * lf_div` has the opposite sign. lf_div
+        // is 1 at power on (clock 0) and toggles every 2 clocks.
+        for (now, extra) in [(100, 8), (101, 8), (102, 6), (103, 6), (104, 8)] {
             let mut apu = Apu::new();
             apu.power_on(0, false);
             apu.write(0x12, 0xF0, now, true);
             apu.write(0x14, 0x87, now, true);
-            assert_eq!(apu.sq[0].countdown, 1024 + extra, "double, {now}");
+            assert_eq!(apu.sq[0].countdown, 1024 + extra, "off, {now}");
+            apu.write(0x14, 0x87, now, true);
+            assert_eq!(apu.sq[0].countdown, 1024 + extra - 4, "on, {now}");
         }
     }
 
