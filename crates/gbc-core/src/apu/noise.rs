@@ -80,13 +80,42 @@ fn lfsr_steps(mut x: u32, mut n: u32, narrow: bool) -> (u16, u32) {
 /// bits 0-6 (cycles of 127, or the fixed point 0x7F). Only long STOP
 /// stretches reach the reduction.
 #[inline]
-fn reduce(n: u64, narrow: bool) -> u32 {
-    let (base, cycle) = if narrow { (8, 127) } else { (0, 32_767) };
+fn reduce(n: u32, narrow: bool) -> u32 {
+    let (base, cycle) = lfsr_cycle(narrow);
     if n < base + cycle {
-        n as u32
+        n
     } else {
-        (base + (n - base) % cycle) as u32
+        base + (n - base) % cycle
     }
+}
+
+/// The LFSR's pre-period and cycle length (`reduce`).
+#[inline]
+fn lfsr_cycle(narrow: bool) -> (u32, u32) {
+    if narrow { (8, 127) } else { (0, 32_767) }
+}
+
+/// `Noise::advance` over `rest >= 2^32` clocks past the countdown (a long
+/// STOP or a caller's distant run target; see `apu::rem_long`): the step
+/// count `rest / p + 1` and `rest % p`, in u64 (`__aeabi_uldivmod` on
+/// thumbv7em), out of line and cold. The count is replaced by one with
+/// the same effect that fits u32: congruent modulo 2^14 (`bump` keeps the
+/// counter modulo 2^14, and the count stays nonzero) and, at or past the
+/// pre-period plus one cycle, modulo the LFSR cycle and still past it
+/// (`reduce`). The modulus `2^14 * cycle` (at most 536,854,528) keeps it
+/// under 2^30.
+#[cold]
+#[inline(never)]
+fn long_steps(rest: u64, p: u32, narrow: bool) -> (u32, u32) {
+    let n = rest / u64::from(p) + 1;
+    let (base, cycle) = lfsr_cycle(narrow);
+    let past = u64::from(base + cycle);
+    let n = if n < past {
+        n
+    } else {
+        past + (n - past) % ((1 << 14) * u64::from(cycle))
+    };
+    (n as u32, (rest % u64::from(p)) as u32)
 }
 
 /// Set bits per byte value: a table, as Cortex-M7 has no popcount
@@ -339,11 +368,17 @@ impl Noise {
         }
         let p = self.period().get();
         let rest = dt - cd;
-        self.countdown = p - (rest % u64::from(p)) as u32;
-        let n = rest / u64::from(p) + 1;
-        // Modulo 2^32, a multiple of the counter's 2^14.
-        self.bump(n as u32);
-        self.clock(reduce(n, self.nr43 & 8 != 0));
+        let narrow = self.nr43 & 8 != 0;
+        // u32 for spans under 2^32 clocks (all but long STOP stretches):
+        // `p >= 8`, so `n <= 2^29 + 1`.
+        debug_assert!(p >= 8);
+        let (n, r) = match u32::try_from(rest) {
+            Ok(rest) => (rest / p + 1, rest % p),
+            Err(_) => long_steps(rest, p, narrow),
+        };
+        self.countdown = p - r;
+        self.bump(n);
+        self.clock(reduce(n, narrow));
     }
 
     /// Adds to `out[i]` the analog level times clocks over the `i`-th of
@@ -581,9 +616,9 @@ mod tests {
             let cycle = if narrow { 127 } else { 32_767 };
             for n in [0, 5, 8, 9, 200, cycle + 3, cycle + 20, 3 * cycle + 9] {
                 let short = reduce(n, narrow);
-                assert!(short < 8 + cycle as u32);
+                assert!(short < 8 + cycle);
                 for x in [0u16, 0x1234, 0x7FFF, 0x5A5A] {
-                    let full = naive(x, n as u32, narrow).0;
+                    let full = naive(x, n, narrow).0;
                     assert_eq!(naive(x, short, narrow).0, full, "n={n} x={x:#x}");
                 }
             }
@@ -757,6 +792,16 @@ mod tests {
                 }
                 assert_eq!(ch.lfsr, r.lfsr, "case {case} nr43={nr43:#x}");
             }
+        }
+    }
+
+    #[test]
+    fn advance_over_2_pow_32_clocks_matches_shorter_spans() {
+        // p = 8 (2^29 steps per piece), shift 13 (~7,000 steps in all:
+        // under one 15-bit cycle, over 7-bit ones), frozen shift 15; 15-
+        // and 7-bit.
+        for nr43 in [0x00, 0x08, 0x10, 0x47, 0xD7, 0xDF, 0xF7] {
+            crate::apu::check_long_advance(playing(nr43), |c, dt| c.advance(dt));
         }
     }
 

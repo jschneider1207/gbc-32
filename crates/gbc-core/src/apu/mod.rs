@@ -57,6 +57,45 @@ pub(crate) const SAMPLE_PERIOD_LOG2: u32 = 7;
 /// Base clocks per output sample window.
 pub(crate) const SAMPLE_PERIOD: u64 = 1 << SAMPLE_PERIOD_LOG2;
 
+/// `x mod m` for a channel advance over 2^32 clocks or more
+/// (`Square`/`Wave::advance`). Normal spans are far shorter (DIV-APU syncs
+/// every 8,192 clocks, and every run call ends with a sync); only a long
+/// STOP or a caller's distant run target gets here. Cold and out of line,
+/// so the u64 division (`__aeabi_uldivmod`, ~50-100 cycles on Cortex-M7)
+/// stays off the advance paths, which divide in u32.
+#[cold]
+#[inline(never)]
+pub(crate) fn rem_long(x: u64, m: u32) -> u32 {
+    (x % u64::from(m)) as u32
+}
+
+/// Checks that a channel advanced over spans of 2^32 clocks or more at
+/// once (the u64 paths, `rem_long`, `noise::long_steps`) ends in the same
+/// state as advanced in steps under 2^32 (the u32 paths).
+#[cfg(test)]
+fn check_long_advance<T: Copy + PartialEq + core::fmt::Debug>(
+    ch: T,
+    advance: impl Fn(&mut T, u64),
+) {
+    for dt in [
+        1 << 32,
+        3 << 32 | 12_345,
+        5 << 32 | 777_777,
+        7 << 32 | 3_000_001,
+    ] {
+        let mut one = ch;
+        advance(&mut one, dt);
+        let mut split = ch;
+        let mut left = dt;
+        while left != 0 {
+            let step = left.min(1 << 31);
+            advance(&mut split, step);
+            left -= step;
+        }
+        assert_eq!(one, split, "{ch:?} dt={dt}");
+    }
+}
+
 /// The APU's internal state. The register bytes are in `Memory::io`.
 #[repr(C)]
 #[derive(Clone, Copy)]

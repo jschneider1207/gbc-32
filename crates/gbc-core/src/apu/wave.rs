@@ -186,8 +186,8 @@ impl Wave {
         let p = self.period();
         let rest = dt - cd;
         // Indices repeat every 32 periods (the u64 remainder is for long
-        // STOP stretches only, as in `Square::advance`).
-        let rest = u32::try_from(rest).unwrap_or((rest % (32 * u64::from(p.get()))) as u32);
+        // STOP stretches only, as in `Square::advance`). `32 * p <= 131,072`.
+        let rest = u32::try_from(rest).unwrap_or_else(|_| super::rem_long(rest, 32 * p.get()));
         let steps = rest / p;
         self.index = (self.index + (steps & 31) as u8) & 31;
         self.tick(p, io);
@@ -338,6 +338,14 @@ mod tests {
         w.write(3, f as u8, 0, io);
         w.write(4, 0x80 | (f >> 8) as u8, 0, io);
         w
+    }
+
+    #[test]
+    fn advance_over_2_pow_32_clocks_matches_shorter_spans() {
+        let io = io_ramp();
+        for f in [0, 1000, 1999, 2047] {
+            crate::apu::check_long_advance(playing(&io, 1, f), |c, dt| c.advance(dt, &io));
+        }
     }
 
     #[test]

@@ -109,8 +109,8 @@ impl Square {
         let rest = dt - cd;
         // Positions repeat every 8 periods; a sync span is normally under
         // 2^32 clocks (DIV-APU steps every 8192), so the u64 remainder is
-        // only for long STOP stretches.
-        let rest = u32::try_from(rest).unwrap_or((rest % (8 * u64::from(p.get()))) as u32);
+        // only for long STOP stretches (`rem_long`). `8 * p <= 65,536`.
+        let rest = u32::try_from(rest).unwrap_or_else(|_| super::rem_long(rest, 8 * p.get()));
         let steps = rest / p;
         self.tick(p);
         self.pos = (self.pos + (steps & 7) as u8) & 7;
@@ -423,6 +423,13 @@ mod tests {
         sq.write(4, 0x87, 0, 1);
         assert!(sq.started);
         assert_eq!(sq.countdown, 1024 + 6 - 2);
+    }
+
+    #[test]
+    fn advance_over_2_pow_32_clocks_matches_shorter_spans() {
+        for f in [0, 1000, 1999, 2047] {
+            crate::apu::check_long_advance(playing(2, 15, f), |c, dt| c.advance(dt));
+        }
     }
 
     #[test]
