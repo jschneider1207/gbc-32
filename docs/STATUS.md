@@ -4,37 +4,47 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M8 (game compatibility + perf baseline), in progress. M7
-  is `stage1-m7` (M1-M6 tagged likewise).
-- **Last updated:** 2026-11-23, session 10 (log
-  `logs/2026-11-22-10-m8-start.md`)
+- **Milestone:** M8 (game compatibility + perf baseline): all work items
+  are done or deferred to Stage 2; **ready to close** (steps below). The
+  real-game checklist fixes moved to M9 (human, 2026-11-23). M7 is
+  `stage1-m7` (M1-M6 tagged likewise).
+- **Last updated:** 2026-11-23, end of session 10 (log
+  `logs/2026-11-22-10-m8-start.md`). main = daec83c, gate passes, tree clean,
+  no worktrees or agents running.
 
-## Next up
+## Next up (session 11)
 
-1. **Real-game checklist results from the human** (plan, bottom) feed the
-   first M8 task. Headless smoke of all 6 games (scratch copies, 3600
-   frames) is clean after this session's core changes.
-2. **Mid-line PPU fidelity** (`docs/design/mid-line-ppu.md`, section 7 has
-   per-step notes): steps 1 (map select/SCX fetch hold), 2 (SCX low-bit
-   carry), 3 (per-plane SCY/LCDC.4) and D (double-speed write dot) are on
-   main: +159 ROMs, 0 regressions. Steps E (window stall), F (objects), G
-   (CGB tile-select glitch) are blocked on code size (270 B left; Needs
-   human). Mealybug `m3_scx_low_3_bits` (pixels 152-159) is not the column
-   carry: separate diagnosis.
-2b. **M9 triage** (`docs/plan/m9-triage.md`, 17 groups): done this session:
-   CGB palette RAM blocked around mode 3 (6110717, +31), LCDC.2 per OAM scan
-   entry (3f7b00d, +20), live-SCX fine-scroll discard (e549dd7, +21). Next
-   by ROMs per cost: step E window stall (97, needs .text), OAM DMA write
-   conflicts (58, needs the human's reference pick), HDMA timing (75, L),
-   STAT IRQ edges (47, L).
-3. Remaining M8 items: `spsw-interrupts-cgbBC` (AGE `caution/`, low);
-   M6 hardware lows; PPU edge cases from the M3 review; APU cost
-   (optional); event-storm and ROM placement need Stage 2 hardware.
-4. M8 close: gate passes now; then the milestone review (hardware
-   correctness, test integrity incl. the romtest audio rule change
-   23154a2/b74079a, perf/portability: this milestone changed hot paths:
-   ROM reads, APU, PPU), update the baseline, tag `stage1-m8`. Not before
-   the human's checklist findings are fixed.
+1. **Worst-case benchmark gains mid-line SCX writes** (human decision,
+   session 10): add one mid-line SCX write per line to `synth:worst-case`
+   (tools/bench/src/synth.rs) so the held-fetch slow path counts against
+   the 4.02 M x86 Ir/frame line. Do this BEFORE the M8 baseline update.
+   If the worst case then crosses the line, stop and bring numbers/options
+   to the human; don't loosen anything. Mutation-check: the new writes must
+   actually hit mode 3 (e.g. show the slow path's Ir appears).
+2. **Close M8** (AGENTS.md "Independent review", "Git"): range
+   `stage1-m7..HEAD` (big: ~90 commits; this session touched CPU/bus ROM
+   reads, timer, APU, PPU, DMA, runner, bench, desktop). Run 3 fresh
+   reviewers in parallel: hardware correctness, test integrity (includes
+   the romtest changes 23154a2 audio capture-length rule and b74079a
+   audio0 report split, the fingerprint corpus change f200ab4, and the new
+   gate checks), performance/portability (hot paths changed: ROM reads
+   ADR 0027, APU, PPU held fetch, timer). Fix confirmed high/medium;
+   lows become plan tasks. Then `--update-baseline` (acceptance) and the
+   bench baseline (`synth:cgb-raster` is +2.70% of the 3% guard against
+   the old one), commit, tag `stage1-m8`. Rewrite STATUS.
+3. **M9** (`docs/plan/stage-1.md` M9, `docs/plan/m9-triage.md`): first the
+   human's real-game checklist findings (they play on native Windows),
+   then triage groups by ROMs per cost. Open threads:
+   - Window step E2+ (56 ROMs left in triage group 4; leads in the design
+     doc section 7 "Step E1" and the triage doc).
+   - OAM DMA group 13 (6 `src{8000,9F00}_busypop*`): conflicting CPU
+     reads with a VRAM source clear OAM byte `i` (gambatte); needs a
+     design for a side effect on the read path (ADR 0028).
+   - `oamdma_src0000_busyint0002` (interrupt-dispatch pushes during DMA).
+   - Steps F (objects), G (CGB tile-select glitch); Mealybug
+     `m3_scx_low_3_bits` pixels 152-159 (not the column carry).
+   - HDMA timing (75), STAT IRQ edges (47), `lcd_offset` (33), double-speed
+     STAT/LY (31), APU square timing (27).
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
@@ -49,40 +59,44 @@ Desktop front end (`crates/gbc-desktop`): `gbc-desktop <rom> [--scale K]
 Save: `<stem>.sav`, or `<file name>.sav` when `game.gb` and `game.gbc` sit
 side by side (ADR 0023 amendment). Ctrl+C/SIGTERM/panic still write the
 exit save (`ctrlc` crate). Audio: cpal, audio-driven pacing (ADR 0024),
-device reopen with 2-16 s backoff after a stream loss (amendment; real
-device loss untested: manual check below). Keys: arrows, Z = B, X = A,
-Enter = Start, Right Shift/Backspace = Select, Esc quits.
+device reopen with 2-16 s backoff after a stream loss (amendment). Keys:
+arrows, Z = B, X = A, Enter = Start, Right Shift/Backspace = Select, Esc
+quits. Real-game headless smoke (scratch copies of `/mnt/x/gbc-roms`,
+3600 frames) is clean at daec83c.
 
-Perf watch: `check-bench.sh` OK vs the committed baseline: `synth:worst-case`
--0.32% (cold-code cuts), `synth:cgb-raster` **+2.68% of the 3% guard** (one
-mid-line SCX write per line now takes the held-fetch slow path, ~500-565 x86
-Ir per write; reset at the M8 baseline update). APU: 883.4 x86 Ir per APU
-write (budget <= 950). `.text` 95,836 of 96,000 B (164 B left) after two
-cold-code cuts freed 1,530 B. ITCM set 54,942 B of a 57,344 B core budget
-(`scripts/check-itcm-set.sh`, ADR 0026 Proposed). New gate checks this
-session: `check-rom-loads.sh` (ADR 0027), `check-itcm-set.sh`. Fingerprint
-corpus now includes the 198 PNG-reference gambatte ROMs (4,020 runs) and
-fails on a corpus mismatch (`--allow-corpus-change` for the first run
-against an older rev). Wall-clock baseline: `bench --wall` (docs/perf.md).
+Perf watch: `check-bench.sh` OK vs the committed (M7) baseline:
+`synth:worst-case` -0.32%, `synth:cgb-raster` **+2.70% of the 3% guard**
+(mid-line writes take the held-fetch slow path), `synth:dma-storm` +~0.8%.
+APU: 883.4 x86 Ir per APU write (budget <= 950). `.text` **96,420 of
+97,500 B** (human raised the total from 96,000 in session 10;
+per-function budgets unchanged). ITCM set 54,896 B of a 57,344 B core
+budget (`scripts/check-itcm-set.sh`, ADR 0026 Proposed). Gate checks
+added in session 10: `check-rom-loads.sh` (ADR 0027), `check-itcm-set.sh`.
+Fingerprint corpus: 4,020 runs incl. the 198 PNG-reference gambatte ROMs;
+a corpus mismatch fails unless `--allow-corpus-change`. Wall-clock
+baseline: `bench --wall` (docs/perf.md).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
-- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change".
-- Resources: at most 2 concurrent builds, heavy steps alone; core
-  experiments in scratch worktrees with their own target dir.
+- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change"; every
+  changed ROM is listed and explained.
+- Resources: at most 2 concurrent builds, heavy steps (check-bench,
+  diff-fingerprint, gate) alone; core work in scratch worktrees with their
+  own target dir, merged by `--ff-only` after a rebase.
 - Parallel agents can collide on ADR numbers: check `docs/decisions/`
-  right before committing an ADR.
+  right before committing an ADR (next free: 0029).
+- PPU design size estimates ran ~2-3x low; measure early.
 
 ## Needs human
 Open (session 10):
+- **Real-game checklist** (plan, bottom; now an M9 task), on native
+  Windows. Extra checks: Ctrl+C in the window still saves; change the
+  default audio output device mid-game (expect `audio stopped`, then within
+  ~2 s `output device back; resuming audio pacing`, no burst); a battery
+  `.sav` survives a restart; a gamepad.
 - **Sign-off candidate (M9):** possibly AGE `spsw-interrupts-cgbBC` (AGE
   `caution/`: breaks the halt Nintendo requires; its source still needs a
   read before asking).
-- **Real-game checklist** (plan, bottom), on native Windows. Extra checks
-  this session: Ctrl+C in the window still saves; change the default audio
-  output device mid-game (expect `audio stopped`, then within ~2 s
-  `output device back; resuming audio pacing`, no burst); a battery `.sav`
-  survives a restart; a gamepad.
 - Optional, strongest guard against a repeat of the BSOD: set
   `guiApplications=false` in `%UserProfile%\.wslconfig` (disables WSLg).
 - FYI: `wsl-pro.service` restarts every 2 s because a cmd.exe AutoRun
@@ -222,18 +236,17 @@ None.
 
 ## Acceptance snapshot
 
-Current HEAD (e549dd7), not yet the committed baseline (`stage1-m7`
-baseline is older; update at M8 close). `scripts/gate-stage1.sh` passes at
-e549dd7.
+HEAD daec83c, not yet the committed baseline (that is M7's; update at the
+M8 close). `scripts/gate-stage1.sh` passes at daec83c.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 39 | 40 | only age `spsw-interrupts-cgbBC` (AGE caution/) fails |
-| stretch | 3,028 | 3,466 | 5 no-reference; M7 baseline was 2,765 |
+| stretch | 3,126 | 3,466 | 5 no-reference; 7 signed off (other CGB revisions); M7 baseline was 2,765 |
 
-Session 10 gains (vs the M7 baseline): WX=0 stall (8ba9c4c), line-0 mode 0
-+ post-boot position 171 (740154c), frame-sequencer double-speed delay
-(0a83ae5), LY read timing (d2b6e56), STOP DIV-reset TIMA edge (eb019ba),
-mid-line PPU steps 1-3 + D (6cfe52b..f507248), palette RAM blocking
-(6110717), LCDC.2 per scan entry (3f7b00d), live-SCX discard (e549dd7).
+Session 10 gains (vs the M7 baseline): should-tier timing fixes (8ba9c4c,
+740154c, 0a83ae5, d2b6e56, eb019ba), mid-line PPU steps 1-3, D, E1
+(6cfe52b..daec83c), palette RAM blocking (6110717), LCDC.2 per scan entry
+(3f7b00d), live-SCX discard (e549dd7), OAM DMA write conflicts per
+gambatte (3031f7f, ADR 0028).
