@@ -706,15 +706,16 @@ impl Ppu {
     /// writes are dropped during mode 3 (Pan Docs: Rendering, "VRAM
     /// access"). CGB timing (SameBoy `vram_read_blocked` and
     /// `vram_write_blocked`, the same on CGB): from the mode-3 STAT change
-    /// (first line after LCD enable: the pipeline start, or the STAT change
-    /// in double speed) to the mode-3 end (one dot later in double speed).
+    /// (single speed: 2 dots after it, [`edges::VRAM_FROM_SS`]; first line
+    /// after LCD enable: the pipeline start, or the STAT change in double
+    /// speed) to the mode-3 end (one dot later in double speed).
     pub(crate) fn vram_blocked(&self, now: u64, double: bool) -> bool {
-        let first = if double {
-            edges::VRAM_FROM_FIRST_DS
+        let from = if double {
+            [edges::VRAM_FROM_DS, edges::VRAM_FROM_FIRST_DS]
         } else {
-            edges::VRAM_FROM_FIRST_SS
+            [edges::VRAM_FROM_SS, edges::VRAM_FROM_FIRST_SS]
         };
-        self.cpu_blocked(now, double, [edges::VRAM_FROM, first], 0)
+        self.cpu_blocked(now, double, from, 0)
     }
 
     /// The CPU access windows ([`Self::vram_blocked`],
@@ -2772,9 +2773,12 @@ mod tests {
         let l5 = clock(on, 0, 5 * LINE);
         r.sync(l5 + 300);
         let p = &r.ppu;
+        // VRAM: single speed from dot 86, two dots after STAT reads mode
+        // 3 (`vram_m3/pre{read,write}_lcdoffset2_1` and
+        // `dma/hdma_late_enable_lcdoffset3_1` access at 85 and 84).
         let vram = |t: u64| p.vram_blocked(l5 + t, false);
         assert_eq!(
-            [vram(83), vram(84), vram(255), vram(256)],
+            [vram(85), vram(86), vram(255), vram(256)],
             [false, true, true, false]
         );
         let oam = |t: u64, write| p.oam_blocked(l5 + t, false, write);
@@ -2798,12 +2802,14 @@ mod tests {
         );
         assert_eq!(
             [
+                p.vram_blocked(l5 + 83, true),
+                p.vram_blocked(l5 + 84, true),
                 p.vram_blocked(l5 + 256, true),
                 p.vram_blocked(l5 + 257, true)
             ],
-            [true, false]
+            [false, true, true, false]
         );
-        // CGB palette RAM: 3 dots after VRAM, to 4 dots after the mode-3
+        // CGB palette RAM: from dot 87, to 4 dots after the mode-3
         // end (2 in double speed, from its later end). Asked synced, as
         // the bus does (the fast path needs `now` at or past the sync).
         let mut r2 = Rig::on_at(on, 0, 0xFF);

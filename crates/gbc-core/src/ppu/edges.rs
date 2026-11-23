@@ -129,9 +129,17 @@ pub(crate) const MODE0_DS_LATE: u32 = 1;
 /// The HBlank interrupt source rises this many dots after the mode-3 end.
 pub(crate) const HBLANK_AFTER_END: u32 = 1;
 
-/// VRAM blocked from here (first line after LCD enable: single / double
-/// speed) to the mode-3 end.
-pub(crate) const VRAM_FROM: u32 = MODE3;
+/// VRAM blocked for the CPU from here to the mode-3 end: single speed two
+/// dots after STAT reads mode 3, double speed with it (first line after
+/// LCD enable: `_FIRST`). gambatte (behaviour only) `vramReadable` /
+/// `vramWritable`: `lineCycles + ds < 76 + 3cgb`, one `cc` earlier in
+/// double speed, 7 dots before our grid as its `getStat` mode-2 read
+/// (`>= 453`) is to our `t = 4`. The CGB04C captures bracket the single-
+/// speed edge at every CPU phase: `vram_m3/pre{read,write}_lcdoffset2_1`
+/// access at 85 and `dma/hdma_late_enable_lcdoffset3_1` reads at 84 (both
+/// allowed), `pre{read,write}_lcdoffset1_2` at 86 (blocked).
+pub(crate) const VRAM_FROM_SS: u32 = t(h(86));
+pub(crate) const VRAM_FROM_DS: u32 = MODE3;
 pub(crate) const VRAM_FROM_FIRST_SS: u32 = t(h(91));
 pub(crate) const VRAM_FROM_FIRST_DS: u32 = t(h(86));
 
