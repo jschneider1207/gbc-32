@@ -465,5 +465,25 @@ roms = [
   "gambatte/window/on_screen/wxA6_wy01_wxA7_ly02.gbc",
   "gambatte/window/on_screen/wxA6_wy8F.gbc",
 ]
+exclude = [
+  "gambatte/scx_during_m3/scx_attrib_during_m3_spx2_ds.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2_ds.gbc",
+]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
+
+[[group]]
+# Signed off (human, 2026-11-23): depends on uninitialised OBJ palette
+# RAM (colour never written; cgb04c capture shows that console's power-on
+# 0x21926C). Timing passes. See docs/STATUS.md, session 11.
+# source: gambatte/game-boy-test-roms-howto.md (sibling .png references; ADR 0018).
+id = "gambatte-uninit-palram"
+tier = "stretch"
+roms = [
+  "gambatte/scx_during_m3/scx_attrib_during_m3_spx2_ds.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2_ds.gbc",
+]
 exit = { run_frames = 15 }
 checks = [{ gambatte = true }]
