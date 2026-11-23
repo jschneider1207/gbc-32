@@ -1,6 +1,7 @@
 //! The interactive front end: a winit window drawn with softbuffer.
 
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +17,7 @@ use winit::window::{Window, WindowId};
 
 use crate::input::{HeldInput, key_to_button, pad_button_to_button};
 use crate::pacing::Pacing;
+use crate::png;
 use crate::session::Autosave;
 use crate::video;
 
@@ -41,6 +43,8 @@ struct App<'e, 'a> {
     /// `None` when gilrs could not start: keyboard only.
     pads: Option<Gilrs>,
     pacing: Pacing,
+    /// Frames still to run before the window closes itself (`--frames`).
+    frames_left: Option<u64>,
     error: Option<String>,
 }
 
@@ -159,9 +163,19 @@ impl ApplicationHandler for App<'_, '_> {
         self.pacing.begin(Instant::now());
         let mut ran = 0;
         while self.pacing.should_run(ran) {
+            if self.frames_left == Some(0) {
+                break;
+            }
             let n = self.run_one_frame();
             self.pacing.push_audio(&self.audio[..n]);
             ran += 1;
+            if let Some(left) = &mut self.frames_left {
+                *left -= 1;
+            }
+        }
+        if self.frames_left == Some(0) {
+            el.exit();
+            return;
         }
         let wake = self.pacing.next_wake(Instant::now());
         el.set_control_flow(ControlFlow::WaitUntil(wake));
@@ -175,6 +189,8 @@ pub fn run(
     autosave: &mut Autosave,
     title: String,
     scale: u32,
+    frames: Option<u64>,
+    screenshot: Option<&Path>,
 ) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| format!("can't start the event loop: {e}"))?;
     let mut app = App {
@@ -189,10 +205,14 @@ pub fn run(
         held: HeldInput::new(),
         pads: pads_init(),
         pacing: Pacing::open(Instant::now()),
+        frames_left: frames,
         error: None,
     };
     el.run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
+    if let Some(p) = screenshot {
+        png::write_frame(p, &app.shown)?;
+    }
     app.error.map_or(Ok(()), Err)
 }
 

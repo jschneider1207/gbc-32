@@ -146,7 +146,7 @@ fn cart_without_battery_gets_no_save() {
 
 #[test]
 fn bad_usage_exits_2() {
-    for args in [&[][..], &["x.gb", "--frames", "3"], &["--headless", "x.gb"]] {
+    for args in [&[][..], &["--screenshot"], &["--headless", "x.gb"]] {
         assert_eq!(run(args).status.code(), Some(2), "{args:?}");
     }
 }
@@ -171,4 +171,32 @@ fn locked_cpu_still_exits_0_with_a_warning() {
     let out = headless(&rom_path, "3");
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("locked"));
+}
+
+#[test]
+fn screenshot_writes_a_160x144_png() {
+    let dir = Dir::new("shot");
+    let rom_path = dir.path("s.gb");
+    fs::write(&rom_path, rom(0x00, IDLE)).unwrap();
+    let png_path = dir.path("out.png");
+    let out = run(&[
+        "--headless",
+        "--frames",
+        "3",
+        "--screenshot",
+        png_path.to_str().unwrap(),
+        rom_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let png = fs::read(&png_path).expect("screenshot written");
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(&png[8..16], &[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+    assert_eq!(&png[16..24], &[0, 0, 0, 160, 0, 0, 0, 144]);
+    assert_eq!(&png[24..29], &[8, 2, 0, 0, 0], "8-bit RGB");
+    assert_eq!(&png[png.len() - 12..], b"\0\0\0\0IEND\xAE\x42\x60\x82");
+    assert!(png.len() > 144 * (160 * 3 + 1), "raw pixel data present");
 }

@@ -5,11 +5,15 @@ use std::path::PathBuf;
 
 use crate::compat_palette::Mode;
 
-pub const USAGE: &str = "usage: gbc-desktop <rom.gb|rom.gbc> [--headless --frames N] [--scale K]
+pub const USAGE: &str = "usage: gbc-desktop <rom.gb|rom.gbc> [--headless] [--frames N] [--scale K]
+                  [--screenshot out.png]
                   [--dmg-palette auto|gray]
 
   --headless     run without a window or audio device (needs --frames)
-  --frames N     with --headless: emulate N frames, then exit 0 (N >= 1)
+  --frames N     emulate N frames, then exit 0 (N >= 1; the window closes
+                 itself and the save is written as on Esc)
+  --screenshot PATH
+                 on exit, write the last complete frame (160x144) as a PNG
   --scale K      window scale, integer 1-32 (default 4)
   --dmg-palette auto|gray
                  colors for DMG-only games: the CGB boot ROM's pick for
@@ -22,8 +26,11 @@ const MAX_SCALE: u32 = 32;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub rom: PathBuf,
-    /// `Some(n)` in headless mode: the number of frames to run.
-    pub headless_frames: Option<u64>,
+    pub headless: bool,
+    /// `Some(n)`: stop after n frames (always set when headless).
+    pub frames: Option<u64>,
+    /// Write the last frame here as a PNG on exit.
+    pub screenshot: Option<PathBuf>,
     /// Integer window scale, for the later window step.
     pub scale: u32,
     /// Colors for DMG-only cartridges.
@@ -42,6 +49,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     let mut rom: Option<PathBuf> = None;
     let mut headless = false;
     let mut frames: Option<u64> = None;
+    let mut screenshot: Option<PathBuf> = None;
     let mut scale = DEFAULT_SCALE;
     let mut dmg_palette = Mode::Auto;
     let mut it = args.into_iter();
@@ -58,6 +66,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                     Ok(n) if n >= 1 => n,
                     _ => return Err(format!("--frames: expected an integer >= 1, got `{v}`")),
                 });
+            }
+            "--screenshot" => {
+                let v = it.next().ok_or("--screenshot needs a value")?;
+                if screenshot.replace(PathBuf::from(v)).is_some() {
+                    return Err("--screenshot given twice".into());
+                }
             }
             "--scale" => {
                 let v = it.next().ok_or("--scale needs a value")?;
@@ -87,15 +101,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         }
     }
     let rom = rom.ok_or("no ROM given")?;
-    let headless_frames = match (headless, frames) {
-        (true, Some(n)) => Some(n),
-        (true, None) => return Err("--headless needs --frames N (it would never exit)".into()),
-        (false, Some(_)) => return Err("--frames is only valid with --headless".into()),
-        (false, None) => None,
-    };
+    if headless && frames.is_none() {
+        return Err("--headless needs --frames N (it would never exit)".into());
+    }
     Ok(Command::Run(Args {
         rom,
-        headless_frames,
+        headless,
+        frames,
+        screenshot,
         scale,
         dmg_palette,
     }))
@@ -120,7 +133,9 @@ mod tests {
     fn rom_only_defaults() {
         let a = run(&["game.gb"]);
         assert_eq!(a.rom, PathBuf::from("game.gb"));
-        assert_eq!(a.headless_frames, None);
+        assert!(!a.headless);
+        assert_eq!(a.frames, None);
+        assert_eq!(a.screenshot, None);
         assert_eq!(a.scale, 4);
         assert_eq!(a.dmg_palette, Mode::Auto);
     }
@@ -128,8 +143,31 @@ mod tests {
     #[test]
     fn headless_with_frames_and_scale() {
         let a = run(&["--headless", "--frames", "60", "x.gbc", "--scale", "2"]);
-        assert_eq!(a.headless_frames, Some(60));
+        assert!(a.headless);
+        assert_eq!(a.frames, Some(60));
         assert_eq!(a.scale, 2);
+    }
+
+    #[test]
+    fn window_mode_accepts_frames() {
+        let a = run(&["--frames", "5", "x.gb"]);
+        assert!(!a.headless);
+        assert_eq!(a.frames, Some(5));
+    }
+
+    #[test]
+    fn screenshot_path_in_either_mode() {
+        let a = run(&["x.gb", "--screenshot", "o.png", "--frames", "2"]);
+        assert_eq!(a.screenshot, Some(PathBuf::from("o.png")));
+        let a = run(&[
+            "--headless",
+            "--frames",
+            "2",
+            "--screenshot",
+            "p.png",
+            "x.gb",
+        ]);
+        assert_eq!(a.screenshot, Some(PathBuf::from("p.png")));
     }
 
     #[test]
@@ -154,10 +192,12 @@ mod tests {
         for bad in [
             &[][..],
             &["--headless", "x.gb"],
-            &["--frames", "5", "x.gb"],
             &["--headless", "--frames", "0", "x.gb"],
             &["--headless", "--frames", "-3", "x.gb"],
             &["--headless", "--frames", "x.gb"],
+            &["--screenshot", "x.gb"],
+            &["x.gb", "--screenshot"],
+            &["--screenshot", "a.png", "--screenshot", "b.png", "x.gb"],
             &["--scale", "0", "x.gb"],
             &["--scale", "33", "x.gb"],
             &["--scale", "x.gb"],

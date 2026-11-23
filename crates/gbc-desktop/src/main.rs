@@ -11,6 +11,7 @@ mod dsp;
 mod headless;
 mod input;
 mod pacing;
+mod png;
 mod save;
 mod session;
 mod video;
@@ -39,7 +40,7 @@ fn main() -> ExitCode {
         sync_rtc_on_load: true,
         dmg_palette: args.dmg_palette,
     };
-    let Some(frames) = args.headless_frames else {
+    if !args.headless {
         let title = format!(
             "gbc-32 \u{2014} {}",
             args.rom
@@ -47,7 +48,14 @@ fn main() -> ExitCode {
                 .map_or_else(|| args.rom.to_string_lossy(), |n| n.to_string_lossy())
         );
         return match session::run(&opts, |emu, autosave| {
-            window::run(emu, autosave, title, args.scale)
+            window::run(
+                emu,
+                autosave,
+                title,
+                args.scale,
+                args.frames,
+                args.screenshot.as_deref(),
+            )
         })
         .and_then(|r| r)
         {
@@ -57,8 +65,9 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         };
-    };
-    match headless::run(&opts, frames) {
+    }
+    let frames = args.frames.expect("parse requires --frames when headless");
+    match headless::run(&opts, frames, args.screenshot.as_deref()) {
         Ok(_) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("error: {msg}");
