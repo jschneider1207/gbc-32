@@ -153,8 +153,19 @@ impl core::error::Error for LoadError<'_> {
 /// persists it (battery saves).
 /// Header byte `at` of `rom` (0 past the end: callers check the length
 /// first).
+///
+/// Out of line (code size): header parsing runs once per load, and a call
+/// in a loop keeps LLVM from unrolling it (`is_mbc1m`).
+#[inline(never)]
 fn header(rom: &[u8], at: usize) -> u8 {
     Rom::new(rom).get(at).unwrap_or(0)
+}
+
+/// Byte `i` of `rom`, or FF past its end. Out of line for the same reason
+/// as `header`, for the cold ROM reads of VRAM DMA (`Cart::rom_tail`).
+#[inline(never)]
+fn rom_byte(rom: Rom<'_>, i: usize) -> u8 {
+    rom.get(i).unwrap_or(0xFF)
 }
 
 pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
@@ -241,13 +252,9 @@ fn is_mbc1m(rom: &[u8]) -> bool {
     if rom.len() < 0x4_4000 {
         return false;
     }
-    // Byte by byte through `Rom::get`, not a slice compare (a `memcmp`
-    // may read words; ADR 0027).
-    let rom = Rom::new(rom);
-    match (rom.sub(0x104, 0x134), rom.sub(0x4_0104, 0x4_0134)) {
-        (Some(a), Some(b)) => (0..0x30).all(|i| a.get(i) == b.get(i)),
-        _ => false,
-    }
+    // Byte by byte through `Rom::get` (`header`), not a slice compare (a
+    // `memcmp` may read words; ADR 0027). Both copies are inside the ROM.
+    (0x104..0x134).all(|i| header(rom, i) == header(rom, 0x4_0000 + i))
 }
 
 /// Whether the cartridge type has an MBC3 real-time clock.
@@ -628,9 +635,7 @@ impl<'a> Cart<'a> {
         let (mem, off): (&[u8], usize) = if addr < 0x8000 {
             let window = self.rom_win[usize::from(addr >> 14) & 1];
             let off = usize::from(addr) & (ROM_BANK - 1);
-            // Bytes past the end of a short last bank read FF, as in
-            // `read_rom`.
-            return core::array::from_fn(|i| window.get(off + i).unwrap_or(0xFF));
+            return Self::rom_block(window, off);
         } else if !self.ram_enabled || (self.rtc_sel == 0 && self.ram_len == 0) {
             return [0xFF; 16];
         } else if self.rtc_sel != 0 {
@@ -642,6 +647,37 @@ impl<'a> Cart<'a> {
         match mem.as_chunks::<16>().0.get(off >> 4) {
             Some(b) => *b,
             None => Self::block_tail(mem, off),
+        }
+    }
+
+    /// 16 byte reads from `window` at `off`. When the whole block is in
+    /// the window the bounds checks fold away (16 plain `ldrb`, not 16
+    /// checked loads: those cost ~500 B of code, ADR 0027); otherwise
+    /// [`Self::rom_tail`].
+    #[inline(never)]
+    fn rom_block(window: Rom<'_>, off: usize) -> [u8; 16] {
+        let mut b = [0xFF; 16];
+        match window.sub(off, off + 16) {
+            Some(src) => {
+                for (i, x) in b.iter_mut().enumerate() {
+                    *x = src.get(i).unwrap_or(0xFF);
+                }
+            }
+            None => Self::rom_tail(window, off, &mut b),
+        }
+        b
+    }
+
+    /// A block that runs past the end of the ROM bank window (a ROM whose
+    /// size isn't a multiple of 16): those bytes read FF, as in
+    /// `read_rom`. A loop with a call per byte and a trip count LLVM
+    /// can't see, so it stays rolled (code size; it is never hot).
+    #[cold]
+    #[inline(never)]
+    fn rom_tail(window: Rom<'_>, off: usize, b: &mut [u8; 16]) {
+        let n = window.len().saturating_sub(off);
+        for (i, x) in b.iter_mut().take(n).enumerate() {
+            *x = rom_byte(window, off + i);
         }
     }
 
