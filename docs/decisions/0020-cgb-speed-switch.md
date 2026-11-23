@@ -109,3 +109,31 @@ emulator's `gb_sound::after_speed_change` (Apache-2.0, read only). SameBoy
 does not model it. AGE also re-applies it after a single-speed DIV write;
 no checked test covers that, so we don't. Gains `spsw-ch2-lc-delay-cgbBCE`
 and Gambatte `speedchange{,2,5}_ch2_nr52_*` (6).
+
+## Amendment (2026-11-23, session 10): LY read timing the switch alignments expose
+
+The CPU/PPU alignments left by repeated switches put LY reads on dots the
+default alignment never samples. AGE `lcd-align-ly` (verified on CGB B/C)
+fixes two rules there (d2b6e56, `Ppu::ly`):
+- LY changes 3 dots into every line 1-153 (lines 144-153 were at dot 2);
+  153 reads for 4 dots (5 in double speed), then 0.
+- For the 2 dots (1 in double speed) before LY changes it reads
+  LY & (LY + 1), the counter mid-carry (the test's "glitch" rows).
+Source for both: AGE `gb_lcd::read_ly` (Apache-2.0, read only), whose PPU
+sits one dot later than ours in double speed (it moves the LCD at the
+switch to double speed, we move the CPU grid at the switch back), so its
+dot 454/453 double-speed thresholds map onto our dots 3/2. Gains
+`lcd-align-ly-cgbBC` and Gambatte `lcd_offset/offset1_lyc98int_ly_count_{1,2}`,
+`offset2_lyc98int_ly_count_2`; no regressions (full stage1 manifest).
+
+Open: `spsw-tima-cgbBC` still fails. Rows: the 262 kHz TIMA read right
+after a switch to double speed with no delay (03, want 04), and every
+262 kHz and 65 kHz "immediate increment" row after a switch to single speed
+(one count low; the 16 and 4 kHz rows pass). Making the timer count 4 or 8
+more clocks to single speed fixes none of them and breaks the 4 kHz rows,
+so it isn't a plain pause-length error. AGE's model to compare against:
+DIV resets after STOP's second byte (ours: after its fetch, the timer
+frozen through the byte), the halt is 0x8000 new-speed M-cycles with the
+timer running, and on CGB B/C a DIV reset during STOP that would increment
+TIMA immediately doesn't increment on that M-cycle, for the 4 kHz timer only
+(`gb_timer::after_div_reset`, "speed change glitch").
