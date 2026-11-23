@@ -154,10 +154,95 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 
 ## M6: APU
 
-- [ ] Four channels, frame sequencer, length/sweep/envelope, wave RAM quirks
-- [ ] Batched sample generation (ADR 0002) into a caller-provided buffer
-- [ ] Resampling/mixing strategy documented in architecture.md
-- [ ] FF76/FF77 (PCM12/PCM34) read live channel output; they are hard-wired to 00 (`bus.rs`, TODO(M6)) (M3 test-integrity review)
+Design: ADR 0021 (state in `Memory::apu`, lazy catch-up with pure reads,
+`DivApu` from the DIV falling edge, 32,768 Hz box-filtered output, empty
+buffer = advance only). Original items, now covered by the tasks below:
+four channels + frame sequencer + length/sweep/envelope + wave RAM quirks
+(1, 3-6); batched sample generation into the caller's buffer (1);
+resampling/mixing documented in architecture.md (10); FF76/FF77 live
+(PCM12/PCM34 hard-wired to 00 in `bus.rs`, TODO(M6), M3 test-integrity
+review) (1, 3-5).
+
+Ordered; one focused agent each (~20-40 tool calls). Every new test is
+mutation-checked. Tasks 1-2 run on branch `m6-apu` (over the `.text`
+budget); nothing merges to `main` before step 2's human decision.
+
+1. [ ] **APU framework + CH2** (branch `m6-apu`), two commits, `.text`
+   measured after each (`check-code-size.sh` total and per symbol):
+   - (a) Framework: `apu/` layout and `Apu` in `Memory` (size test <= 128 B;
+     `Hw` unchanged), cold `Ctx::write_apu` for FF10-FF3F, NR52 power off/on
+     with CGB semantics (zero FF10-FF25 and state, writes ignored while off,
+     lengths included), NR52 read, `read_apu` for FF26/FF30-FF3F/FF76/FF77,
+     `DivApu` deadline + `fs`/`skip` (power-on skip, DIV-write early step in
+     `div_reset`, speed-switch reschedule, reset/load), output pipeline with
+     no channels (window integrator, NR50/NR51 mixer, `AudioBuffer` event,
+     end-of-call sync, advance-only path, `live` restart),
+     `AUDIO_SAMPLE_RATE` + ADR 0006 amendment. Fingerprint diff vs parent:
+     only the post-boot NR52/APU state may differ; explain every ROM.
+   - (b) CH2: `Square` (duty, trigger countdown per ADR 0021 section 5,
+     first-sample-zero), shared `Length` (incl. extra clocking and the
+     trigger reload) and `Envelope` (incl. zombie mode), DAC, PCM12 high
+     nibble, integration into the mixer. Report F (a), S (b) and the full
+     estimate `F + 3.3 S` (ADR 0021 section 11).
+   - The one API reviewer (AGENTS.md review rule 3) on the
+     `AUDIO_SAMPLE_RATE`/ADR 0006 diff.
+2. [ ] **Code-size checkpoint (orchestrator + human, no agent):** bring F,
+   S and the estimate (plus margin) to the human under "Needs human";
+   the human sets the new total `.text` budget once. Then a budget commit
+   on the branch and merge `m6-apu` into `main` (merge commit, no
+   rebase/force). Per-function budgets for the new APU symbols are added
+   here too. While waiting, tasks 3-5 may stack on the branch.
+3. [ ] **CH1 = `Square` + `Sweep`**: classic sweep (trigger copy, period
+   0 = 8, overflow check on trigger with shift != 0, second calculation,
+   negate quirk on NR10 write), PCM12 low nibble. Arbiters: cgb_sound
+   04, 05, 06 (`rom_singles`).
+4. [ ] **CH3 wave**: NR30 DAC, 256 length, NR32 shift, sample buffer kept
+   on trigger, trigger delay `(2051 - f) * 2` (verify the countdown
+   convention in SameBoy), CGB wave RAM read/write while on (pure read via
+   a channel copy), no corruption on retrigger, cached waveform sum,
+   PCM34 low nibble. Arbiters: cgb_sound 09, 10, 12; gambatte
+   `sound/ch3_*ff30*` hex ROMs as a cross-check.
+5. [ ] **CH4 noise**: LFSR (XNOR, 7-bit mode), period `(r ? 16r : 8) << s`,
+   shift 14/15 frozen, shared length/envelope, PCM34 high nibble.
+6. [ ] **cgb_sound to pass**: run `--filter 'blargg/cgb_sound/**'`, fix what
+   fails in 01/02/03/07/08/11 (registers, length, trigger, frame-sequencer
+   sync, power). If more than two subtests fail here, one agent per
+   subtest. Must-tier gate step green.
+7. [ ] **Sync invariant checks** (ADR 0021 section 3): unit test advancing
+   the APU with random split points vs one span (bit-identical state and,
+   with a buffer that never fills, identical samples); `bench --fingerprint`
+   gets an audio-buffer option and the fingerprint with and without it must
+   be identical over the corpus. Mutation check: break one channel's
+   closed-form advance, see both fail.
+8. [ ] **Perf**: `tools/bench` passes per-call audio buffers (as the MCU
+   will), `synth:worst-case` gains all four channels at their worst periods
+   (square/wave f = 2047, noise r = 0 s = 0, 7-bit, both sides);
+   rebaseline in the same commit. Budget: APU <= 200k x86 Ir/frame on
+   worst-case; if over, the ADR 0021 options in order. Run `check-bench.sh`
+   alone.
+9. [ ] **romtest audio rule** (`_outaudio0/1`, 131 ROMs): empty buffer until
+   the last frame, then 550 slots; silent = all returned samples equal
+   (Gambatte testrunner). Cross-check once in a scratch worktree with
+   `SAMPLE_PERIOD_LOG2 = 1`: all 131 verdicts must match the 32 kHz run
+   (report any mismatch; fallback is a test-only rate option, not a
+   manifest change). ADR 0018 amendment; this changes runner pass/fail
+   logic, so it gets its review (or the milestone test-integrity review,
+   before any result is relied on).
+10. [ ] **Docs**: architecture.md (APU module, catch-up points, audio
+    contract: rate, buffer sizing, front ends own resampling + HPF),
+    `docs/reference/apu.md` (distilled rules with sources, the SameBoy
+    countdown conversions), `docs/perf.md` APU numbers.
+11. [ ] **Milestone close**: hardware, test-integrity and perf reviewers in
+    parallel (the sample path is new per-frame work), triage, baseline,
+    tag `stage1-m6`.
+
+Deferred (stretch, gambatte `sound/` and SameSuite APU ROMs; ADR 0021
+section 12), not part of the M6 gate:
+- [ ] SameBoy envelope lock/clock model with the secondary (rising-edge)
+  DIV event and the CGB-C `_nrx2_glitch`
+- [ ] Square trigger delay / `lf_div` fit (gambatte `ch1_duty*_pos*`, `ch2_init_pos*`)
+- [ ] SameBoy noise counter (14-bit counter, rising edge of the selected bit, alignment-dependent trigger)
+- [ ] Sweep calculation delay; DAC fade to 0
 
 **Acceptance:** group `blargg-cgb-sound` passing.
 

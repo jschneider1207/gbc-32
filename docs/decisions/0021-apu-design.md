@@ -1,0 +1,394 @@
+# 0021: APU: lazy catch-up, state in `Memory`, 32,768 Hz box-filtered output
+
+- Status: Accepted
+- Date: 2026-11-22
+
+## Context
+M6 adds the APU (plan `docs/plan/stage-1.md` M6). The only M6 acceptance
+is must-tier `blargg/cgb_sound`, whose 12 subtests check behavior through
+registers, not samples: 01 registers (read masks; writes ignored while
+off), 02 length counters, 03 trigger (length reload and extra clocking),
+04 sweep, 05 sweep details (negate quirk, second calculation), 06 overflow
+on trigger, 07 length/sweep period sync with the frame sequencer, 08
+length counters during power (on CGB they don't survive power off), 09
+wave RAM read while on (CGB: the byte being played), 10 wave trigger
+while on (CGB: no corruption), 11 registers after power, 12 wave RAM
+write while on. The 131 gambatte `_outaudio0/1` ROMs (stretch) are
+`unsupported` until the core produces audio (ADR 0018).
+
+Forces:
+- **Perf.** `synth:worst-case` is at 3.54 M x86 Ir/frame, 88% of the
+  4.02 M line (50% of an H753). Nothing may run per M-cycle (ADR 0011);
+  the APU catches up lazily (ADR 0002).
+- **Code size.** `.text` is 85,068 of 85,100 B. The human raises the total
+  once for M6, to a figure measured after the first channel lands
+  (STATUS, session 07), so the first step must let us extrapolate.
+- **State size.** `Hw` is capped at 864 B (832 used, a test checks); the
+  APU needs roughly 80 B.
+- **Pure reads.** `bus::read` takes `&Memory, &Sys` and is shared with
+  `peek` (ADR 0008): register reads have no side effects, so NR52, wave
+  RAM while playing and PCM12/PCM34 must be computable from the stored
+  state and the clock.
+- **Determinism.** The same ROM and inputs give the same output; the
+  audio buffer the caller passes must not change emulated behavior.
+
+References (read for behavior; SameBoy is MIT, Gambatte GPL and read for
+rules only): Pan Docs "Audio", "Audio Registers", "Audio details"
+(gbdev.io/pandocs); SameBoy `Core/apu.c` (`GB_apu_div_event`,
+`GB_apu_write`/`GB_apu_read`, `GB_apu_init`, `_nrx2_glitch`,
+`trigger_sweep_calculation`), `Core/timing.c` (`GB_set_internal_div_counter`);
+Gambatte `test/testrunner.cpp` (the audio verdict, ADR 0018).
+
+## Decision
+
+### 1. Module layout
+```
+apu/mod.rs     Apu (state, power, frame sequencer, sync), register write
+               entry point, pure read helpers (NR52, wave RAM, PCM), StereoSample,
+               output constants
+apu/units.rs   Length and Envelope, shared by the channels that have them
+apu/square.rs  Square (CH1 and CH2: one non-generic impl, `[Square; 2]`),
+               Sweep (CH1 only)
+apu/wave.rs    Wave (CH3)
+apu/noise.rs   Noise (CH4)
+apu/mix.rs     the window integrator and mixer (output samples)
+```
+No generics or traits over channels (one copy of each function, for code
+size); channels are plain `Copy` structs, so a pure read can advance a
+copy.
+
+### 2. Where the state lives, and its size
+`Apu` is a field of `Memory` (`Memory::apu`), not of `Hw`. `Hw` has 32 B
+left under its cap; the APU is only touched on cold paths (APU register
+access, two event kinds, the end of a run call), so reaching it through
+`ctx.mem` costs the hot path nothing. All-zero is a valid `Apu` (powered
+off), so `Memory::new()` stays `const` all-zero and `.bss`; `reset`
+writes the post-boot state, as for the other non-zero `Memory` fields
+(architecture.md, "Core ↔ platform boundary"). `Hw` does not grow: the
+`DivApu` and `AudioBuffer` deadlines already exist in `Schedule`.
+
+The register bytes stay in `mem.io` (FF10-FF25 raw, wave RAM FF30-FF3F),
+so the plain register reads (`mem.io[reg] | SOUND_READ_MASK`) are
+unchanged. `Apu` holds only the internal state, about 80 B (`repr(C)`):
+
+| Part | Fields (approx.) | Bytes |
+|---|---|---|
+| `Output` | `synced: u64` (clock the state is exact at), window position `u8`, `acc: [i32; 2]`, `live: bool` | ~20 |
+| `Fs` | power `bool`, step `u8`, skip `bool`, NR52 active bits `u8`, 1 MHz phase `u8` | ~5 |
+| `Square` x2 | countdown `u16`, freq `u16`, duty pos, volume, envelope timer/flags, length, flags (`u8`s) | 2 x 12 |
+| `Sweep` | shadow `u16`, timer, flags | 4 |
+| `Wave` | countdown `u16`, freq `u16`, length `u16`, index, sample buffer, flags, cached waveform sum `u16` | ~12 |
+| `Noise` | countdown `u32`, LFSR `u16`, volume, envelope timer/flags, length, flags | ~12 |
+
+A unit test asserts `size_of::<Apu>() <= 128`. Power off replaces
+everything but `Output` with the zero state (section 7), so the output
+stream continues across power cycles.
+
+### 3. Timing: lazy catch-up and its invariant
+`Apu::sync(now, io, out)` brings the state from `synced` to `now`: each
+channel's period counter, duty/sample position and LFSR advance exactly
+in base clocks, and, if the caller's buffer has room, the elapsed time is
+integrated into output samples (section 8). Nothing runs per M-cycle.
+
+**Invariant:** the register-visible state (NR52 bits, lengths, envelope
+volume, sweep, LFSR, positions, PCM12/PCM34, wave RAM accesses) is a
+function of the clock and the register writes only, never of where syncs
+happened. `advance(a→b); advance(b→c)` must equal `advance(a→c)`
+bit-for-bit. A unit test syncs at random split points and compares; a
+whole-machine check runs `bench --fingerprint` with and without audio
+buffers and requires identical fingerprints (plan task).
+
+The state only changes discontinuously at two kinds of points, so those
+are where syncs are required:
+- **APU register writes** (FF10-FF26, wave RAM FF30-FF3F): `Ctx::write_apu`,
+  `#[inline(never)]` (off `write_high`, ADR 0011's rule for cold I/O):
+  sync to the access clock, then apply the write.
+- **Frame-sequencer steps** (`EventKind::DivApu`, section 4): sync, then
+  step length/sweep/envelope.
+
+Two more sync points serve the output only:
+- **`EventKind::AudioBuffer`**: set when a run call starts with buffer room,
+  at the clock where the last free slot's window ends. Handler: sync,
+  raise `AUDIO_BUFFER_FULL` (always a stop event), deadline `NEVER`.
+- **End of each run call**: sync to the final clock (in `Emulator::run`,
+  before building `RunResult`), so `audio_samples` counts every sample
+  completed in the call and the partial window carries over in `acc`.
+
+Reads stay pure (`read_io(&Memory, &Sys, &Hot)`):
+- NR52: `0x70 | power << 7 | active bits`, all stored state (active bits
+  only change at writes and frame-sequencer steps).
+- FF10-FF25: `mem.io | SOUND_READ_MASK` as today (power off zeroes `mem.io`).
+- Wave RAM, PCM12, PCM34: one `#[inline(never)] read_apu(mem, now, reg)`
+  that copies the channel, advances the copy by `now - synced`, and reads
+  it. While powered on, `DivApu` fires every 8192 clocks, so the copy's
+  advance is bounded (the noise LFSR: at most 1024 steps, only on an
+  FF77 read).
+
+### 4. Frame sequencer and DIV
+DIV-APU is the falling edge of DIV bit 4, bit 5 in double speed (Pan Docs
+"Audio details", DIV-APU), i.e. system-counter bit 12 or 13 (ADR 0011,
+SameBoy `apu_bit`). It is the `DivApu` deadline, computed from the timer
+like the serial clock: `timer.clock_at(next_fall(bit, timer.sc(now)))`,
+`next_fall(k, a) = ((a >> (k+1)) + 1) << (k+1)`, `bit = 12 + shift`. It is
+`NEVER` while the APU is powered off. One helper,
+`Ctx::set_div_apu_deadline`, is called wherever the counter is rebased or
+the APU powers on:
+- **DIV write and STOP** (`Ctx::div_reset`): `old = timer.write_div(now)`
+  is already returned; if `old & (1 << bit)` the reset is a falling edge
+  and the frame sequencer steps now (sync first, then the step; SameBoy
+  `GB_set_internal_div_counter`, `triggers & apu_bit`), then the deadline
+  moves with the rebased counter.
+- **Speed switch**: after `timer.speed_switch`, the bit changes 12 ↔ 13 and
+  the counter may be frozen for the pause; recompute the deadline (the
+  frozen counter is already handled by `clock_at`).
+- **Reset/load**: post-boot deadline. **NR52 power on**: below.
+- When STOP freezes DIV (M5 "STOP accuracy" task), the same helper gives
+  no edge until DIV runs again; nothing APU-specific is needed.
+
+The step counter follows SameBoy's `div_divider` (Pan Docs gives the same
+rates): `fs` is the number of steps since power on, mod 8. A step: if
+`skip`, clear it and do nothing else; otherwise `fs = (fs + 1) & 7`, then
+- `fs & 1 == 1`: clock the length counters (256 Hz);
+- `fs & 3 == 3`: clock the sweep (128 Hz);
+- `fs == 0`: clock the envelopes (64 Hz). (SameBoy decrements the volume
+  countdown at `fs == 7` and applies the tick at the next event; the
+  classic model below ticks at `fs == 0`, the same step.)
+
+"The next step doesn't clock length" (the extra-length-clocking
+condition, Pan Docs "Obscure behavior") is `fs & 1 == 1`.
+At NR52 power on: `fs = 0`, `skip = false`; but if the counter's APU bit
+is 1 at that moment, `skip = true, fs = 1` (SameBoy NR52 power-on: the
+first falling edge comes too soon and is skipped).
+
+The rising-edge `GB_apu_div_secondary_event` is not modelled in M6 (the
+classic envelope below doesn't need it; ADR 0011 left it optional).
+
+### 5. Channels
+All periods are in base clocks (4,194,304 Hz), the same in both CPU speeds
+(only the frame sequencer follows double speed). Each channel keeps
+`countdown` (clocks to its next step, >= 1) and reloads it from its period
+at each step; a frequency or NR43 write changes the period used at the next
+reload, not the running countdown (SameBoy keeps `sample_countdown`).
+Divisions by periods use `NonZeroU32` so there is no divide-by-zero panic
+path (thumbv7em code size; ADR 0009's no-panic spirit).
+
+**Shared units** (`units.rs`), Pan Docs "Audio Registers" / "Obscure behavior":
+- *Length* (max 64; 256 for CH3): an NRx1 write loads `max - value`.
+  Clocked when enabled: decrement; at 0 the channel turns off. An NRx4
+  write that enables length (bit 6 from 0 to 1) while `fs & 1 == 1` and
+  the counter is non-zero clocks it once more; reaching 0 turns the channel
+  off unless the write also triggers. A trigger with the counter at 0 loads
+  `max`, or `max - 1` if length is enabled and `fs & 1 == 1`.
+- *Envelope* (classic model): trigger loads volume = NRx2 >> 4 and the
+  timer from the period; on envelope steps, if the period is non-zero the
+  timer counts down and at 0 reloads, moving the volume one step in the
+  NRx2 direction until 0 or 15, where the envelope stops (flag).
+  **Zombie mode:** an NRx2 write while the channel is on applies the Pan
+  Docs CGB-02/04 rule ("Audio details", Zombie mode): if the old period was
+  0 and the envelope is still running, volume + 1; else, if the old
+  direction was decrease, volume + 2; then, if the direction changed,
+  volume = 16 - volume; keep the low 4 bits. (SameBoy `_nrx2_glitch` is the
+  same idea on its lock/clock model; exactness is deferred, section 12.)
+- *DAC*: on when `NRx2 & 0xF8 != 0` (CH3: NR30 bit 7). A DAC-off write
+  turns the channel off; a trigger with the DAC off leaves it off (length
+  reload still happens).
+
+**Square** (CH1, CH2): duty position 0-7 steps every `(2048 - f) * 4`
+clocks. Duty patterns as one 8-bit mask each, bit i = position i (SameBoy
+`duties`, Pan Docs NRx1 waveforms), positions 0-7: 12.5% `0000_0001`, 25%
+`1000_0001`, 50% `1000_0111`, 75% `0111_1110`. The position is reset
+only by APU power off (Pan Docs: "cannot be reset, except by turning the
+APU off"); a trigger reloads the countdown only. Trigger countdown: SameBoy
+`sample_countdown = (f ^ 0x7FF) * 2 + delay` in 2 MHz ticks (2 base
+clocks), `delay = 6 - lf_div` for an inactive channel and `4 - lf_div` for
+an active one, where `lf_div` is SameBoy's 1 MHz phase (we derive it from
+the clock and the power-on clock parity, stored as one bit). The
+implementer converts that to base clocks from SameBoy's run loop (whether
+a countdown fires at 0 or at -1) and records the conversion in
+`docs/reference/apu.md`. A newly started channel outputs digital 0 until
+its first duty step (Pan Docs: "On first startup, the channel outputs a
+digital zero"; SameBoy `did_tick`). Output: `volume` if the duty bit at the
+position is 1, else 0.
+
+**Sweep** (CH1; classic model, Pan Docs "Audio Registers" NR10, blargg
+04-06): trigger copies the frequency to `shadow`, loads the timer (period 0
+counts as 8), sets `enabled = period != 0 || shift != 0`, clears
+`negate_used`, and if `shift != 0` runs one calculation (overflow → off).
+On sweep steps: the timer counts down; at 0 it reloads (0 → 8) and, if
+enabled and the period is non-zero, `new = calc()`; if `new <= 2047` and
+`shift != 0`, store it as the shadow and the channel frequency, then run
+`calc()` again for the overflow check only. `calc()`: `shadow ± (shadow >>
+shift)`; a subtraction sets `negate_used`; a result over 2047 turns the
+channel off. **Negate quirk:** an NR10 write that clears the negate bit
+after `negate_used` turns the channel off (SameBoy checks this always on
+CGB C and older).
+
+**Wave** (CH3): sample index 0-31 steps every `(2048 - f) * 2` clocks; at
+each step the index increments and the sample buffer loads the nibble
+(high nibble first). Trigger: index 0, sample buffer kept (Pan Docs:
+retrigger does not clear or refresh it), first step after SameBoy's
+`sample_countdown = (f ^ 0x7FF) + 3` ticks, i.e. `(2051 - f) * 2` base
+clocks if a countdown of n fires after n + 1 ticks (that convention
+matches the per-step period); blargg 09 and the gambatte `ch3_*read_ff30*`
+hex ROMs are the arbiters. Output: `buffer >> shift`, shift 4/0/1/2 for
+NR32 codes 0-3. Power on clears the buffer. **CGB wave RAM while CH3 is
+on:** reads and writes go to byte `index / 2` at the access clock, at any
+time (SameBoy `GB_apu_read`/`GB_apu_write` on CGB; blargg 09, 12); a
+retrigger never corrupts wave RAM on CGB (blargg 10). The cached waveform
+sum (section 8) is invalidated on wave RAM and NR32 writes.
+
+**Noise** (CH4): 15-bit LFSR, cleared to 0 on trigger; a step writes
+`!(b0 ^ b1)` into bit 14, and also bit 6 in 7-bit mode (NR43 bit 3), then
+shifts right (Pan Docs' 16-bit description, SameBoy's 15-bit masks
+0x4000/0x4040 are the same machine). Output: `volume` if bit 0 is 1. Step
+period `(r == 0 ? 8 : 16 * r) << s` clocks (Pan Docs: 262144 / (r * 2^s)
+Hz with r = 0 as 0.5); shift 14 and 15 never clock. Trigger: countdown =
+period (SameBoy's alignment-dependent start is deferred, section 12).
+
+### 6. PCM12 / PCM34 (FF76/FF77)
+`PCM12 = ch1 | ch2 << 4`, `PCM34 = ch3 | ch4 << 4`, each the channel's
+current digital output (0-15) if it is on, else 0 (SameBoy `GB_IO_PCM12`/
+`PCM34`: `is_active ? sample : 0`). Read through `read_apu` (section 3) at
+the access clock. On a CGB in either mode, as today.
+
+### 7. NR52 power on CGB
+- **Off** (bit 7 1 → 0): sync to now; `mem.io[0x10..=0x25] = 0`; all `Apu`
+  state but `Output` becomes zero, which also clears the length counters
+  (CGB: lengths don't survive power off, blargg 08; Pan Docs "Audio
+  Registers": DMG keeps them, CGB doesn't); the `DivApu` deadline becomes
+  `NEVER`. Wave RAM is untouched (SameBoy: "Wave RAM is not cleared").
+- **While off**: writes to FF10-FF25 are ignored on CGB, the NRx1 length
+  writes included (SameBoy: only DMG accepts them); NR52 bit 7 and wave
+  RAM stay writable. Reads: zeroed registers with their masks; NR52 `0x70`.
+- **On** (0 → 1): the zero state already has duty positions 0 and the wave
+  buffer 0 (Pan Docs); set the frame-sequencer start (section 4) and the
+  `DivApu` deadline; record the 1 MHz phase.
+- **Post-boot** (`reset`/`load`): powered on, NR52 reads F1: CH1 on with
+  its DAC on, volume 0 and the envelope stopped (the boot chime has decayed
+  by hand-over; provisional, fit to Mooneye `boot_hwio-C` and SameBoy's
+  post-boot state if a test says otherwise), `fs = 0`, deadline from the
+  post-boot counter. The `(0xFF26, 0xF1)` entry in `POST_BOOT_IO` becomes
+  `Apu` state.
+
+### 8. Output: rate, integration, mixing
+- **Rate:** one stereo sample per 128 base clocks, **32,768 Hz** exactly
+  (`AUDIO_SAMPLE_RATE`), the same in both CPU speeds. 548.625 samples per
+  frame; 64 per frame-sequencer step. 128 is a power of two, so the window
+  normalisation is a shift. The constant is `SAMPLE_PERIOD_LOG2 = 7`
+  (crate-internal), the one knob for a later rate change (8 → 16,384 Hz if
+  the perf budget demands it; a human-facing quality trade).
+- **Filter:** each output sample is the exact average of the mixed signal
+  over its 128-clock window (a box filter). The channel outputs are
+  piecewise constant, so the average is a sum of `level * duration`
+  segments, integer only. That is a crude low-pass (first null at 32 kHz),
+  much better than point sampling for the ultrasonic tones some games use
+  as DC, and free of floats.
+- **Per channel, per segment:** `integrate(dt) -> i32` advances the channel
+  and returns the sum of its analog level times clocks. The analog level
+  is `15 - 2 * digital` (Pan Docs DAC: digital 0 → analog +1, 15 → -1, so
+  -15..15) while the DAC is on, 0 while it is off. Cost is bounded: a
+  square skips whole waveform periods in closed form (8 steps of a full
+  period always contain the whole duty pattern, so this is exact: one
+  division), leaving at most 8 step iterations; the wave channel does the
+  same with its cached 32-sample sum (at most 31 iterations, worst at f >=
+  2041); noise steps its LFSR (at most 16 steps per window, at r = 0, s = 0).
+- **Mixing** (NR51 panning, NR50 volume; VIN ignored, no cartridge audio):
+  per side `acc += (sum of the panned channels' integrals) * (volume + 1)`,
+  NR50/NR51 read from `mem.io` (a write syncs first, so a mid-window change
+  splits the window correctly). At a window end: `sample = acc << 6 >>
+  SAMPLE_PERIOD_LOG2` (the extreme 4 * 15 * 8 = 480 maps to 30,720, within
+  i16 without clamping), `acc = 0`.
+- **No high-pass filter in the core.** The DC-blocking capacitor (Pan Docs
+  "Mixer": charge factor 0.998943 per clock on CGB) is the front end's job,
+  with resampling: desktop resamples 32,768 → its device rate; the MCU can
+  run the SAI at exactly 32,768 Hz (fractional PLL) and needs only the
+  HPF. Keeping DC in the core also keeps "silence = constant samples"
+  (section 10).
+- **Buffer contract** (ADR 0006): samples are written from `audio[0]`, one
+  per completed window. When the last free slot completes, the
+  `AudioBuffer` event ends the call (`AUDIO_BUFFER_FULL`). Overshoot past
+  that (rest of the instruction, a VRAM DMA step) is less than one window,
+  so it lands in `acc` and the next call continues the same window grid:
+  with buffers that never run out, the stream is independent of how the
+  caller chunks it. Size buffers `(clocks >> 7) + 1` per call, 550 for
+  `run_frame`.
+
+### 9. Empty buffer (romtest, benches)
+With no room (`audio.len() == audio_len`), `sync` takes the advance-only
+path: square and wave positions advance in closed form (one division
+each), the noise LFSR steps (bounded per section 3), and nothing is
+integrated or mixed. Syncs then happen only at APU writes, 512 Hz
+`DivApu` steps and the end of each run call, so the cost is a few hundred
+Ir per frame plus LFSR steps when noise plays; register-visible state is
+exactly as with a buffer (section 3 invariant). `Output::live` records
+whether the last sync integrated; the first sync with room after an
+advance-only stretch restarts the window grid at `synced` with `acc = 0`.
+That makes the output a deterministic function of the call sequence, not
+of time alone; callers that want a continuous stream always pass room.
+
+### 10. The romtest audio boundary
+No new core API beyond `AUDIO_SAMPLE_RATE` (section 11). Gambatte's
+testrunner runs a fixed number of chunks and passes `audio0` if all
+35,112 samples of the last 70,224-clock chunk equal the first one, any
+constant value, and `audio1` if any differs (testrunner.cpp; ADR 0018).
+romtest does the same with what the core returns: it passes an empty
+buffer until the last frame of the run, then a 550-sample buffer, and
+judges "silent" as all returned samples equal. With no HPF in the core, a
+steady DC level stays constant.
+
+Known blind spot: a 128-clock average of a waveform whose period divides
+128 clocks (square at f = 2044, 2046, 2047; wave at f = 2046, 2047) is
+constant, so such an ultrasonic tone reads as silent where Gambatte's
+2-clock samples would not. The romtest task checks the pinned set once
+in a scratch worktree with `SAMPLE_PERIOD_LOG2 = 1` (2-clock windows,
+Gambatte's resolution): if every one of the 131 verdicts matches the
+32 kHz run, the boundary is sound for the pinned ROMs; any mismatch is
+reported, and then a test-only rate option (public API, its own ADR and
+review) is the fallback, not a manifest change.
+
+### 11. Public API, budgets, measurement
+- `pub const AUDIO_SAMPLE_RATE: u32 = 32_768;` (and the clocks per sample,
+  128) is the only public addition: front ends need the rate. ADR 0006 is
+  amended in the same commit; AGENTS.md "Independent review" rule 3 (one
+  reviewer, that diff). `RunResult::audio_samples`, `AUDIO_BUFFER_FULL` and
+  the run methods' `&mut [StereoSample]` are unchanged.
+- **Perf budget:** the APU may add at most 200 k x86 Ir/frame to
+  `synth:worst-case` once the bench passes audio buffers and drives all
+  four channels at their worst periods (estimate: about 160 k, ~290 Ir per
+  window); a typical game mix should be under 70 k. Over budget → measured
+  options in order: noise multi-step (14 LFSR steps per iteration in 15-bit
+  mode), mean level for ultrasonic wave periods, then 16,384 Hz (human).
+- **Code size:** the first task builds the framework and CH2 as two
+  commits and measures `.text` after each (framework F, square S). Full APU
+  estimate: `F + S` (CH2) `+ ~0.3 S` (sweep; CH1 reuses `Square`) `+ ~1.0 S`
+  (wave) `+ ~1.0 S` (noise) `+` the bus integration already in F. That
+  number, plus a margin, goes to the human as the new total budget before
+  anything merges to `main`.
+
+### 12. Deferred precision (stretch tier, tracked in the plan)
+Exactness that no M6 acceptance ROM needs, each a later task driven by
+gambatte `sound/` and SameSuite APU ROMs: SameBoy's envelope lock/clock
+model with the secondary DIV event and its CGB-C `_nrx2_glitch`; the
+square trigger delay fit (`lf_div`, gambatte `ch1_duty*_pos*`); SameBoy's
+noise counter (14-bit counter, rising edge of the selected bit,
+alignment-dependent trigger); the sweep calculation delay; the DAC fade.
+
+## Consequences
+- The APU costs nothing per M-cycle: 512 Hz `DivApu` events plus output
+  work proportional to samples written, and almost nothing with an empty
+  buffer, so romtest results and the existing bench numbers move only by
+  the frame-sequencer events (a rebaseline in the first task).
+- Register reads stay pure; the price is that wave RAM/PCM reads advance a
+  copy of a channel (cold, bounded). Correctness depends on every APU
+  state change going through `write_apu` or a `DivApu` step; the split-sync
+  unit test and the audio/no-audio fingerprint check are the safety net.
+- `Memory` gains ~80 B; `Hw` stays at 832 B under its 864 B cap.
+- 32,768 Hz and a box filter are a quality floor, not hi-fi; band-limited
+  synthesis would cost more code and cycles than the M7 budget allows now.
+- Front ends own resampling and the DC-blocking HPF (M7 desktop, Stage 2
+  MCU). The hardware repo's `docs/firmware-interface.md` says the sample
+  rate is "decided in firmware M6": this ADR is that decision from the
+  core side.
+- Classic (Pan Docs/blargg) envelope, sweep and noise timing pass the
+  register-level tests; the gambatte audio ROMs may need the SameBoy-exact
+  models of section 12.
