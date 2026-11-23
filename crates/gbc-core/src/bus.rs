@@ -820,9 +820,19 @@ impl Ctx<'_, '_> {
             0x41 => {
                 // CGB: in two phases one dot apart; for the first, the LYC
                 // select (double speed: the mode-0 select) keeps its old
-                // value (SameBoy `GB_CONFLICT_STAT_CGB`, `_DOUBLE`).
+                // value (SameBoy `GB_CONFLICT_STAT_CGB`, `_DOUBLE`). When
+                // the write sets that select, the selects it clears stay
+                // set for the first phase too: switching from an active
+                // source to an active LY=LYC keeps the line high, with no
+                // interrupt (gambatte `miscmstatirq/lycstatwirq_trigger_*`
+                // CGB `E0`, `statChangeTriggersStatIrqCgb`; behavior only,
+                // GPL). SameBoy clears them at once, a one-dot low glitch.
                 let keep = if double { 0x08 } else { 0x40 };
-                let first = (value & !keep) | (self.sys.ppu.stat_select() & keep);
+                let old = self.sys.ppu.stat_select();
+                let mut first = (value & !keep) | (old & keep);
+                if value & !old & keep != 0 {
+                    first |= old;
+                }
                 self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu.write_stat(now, first, &mut s.iflags, double);
@@ -3647,5 +3657,33 @@ mod dma_tests {
             assert!(!ctx.sys.vdma.pending, "no immediate block");
             assert!(ctx.sys.vdma.hblank);
         });
+    }
+
+    /// CGB, single speed: a STAT write that switches the selected source
+    /// to LY=LYC while both are active keeps the line high, so it requests
+    /// no interrupt, although the LYC select lands one dot after the
+    /// others (gambatte `miscmstatirq/lycstatwirq_trigger_m0_*_08_40`,
+    /// CGB `E0`). The same write while mode 3 has the line low does.
+    #[test]
+    fn stat_write_switching_to_lyc_select_keeps_the_line_high() {
+        // Frame position = clock - E + 7: line 2, t = 301 (mode 0) and
+        // t = 101 (mode 3).
+        for (m, want) in [
+            ((2 * 456 + 301 - 7) / 4, 0),
+            ((2 * 456 + 101 - 7) / 4, crate::ppu::INT_STAT),
+        ] {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                let e = ctx.clock();
+                ctx.write(0xFF45, 2);
+                ctx.write(0xFF40, 0x91);
+                idle_to(ctx, e, m);
+                ctx.write(0xFF41, 0x08);
+                ctx.sys.iflags = 0;
+                ctx.write(0xFF41, 0x40);
+                ctx.idle();
+                assert_eq!(ctx.sys.iflags & crate::ppu::INT_STAT, want, "access at {m}");
+            });
+        }
     }
 }
