@@ -495,3 +495,40 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Cost.** `.text` +64 B (95,836 of 96,000). `synth:cgb-raster`
   325,848,204 -> 325,984,385 Ir (+0.04%; +2.68% of the 3% guard: the one
   extra compare on each mid-line SCX write), `synth:worst-case` +5 Ir.
+
+### Step E1 (window stall on WX/WY/LCDC.5 writes, branch `ppu-midline-e`)
+
+- **Rule.** The 6-dot window stall was fixed at `latch` (t = 89). Now a
+  WX, WY or LCDC.5 write in mode 3 calls `Ppu::window_write` (cold),
+  which rebuilds the line's stalls (`set_stalls`, shared with `latch`,
+  objects re-read from the renderer) from the live registers, unless the
+  window's start is already decided: its stall begins within
+  `WINDOW_LEAD` (0) dots of the write. A new start (window appears or
+  moves) counts only if it begins more than `WINDOW_ON_LEAD` (1) dots
+  later; for WY writes `WY_LEAD` (4) dots, measured without the
+  fine-scroll discard (WY's edge doesn't move with SCX & 7, unlike the
+  LCDC.5/WX edges). WX < 7 starts at position WX - 7, before the first
+  pixel (SameBoy display.c: `position_in_line == WX - 7`, `wx_triggered`
+  cleared at GET_TILE_T1 while LCDC.5 is clear). `LineTiming.wx` keeps
+  the WX the stalls were built with (the old start for a WX write).
+- **Calibration** (full manifest vs main): WINDOW_LEAD -2/-1 regress
+  10/5, 0 -> best, 1/2/3 -> 32/22/18 flips with 0 regressions;
+  WINDOW_ON_LEAD 0/1/2 -> 43-3 / 41-0 / 39-1; WY_LEAD 2 -> 1 regression,
+  3-5 identical (41/0). A single lead for all three registers was at best
+  42 flips / 12 regressions.
+- **Result.** 41 fail->pass, 0 regressions: gambatte `window/`
+  `late_disable*` (18), `late_reenable*` (7), `late_wx*` (9),
+  `arg/late_wy*`/`late_*_late_wy*` (8, incl. `late_enable_ly0_ds_1`).
+  `diff-fingerprint.sh main`: only those 41 and Mealybug
+  `m3_lcdc_win_en_change_multiple_wx` (no reference image; writes LCDC.5 in
+  mode 3, so its later writes land at other pixels).
+- **Not done (E2+).** CGB `late_disable*_1` (out0: a disable after the
+  stall began still shortens mode 3 on CGB C, not on DMG), the remaining
+  `late_wy` variants (`1toFF`, `2toFF`: clearing the WY match mid-line),
+  the WX = A6 / object X = A7 edge (10 ROMs), `wx17_weoff_wxA5_weon`,
+  `weon_wx18_weoff_weon_wx80` and Mealybug `m3_lcdc_win_*` (pixels:
+  re-trigger after a disable). 56 of group 4's 97 still fail.
+- **Cost.** `.text` 95,836 -> 96,412 B (`latch` 1,398 B: the stall loop
+  moved to `set_stalls`, called only for lines with objects or a window).
+  `synth:cgb-raster` 325,984,385 -> 326,052,348 Ir (+0.02%; +2.70% of the
+  3% guard), `synth:worst-case` -0.32% vs baseline (as main).

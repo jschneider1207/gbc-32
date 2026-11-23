@@ -26,7 +26,7 @@
 | 1 | CGB palette RAM blocked in mode 3 | 33 | bus (BCPD/OCPD) | S | ~+80 B, cold; none | none (M5 task) |
 | 2 | OAM DMA: CPU write during a conflicting transfer | 58 | `dma.rs` conflict table | S-M | ~+50 B, cold; none | none (**needs human: reference choice**) |
 | 3 | LCDC.2 (object size) sampled per object | 20 | PPU OAM scan (mode 2) + object fetch | S-M | ~+150 B, cold; low | partly F |
-| 4 | Window stall/start in mode 3 (+ WX=A6/obj X=A7 edge) | 97 | PPU mode-3 length, renderer | L | ~+350-450 B; cgb-raster low | **E** |
+| 4 | Window stall/start in mode 3 (+ WX=A6/obj X=A7 edge) | 97 | PPU mode-3 length, renderer | L | ~+350-450 B; cgb-raster low | **E1 done** (41 flips) |
 | 5 | Live SCX&7 discard at mode-3 start | 19 | renderer line start, mode-3 length | M | ~+100 B; check on the line-start path | **done** (21 flips; 5 residual) |
 | 6 | STAT/LY sub-dot edges at the other CPU phase (`lcd_offset`) | 33 | PPU lazy timing (ADR 0014) | M | ~+100 B; medium (STAT event math) | none (existing M5 task) |
 | 7 | APU square trigger/duty phase (gambatte `sound`, `speedchange`) | 27 | APU trigger delay, 1 MHz phase | M | ~+100 B; low (trigger path) | none |
@@ -111,6 +111,11 @@ design step E (`docs/design/mid-line-ppu.md` section 5, step 4); Mealybug
 `m3_lcdc_win_en_change_multiple`, `m3_lcdc_win_map_change`,
 `m3_lcdc_tile_sel_win_change`, `m3_wx_4_change_sprites` also depend on it (counted here).
 Needs the `.text` raise.
+
+**Status (E1, `ppu-midline-e`):** 41 fixed (window stall rebuilt on
+WX/WY/LCDC.5 writes in mode 3; design doc section 7 "Step E1"). 56 left:
+CGB `late_disable*_1` (disable after the stall began), `late_wy` `1toFF`/`2toFF`,
+the WX=A6/obj X=A7 edge, Mealybug `m3_lcdc_win_*`.
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-
