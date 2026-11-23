@@ -4,34 +4,31 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M9 (test-ROM completion), starting. M8 is `stage1-m8`
-  (ad56c23; gate passed; review done, mediums fixed; acceptance and bench
-  baselines updated). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, end of session 10 (log
-  `logs/2026-11-22-10-m8-start.md`).
+- **Milestone:** M9 (test-ROM completion), in progress. M8 is `stage1-m8`
+  (ad56c23). M1-M7 tagged likewise.
+- **Last updated:** 2026-11-23, end of session 11 (log
+  `logs/2026-11-23-11-m9-fixes.md`). Baseline 94b09ae; gate passes.
 
-## Next up (session 11): M9
+## Next up (session 12): M9
 
-`docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). The human
-starts M9 without waiting for the play test; their real-game checklist
-findings become the first M9 fixes when they arrive. Order by ROMs per
-cost, keeping budgets (.text 97,500 B with ~510 B left; worst case 99.2% of
-the line, so every hot-path addition needs a saving):
-- Window step E2+ (~56 ROMs, triage group 4; leads in design doc section 7
-  "Step E1" and the review notes; includes the re-trigger approximation).
-- OAM DMA group 13 (6 `src{8000,9F00}_busypop*`): conflicting CPU reads
-  with a VRAM source clear OAM byte `i` (gambatte, ADR 0028); needs a
-  design for a read-path side effect within size/perf budgets.
-- HDMA timing (75), STAT IRQ edges (47), `lcd_offset` (33), double-speed
-  STAT/LY (31), APU square timing (27): see the triage doc.
-- Steps F (objects), G (CGB tile-select glitch); Mealybug
-  `m3_scx_low_3_bits` pixels 152-159.
-- M8 review lows (plan, M9 list): ITCM globs for `cpu_blocked` and
-  `schedule_overflow`, callee-closure check, missing per-function budgets
-  (`priority_order`, `set_stalls`, held-fetch functions; lower `latch`),
-  `power_cycle`/`eject` stack frames, hardware lows.
-- Code size is the binding constraint: a cold-code cut pass or the ITCM
-  /budget lows may be needed before larger groups.
+`docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
+checklist findings from the human become the first fixes when they arrive.
+1. Land `ppu-edges-step1b` with `hdma-trigger` via option (b): rebase
+   `hdma-trigger` onto step1b, fit the HDMA-period edge (design step 10 piece;
+   gambatte `isHdmaPeriod` behaviour only) against `hdma_late_enable_*` and
+   `hdma_late_m0halt_ds_lcdoffset1_{1,2}`; 0 regressions. Then design steps
+   3-10 (`docs/design/lcd-offset-phase.md`).
+2. Remaining window group 4 (31): late_wy FFto*/10to0, ds late_wy,
+   late_enable_afterVblank, late_wx_ff, WX=A6/obj X=A7 edge, re-trigger.
+3. Group 12 remaining: m0enable/disable_*, lycdisable_ff45_* edge positions;
+   lycstatwirq ly00 pair.
+4. HDMA HALT sub-group leftovers (16), GDMA ds length (4), OAM DMA restart
+   `srcchange0000_busyinc`.
+5. Mealybug step F leftovers (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch),
+   step G, `LCDC_TILES_LATE` lead.
+6. Perf headroom is now the binding constraint (worst case 99.35%); consider a
+   hot-path saving pass before larger PPU work. M8 review lows still open
+   (ITCM globs, per-function budgets, `power_cycle`/`eject` stack frames).
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
@@ -51,16 +48,15 @@ arrows, Z = B, X = A, Enter = Start, Right Shift/Backspace = Select, Esc
 quits. Real-game headless smoke (scratch copies of `/mnt/x/gbc-roms`,
 3600 frames) is clean at c8e8626.
 
-Perf watch (M8 baseline 9527e26, `perf/bench-baseline.txt`):
-`synth:worst-case` now includes one mid-mode-3 SCX write per line (human
-decision) and is 3.989 M x86 Ir/frame, **99.2% of the 4.02 M line** (~31k
-headroom). The 50% bar covers realistic worst cases; dense mid-mode-3
-register writes are outside it (docs/perf.md "Outside the bound"). APU:
-883.4 x86 Ir per APU write (budget <= 950). `.text` ~96,990 of 97,500 B.
-ITCM set ~54.9 KB of a 57,344 B core budget (ADR 0026 Proposed). Gate
-checks: code size, ITCM set, byte-wide ROM loads (ADR 0027), bench.
-Fingerprint corpus 4,020 runs (`--allow-corpus-change` only against revs
-before f200ab4). Wall-clock baseline: `bench --wall` (docs/perf.md).
+Perf watch (`perf/bench-baseline.txt`): `synth:worst-case` is **99.35% of the
+4.02 M x86 Ir/frame line** (~26k headroom; was 99.2%). cgb-acid2 +2.10% of the
++3% guard on main. APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
+`Ctx::write_apu` 498/508 B. `.text` 95,402 of 97,500 B on main (core size cut
+took 96,990 -> 94,242 earlier in session 11, then features). The 50% bar
+covers realistic worst cases; dense mid-mode-3 writes are outside it
+(docs/perf.md). ITCM set ~54.9 KB of 57,344 B (ADR 0026 Proposed). Gate checks:
+code size, ITCM set, byte-wide ROM loads (ADR 0027), bench. Fingerprint corpus
+4,020 runs. Wall-clock baseline: `bench --wall` (docs/perf.md).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
@@ -73,57 +69,51 @@ Working rules that matter here:
   right before committing an ADR (next free: 0029).
 - PPU design size estimates ran ~2-3x low; measure early.
 
-## In flight (session 11)
-- Branch `hdma-trigger` (1a110de + 73ce532 docs, on fa2f8f1): HDMA trigger
-  2 dots after mode-0 STAT, block before IRQ dispatch, HBlank period,
-  lost triggers. +30 ROMs but swaps `hdma_late_m0halt_ds_lcdoffset1_{1,2}`
-  (1 regression) -> not merged.
-- Branch `lcd-offset-phase` (dfb1c67, WIP on `hdma-trigger`): data-fit LYC
-  compare IRQ at t = 5 (lines 1-152, single speed), no reference (SameBoy
-  doesn't model the odd CPU phase). +36 vs main, 3 regressions
-  (`hdma_late_m0halt_ds_lcdoffset1_2`, `m2enable/late_enable_lcdoffset3_1`,
-  `dma/hdma_late_enable_lcdoffset3_1`). Agent's conclusion: group 6 needs a
-  half-dot-resolution PPU edge model (constraints listed in m9-triage.md
-  group 6), a design step. Not merged; helper scripts in the session
-  scratchpad `lo/` (ephemeral).
+## In flight (held, unmerged; all local branches)
+- `ppu-edges-step1b` (17500ef, on 3ed5096): lcd_offset design step 1 with the
+  compare point in `Cursor::cmp`. +5/-1 (`dma/hdma_late_enable_lcdoffset3_1`,
+  an FF55 write needing the step-10 HDMA-period edge), .text +412 with no
+  budget raised, cgb-acid2 +2.44%; only unit tests re-run after its rebase.
+  Supersedes `lcd-offset-step1` and `ppu-edges`.
+- `hdma-trigger` (on fa2f8f1): HDMA trigger 2 dots after mode-0 STAT, block
+  before IRQ dispatch, HBlank period, lost triggers. +30/-1 (swaps
+  `hdma_late_m0halt_ds_lcdoffset1_{1,2}`). Plan: option (b) above.
+- `lcd-offset-phase` (dfb1c67): data-fit WIP, superseded by the design; delete.
 
 ## Needs human
-Open (session 11):
-- **Merge `hdma-trigger` with a 1-ROM swap?** +30 ROMs (17 of the 19
-  trigger/IRQ-order sub-group, 13 HALT/speed-switch), but
-  `dma/hdma_late_m0halt_ds_lcdoffset1_2` goes pass -> fail while its pair
-  `_1` goes fail -> pass. No single threshold passes both at our current
-  CPU/PPU phase (group 6); both should pass once the lcd_offset model
-  lands. Merging needs a baseline update that records a regression, so
-  it's the human's call. Alternative: hold the branch until group 6.
-  Design doc `docs/design/lcd-offset-phase.md` recommends holding it and
-  rebasing after its step 1 (step 10 should remove the swap).
+Open:
+- **`hdma-trigger` swap:** plan is to land it with step1b and fit the
+  HDMA-period edge (0 regressions); the human may instead accept the 1-ROM swap
+  (baseline would record a regression).
 - **Sign-off candidate: power-on OBJ palette RAM (3 ROMs).** gambatte
-  `scx_during_m3_spx2`, `spx2_ds`, `scx_attrib_during_m3_spx2_ds` now pass
-  their timing but differ by 8 px at x 0: OBJ palette 0 colour 2, which no
-  ROM writes; the cgb04c capture shows 0x21926C (that console's power-on
-  palette RAM), we start at 0. Uninitialised RAM is console-specific;
-  modelling one console's dump (gambatte ships one, GPL, reference only)
-  vs signing these off as "depends on uninitialised palette RAM".
-- **Real-game checklist** (plan, bottom; now an M9 task), on native
-  Windows. Extra checks: Ctrl+C in the window still saves; change the
-  default audio output device mid-game (expect `audio stopped`, then within
-  ~2 s `output device back; resuming audio pacing`, no burst); a battery
-  `.sav` survives a restart; a gamepad.
+  `scx_during_m3_spx2`, `spx2_ds`, `scx_attrib_during_m3_spx2_ds` pass timing
+  but differ by 8 px at x 0: OBJ palette 0 colour 2, which no ROM writes; the
+  cgb04c capture shows 0x21926C (that console's power-on palette RAM), we
+  start at 0. Model one console's dump (gambatte ships one, GPL, reference
+  only) vs sign off as "depends on uninitialised palette RAM".
+- **Sign-off proposal (upcoming): group-15 SameSuite applicability tally**
+  (m9-triage): 1 C-applicable, 9 E-only, 7 unclear.
+- **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
+  checks: Ctrl+C in the window still saves; change the default audio output
+  device mid-game (expect `audio stopped`, then within ~2 s `output device
+  back; resuming audio pacing`, no burst); a battery `.sav` survives a
+  restart; a gamepad.
 - **Sign-off candidate (M9):** possibly AGE `spsw-interrupts-cgbBC` (AGE
-  `caution/`: breaks the halt Nintendo requires; its source still needs a
-  read before asking).
-- Local branch `bench-worst-case-midline-scx` (7760ba1) is fully applied
-  to main (cherry-picked as 4ebc674; `git cherry` shows `-`); an agent's
-  `git branch -D` was denied by permissions, so delete it yourself if you
-  want: `git branch -D bench-worst-case-midline-scx`.
+  `caution/`; its source still needs a read before asking).
+- **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
+  `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`.
+  Fully merged (`git cherry main <b>` shows no `+`): `bench-worst-case-midline-scx`,
+  `ppu-objmix`, `wip/speed-switch-h3`, `worktree-agent-a62aec9bd37d37e1c`,
+  `worktree-agent-ab9ff6f40452030b3`, `worktree-agent-ae119d2f1346ad041`.
+  Not fully merged, keep until checked: `ppu-bg-attributes` (1 `+`),
+  `worktree-agent-a46dc3e70b2125ffb` (1 `+`). Worktree-agent branches may be
+  locked worktrees (`git worktree remove --force --force`).
 - Optional, strongest guard against a repeat of the BSOD: set
   `guiApplications=false` in `%UserProfile%\.wslconfig` (disables WSLg).
-- FYI: `wsl-pro.service` restarts every 2 s because a cmd.exe AutoRun
-  entry points at a missing `E:\Tools\ansicon\x64\ansicon`; harmless
-  noise.
-- Optional: disable or schedule WSL auto-updates (Windows Update shut WSL
-  down mid-session on 2026-11-22).
+- FYI: `wsl-pro.service` restarts every 2 s because a cmd.exe AutoRun entry
+  points at a missing `E:\Tools\ansicon\x64\ansicon`; harmless noise.
+- Optional: disable or schedule WSL auto-updates (Windows Update shut WSL down
+  mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
@@ -267,11 +257,13 @@ None.
 
 ## Acceptance snapshot
 
-M8 baseline (`stage1-m8`, `acceptance/results/stage1.json` ad56c23).
-`scripts/gate-stage1.sh` passes.
+Baseline 94b09ae (`acceptance/results/stage1.json`, session 11 end; M8 tag
+`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passes.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 39 | 40 | only age `spsw-interrupts-cgbBC` (AGE caution/) fails |
-| stretch | 3,126 | 3,466 | 5 no-reference; 7 signed off (other CGB revisions); M7 was 2,765 |
+| stretch | 3,201 | 3,461 | 5 no-reference; 7 signed off (other CGB revisions) + 4 SameSuite align ROMs in `same-suite-apu-cgbE` (signed off as CGB E) |
+
+Overall 97.9%; audio 130/131.
