@@ -62,3 +62,41 @@ the trigger, with no `lf_div` term and no on/off difference.
   window, AGB reads FF). A write does not update the buffer.
 - Pinned arbiters (all pass): blargg `cgb_sound` 09, 10, 12; gambatte
   `sound/ch3_*` (26 ROMs); same-suite `apu/channel_3/*` gained 13 passes.
+
+## Noise channel (CH4) timing and the LFSR
+
+SameBoy (`Core/apu.c`, MIT) runs a 14-bit counter (`noise_channel.counter`,
+`& 0x3FFF`) clocked every `divisor` 2 MHz ticks, `divisor = r * 4` (NR43
+bits 0-2; `r = 0` gives 2). The LFSR steps on each rising edge of counter
+bit `s` (NR43 bits 4-7, mask `1 << s`), i.e. every `2^(s+1)` counter
+clocks. Per LFSR step: `divisor * 2^(s+1)` ticks, times 2 base clocks =
+`(r == 0 ? 8 : 16 * r) << s` base clocks, which is Pan Docs' 262,144 /
+(r * 2^s) Hz with r = 0 as 0.5. Shortest: 8 clocks (r = 0, s = 0).
+
+- **Countdown convention:** the divisor countdown fires when
+  `cycles_left >= counter_countdown` (n fires after n ticks, unlike the
+  square/wave `>` with n + 1). The core counts the LFSR step period
+  directly in base clocks: `Noise::countdown` = clocks to the next step,
+  reloaded with the period at each step; a trigger loads one full period.
+  SameBoy's trigger loads `r * 4 + 6` ticks (r = 0: 6) plus
+  alignment-dependent corrections into the divisor countdown, and the
+  free-running counter's phase decides the first edge; that start, and
+  NR43 writes landing on a counter reload, are deferred (ADR 0021
+  section 12). An NR43 write takes effect at the next step.
+- **Shift 14 and 15:** counter bits 14 and 15 never rise (14-bit counter),
+  so the LFSR is frozen; the output holds bit 0.
+- **LFSR:** 15 bits, 0 on trigger. A step computes `fb = !(b0 ^ b1)`,
+  shifts right, then sets bit 14 to `fb` (and bit 6 in 7-bit mode, NR43
+  bit 3; masks 0x4000/0x4040). Output: the envelope volume while bit 0 is
+  1, else 0 (`current_lfsr_sample`). From 0, bit 0 first becomes 1 after
+  15 steps (7 in 7-bit mode).
+- **Word-parallel steps** (`noise.rs` `lfsr_steps`): the first k steps
+  read only original bits while `k <= 14` (`k <= 6` in 7-bit mode), so k
+  steps are one word operation and the outputs after steps 1..k are the
+  original bits 1..k. Long spans reduce exactly: the 15-bit step is a
+  bijection with cycles of 32,767 or 1 (0x7FFF); in 7-bit mode bit 7 is
+  overwritten, so after 8 steps the state is a function of bits 0-6
+  (cycles of 127 or 1).
+- **CGB power off** zeroes NR41 and the length counter with everything
+  else (blargg `cgb_sound` 11: "Powering off should clear NR41"); NR41
+  writes while off are ignored on CGB, as for the other channels.

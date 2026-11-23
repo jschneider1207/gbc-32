@@ -481,3 +481,19 @@ on an M-cycle boundary" still holds.
 - CH3 register and wave RAM writes go from `Ctx::write_apu` to
   `apu::write_wave` (out of line; it needs `Memory::io` for wave RAM),
   not through `Apu::write`. The sync methods take `io` for the same reason.
+
+### 2026-11-22: CH4 implementation notes (M6 task 5)
+- **Units verified** in SameBoy: the period `(r ? 16r : 8) << s` is in
+  base clocks (docs/reference/apu.md). The trigger loads one full period;
+  SameBoy's counter-phase start stays deferred (section 12).
+- **The LFSR advances k steps per word operation** (k <= 14, or 6 in
+  7-bit mode), and the high time over a span is the popcount of the
+  original bits 1..k, so `integrate` and `advance` share one stepping
+  function and the LFSR state does not depend on whether a buffer was
+  passed (section 3). Worst case (r = 0, s = 0): 1024 steps per
+  frame-sequencer span, 74 word operations (171 in 7-bit mode). Spans
+  past one LFSR cycle reduce modulo 32,767 (127 in 7-bit mode after 8
+  steps), exactly.
+- `Fs::active` is gone: NR52 bit 3 is `Noise::on`. NR41-NR44 go through
+  `Apu::write` to its out-of-line tail `write_rest` (formerly
+  `write_sweep`), which keeps `Apu::write` within its code-size budget.
