@@ -240,5 +240,7 @@ sample per `AUDIO_SAMPLE_CLOCKS` (128), so a capture with fewer than
 silence verdict: a truncated capture could otherwise fake `audio0`. The
 bound is exact for a complete capture (`floor(x) - floor(y) >= floor(x - y)`),
 so no correct run falls under it. The full manifest shows no status change
-from it. Not done: a separate report count of `audio0` passes as weak
-evidence (a constant APU passes 73 of 131); it would need a report change.
+from it. Report only (no status, score, baseline or exit-code change): the console
+summary and the Markdown report add a line "audio: N / M pass (audio1 X,
+audio0 Y; audio0 passes are weak evidence: a silent APU passes them)", since
+a constant APU passes 73 of 131. Current: 105 / 131 (audio1 35, audio0 70).

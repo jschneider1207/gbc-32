@@ -414,6 +414,54 @@ pub fn may_update_baseline(regressions: &[Regression]) -> Result<(), String> {
     }
 }
 
+/// Gambatte `_outaudio0/1` passes, split by kind (report only; ADR 0018
+/// Amendment 4). `audio0` expects silence, so a silent APU passes every
+/// one of them: those passes are weak evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AudioEvidence {
+    pub audio1_pass: usize,
+    pub audio0_pass: usize,
+    pub total: usize,
+}
+
+/// `None` if no ROM in `results` has an `_outaudio0/1` name.
+pub fn audio_evidence(results: &[RomResult]) -> Option<AudioEvidence> {
+    let mut e = AudioEvidence {
+        audio1_pass: 0,
+        audio0_pass: 0,
+        total: 0,
+    };
+    for r in results {
+        let (_, stem) = crate::checks::dir_and_stem(&r.rom);
+        let Ok(Some(crate::gambatte::Expect::Audio(sound))) = crate::gambatte::parse_out(stem)
+        else {
+            continue;
+        };
+        e.total += 1;
+        if r.status == Status::Pass {
+            if sound {
+                e.audio1_pass += 1;
+            } else {
+                e.audio0_pass += 1;
+            }
+        }
+    }
+    (e.total > 0).then_some(e)
+}
+
+impl AudioEvidence {
+    pub fn describe(&self) -> String {
+        format!(
+            "audio: {} / {} pass (audio1 {}, audio0 {}; audio0 passes are weak evidence: \
+             a silent APU passes them)",
+            self.audio1_pass + self.audio0_pass,
+            self.total,
+            self.audio1_pass,
+            self.audio0_pass
+        )
+    }
+}
+
 /// The `limit` slowest results by wall time (ties by group and ROM).
 pub fn slowest(results: &[RomResult], limit: usize) -> Vec<&RomResult> {
     let mut v: Vec<&RomResult> = results.iter().collect();
@@ -579,6 +627,10 @@ impl Report<'_> {
              (weights renormalized over the tiers present in a partial run).\n",
             pct(self.summary.overall)
         );
+
+        if let Some(a) = audio_evidence(self.results) {
+            let _ = writeln!(md, "{}\n", a.describe());
+        }
 
         // Per-group summary, then every ROM.
         let mut by_group: BTreeMap<&str, Vec<&RomResult>> = BTreeMap::new();
@@ -912,6 +964,25 @@ pub mod tests {
                 "01.gb"
             ]
         );
+    }
+
+    #[test]
+    fn audio_evidence_splits_audio0_and_audio1_passes() {
+        let rs = vec![
+            result("g", Tier::Stretch, "a/t_cgb04c_outaudio0.gbc", Status::Pass),
+            result("g", Tier::Stretch, "a/u_cgb04c_outaudio0.gbc", Status::Fail),
+            result("g", Tier::Stretch, "a/y_cgb04c_outaudio0.gbc", Status::Pass),
+            result("g", Tier::Stretch, "a/v_cgb04c_outaudio1.gbc", Status::Pass),
+            result("g", Tier::Stretch, "a/w_cgb04c_outaudio1.gbc", Status::Fail),
+            result("g", Tier::Stretch, "a/x_cgb04c_out1.gbc", Status::Pass),
+        ];
+        let e = audio_evidence(&rs).unwrap();
+        assert_eq!((e.audio1_pass, e.audio0_pass, e.total), (1, 2, 5));
+        assert!(
+            e.describe()
+                .starts_with("audio: 3 / 5 pass (audio1 1, audio0 2;")
+        );
+        assert_eq!(audio_evidence(&rs[5..]), None);
     }
 
     #[test]

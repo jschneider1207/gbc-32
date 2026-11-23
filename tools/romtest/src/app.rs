@@ -639,6 +639,9 @@ fn print_summary(out: &mut dyn Write, rep: &Report<'_>, have_baseline: bool, bas
         );
     }
     let _ = writeln!(out, "  overall  {}", fmt_pct(rep.summary.overall));
+    if let Some(a) = report::audio_evidence(rep.results) {
+        let _ = writeln!(out, "  {}", a.describe());
+    }
 
     let slow = report::slowest(rep.results, 10);
     let _ = writeln!(out, "\nslowest ROMs:");
