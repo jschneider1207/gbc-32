@@ -1847,6 +1847,10 @@ impl Bus for Ctx<'_, '_> {
     /// double speed ran it at once).
     fn hdma_refetch(&mut self) -> bool {
         let v = &mut self.sys.vdma;
+        // The common case first: nothing to clear (perf: every HALT).
+        if v.refetch == 0 {
+            return false;
+        }
         let r = v.refetch == hdma::REQUESTED;
         if !v.pending {
             v.refetch = 0;

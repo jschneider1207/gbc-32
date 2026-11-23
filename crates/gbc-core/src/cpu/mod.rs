@@ -115,6 +115,22 @@ pub trait Bus {
     fn write(&mut self, addr: u16, value: u8);
     /// One M-cycle without a memory access (an internal CPU cycle).
     fn idle(&mut self);
+    /// The opcode fetch M-cycle: reads `addr`, or with `latched` (an
+    /// opcode fetched earlier, [`Cpu::latch_fetch`]) only idles and
+    /// returns it. One call site with the M-cycle shared by both cases,
+    /// so the opcode dispatch has one entry (perf: a second entry for the
+    /// latched opcode cost `synth:worst-case` 1%: LLVM duplicated the
+    /// dispatch jump and lost addressing modes all through `Cpu::run`).
+    #[inline(always)]
+    fn fetch(&mut self, addr: u16, latched: Option<u8>) -> u8 {
+        match latched {
+            Some(op) => {
+                self.idle();
+                op
+            }
+            None => self.read(addr),
+        }
+    }
     /// Idles a halted, stopped, locked-up or powered-off CPU: at least one
     /// M-cycle, and at most up to the first M-cycle boundary at which
     /// [`Bus::interrupt_flags`], [`Bus::interrupt_enable`],
@@ -382,31 +398,36 @@ impl Cpu {
 
     #[inline(always)]
     fn step_inline<B: Bus>(&mut self, bus: &mut B) {
-        let op = 'op: {
-            let mut pc_step = 1;
-            if self.mode != Mode::Running {
-                match self.step_not_running(bus) {
-                    // A latched opcode: no fetch.
-                    Some(LATCHED) => break 'op self.latched,
-                    Some(step) => pc_step = step,
-                    None => return,
+        let mut pc_step = 1;
+        let mut latched = None;
+        if self.mode != Mode::Running {
+            match self.step_not_running(bus) {
+                // A latched opcode: its M-cycle without a read, PC already
+                // past it; `step_not_running` did the interrupt check.
+                Some(LATCHED) => {
+                    latched = Some(self.latched);
+                    pc_step = 0;
                 }
+                Some(step) => pc_step = step,
+                None => return,
             }
+        }
+        if latched.is_none() {
             if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
                 self.dispatch(bus);
                 return;
             }
             // EI takes effect after the instruction that follows it. The
-            // check above used the old IME, so that instruction always runs.
+            // check above used the old IME, so that instruction always
+            // runs.
             if self.ei_pending {
                 self.ei_pending = false;
                 self.ime = true;
             }
-            let pc = self.regs.pc;
-            let op = bus.read(pc);
-            self.regs.pc = pc.wrapping_add(pc_step);
-            op
-        };
+        }
+        let pc = self.regs.pc;
+        let op = bus.fetch(pc, latched);
+        self.regs.pc = pc.wrapping_add(pc_step);
         // The only call site, so the 256-arm dispatch is inlined once.
         self.execute(op, bus);
     }
@@ -509,12 +530,11 @@ impl Cpu {
                     self.ei_pending = false;
                     self.ime = true;
                 }
-                bus.idle();
+                // The M-cycle: `Bus::fetch` with the latched opcode.
                 Some(LATCHED)
             }
             Mode::Prefetched => {
                 self.mode = Mode::Running;
-                bus.idle();
                 Some(LATCHED)
             }
             Mode::Locked | Mode::Off => {
