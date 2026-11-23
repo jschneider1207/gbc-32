@@ -48,6 +48,7 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3apu6square*5Sweep5clock*                    # Sweep::clock
 .text._R*8gbc_core3apu3mix8constant*                           # mix::constant
 .text._R*8gbc_core3bus*3Ctx13div_apu_event*                    # Ctx::div_apu_event
+.text._R*8gbc_core3bus*3Ctx16set_apu_deadline*                 # Ctx::set_apu_deadline
 .text._R*8gbc_core3bus*3Ctx8apu_sync*                          # Ctx::apu_sync
 .text._R*8gbc_core3bus*3Sys20set_div_apu_deadline*             # Sys::set_div_apu_deadline
 .text._R*8gbc_core3bus*3Ctx11start_audio*                      # Ctx::start_audio

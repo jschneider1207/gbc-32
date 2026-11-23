@@ -109,6 +109,14 @@ impl Envelope {
         self.running = true;
     }
 
+    /// After a trigger in the frame-sequencer step before the envelope's
+    /// step 0 (`Apu::env_late`): that step doesn't count, one more to the
+    /// first volume change.
+    #[inline]
+    pub(crate) fn delay(&mut self) {
+        self.timer += 1;
+    }
+
     /// A frame-sequencer envelope step (64 Hz). With a non-zero period,
     /// the timer counts down and at 0 reloads and moves the volume one
     /// step in the NRx2 direction; reaching 0 or 15 stops the envelope.
@@ -241,6 +249,16 @@ mod tests {
         e.clock();
         e.clock();
         assert_eq!((e.volume, e.running), (0, false));
+    }
+
+    #[test]
+    fn a_delayed_trigger_takes_one_more_step() {
+        let mut e = env(0x09); // volume 0, up, period 1
+        e.delay();
+        e.clock();
+        assert_eq!(e.volume, 0);
+        e.clock();
+        assert_eq!(e.volume, 1);
     }
 
     #[test]

@@ -98,7 +98,11 @@
 438 <gbc_core::apu::Apu>::write
 508 <gbc_core::bus::Ctx>::write_apu
 304 gbc_core::apu::read_apu
-55 <gbc_core::bus::Ctx>::div_apu_event
+# Sweep lag (m9-triage group 7/15): div_apu_event also runs the sweep step
+# 4 clocks after the edge and calls the new set_apu_deadline (measured
+# 78, 56 bytes; +5%).
+82 <gbc_core::bus::Ctx>::div_apu_event
+59 <gbc_core::bus::Ctx>::set_apu_deadline
 46 <gbc_core::bus::Ctx>::apu_sync
 284 <gbc_core::bus::Sys>::set_div_apu_deadline
 # Total gbc-core code: the sum of all .text* sections in the rlib (the

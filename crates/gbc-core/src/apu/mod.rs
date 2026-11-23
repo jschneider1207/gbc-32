@@ -27,6 +27,7 @@ pub(crate) use mix::Output;
 
 use crate::memory::Memory;
 use noise::Noise;
+pub(crate) use square::SWEEP_LAG;
 use square::{Square, Sweep};
 use wave::Wave;
 
@@ -224,7 +225,8 @@ impl Apu {
     /// A DIV-APU falling edge (after a sync to its clock): the frame
     /// sequencer steps and clocks the units, except during the power-on
     /// skip (`Fs::skip`). Pan Docs "Audio details", DIV-APU; SameBoy
-    /// `GB_apu_div_event`.
+    /// `GB_apu_div_event`. The sweep step comes `SWEEP_LAG` clocks later:
+    /// this sets `Sweep::due` and the bus runs it.
     #[inline(never)]
     pub(crate) fn step(&mut self) {
         let fs = &mut self.fs;
@@ -246,10 +248,28 @@ impl Apu {
         if step & 1 == 1 {
             self.wave.clock_length();
         }
-        if step & 3 == 3 {
-            // The sweep, 128 Hz.
-            self.sweep.clock(&mut self.sq[0]);
-        }
+        // The sweep, 128 Hz, `SWEEP_LAG` clocks after the edge: the bus
+        // runs it then (`Ctx::div_apu_event`).
+        self.sweep.due |= step & 3 == 3;
+    }
+
+    /// A trigger at `dist` clocks before the next `DivApu` event falls in
+    /// the frame-sequencer step before the envelopes' step 0, which then
+    /// doesn't count for the new envelope: from 4 clocks before the edge
+    /// into step 7 to 4 clocks before the one into step 0. gambatte
+    /// `EnvelopeUnit::nr4Init` (GPL, behaviour only): one more period when
+    /// `(cc + 2) & 0x7000 == 0`, 2 MHz units; hardware captures cgb04c
+    /// `ch2_init_reset_env_counter_timing_13`/`_14` (4 clocks before the
+    /// window: counts) vs `_15`/`_16` (inside: one period later). SameBoy
+    /// agrees on the step: its envelope countdowns tick at step 7
+    /// (`GB_apu_div_event`). While a sweep step is pending (`Sweep::due`,
+    /// just after the edge into step 3 or 7) the event is that step, not
+    /// the next edge.
+    #[inline]
+    fn env_late(&self, dist: u32) -> bool {
+        // Steps 6 within 4 clocks of the edge, or 7 unless within 4 of the
+        // edge into 0: the trigger moved 4 clocks on is in step 7.
+        self.fs.step + u8::from(dist <= 4 && !self.sweep.due) == 7
     }
 
     /// SameBoy's 1 MHz phase `lf_div` at clock `now`: 1 at power on, then
@@ -287,9 +307,12 @@ impl Apu {
 
     /// A write to a channel register FF10-FF25 (by the low 7 address bits)
     /// at clock `now` (`double`: in double speed), after a sync, with the
-    /// APU on. The byte is already stored in `Memory::io`.
+    /// APU on and the next `DivApu` event at clock `edge`. The byte is
+    /// already stored in `Memory::io`.
     #[inline(never)]
-    pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64, double: bool) {
+    pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64, double: bool, edge: u64) {
+        // Under 2^14 while powered (`DivApu` is an edge or the sweep lag).
+        let dist = edge.wrapping_sub(now) as u32;
         // FF10-FF14 are CH1's NR10-NR14 and FF15-FF19 CH2's (FF15 unused)
         // NR21-NR24: one call site for both squares keeps a single inlined
         // copy. NR10 and FF15 (offset 0) are no-ops in `Square::write`.
@@ -302,21 +325,51 @@ impl Apu {
         // NR10, CH1's trigger after the channel's own, or CH4. One
         // unconditional tail call instead of a test on every exit (code
         // size).
-        self.write_rest(reg, value);
+        self.write_rest(reg, value, dist);
     }
 
-    /// The rest of a write to FF10-FF25 (`reg`), after `Square::write`:
-    /// NR10, or CH1's trigger (NR14 bit 7) after the channel's own, go to
-    /// the sweep; FF1F-FF23 to CH4 (NR41-NR44 at offsets 1-4, FF1F unused);
-    /// nothing for the others. Out of line, off `Apu::write`'s common path.
+    /// The rest of a write to FF10-FF25 (`reg`), after `Square::write`,
+    /// `dist` clocks before the next `DivApu` event: NR10, or CH1's
+    /// trigger (NR14 bit 7) after the channel's own, go to the sweep;
+    /// FF1F-FF23 to CH4 (NR41-NR44 at offsets 1-4, FF1F unused); nothing
+    /// for the others. Then a CH1, CH2 or CH4 trigger in the step before
+    /// the envelopes' step 0 (`Apu::env_late`) delays its envelope (here
+    /// rather than in the channels' trigger paths: code size). Out of
+    /// line, off `Apu::write`'s common path.
+    ///
+    /// A CH1 trigger up to 8 clocks before the edge into step 3 or 7, or
+    /// before the sweep step it causes (`Sweep::due`), resets the sweep
+    /// timer after that step: it doesn't count. gambatte
+    /// `SweepUnit::nr4Init` (GPL, behaviour only): the timer starts from
+    /// `(cc + 2 + 2 * cgb) >> 14`, 2 MHz units; hardware captures cgb04c
+    /// `ch1_init_reset_sweep_counter_timing_7` (12 clocks before: counts)
+    /// vs `_10` (8 before: doesn't). SameBoy reloads its countdown at the
+    /// trigger with no window.
     #[inline(never)]
-    fn write_rest(&mut self, reg: usize, value: u8) {
-        let ch1 = &mut self.sq[0];
+    fn write_rest(&mut self, reg: usize, value: u8, dist: u32) {
+        let fs = self.fs.step;
         match reg {
-            0x10 => self.sweep.write(value, ch1),
-            0x14 if value & 0x80 != 0 => self.sweep.trigger(ch1),
-            0x1F..=0x23 => self.noise.write(reg - 0x1F, value, self.fs.step),
+            0x10 => self.sweep.write(value, &mut self.sq[0]),
+            0x1F..=0x23 => self.noise.write(reg - 0x1F, value, fs),
             _ => {}
+        }
+        if value & 0x80 == 0 {
+            return;
+        }
+        let late = self.env_late(dist);
+        let env = match reg {
+            0x14 => {
+                let ch1 = &mut self.sq[0];
+                let skip = self.sweep.due || fs & 3 == 2 && dist <= 8;
+                self.sweep.trigger(ch1, skip);
+                &mut ch1.env
+            }
+            0x19 => &mut self.sq[1].env,
+            0x23 => &mut self.noise.env,
+            _ => return,
+        };
+        if late {
+            env.delay();
         }
     }
 
@@ -391,6 +444,16 @@ pub(crate) fn write_wave(mem: &mut Memory, reg: usize, value: u8) {
 mod tests {
     use super::*;
 
+    impl Apu {
+        /// A DIV-APU edge with its sweep step at once (no lag).
+        pub(crate) fn edge(&mut self) {
+            self.step();
+            if self.sweep.due {
+                self.sweep.clock(&mut self.sq[0]);
+            }
+        }
+    }
+
     #[test]
     fn apu_fits_in_128_bytes() {
         assert!(size_of::<Apu>() <= 128, "{}", size_of::<Apu>());
@@ -403,9 +466,9 @@ mod tests {
         mem.apu.post_boot();
         // Duty 25% (positions 0 and 7 high), volume 15, f = 0x400: 4096
         // clocks per step.
-        mem.apu.write(0x16, 0x40, 0, false);
-        mem.apu.write(0x17, 0xF0, 0, false);
-        mem.apu.write(0x19, 0x84, 0, false);
+        mem.apu.write(0x16, 0x40, 0, false, u64::MAX);
+        mem.apu.write(0x17, 0xF0, 0, false, u64::MAX);
+        mem.apu.write(0x19, 0x84, 0, false, u64::MAX);
         let first = u64::from(mem.apu.sq[1].countdown);
         assert_eq!(read_apu(&mem, 0, 0x76), 0x00, "not started");
         // Position 7 after 7 steps, with the state still at clock 0.
@@ -451,20 +514,20 @@ mod tests {
         let mut apu = Apu::new();
         apu.power_on(0, true);
         assert_eq!((apu.fs.step, apu.fs.skip), (1, 2));
-        apu.step();
+        apu.edge();
         assert_eq!((apu.fs.step, apu.fs.skip), (1, 1));
         // The second edge clocks step 1 without stepping (SameBoy
         // `GB_SKIP_DIV_EVENT_SKIPPED`).
-        apu.step();
+        apu.edge();
         assert_eq!((apu.fs.step, apu.fs.skip), (1, 0));
-        apu.step();
+        apu.edge();
         assert_eq!(apu.fs.step, 2);
         let mut apu = Apu::new();
         apu.power_on(0, false);
-        apu.step();
+        apu.edge();
         assert_eq!(apu.fs.step, 1);
         for _ in 0..7 {
-            apu.step();
+            apu.edge();
         }
         assert_eq!(apu.fs.step, 0, "wraps mod 8");
     }
@@ -479,13 +542,13 @@ mod tests {
     fn the_second_edge_after_a_high_power_on_clocks_length_at_step_1() {
         let mut apu = Apu::new();
         apu.power_on(0, true);
-        apu.write(0x17, 0xF0, 0, false); // DAC on
-        apu.write(0x16, 0x3E, 0, false); // length 2
-        apu.write(0x19, 0xC0, 0, false); // trigger, length on
+        apu.write(0x17, 0xF0, 0, false, u64::MAX); // DAC on
+        apu.write(0x16, 0x3E, 0, false, u64::MAX); // length 2
+        apu.write(0x19, 0xC0, 0, false, u64::MAX); // trigger, length on
         assert_eq!(apu.nr52() & 0x02, 0x02, "on after the trigger");
-        apu.step();
+        apu.edge();
         assert_eq!(apu.nr52() & 0x02, 0x02, "first edge skipped");
-        apu.step();
+        apu.edge();
         assert_eq!(apu.nr52() & 0x02, 0x00, "length 1 -> 0 at step 1");
     }
 
@@ -499,13 +562,13 @@ mod tests {
         for now in 100..108u64 {
             let mut apu = Apu::new();
             apu.power_on(0, false);
-            apu.write(0x12, 0xF0, now, false);
-            apu.write(0x13, 0xE0, now, false);
-            apu.write(0x14, 0x87, now, false);
+            apu.write(0x12, 0xF0, now, false, u64::MAX);
+            apu.write(0x13, 0xE0, now, false, u64::MAX);
+            apu.write(0x14, 0x87, now, false, u64::MAX);
             let first = now + u64::from(apu.sq[0].countdown);
             assert_eq!(first % 4, 1, "off, trigger at {now}");
             assert!((now + 128 + 5..now + 128 + 9).contains(&first), "{now}");
-            apu.write(0x14, 0x87, now, false);
+            apu.write(0x14, 0x87, now, false, u64::MAX);
             let first = now + u64::from(apu.sq[0].countdown);
             assert_eq!(first % 4, 1, "on, trigger at {now}");
             assert!((now + 128 + 1..now + 128 + 5).contains(&first), "{now}");
@@ -523,10 +586,10 @@ mod tests {
         for (now, extra) in [(100, 8), (101, 8), (102, 6), (103, 6), (104, 8)] {
             let mut apu = Apu::new();
             apu.power_on(0, false);
-            apu.write(0x12, 0xF0, now, true);
-            apu.write(0x14, 0x87, now, true);
+            apu.write(0x12, 0xF0, now, true, u64::MAX);
+            apu.write(0x14, 0x87, now, true, u64::MAX);
             assert_eq!(apu.sq[0].countdown, 1024 + extra, "off, {now}");
-            apu.write(0x14, 0x87, now, true);
+            apu.write(0x14, 0x87, now, true, u64::MAX);
             assert_eq!(apu.sq[0].countdown, 1024 + extra - 4, "on, {now}");
         }
     }
@@ -536,11 +599,11 @@ mod tests {
     fn ch1_playing(nr10: u8, f: u16) -> Apu {
         let mut apu = Apu::new();
         apu.power_on(0, false);
-        apu.write(0x10, nr10, 0, false);
-        apu.write(0x11, 0x80, 0, false);
-        apu.write(0x12, 0xF0, 0, false);
-        apu.write(0x13, f as u8, 0, false);
-        apu.write(0x14, 0x80 | (f >> 8) as u8, 0, false);
+        apu.write(0x10, nr10, 0, false, u64::MAX);
+        apu.write(0x11, 0x80, 0, false, u64::MAX);
+        apu.write(0x12, 0xF0, 0, false, u64::MAX);
+        apu.write(0x13, f as u8, 0, false, u64::MAX);
+        apu.write(0x14, 0x80 | (f >> 8) as u8, 0, false, u64::MAX);
         apu
     }
 
@@ -561,7 +624,7 @@ mod tests {
         let mut apu = ch1_playing(0x11, 0x100);
         let mut seen = [0; 8];
         for _ in 0..8 {
-            apu.step();
+            apu.edge();
             seen[usize::from(apu.fs.step)] = apu.sq[0].freq;
         }
         assert_eq!(
@@ -571,18 +634,100 @@ mod tests {
         // A sweep step that overflows turns CH1 off: NR52 bit 0.
         let mut apu = ch1_playing(0x11, 1280);
         for _ in 0..3 {
-            apu.step();
+            apu.edge();
         }
         assert_eq!(apu.nr52() & 1, 0);
+    }
+
+    /// The edge into step 3 or 7 leaves the sweep step pending
+    /// (`Sweep::due`) for the bus to run `SWEEP_LAG` clocks later.
+    #[test]
+    fn the_edges_into_steps_3_and_7_leave_the_sweep_step_pending() {
+        let mut apu = ch1_playing(0x11, 0x100);
+        for want in [false, false, true] {
+            apu.step();
+            assert_eq!(apu.sweep.due, want, "step {}", apu.fs.step);
+        }
+        assert_eq!(apu.sq[0].freq, 0x100, "not yet");
+        apu.sweep.clock(&mut apu.sq[0]);
+        assert!(!apu.sweep.due);
+        assert_eq!(apu.sq[0].freq, 0x180);
+    }
+
+    /// The sweep timer after a CH1 trigger (NR10 = 20: period 2) `dist`
+    /// clocks before the next `DivApu` event, at frame-sequencer `step`,
+    /// with a sweep step pending (`due`) or not.
+    fn sweep_timer_after_trigger(step: u8, dist: u64, due: bool) -> u8 {
+        let mut apu = Apu::new();
+        apu.power_on(0, false);
+        apu.fs.step = step;
+        apu.sweep.due = due;
+        for (reg, v) in [(0x10, 0x20), (0x12, 0xF0), (0x14, 0x87)] {
+            apu.write(reg, v, 100, false, 100 + dist);
+        }
+        apu.sweep.timer
+    }
+
+    #[test]
+    fn a_ch1_trigger_up_to_8_clocks_before_a_sweep_step_skips_it() {
+        // gambatte cgb04c `ch1_init_reset_sweep_counter_timing_7` (12
+        // clocks before the edge into step 3: counts) and `_10` (8: not).
+        assert_eq!(sweep_timer_after_trigger(2, 12, false), 2);
+        assert_eq!(sweep_timer_after_trigger(2, 8, false), 3);
+        assert_eq!(sweep_timer_after_trigger(6, 1, false), 3);
+        assert_eq!(
+            sweep_timer_after_trigger(1, 8, false),
+            2,
+            "no sweep step next"
+        );
+        assert_eq!(sweep_timer_after_trigger(3, 4, true), 3, "inside the lag");
+        assert_eq!(sweep_timer_after_trigger(3, 8000, false), 2);
+    }
+
+    /// The CH2 and CH4 envelope timers after a trigger (NRx2 = 09: volume
+    /// 0, up, period 1) `dist` clocks before the next `DivApu` event, at
+    /// frame-sequencer `step`, with a sweep step pending (`due`) or not.
+    fn env_timers_after_trigger(step: u8, dist: u64, due: bool) -> (u8, u8) {
+        let mut apu = Apu::new();
+        apu.power_on(0, false);
+        apu.fs.step = step;
+        apu.sweep.due = due;
+        for (reg, v) in [(0x17, 0x09), (0x19, 0x80), (0x21, 0x09), (0x23, 0x80)] {
+            apu.write(reg, v, 100, false, 100 + dist);
+        }
+        (apu.sq[1].env.timer, apu.noise.env.timer)
+    }
+
+    #[test]
+    fn a_trigger_in_the_step_before_the_envelope_step_adds_a_period() {
+        // gambatte cgb04c `ch2_init_reset_env_counter_timing_13`/`_14` (8
+        // clocks before the edge into step 7: counts) and `_15`/`_16` (4:
+        // one period later).
+        assert_eq!(env_timers_after_trigger(6, 8, false), (1, 1));
+        assert_eq!(env_timers_after_trigger(6, 4, false), (2, 2));
+        assert_eq!(env_timers_after_trigger(7, 8000, false), (2, 2));
+        assert_eq!(env_timers_after_trigger(7, 5, false), (2, 2));
+        assert_eq!(
+            env_timers_after_trigger(7, 4, false),
+            (1, 1),
+            "4 before step 0"
+        );
+        assert_eq!(
+            env_timers_after_trigger(7, 2, true),
+            (2, 2),
+            "inside the sweep lag"
+        );
+        assert_eq!(env_timers_after_trigger(0, 4, false), (1, 1));
+        assert_eq!(env_timers_after_trigger(5, 4, false), (1, 1));
     }
 
     #[test]
     fn nr10_writes_go_to_the_sweep_and_ff15_is_ignored() {
         let mut apu = ch1_playing(0x19, 0x400);
         let before = apu;
-        apu.write(0x15, 0xFF, 0, false);
+        apu.write(0x15, 0xFF, 0, false, u64::MAX);
         assert_eq!(apu, before, "FF15 unused");
-        apu.write(0x10, 0x11, 0, false); // clears negate after a negate calculation
+        apu.write(0x10, 0x11, 0, false, u64::MAX); // clears negate after a negate calculation
         assert!(!apu.sq[0].on);
     }
 
@@ -597,8 +742,8 @@ mod tests {
         assert_eq!(read_apu(&mem, first, 0x76), 0x00);
         assert_eq!(read_apu(&mem, first + 4 * 4096, 0x76), 0x0F, "position 5");
         // CH2 in the high nibble at the same time.
-        mem.apu.write(0x17, 0xA0, 0, false);
-        mem.apu.write(0x19, 0x87, 0, false);
+        mem.apu.write(0x17, 0xA0, 0, false, u64::MAX);
+        mem.apu.write(0x19, 0x87, 0, false, u64::MAX);
         let t = first + 4 * 4096;
         assert_eq!(read_apu(&mem, t, 0x76) & 0x0F, 0x0F);
     }
@@ -634,7 +779,7 @@ mod noise_tests {
         mem.apu.power_on(0, false);
         for (reg, v) in [(0x21, 0xF0), (0x22, 0x00), (0x23, 0x80)] {
             mem.io[reg] = v;
-            mem.apu.write(reg, v, 0, false);
+            mem.apu.write(reg, v, 0, false, u64::MAX);
         }
         mem
     }
@@ -646,7 +791,7 @@ mod noise_tests {
         assert_eq!(read_apu(&mem, 15 * 8 - 1, 0x77), 0x00);
         assert_eq!(read_apu(&mem, 15 * 8, 0x77), 0xF0);
         assert_eq!(mem.apu.out.synced, 0, "pure");
-        mem.apu.write(0x21, 0x00, 0, false);
+        mem.apu.write(0x21, 0x00, 0, false, u64::MAX);
         assert_eq!(mem.apu.nr52(), 0xF0, "DAC off");
         assert_eq!(read_apu(&mem, 15 * 8, 0x77), 0x00);
     }
@@ -654,22 +799,22 @@ mod noise_tests {
     #[test]
     fn frame_sequencer_clocks_the_ch4_length() {
         let mut mem = ch4_playing();
-        mem.apu.write(0x20, 0x3F, 0, false); // length 1
-        mem.apu.write(0x23, 0x40, 0, false); // enable at step 0: no extra clock
+        mem.apu.write(0x20, 0x3F, 0, false, u64::MAX); // length 1
+        mem.apu.write(0x23, 0x40, 0, false, u64::MAX); // enable at step 0: no extra clock
         assert_eq!(mem.apu.nr52() & 8, 8);
-        mem.apu.step(); // step 1: length
+        mem.apu.edge(); // step 1: length
         assert_eq!(mem.apu.nr52() & 8, 0);
     }
 
     #[test]
     fn power_off_clears_the_ch4_length() {
         let mut mem = ch4_playing();
-        mem.apu.write(0x20, 0x3F, 0, false); // length 1
+        mem.apu.write(0x20, 0x3F, 0, false, u64::MAX); // length 1
         mem.apu.power_off();
         mem.apu.power_on(0, false);
-        mem.apu.write(0x21, 0xF0, 0, false);
-        mem.apu.write(0x23, 0xC0, 0, false); // trigger, length on: 64 if cleared
-        mem.apu.step(); // step 1: length
+        mem.apu.write(0x21, 0xF0, 0, false, u64::MAX);
+        mem.apu.write(0x23, 0xC0, 0, false, u64::MAX); // trigger, length on: 64 if cleared
+        mem.apu.edge(); // step 1: length
         assert_eq!(mem.apu.nr52() & 8, 8);
     }
 
@@ -766,7 +911,7 @@ mod wave_tests {
         assert_eq!(buf[5].right, 13 * 8 * 64);
         write_wave(&mut mem, 0x1B, 0xFF); // length 1
         write_wave(&mut mem, 0x1E, 0x47);
-        mem.apu.step(); // step 1: length
+        mem.apu.edge(); // step 1: length
         assert!(!mem.apu.wave.on);
     }
 }
@@ -827,7 +972,7 @@ mod sync_tests {
             0x1A..=0x1E | 0x30..=0x3F => write_wave(mem, reg, value),
             _ => {
                 mem.io[reg] = value;
-                mem.apu.write(reg, value, now, false);
+                mem.apu.write(reg, value, now, false, u64::MAX);
             }
         }
     }
@@ -975,7 +1120,7 @@ mod sync_tests {
             states.push(mem.apu);
             match ev {
                 Some(Ev::Write(reg, v)) => write(&mut mem, reg, v, t),
-                Some(Ev::Step) => mem.apu.step(),
+                Some(Ev::Step) => mem.apu.edge(),
                 None => {}
             }
         }

@@ -92,7 +92,7 @@ impl Schedule {
     }
 
     /// The deadline of `kind`, or [`NEVER`].
-    #[cfg(test)]
+    #[inline]
     pub(crate) const fn deadline(&self, kind: EventKind) -> u64 {
         self.at[kind as usize]
     }

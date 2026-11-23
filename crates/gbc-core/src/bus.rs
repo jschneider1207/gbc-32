@@ -504,12 +504,27 @@ impl Ctx<'_, '_> {
         if !self.mem.apu.powered() {
             return;
         }
+        let now = self.clock();
         if old >> self.sys.timer.div_apu_bit() & 1 != 0 {
-            let now = self.clock();
             self.apu_sync(now);
             self.mem.apu.step();
         }
-        self.sys.set_div_apu_deadline(true, self.clock());
+        self.set_apu_deadline(now);
+    }
+
+    /// Sets the `DivApu` deadline at clock `now`, after a frame-sequencer
+    /// step or a counter rebase: `SWEEP_LAG` clocks on while a sweep step
+    /// is pending (`Sweep::due`; a rebase inside the lag, at most 2 clocks
+    /// into it in double speed, moves it by that much), else the next
+    /// DIV-APU edge.
+    #[inline(never)]
+    fn set_apu_deadline(&mut self, now: u64) {
+        let apu = &self.mem.apu;
+        if apu.sweep.due {
+            self.sys.sched.set(EventKind::DivApu, now + apu::SWEEP_LAG);
+        } else {
+            self.sys.set_div_apu_deadline(apu.powered(), now);
+        }
     }
 
     /// Brings the APU up to `now`, writing completed samples into the
@@ -552,12 +567,18 @@ impl Ctx<'_, '_> {
         self.sys.sched.set(EventKind::AudioBuffer, at);
     }
 
-    /// A DIV-APU falling edge (`EventKind::DivApu`, due at `now`).
+    /// A DIV-APU falling edge (`EventKind::DivApu`, due at `now`), or the
+    /// sweep step `SWEEP_LAG` clocks after one (`Sweep::due`).
     #[inline(never)]
     fn div_apu_event(&mut self, now: u64) {
         self.apu_sync(now);
-        self.mem.apu.step();
-        self.sys.set_div_apu_deadline(true, now);
+        let apu = &mut self.mem.apu;
+        if apu.sweep.due {
+            apu.sweep.clock(&mut apu.sq[0]);
+        } else {
+            apu.step();
+        }
+        self.set_apu_deadline(now);
     }
 
     /// The last free audio slot's window ended (`EventKind::AudioBuffer`):
@@ -585,7 +606,10 @@ impl Ctx<'_, '_> {
             // Channel registers: stored, then decoded by the channels.
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
-                self.mem.apu.write(reg, value, now, self.hot.mcycle == 2);
+                let edge = self.sys.sched.deadline(EventKind::DivApu);
+                self.mem
+                    .apu
+                    .write(reg, value, now, self.hot.mcycle == 2, edge);
             }
             // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,
@@ -1337,8 +1361,7 @@ impl Ctx<'_, '_> {
         // The DIV-APU bit changes (12 <-> 13) with the counter speed, and
         // a switch to double speed toggles the frame sequencer's delay
         // (`Timer::apu_ds_delay`).
-        let powered = self.mem.apu.powered();
-        self.sys.set_div_apu_deadline(powered, now);
+        self.set_apu_deadline(now);
         if !pending && self.sys.vdma.hblank {
             self.vdma_halt();
         }
@@ -2588,6 +2611,41 @@ mod tests {
             emu.hw.sys.sched.deadline(EventKind::DivApu),
             first + 2 * 8192
         );
+    }
+
+    /// The sweep step comes `SWEEP_LAG` (4) clocks after the edge into
+    /// step 3: an access at the edge's clock still sees CH1 on (gambatte
+    /// cgb04c `ch1_init_reset_sweep_counter_timing_nr52_3`), the `DivApu`
+    /// event runs the step 4 clocks on, then waits for the next edge.
+    #[test]
+    fn the_sweep_steps_4_clocks_after_the_edge_into_step_3() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let first = first_div_apu_edge();
+        let e3 = first + 2 * 8192;
+        let _ = run_audio(emu, first + 8192 + 0x100, &mut []);
+        assert_eq!(emu.mem.apu.fs.step, 2);
+        // Period 1, shift 1, f = 1280: the first step stores 1920 and its
+        // overflow check (2880) turns CH1 off.
+        for (reg, v) in [
+            (0xFF12, 0xF0),
+            (0xFF10, 0x11),
+            (0xFF13, 0x00),
+            (0xFF14, 0x85),
+        ] {
+            write(emu, reg, v);
+        }
+        assert_eq!(emu.peek(0xFF26) & 1, 1);
+        let now = emu.clock();
+        let _ = run_audio(emu, e3 - now, &mut []);
+        assert_eq!(emu.clock(), e3);
+        assert_eq!(emu.mem.apu.fs.step, 3);
+        assert_eq!(emu.peek(0xFF26) & 1, 1, "on at the edge");
+        assert_eq!(emu.mem.apu.sq[0].freq, 1280);
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), e3 + 4);
+        let _ = run_audio(emu, 4, &mut []);
+        assert_eq!(emu.mem.apu.sq[0].freq, 1920);
+        assert_eq!(emu.peek(0xFF26) & 1, 0, "off 4 clocks on");
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), e3 + 8192);
     }
 
     #[test]

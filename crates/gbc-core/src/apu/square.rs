@@ -269,7 +269,20 @@ pub(crate) struct Sweep {
     pub(crate) enabled: bool,
     /// A calculation in negate mode ran since the trigger.
     pub(crate) negate_used: bool,
+    /// A sweep step is pending: the frame sequencer stepped to 3 or 7 less
+    /// than `SWEEP_LAG` clocks ago (`Apu::step`); the bus runs `clock` at
+    /// the lag's end.
+    pub(crate) due: bool,
 }
+
+/// Base clocks from the DIV-APU edge that steps the frame sequencer to 3
+/// or 7 to the sweep step it causes. gambatte (`SweepUnit`, GPL, behaviour
+/// only) has the sweep events 2 of its 2 MHz units after the 128 Hz
+/// boundary and the length events on it; its hardware captures (cgb04c
+/// `ch1_init_reset_sweep_counter_timing_7` vs `_9`, NR10 writes; `_nr52_3`
+/// vs `_nr52_4`, NR52 reads) put the step after an access at the edge's
+/// clock and before one 4 clocks later.
+pub(crate) const SWEEP_LAG: u64 = 4;
 
 impl Sweep {
     pub(crate) const ZERO: Self = Self {
@@ -278,6 +291,7 @@ impl Sweep {
         timer: 0,
         enabled: false,
         negate_used: false,
+        due: false,
     };
 
     /// NR10 bits 4-6: steps between calculations (0: none).
@@ -328,11 +342,14 @@ impl Sweep {
     /// A trigger of `ch` (after its own trigger): the frequency is copied
     /// to the shadow, the timer reloads, the sweep is enabled if the
     /// period or the shift is non-zero, and with a non-zero shift one
-    /// calculation runs for its overflow check only.
+    /// calculation runs for its overflow check only. `late`: the trigger
+    /// is close enough before a sweep step (`Apu::write_rest`) that the
+    /// step doesn't count: one more step to the first calculation.
     #[inline]
-    pub(crate) fn trigger(&mut self, ch: &mut Square) {
+    pub(crate) fn trigger(&mut self, ch: &mut Square, late: bool) {
         self.shadow = ch.freq & 0x7FF;
         self.reload();
+        self.timer += u8::from(late);
         let shift = self.nr10 & 7;
         self.enabled = self.period() != 0 || shift != 0;
         self.negate_used = false;
@@ -346,8 +363,10 @@ impl Sweep {
     /// result within range with a non-zero shift is written back to the
     /// shadow and the channel frequency, and a second calculation runs for
     /// its overflow check only.
+    /// Clears `due`: the bus calls it `SWEEP_LAG` clocks after the edge.
     #[inline(never)]
     pub(crate) fn clock(&mut self, ch: &mut Square) {
+        self.due = false;
         self.timer = self.timer.wrapping_sub(1);
         if self.timer != 0 {
             return;
@@ -538,7 +557,7 @@ mod tests {
         sw.write(nr10, &mut sq);
         sq.write(3, f as u8, 0, 10);
         sq.write(4, 0x80 | (f >> 8) as u8, 0, 10);
-        sw.trigger(&mut sq);
+        sw.trigger(&mut sq, false);
         (sw, sq)
     }
 
@@ -640,7 +659,7 @@ mod tests {
         let (mut sw, mut sq) = ch1(0x19, 0x400);
         sw.write(0x10, &mut sq); // off
         sq.write(4, 0x84, 0, 10);
-        sw.trigger(&mut sq); // shift 0 now: no calculation
+        sw.trigger(&mut sq, false); // shift 0 now: no calculation
         sw.write(0x00, &mut sq);
         assert!(sq.on);
     }
