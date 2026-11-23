@@ -216,7 +216,7 @@ budget); nothing merges to `main` before step 2's human decision.
    gets an audio-buffer option and the fingerprint with and without it must
    be identical over the corpus. Mutation check: break one channel's
    closed-form advance, see both fail.
-8. [ ] **Perf**: `tools/bench` passes per-call audio buffers (as the MCU
+8. [x] (9b0b8cc, 29cacd2, 4dd75a2, d236d92, 0fc52a8; budget 230k by human 2026-11-22) **Perf**: `tools/bench` passes per-call audio buffers (as the MCU
    will), `synth:worst-case` gains all four channels at their worst periods
    (square/wave f = 2047, noise r = 0 s = 0, 7-bit, both sides);
    rebaseline in the same commit. Budget: APU <= 200k x86 Ir/frame on
@@ -244,7 +244,9 @@ budget); nothing merges to `main` before step 2's human decision.
      **still over 200k**. worst-case 3.78 M/frame = 94.0% of the 4.02 M
      line. What remains per window: CH3 ~114 Ir, CH4 ~83, CH1/CH2 ~76,
      mixer ~59 (docs/perf.md, APU cost).
-   - 8c. [ ] If still over: human decision (ADR options 2-3 change the
+   - 8c. [x] Human decision 2026-11-22 (session 08): accept the exact
+     result; the APU budget is 230k Ir/frame (ADR 0021 amendment). No
+     output-changing option. Earlier: if still over: human decision (ADR options 2-3 change the
      output: mean level for ultrasonic wave periods, 16,384 Hz; or a
      different budget).
 9. [x] (660cabd) **romtest audio rule** (`_outaudio0/1`, 131 ROMs): empty buffer until

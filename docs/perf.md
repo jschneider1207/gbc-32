@@ -162,7 +162,8 @@ same fingerprints at buffers 7 and 64):
   multiplies.
 
 The APU on worst-case (`Ctx::apu_sync` inclusive, measured directly) is
-now **224.1k Ir/frame: still over the 200k budget**. Per window (65,536
+now **224.1k Ir/frame**, within the 230k budget (human decision
+2026-11-22, after the 200k estimate was missed; ADR 0021 amendment). Per window (65,536
 per 2 s): CH3 ~114 Ir, CH4 ~83, CH1/CH2 ~76 each, the mixer ~59.
 worst-case 3.78 M Ir/frame, 94.0% of the 4.02 M line. thumbv7em
 `.text` 94,120 -> 94,492 B (`Noise::integrate` 1,094 B; `Apu::sync`

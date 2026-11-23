@@ -497,3 +497,14 @@ on an M-cycle boundary" still holds.
 - `Fs::active` is gone: NR52 bit 3 is `Noise::on`. NR41-NR44 go through
   `Apu::write` to its out-of-line tail `write_rest` (formerly
   `write_sweep`), which keeps `Apu::write` within its code-size budget.
+
+## Amendment: APU perf budget 230k (2026-11-22, human)
+
+The 200 k Ir/frame budget above was this ADR's estimate. With all four
+channels at their worst periods, the first measurement was 682.6 k. Exact
+(sample-identical) optimizations brought it to 224.1 k: closed-form square
+and wave windows, batched mixing, and doubling-identity noise stepping
+(docs/perf.md "APU cost"). `synth:worst-case` is 3.78 M Ir/frame, 94.0% of
+the 4.02 M line. The human chose to accept this result and set the APU
+budget to **230 k Ir/frame**. The output-changing fallbacks (mean level for
+ultrasonic wave periods, 16,384 Hz) are not used.
