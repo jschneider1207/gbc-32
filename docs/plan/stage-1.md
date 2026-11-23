@@ -146,6 +146,7 @@ OAM access windows, so the full `mooneye-acceptance` group is required in M3.
 - [ ] M5 review (perf) low: object rank merge does ~10 u64 ops (2 multiplies) per object fetch, also in compatibility mode (rank 0); <= ~30k M7 cycles/frame
 - [ ] M5 review (perf) low: no per-function budgets for `fetch_objects` 776, `partial_tile` 182/162, `write_palette_data` 356, `vram_dma` 708, `vdma_arm` 210, `Emulator::run` 458
 - [ ] M5 review (perf) low: benches miss OCPD writes and a combined palette raster + objects + HDMA frame; worst-case runs all-zero attributes (OK: decode is data-independent)
+- [ ] Lockup re-review low (session 07): `gambatte-cgb` excludes `gambatte/undef_ops/**` but `gambatte-cgb-undef-ops` selects `gambatte/undef_ops/*cgb04c*`; a nested ROM in a future release would fall in neither. Harmless while `test-roms.sha256` pins the set; make the globs match (manifest change, human)
 
 **Acceptance:** groups `cgb-acid2` and `mooneye-cgb-boot-regs` passing;
 `same-suite-cgb` and `age-cgb` tracked (should tier).

@@ -170,5 +170,7 @@ match is now a bad manifest (exit 2). This only makes the runner
 stricter; every existing exclude in `stage1.toml` removes ROMs.
 
 **Manifest.** `acceptance/stage1.toml` is human-owned, so the new group
-and the exclude are a proposed diff awaiting approval. Until then the 10
-undef_ops ROMs report `crash` on `main`, which is the stricter state.
+and the exclude were drafted as a diff for the human, who approved them
+in advance ("You have my ok", 2026-11-22); committed in 8543723 after
+validation (10/10 undef_ops pass in their own group, none left in
+`gambatte-cgb`).
