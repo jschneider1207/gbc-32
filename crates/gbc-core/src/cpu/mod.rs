@@ -180,6 +180,13 @@ pub trait Bus {
         self.halt_end();
         true
     }
+    /// After a speed switch that halts ([`Bus::speed_switch`]): whether
+    /// STOP's second byte, already read, runs as the next opcode. The
+    /// emulator: a VRAM DMA block requested in STOP's first M-cycle
+    /// (gambatte `Memory::stop`, `prefetched`). Free.
+    fn stop_refetch(&mut self) -> bool {
+        false
+    }
     /// Whether a stopped CPU wakes up (a button is pressed).
     fn stop_wakeup(&self) -> bool {
         false
@@ -401,11 +408,14 @@ impl Cpu {
             }
             // The speed-switch halt is a HALT (SameBoy `halted`) that its
             // countdown also ends, with the same wake-up M-cycle, then the
-            // fetch.
+            // fetch, and the same check for a VRAM DMA block before it.
             Mode::SpeedSwitch => {
                 if bus.speed_switch_halt() {
                     bus.idle();
                     self.mode = Mode::Running;
+                    if bus.wake_stalls() {
+                        return None;
+                    }
                     Some(1)
                 } else {
                     None
@@ -523,6 +533,12 @@ impl Cpu {
                         bus.idle();
                     } else {
                         self.mode = Mode::SpeedSwitch;
+                        // The byte is fetched again from memory, where
+                        // gambatte runs the latched one: they differ only
+                        // if a VRAM DMA block overwrote it in the halt.
+                        if bus.stop_refetch() {
+                            self.regs.pc = self.regs.pc.wrapping_sub(1);
+                        }
                     }
                 }
             }

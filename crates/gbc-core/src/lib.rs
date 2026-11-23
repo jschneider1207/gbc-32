@@ -1513,6 +1513,9 @@ mod tests {
         fn stop_wakeup(&self) -> bool {
             self.0.stop_wakeup()
         }
+        fn stop_refetch(&mut self) -> bool {
+            cpu::Bus::stop_refetch(self.0)
+        }
         fn halt_begin(&mut self) {
             self.0.halt_begin();
         }
@@ -1936,7 +1939,10 @@ mod tests {
         // A transfer from C000 starts, then the switch to double speed
         // with nothing pending: the DMA pauses for the halt (SameBoy
         // `GB_dma_run` returns while `halted`), and what was left takes
-        // the same M-cycle count at double speed after it.
+        // the same M-cycle count at double speed after it, from the end of
+        // the wake-up M-cycle (gambatte CGB C captures
+        // `oamdma/oamdmasrcC0_speedchange_readC000`; a HALT's resumes at
+        // its start).
         let emu = with_program(&[], 0x80);
         write_reg(emu, 0xFF46, 0xC0);
         let mut fb = frame();
@@ -1954,7 +1960,7 @@ mod tests {
         assert_eq!(wake, now + 0x8000 * 2);
         ctx.speed_switch_end();
         assert_eq!(ctx.sys.ppu.dma.paused, schedule::NEVER);
-        assert_eq!(ctx.sys.ppu.dma.end, wake + (end - now) / 2);
+        assert_eq!(ctx.sys.ppu.dma.end, wake + 2 + (end - now) / 2);
     }
 
     #[test]

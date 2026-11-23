@@ -67,8 +67,15 @@ pub(crate) struct VramDma {
     pub(crate) halted: bool,
     /// HALT began outside the HBlank (`allow_hdma_on_wake`) during an
     /// HBlank transfer: the wake-up, in mode 0, starts a block. Cleared at
-    /// the wake-up (and by the end of a speed-switch countdown).
+    /// the wake-up.
     pub(crate) wake_ok: bool,
+    /// A block was requested in a speed-switch STOP's first M-cycle
+    /// (gambatte `Memory::stop`: `prefetched = hdmaReqFlagged`): STOP's
+    /// second byte runs as the next opcode (`Ctx::stop_refetch`). To single
+    /// speed it stays set until that block runs at the wake-up, whose stall
+    /// is then one M-cycle shorter (gambatte `cc -= 4` after a DMA in the
+    /// `hdma_requested` halt state). Fits this struct's padding.
+    pub(crate) refetch: bool,
     /// M-cycles left of the current transfer step's CPU stall
     /// ([`stall_mcycles`]; at most 2,049). A run call can end inside the
     /// stall (a stop event or its target); the next call resumes it
@@ -96,6 +103,7 @@ impl VramDma {
             pending: false,
             halted: false,
             wake_ok: false,
+            refetch: false,
             stall: 0,
             switch_end: 0,
             line: crate::schedule::NEVER,
@@ -163,6 +171,8 @@ mod tests {
         // HALT, far enough not to be reached by stepping from 0100, then
         // LD A,(8000); then EI, NOP.
         rom[0x7000..0x7006].copy_from_slice(&[0x76, 0xFA, 0x00, 0x80, 0xFB, 0x00]);
+        // STOP with INC A as its second byte, then NOPs.
+        rom[0x7100..0x7102].copy_from_slice(&[0x10, 0x3C]);
         let emu = crate::tests::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         for i in 0..0x100 {
@@ -508,5 +518,167 @@ mod tests {
         assert!(!emu.hw.cpu.halted());
         assert_eq!(emu.mem.vram[0], 0);
         assert_eq!(emu.peek(0xFF55), 0x01);
+    }
+
+    /// Sets PC to the STOP at 7100 with the speed switch armed (KEY1 bit 0,
+    /// no P1 line selected, IE = 0) and A = 1.
+    fn arm_stop(emu: &mut Emulator) {
+        write(emu, 0xFF00, 0x30);
+        write(emu, 0xFF4D, 0x01);
+        emu.hw.sys.ie = 0;
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x7100;
+        r.a = 1;
+        emu.hw.cpu.set_registers(r);
+    }
+
+    /// Steps until PC leaves `pc`: the length of that step.
+    fn step_until_pc_moves(emu: &mut Emulator, pc: u16) -> u64 {
+        for _ in 0..200_000 {
+            let d = step(emu);
+            if emu.hw.cpu.registers().pc != pc {
+                return d;
+            }
+        }
+        panic!("pc stuck");
+    }
+
+    /// Starts an HBlank transfer of `len` (FF55 bits 0-6) in mode 2 and
+    /// steps NOPs until that line's HBlank trigger falls in STOP's first
+    /// M-cycle, then runs the STOP (a speed switch, nothing pending).
+    fn stop_on_trigger(emu: &mut Emulator, len: u8) {
+        // A mode-0 start, then the next line's (456 dots on).
+        while emu.peek(0xFF41) & 3 != 0
+            || !(1..=140).contains(&emu.peek(0xFF44))
+            || emu.hw.sys.ppu.mode0_start().is_none()
+        {
+            step(emu);
+        }
+        let t = emu.hw.sys.ppu.mode0_start().unwrap() + 456 + super::HBLANK_DELAY;
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x80 | len);
+        let m = emu.hw.sys.hot.mcycle as u64;
+        while emu.clock() + m < t {
+            step(emu);
+        }
+        assert!(emu.clock() < t);
+        arm_stop(emu);
+        step(emu);
+    }
+
+    #[test]
+    fn a_block_due_in_stops_first_mcycle_runs_in_the_halt_to_double_speed() {
+        // gambatte CGB C `dma/hdma_late_m3speedchange_{hdma5,inc,
+        // read_hdmadst00}_scx1_2`, `hdma_transition_speedchange_hdmalen*`:
+        // the block runs in the halt and ends the transfer (FF55 bit 7
+        // set, length kept), and STOP's second byte runs as an opcode.
+        let emu = setup(0x91, 0x80);
+        stop_on_trigger(emu, 0x01);
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.peek(0xFF55), 0x81);
+        step_until_pc_moves(emu, 0x7101);
+        assert_eq!(emu.hw.cpu.registers().pc, 0x7102);
+        assert_eq!(emu.hw.cpu.registers().a, 2);
+        // Ended: no block on the next lines.
+        let t0 = emu.clock();
+        while emu.clock() < t0 + 3 * 456 {
+            assert_eq!(step(emu), 2);
+        }
+        assert_eq!(emu.mem.vram[16], 0);
+    }
+
+    #[test]
+    fn a_block_due_in_stops_first_mcycle_runs_at_the_wake_up_to_single_speed() {
+        // gambatte CGB C `dma/hdma_late_m3speedchange_*_ds_2`,
+        // `hdma_transition_speedchange_ldaaimm_scx1_ds`: the block runs
+        // at the wake-up, before STOP's second byte runs as an opcode, and
+        // its stall is one M-cycle shorter (`tima_scx1_ds_{3,4}`).
+        let emu = setup(0x91, 0x80);
+        // To double speed first (no transfer active).
+        arm_stop(emu);
+        step(emu);
+        step_until_pc_moves(emu, 0x7102);
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        stop_on_trigger(emu, 0x00);
+        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.mem.vram[0], 0);
+        assert_eq!(emu.peek(0xFF55), 0x00);
+        let d = step_until_pc_moves(emu, 0x7101);
+        assert_eq!(emu.hw.cpu.registers().a, 2);
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.peek(0xFF55), 0xFF);
+        // The stall (1 + 8 M-cycles, less one), then INC A.
+        assert_eq!(d, 4 * 8 + 4);
+    }
+
+    /// Steps the speed-switch halt until `pred`, then ends it at the next
+    /// M-cycle boundary at or after `at(clock)`.
+    fn end_switch_halt(emu: &mut Emulator, at: impl Fn(&Emulator) -> Option<u64>) {
+        for _ in 0..200_000 {
+            if let Some(w) = at(emu) {
+                emu.hw.sys.vdma.switch_end = w as u32;
+                return;
+            }
+            step(emu);
+        }
+        panic!("no wake-up point");
+    }
+
+    #[test]
+    fn the_speed_switch_countdown_wakes_into_a_block_in_the_hblank() {
+        // gambatte `intevent_unhalt` (CGB C capture
+        // `dma/hdma_m3speedchange_late_m0wakeup_1`): a switch begun
+        // outside the HBlank whose countdown ends in it starts a block.
+        let emu = setup(0x91, 0x80);
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x80);
+        arm_stop(emu);
+        step(emu);
+        end_switch_halt(emu, |e| {
+            let m0 = e.hw.sys.ppu.mode0_start()?;
+            let c = e.clock();
+            (e.peek(0xFF41) & 3 == 0 && c > m0 + 40).then_some(c)
+        });
+        for _ in 0..3 {
+            step(emu);
+        }
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.peek(0xFF55), 0xFF);
+    }
+
+    #[test]
+    fn an_hblank_in_the_speed_switch_wake_up_mcycle_starts_no_block() {
+        // SameBoy clears `halted` after the wake-up M-cycle (CGB C capture
+        // `dma/hdma_m0speedchange_late_m3wakeup_scx2_2`): a trigger inside
+        // it is lost, as in the halt.
+        let emu = setup(0x91, 0x80);
+        // Begun in the HBlank (no wake-up block): 2 blocks, the first now.
+        while emu.peek(0xFF41) & 3 != 2 || emu.peek(0xFF44) == 0 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x81);
+        step_to_stall(emu);
+        assert_eq!(emu.mem.vram[..16], block(0));
+        arm_stop(emu);
+        step(emu);
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        // Wake up 1 clock before a trigger (double speed: it falls in the
+        // wake-up M-cycle).
+        end_switch_halt(emu, |e| {
+            let t = e.hw.sys.ppu.mode0_start()? + 456 + super::HBLANK_DELAY;
+            let c = e.clock();
+            (t - 1 > c + 8 && t - 1 < c + 16 && (t - 1 - c).is_multiple_of(2)).then_some(t - 1)
+        });
+        let t0 = emu.clock();
+        while emu.clock() < t0 + 100 {
+            step(emu);
+        }
+        assert_eq!(emu.mem.vram[16], 0);
+        assert_eq!(emu.peek(0xFF55), 0x00);
     }
 }
