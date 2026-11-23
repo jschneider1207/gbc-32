@@ -360,8 +360,8 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Result:** 35 fail->pass, 0 regressions (`bgtilemap` 20 incl. 4 `_ds`,
   `scx_during_m3` 11, Mealybug `m3_lcdc_bg_map_change2`,
   `m3_lcdc_win_map_change2`, `m3_scx_high_5_bits{,_change2}`).
-- **Blocked on code size.** thumbv7em `.text` +976 B over 01bca59-era
-  95,260 B (96,236 > 96,000), with `hold_fetch` 480, `render_held` 346,
+- **Blocked on code size.** thumbv7em `.text` +864 B over the branch point's
+  95,260 B (96,124 > 96,000), with `hold_fetch` 480, `render_held` 346,
   `render` +46, `latch` +72, `draw` 146 -> 158 (> 155 budget). The `draw`
   and `latch` growth is layout, not code: `Memory` is `repr(C)` and the
   hold sits in a widened `bg_pairs` (`BgPairs`), shifting later fields'
