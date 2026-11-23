@@ -41,7 +41,7 @@ const REQUIRE_ENV: &str = "GBC_REQUIRE_TEST_DATA";
 /// byte in every case, and none of its 10 cases sets IE or IF, so all 1000
 /// have nothing pending. The human's decision (2026-11-22; ADR 0020): run
 /// all 1000 and compare everything except the two things the length rule
-/// changes by definition, PC and the bus-cycle list. Registers A-L, F, SP,
+/// changes by definition: the bus-cycle list is skipped and PC must be SST's plus one. Registers A-L, F, SP,
 /// IME, EI and the final RAM are still compared. The exemption is pinned
 /// (file and case count) so it can't silently grow to other opcodes.
 const STOP_FILE: &str = "10";
@@ -170,7 +170,16 @@ fn run_case(case: &Case, bus: &mut FlatBus, exempt: bool) -> (Option<String>, Op
     let mut state = Vec::new();
     let (mut got, want) = (cpu.registers(), case.end.registers());
     if exempt {
-        // See [`STOP_FILE`]: PC and the cycle list are not compared.
+        // See [`STOP_FILE`]: the cycle list is not compared, and PC is
+        // checked against the hardware length, not SST's. SST expects a
+        // 1-byte STOP; with nothing pending it is 2 bytes (SameBoy
+        // `stop()`), and no case has an interrupt pending, so PC must be
+        // exactly one more than SST's (M5 review).
+        assert_eq!(
+            got.pc,
+            want.pc.wrapping_add(1),
+            "STOP must skip its second byte"
+        );
         got.pc = want.pc;
     }
     if got != want {
