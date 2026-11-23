@@ -174,3 +174,60 @@ and the exclude were drafted as a diff for the human, who approved them
 in advance ("You have my ok", 2026-11-22); committed in 8543723 after
 validation (10/10 undef_ops pass in their own group, none left in
 `gambatte-cgb`).
+
+## Amendment 3 (2026-11-22): the `_outaudio0/1` rule
+
+**Rule.** With the APU in place (M6, ADR 0021), the audio results are
+judged instead of `unsupported`. A group with a `gambatte = true` check
+captures the last frame of its run: every run call before
+`limit - FRAME_CLOCKS` (the exit's clock limit minus one frame) gets an
+empty audio buffer, one call ends exactly there, and from then on the
+calls share one buffer of `(FRAME_CLOCKS / AUDIO_SAMPLE_CLOCKS) + 2` = 550
+slots (ADR 0021 section 10). The window is therefore `[start, end)` with
+`start` the first clock at or past `limit - FRAME_CLOCKS` and `end` where
+the run stopped (at or just past `limit`); the core's window grid restarts
+at `start` (ADR 0021 section 9). Silent means every returned sample
+equals the first one, both sides compared, at any constant level (DC is
+silence). `audio0` passes when silent, `audio1` when not. A ROM with both
+an audio result and a reference PNG must pass both.
+
+**Failure modes, all strict.** A run that never reached the last frame,
+or ended inside it (`end < limit`, e.g. an `ld_b_b` exit or a crash),
+fails, as does an empty capture. Filling all 550 slots means samples may
+have been dropped (the core would stop on `AUDIO_BUFFER_FULL` and the
+rest of the frame would get no room), which cannot happen at 128-clock
+windows and is a runner error (exit 2).
+
+**Deviations from testrunner** (read for the rule only, nothing copied):
+- *Window position.* testrunner runs chunks of up to 35,112 two-clock
+  samples (`runFor` returns early at each video frame) while
+  `samplesLeft = 35112 * 15` stays >= 0, so about 16 frames, and judges
+  the first 35,112 entries of the buffer after the last chunk. When that
+  chunk ended early at a frame boundary, the tail of the buffer still
+  holds the previous chunk's samples. We judge exactly the last
+  70,224 clocks of the manifest's run (`run_frames = 15`), the same run
+  the screen verdict uses, and only samples produced in it. Same length,
+  a frame earlier, no stale data.
+- *Resolution.* testrunner's samples are 2-clock points; ours are
+  128-clock averages (ADR 0021 section 8). ADR 0021 section 10 names the
+  blind spot (a tone whose period divides 128 clocks averages to a
+  constant). **Cross-check (session of this amendment):** in a scratch
+  worktree with `SAMPLE_PERIOD_LOG2 = 1` (2-clock windows, Gambatte's
+  resolution) all 131 `_outaudio` verdicts were identical to the 32,768 Hz
+  run (98 pass, 33 fail in both). At 2-clock windows the run's overshoot
+  past `limit` (up to one instruction) can span several windows, so that scratch run needed 64 slots of
+  headroom instead of 2 (it reported the full-buffer runner error with
+  2); at 128-clock windows the overshoot is under one window. So no
+  test-only rate option is needed for the pinned ROMs.
+
+**Results (`--filter 'gambatte/**'`, 3352 group/ROM runs):** before,
+2599 pass, 622 fail, 0 crash, 131 unsupported; after, 2697 pass,
+655 fail, 0 crash, 0 unsupported. The 131 audio ROMs: 98 pass, 33 fail.
+No other ROM's verdict changed (all 3221 compared). With this rule no
+check produces `unsupported` any more; the status stays in the contract
+for future check kinds.
+
+**Review.** This changes the runner's pass/fail logic (AGENTS.md
+"Independent review", rule 2). The M6 milestone test-integrity review
+covers it; no result from the audio rule is relied on (baseline update,
+gate, milestone tag) until then.

@@ -222,7 +222,7 @@ budget); nothing merges to `main` before step 2's human decision.
    rebaseline in the same commit. Budget: APU <= 200k x86 Ir/frame on
    worst-case; if over, the ADR 0021 options in order. Run `check-bench.sh`
    alone.
-9. [ ] **romtest audio rule** (`_outaudio0/1`, 131 ROMs): empty buffer until
+9. [x] (660cabd) **romtest audio rule** (`_outaudio0/1`, 131 ROMs): empty buffer until
    the last frame, then 550 slots; silent = all returned samples equal
    (Gambatte testrunner). Cross-check once in a scratch worktree with
    `SAMPLE_PERIOD_LOG2 = 1`: all 131 verdicts must match the 32 kHz run
