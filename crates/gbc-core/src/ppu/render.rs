@@ -59,6 +59,7 @@
 use super::objects::{LineObjects, MAX_PER_LINE};
 use super::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::DmgPalettes;
+use crate::memory::BgPairs;
 
 const W: usize = SCREEN_WIDTH;
 
@@ -182,6 +183,7 @@ pub(crate) fn cgb_color(ram: &[u8; 64], i: usize) -> u16 {
 }
 
 /// Memory the renderer reads.
+#[derive(Clone, Copy)]
 pub(crate) struct Sources<'a> {
     /// Both VRAM banks; compatibility mode only reads bank 0.
     pub(crate) vram: &'a [u8; 0x4000],
@@ -190,8 +192,9 @@ pub(crate) struct Sources<'a> {
     /// on a line OAM DMA touches (`Ppu::fix_attrs`); else they read `oam`.
     pub(crate) attrs: Option<&'a [(u8, u8); MAX_PER_LINE]>,
     pub(crate) colors: &'a Colors,
-    /// Per BG palette, [`pair_table`] of `colors.bg` (kept in `Memory`).
-    pub(crate) pairs: &'a [[u32; 16]; 8],
+    /// Per BG palette, [`pair_table`] of `colors.bg`, and the held fetches
+    /// ([`Renderer::render_held`]).
+    pub(crate) pairs: &'a BgPairs,
 }
 
 /// Row `ly` (0-143) of a frame, for [`Renderer::render`].
@@ -281,6 +284,12 @@ impl Renderer {
         self.wy_triggered
     }
 
+    /// The window state at the last pixel drawn: active, its start pixel
+    /// and the pixels cut from its first tile.
+    pub(crate) const fn window(&self) -> (bool, u8, u8) {
+        (self.window_active, self.window_start, self.window_skip)
+    }
+
     /// Start of line `ly`'s pixel output, with SCX as of that moment and
     /// the objects the OAM scan selected.
     pub(crate) fn start_line(
@@ -329,6 +338,11 @@ impl Renderer {
     ) {
         let x1 = x1.min(W);
         if x0 >= x1 {
+            return;
+        }
+        if usize::from(src.pairs.hold[1].0) > x0
+            && self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank)
+        {
             return;
         }
         if self.obj_dirty {
@@ -389,6 +403,49 @@ impl Renderer {
             // time; tiles with no object pixel take the plain path.
             self.bg_span::<true>(out, &obj_buf[x0 + 8..x1 + 8], x0, win_from, regs, src);
         }
+    }
+
+    /// [`Renderer::render`] while pixels the fetcher fetched before a
+    /// map-select or SCX write in mode 3 are still to be drawn
+    /// (`Ppu::hold_fetch`): each held part with the LCDC bits 3 and 6 and
+    /// the SCX its tiles were fetched with, then the rest with `regs`;
+    /// false for a span inside one held part, drawn with its registers
+    /// already. Out of line and cold: only after such a write.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn render_held(
+        &mut self,
+        row: &mut [u16; W],
+        mut x0: usize,
+        x1: usize,
+        regs: &Regs,
+        src: &Sources,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut [u8; OBJ_BUF_LEN],
+    ) -> bool {
+        const MAPS: u8 = LCDC_BG_MAP | LCDC_WIN_MAP;
+        for &(end, lcdc, scx) in &src.pairs.hold {
+            let end = usize::from(end);
+            if end <= x0 {
+                continue;
+            }
+            let held = Regs {
+                lcdc: (regs.lcdc & !MAPS) | (lcdc & MAPS),
+                scx,
+                ..*regs
+            };
+            // Inside one held part with its registers (the calls below):
+            // drawn as usual.
+            if x1 <= end && held.lcdc == regs.lcdc && scx == regs.scx {
+                return false;
+            }
+            let to = end.min(x1);
+            self.render(row, x0, to, &held, src, obj_buf, obj_rank);
+            x0 = to;
+        }
+        self.render(row, x0, x1, regs, src, obj_buf, obj_rank);
+        true
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`
@@ -809,7 +866,7 @@ fn fill_tiles<const MIX: bool>(
             // No object pixel: two pixels per lookup (and, merged by the
             // compiler on little-endian targets, per store).
             None => {
-                let pairs = &src.pairs[pal];
+                let pairs = &src.pairs.pal[pal];
                 for (j, p) in tile.as_chunks_mut::<2>().0.iter_mut().enumerate() {
                     let v = pairs[usize::from((w >> (12 - 4 * j)) as u8 & 15)];
                     *p = [v as u16, (v >> 16) as u16];
@@ -1057,7 +1114,10 @@ mod tests {
                 oam: &self.oam,
                 attrs: None,
                 colors: &self.colors,
-                pairs: &core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
+                pairs: &BgPairs {
+                    pal: core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
+                    hold: [(0, 0, 0); 2],
+                },
             };
             self.r.render(
                 row,

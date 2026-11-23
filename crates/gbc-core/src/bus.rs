@@ -793,6 +793,7 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu.flush(now, self.mem, self.frame);
+                s.ppu.hold_fetch(now, self.mem, reg, value);
                 // Turning the LCD off outside mode 0 starts an HBlank
                 // transfer block (SameBoy `GB_lcd_off`).
                 if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
@@ -846,6 +847,9 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to_call(now.max(at));
                 let s = &mut *self.sys;
                 s.ppu.flush(at, self.mem, self.frame);
+                if reg == 0x43 {
+                    s.ppu.hold_fetch(at, self.mem, reg, value);
+                }
                 self.mem.io[reg] = value;
                 match reg {
                     0x47..=0x49 => s.ppu.write_palette(
@@ -853,7 +857,7 @@ impl Ctx<'_, '_> {
                         value,
                         &s.config.dmg_palettes,
                         s.cgb_mode,
-                        &mut self.mem.bg_pairs,
+                        &mut self.mem.bg_pairs.pal,
                     ),
                     0x4A => s.ppu.check_wy_at(now, self.mem),
                     _ => {}
@@ -2225,16 +2229,19 @@ mod tests {
         }
     }
 
-    /// A SCX write in mode 3 moves the BG from the pixel being output at
-    /// the access on (`GB_CONFLICT_READ_OLD`).
+    /// A SCX write in mode 3 (landing at the access, `GB_CONFLICT_READ_OLD`)
+    /// moves the BG from the first tile the fetcher has not read the map
+    /// entry of yet (`Ppu::hold_fetch`).
     #[test]
     fn mid_mode3_scx_write_splits_the_line() {
         let emu = striped_bg();
         let gray = crate::DmgPalettes::GRAYSCALE.bg;
-        // The write at t = 151: pixels 0-54 are out with SCX = 0.
+        // The write at t = 151: pixels 0-54 are out with SCX = 0, tile 6
+        // (pixels 48-55) is in the FIFO and tile 7 (56-63) was fetched with
+        // SCX = 0 too.
         let row = write_in_mode3(emu, 7, 151, 0xFF43, 8);
         for (x, &p) in row.iter().enumerate() {
-            let scx = if x < 55 { 0 } else { 8 };
+            let scx = if x < 64 { 0 } else { 8 };
             let want = if ((x + scx) / 8) % 2 == 0 {
                 gray[3]
             } else {

@@ -28,7 +28,7 @@ pub struct Memory {
     /// (`ppu::render::pair_table`), kept up to date on palette writes so
     /// the renderer never builds one. Palette 0 in DMG compatibility mode
     /// is BGP's colors.
-    pub(crate) bg_pairs: [[u32; 16]; 8],
+    pub(crate) bg_pairs: BgPairs,
     /// 8 banks of 4 KiB (CGB). Bank 0 at C000, banks 1-7 at D000 (SVBK).
     pub(crate) wram: [u8; 0x8000],
     /// 2 banks of 8 KiB (CGB, VBK).
@@ -86,7 +86,10 @@ impl Memory {
             obj_rank: [0; OBJ_BUF_LEN],
             bg_pal: [0; 64],
             obj_pal: [0; 64],
-            bg_pairs: [[0; 16]; 8],
+            bg_pairs: BgPairs {
+                pal: [[0; 16]; 8],
+                hold: [(0, 0, 0); 2],
+            },
             apu: Apu::new(),
         }
     }
@@ -106,13 +109,29 @@ impl Memory {
         self.obj_rank.fill(0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
-        self.bg_pairs = [[0; 16]; 8];
+        self.bg_pairs.pal = [[0; 16]; 8];
         self.apu = Apu::new();
     }
 }
 
+/// Per BG palette, `ppu::render::pair_table` of its colors (kept here and
+/// rebuilt when the palette changes), and the renderer's held fetches.
+/// Both reach `Renderer::render` through the one `Sources::pairs` pointer
+/// (a second pointer would grow `Ppu::draw` past its code-size budget).
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct BgPairs {
+    pub(crate) pal: [[u32; 16]; 8],
+    /// Pixels of the current line the fetcher had already fetched with
+    /// older map-select (LCDC.3/6) and SCX values when those were written
+    /// in mode 3 (`ppu::Ppu::hold_fetch`): `(end, LCDC, SCX)`, the pixels
+    /// before `end` drawn with that LCDC's bits 3 and 6 and that SCX. In
+    /// `end` order; `[1]` is the last; `[1].0 == 0`: none.
+    pub(crate) hold: [(u8, u8, u8); 2],
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::Memory;
     use crate::apu::Apu;
 
@@ -151,7 +170,8 @@ mod tests {
             obj_pal,
         ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
-        assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
+        assert!(bg_pairs.pal.as_flattened().iter().all(|&w| w == 0));
+        assert!(bg_pairs.hold.iter().all(|&h| h == (0, 0, 0)));
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).

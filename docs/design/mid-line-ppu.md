@@ -336,3 +336,39 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Regression guard.** The fast path must stay bit-identical. The
   fingerprint diff on every step is the proof. Any differing ROM without
   a mid-line fetch-register write means the step is wrong.
+
+## 7. Implementation notes (step 1, branch `ppu-midline-1`, WIP)
+
+- **Held registers, not held tile data.** Instead of a `Prefetch` of
+  fetched index/attr/planes, `Ppu::hold_fetch` (cold) records up to two
+  `(end pixel, LCDC, SCX)` parts: the pixels before `end` are drawn with
+  that LCDC's bits 3/6 and that SCX. VRAM is CPU-blocked in mode 3, so
+  re-reading it at draw time gives what the fetcher read. `Renderer::render`
+  splits a span at the part ends (`render_held`, cold); no per-pixel or
+  per-tile change, one byte test per span on the fast path. Two parts
+  compose consecutive writes (tile j+1 fetched between two writes keeps
+  the values between them). Steps C/D can store the data registers per
+  part the same way.
+- **Fetch frontier.** Tile j (in the FIFO) always keeps the old values;
+  tile j+1 too once `FETCH_SAMPLED` dots of tile j were output, or when an
+  object/window stall at or after tile j's first pixel has run (BG fetch
+  completed in the stall). Discarded SCX & 7 pixels count as output from
+  mode-3 dot 12. A held part never crosses the window's start pixel.
+- **Calibration:** `FETCH_SAMPLED = 1` (single speed). 0 loses 8 of the
+  35 flips; 2 loses the 4 Mealybug flips but gains 7 `scx_during_m3_ds`
+  ROMs: double speed wants one dot more, which is step D's landing.
+- **Result:** 35 fail->pass, 0 regressions (`bgtilemap` 20 incl. 4 `_ds`,
+  `scx_during_m3` 11, Mealybug `m3_lcdc_bg_map_change2`,
+  `m3_lcdc_win_map_change2`, `m3_scx_high_5_bits{,_change2}`).
+- **Blocked on code size.** thumbv7em `.text` +976 B over 01bca59-era
+  95,260 B (96,236 > 96,000), with `hold_fetch` 480, `render_held` 346,
+  `render` +46, `latch` +72, `draw` 146 -> 158 (> 155 budget). The `draw`
+  and `latch` growth is layout, not code: `Memory` is `repr(C)` and the
+  hold sits in a widened `bg_pairs` (`BgPairs`), shifting later fields'
+  offsets out of Thumb-2 immediates. Moving the hold to the end of
+  `Memory` needs a second `Sources` pointer (+16 B in `draw`, also over
+  155). `Hw` has no room (+6 B in `Ppu` makes it 872 > 864). Options for
+  the human: raise `.text` (design section 6 asks 97,000) and `draw`
+  (~175); or a cheaper "draw ahead" variant (at the write, draw the held
+  pixels at once with the old registers: ~500 B, no storage, but palette,
+  LCDC.0/1 and WX writes within the next <= 16 pixels land late).

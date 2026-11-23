@@ -249,6 +249,13 @@ pub(crate) struct LineTiming {
 
 const NO_STALL: u8 = 0xFF;
 
+/// Dots after a tile's first pixel is output at which the next tile's
+/// map entry has been read (GET_TILE T1 ran in the dot before): a
+/// map-select or SCX write from then on misses that tile
+/// ([`Ppu::hold_fetch`]). SameBoy pops a pixel, then advances the fetcher,
+/// in the same dot.
+const FETCH_SAMPLED: i32 = 1;
+
 impl LineTiming {
     const NONE: Self = Self {
         start: NEVER,
@@ -1027,6 +1034,81 @@ impl Ppu {
         }
     }
 
+    /// After [`Ppu::flush`], before a write at clock `now` of `value` to
+    /// LCDC (`reg` 0x40) or SCX (0x43): if it changes the map select
+    /// (LCDC.3, LCDC.6) or SCX in mode 3, the tiles the fetcher already has
+    /// keep the old values (`Memory::hold`). The fetcher reads them at each
+    /// tile's GET_TILE step (SameBoy `advance_fetcher_state_machine`, MIT;
+    /// Pan Docs: Pixel FIFO). When pixel `x` is the next out, the tile it
+    /// belongs to is in the FIFO, and the next one is fetched from the dot
+    /// the first pixel of that tile is output (its map entry is read
+    /// `FETCH_SAMPLED` dots later) or completely during an object or window
+    /// stall at or after that pixel (SameBoy finishes the BG fetch before
+    /// fetching an object). `docs/design/mid-line-ppu.md` step 1.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn hold_fetch(&mut self, now: u64, mem: &mut Memory, reg: usize, value: u8) {
+        let lt = &self.line;
+        let a = self.at(now);
+        let t = a.t as i32;
+        let changed = if reg == 0x40 {
+            (value ^ self.lcdc) & 0x48 != 0
+        } else {
+            value != mem.io[0x43]
+        };
+        // In mode 3 (as `mode3_pixel`; LCD off or a line without one never
+        // matches `lt.start`); `flush` drew up to the pixel being output.
+        if !changed
+            || lt.start != now.wrapping_sub(u64::from(a.t))
+            || !(i32::from(lt.mode3)..i32::from(lt.end)).contains(&t)
+        {
+            return;
+        }
+        let x = i32::from(self.drawn);
+        let first_pixel = i32::from(lt.first_pixel);
+        // Position in the line, the SCX & 7 pixels discarded at the start
+        // counted like output pixels: they are popped from 12 dots into
+        // mode 3, before the first pixel.
+        let pos = if t < first_pixel { t - first_pixel } else { x };
+        let (active, start, skip) = self.renderer.window();
+        let phase =
+            (pos + if active {
+                i32::from(skip) - i32::from(start)
+            } else {
+                first_pixel - i32::from(lt.mode3) - 12
+            }) & 7;
+        // Screen x of the first pixel of the tile being output.
+        let tile = pos - phase;
+        let stalled = t >= first_pixel
+            && lt.stalls[..usize::from(lt.n_stalls)]
+                .iter()
+                .any(|&(sx, _)| (tile..=x).contains(&i32::from(sx)));
+        let mut end = tile
+            + if phase >= FETCH_SAMPLED || stalled {
+                16
+            } else {
+                8
+            };
+        // The window's first tile is fetched after it starts (from WX).
+        let wx = mem.io[0x4B];
+        if !active && self.renderer.wy_triggered() && self.lcdc & 0x20 != 0 && wx <= 166 {
+            let s = i32::from(wx.saturating_sub(7));
+            if s >= x {
+                end = end.min(s);
+            }
+        }
+        if end <= x {
+            return;
+        }
+        let seg = (end.min(176) as u8, self.lcdc, mem.io[0x43]);
+        let hold = &mut mem.bg_pairs.hold;
+        if i32::from(hold[1].0) <= x {
+            *hold = [(0, 0, 0), seg];
+        } else if seg.0 > hold[1].0 {
+            *hold = [hold[1], seg];
+        }
+    }
+
     /// A BGP (FF47), OBP0 (FF48) or OBP1 (FF49) write: resolves that
     /// palette's colors now (ADR 0013), after the bus has flushed. In CGB
     /// mode BGP has no effect on colors (Pan Docs: FF47 BGP, "Non-CGB
@@ -1059,7 +1141,7 @@ impl Ppu {
         let (pal, c, i) = ((index >> 3) & 7, (index >> 1) & 3, index & 0x3E);
         let col = u16::from_le_bytes([mem.bg_pal[i], mem.bg_pal[i + 1]]) & 0x7FFF;
         self.colors.bg[pal][c] = col;
-        set_pair_color(&mut mem.bg_pairs[pal], c, col);
+        set_pair_color(&mut mem.bg_pairs.pal[pal], c, col);
     }
 
     /// An OCPD write (CGB mode) to OBJ palette RAM byte `index` (0-63),
@@ -1104,7 +1186,7 @@ impl Ppu {
         if cgb {
             self.colors.set_cgb(&mem.bg_pal, &mem.obj_pal);
         }
-        for (t, pal) in mem.bg_pairs.iter_mut().zip(&self.colors.bg) {
+        for (t, pal) in mem.bg_pairs.pal.iter_mut().zip(&self.colors.bg) {
             *t = pair_table(pal);
         }
     }
@@ -1126,7 +1208,7 @@ impl Ppu {
     /// first line after LCD enable). Out of line: it runs once per line,
     /// and inlined, its register loads were hoisted into every sync.
     #[inline(never)]
-    fn latch(&mut self, l: u32, first: bool, mem: &Memory) {
+    fn latch(&mut self, l: u32, first: bool, mem: &mut Memory) {
         // SameBoy checks at the line start and on WY/LCDC writes (bus
         // `write_ppu` calls `check_wy` too); here before the window's
         // start is fixed.
@@ -1208,6 +1290,7 @@ impl Ppu {
         t.n_stalls = k as u8;
         t.end = first_pixel + 160 + total;
         self.drawn = 0;
+        mem.bg_pairs.hold[1].0 = 0;
         self.renderer.start_line(l as u8, scx, &objs, order);
         self.attr_on = false;
         if aware {
@@ -2138,6 +2221,94 @@ mod tests {
         }
     }
 
+    /// A rig in DMG compatibility mode with BG color 0 = 1 and color 3 = 4,
+    /// tile 0 color 0 and tile 1 color 3 (LCDC.4 = 1), map 9800 all tile 0
+    /// and map 9C00 all tile 1.
+    fn fetch_rig(on: u64) -> Rig {
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        let dmg = DmgPalettes {
+            bg: [1, 2, 3, 4],
+            obj0: [5, 6, 7, 8],
+            obj1: [9, 10, 11, 12],
+        };
+        r.mem.io[0x47] = 0xE4;
+        r.ppu.resolve_palettes(&mut r.mem, &dmg, false);
+        r.mem.vram[16..32].fill(0xFF);
+        r.mem.vram[0x1C00..0x2000].fill(1);
+        r
+    }
+
+    /// A mid-line LCDC or SCX write at clock `now`, as `Ctx::write_ppu`
+    /// does it.
+    fn write_fetch_reg(r: &mut Rig, now: u64, reg: usize, value: u8) {
+        r.sync(now);
+        r.ppu.flush(now, &mut r.mem, &mut r.frame);
+        r.ppu.hold_fetch(now, &mut r.mem, reg, value);
+        if reg == 0x40 {
+            r.ppu.write_lcdc(now, value, &mut r.iflags, false);
+        } else {
+            r.mem.io[reg] = value;
+        }
+    }
+
+    /// The first pixel of line `ly` (from 0) with color `c`, after `from`.
+    fn first_of(r: &Rig, ly: usize, from: usize, c: u16) -> Option<usize> {
+        let row = &r.frame[ly * SCREEN_WIDTH..][..SCREEN_WIDTH];
+        (from..SCREEN_WIDTH).find(|&x| row[x] == c)
+    }
+
+    #[test]
+    fn map_select_write_misses_the_tiles_already_fetched() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // An object at screen x 24 on line 3 (stall at pixel 24; OBJ off,
+        // tile 0: no object pixel).
+        r.mem.oam[..4].copy_from_slice(&[16 + 3, 32, 0, 0]);
+        r.ppu.oam_written();
+        // SCX = 0: the first pixel is out at line position 96, pixel x at
+        // 96 + x. Line 1: write at pixel 20, 4 dots into tile 2: tile 3's
+        // map entry was read too, the new map shows from pixel 32. Line 2:
+        // at pixel 24, the dot tile 3's first pixel is output: tile 4 is
+        // not fetched yet, the new map from pixel 32. Line 3: during the
+        // stall at pixel 24: tile 4 is fetched in the stall, from 40.
+        for (ly, t, want) in [(1u32, 96u64 + 20, 32), (2, 96 + 24, 32)] {
+            let l = clock(on, 0, ly * LINE);
+            write_fetch_reg(&mut r, l + t, 0x40, 0x99);
+            write_fetch_reg(&mut r, l + 300, 0x40, 0x91);
+            r.sync(l + u64::from(LINE));
+            assert_eq!(first_of(&r, ly as usize, 0, 4), Some(want), "line {ly}");
+        }
+        let l3 = clock(on, 0, 3 * LINE);
+        let t = (l3 + 96..)
+            .find(|&t| {
+                r.sync(t);
+                r.ppu.mode3_pixel(t) == Some((3, 24))
+            })
+            .unwrap();
+        assert_eq!(r.ppu.mode3_pixel(t + 3), Some((3, 24)), "in the stall");
+        write_fetch_reg(&mut r, t + 3, 0x40, 0x99);
+        r.sync(l3 + u64::from(LINE));
+        assert_eq!(first_of(&r, 3, 0, 4), Some(40));
+    }
+
+    #[test]
+    fn scx_write_misses_the_tiles_already_fetched() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // Map 9800 columns 3 and 5: tile 1.
+        r.mem.vram[0x1800 + 3] = 1;
+        r.mem.vram[0x1800 + 5] = 1;
+        // Line 1, pixel 20: SCX 0 -> 8. Tiles 2 and 3 (columns 2, 3) were
+        // fetched with SCX 0; from pixel 32 the map column is 8 + x.
+        let l = clock(on, 0, LINE);
+        write_fetch_reg(&mut r, l + 96 + 20, 0x43, 8);
+        r.sync(l + 300);
+        r.mem.io[0x43] = 0;
+        r.sync(l + u64::from(LINE));
+        assert_eq!(first_of(&r, 1, 0, 4), Some(24));
+        assert_eq!(first_of(&r, 1, 24, 1), Some(40));
+    }
+
     #[test]
     fn mode3_pixel_follows_the_stalls() {
         let on = 1000;
@@ -2182,7 +2353,7 @@ mod tests {
                 0x1B,
                 &DmgPalettes::GRAYSCALE,
                 true,
-                &mut r.mem.bg_pairs,
+                &mut r.mem.bg_pairs.pal,
             );
         }
         assert_eq!(r.ppu.colors, before);
