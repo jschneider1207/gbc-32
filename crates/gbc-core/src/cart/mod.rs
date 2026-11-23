@@ -145,12 +145,6 @@ impl core::error::Error for LoadError<'_> {
     }
 }
 
-/// Bytes of cartridge RAM the cartridge uses, from the header. The buffer
-/// passed to [`Emulator::load`](crate::Emulator::load) must be at least
-/// this long; only this many bytes are used (and are the save file, see
-/// [`Emulator::cart_ram`](crate::Emulator::cart_ram)). MBC2's built-in
-/// 512x4-bit RAM counts as 512 bytes. The caller owns this buffer and
-/// persists it (battery saves).
 /// Header byte `at` of `rom` (0 past the end: callers check the length
 /// first).
 ///
@@ -168,6 +162,12 @@ fn rom_byte(rom: Rom<'_>, i: usize) -> u8 {
     rom.get(i).unwrap_or(0xFF)
 }
 
+/// Bytes of cartridge RAM the cartridge uses, from the header. The buffer
+/// passed to [`Emulator::load`](crate::Emulator::load) must be at least
+/// this long; only this many bytes are used (and are the save file, see
+/// [`Emulator::cart_ram`](crate::Emulator::cart_ram)). MBC2's built-in
+/// 512x4-bit RAM counts as 512 bytes. The caller owns this buffer and
+/// persists it (battery saves).
 pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     if rom.len() < MIN_ROM_SIZE {
         return Err(LoadErrorKind::RomTooSmall { len: rom.len() });
