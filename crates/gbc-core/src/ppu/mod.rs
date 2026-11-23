@@ -309,6 +309,14 @@ const WY_LEAD: i32 = 4;
 /// Stall dots kept by an LCDC.5 clear during the window stall: those
 /// before the write's clock plus this (calibrated, step E2).
 const WINDOW_OFF_LEAD: i32 = 0;
+/// Line dot (as `at` counts it) from which the line's sticky WY == LY
+/// check has seen WY ([`Ppu::wy_write`]): line 0, other lines. gambatte
+/// (ppu.cpp `weMasterCheck*LineCycle`, behaviour only) samples line 0 at
+/// its cycle 2 and lines 1-143 at the previous line's cycle 454, 4 dots
+/// earlier relative to the line; SameBoy checks at each line start
+/// (`wy_check`). Calibrated (step E2): one value for all lines, 7 -> 6
+/// flips / 0 regressions, 3-6 -> 2-4 regressions (line 0 ROMs).
+const WY_CHECK_AT: [u32; 2] = [7, 3];
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -1382,6 +1390,21 @@ impl Ppu {
             let l = self.at(now).line;
             if l < LINES {
                 self.check_wy(l, mem);
+            }
+        }
+    }
+
+    /// Before a WY write at clock `now`: once past the line's WY == LY
+    /// check point ([`WY_CHECK_AT`]), the old WY was compared with LY, so a
+    /// match then holds even if the write changes WY before mode 3 (here
+    /// only `latch` and writes check otherwise).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory) {
+        if self.lcd_enabled() {
+            let a = self.at(now);
+            if a.line < LINES && a.t >= WY_CHECK_AT[usize::from(a.line != 0)] {
+                self.check_wy(a.line, mem);
             }
         }
     }
@@ -2633,6 +2656,36 @@ mod tests {
             }
             assert!(due > 2 * 144 * 160, "{due}");
         }
+    }
+
+    /// A WY write after the line's WY == LY check point (`WY_CHECK_AT`)
+    /// doesn't undo the old WY's match (gambatte `window/arg/late_wy_1toFF`).
+    #[test]
+    fn wy_write_after_the_line_check_keeps_the_old_match() {
+        // (line, WY = line, then FF written at dot `t`) -> mode-3 end; the
+        // window at x = 64 stalls 6 dots.
+        let end = |line: u32, t: u32| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, 0, 0xFF);
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4A] = line as u8;
+            r.mem.io[0x4B] = 0x47;
+            // Frame 1: line 0 is not the first line after LCD enable.
+            let l = clock(on, 1, line * LINE);
+            let now = l + u64::from(t);
+            r.sync(now);
+            r.ppu.wy_write(now, &r.mem);
+            r.mem.io[0x4A] = 0xFF;
+            r.ppu.check_wy_at(now, &r.mem);
+            r.sync(l + 455);
+            (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
+        };
+        assert_eq!(end(5, 2), Some(256));
+        assert_eq!(end(5, 3), Some(256 + 6));
+        assert_eq!(end(5, 40), Some(256 + 6));
+        // Line 0 is checked 4 dots later than the others.
+        assert_eq!(end(0, 6), Some(256));
+        assert_eq!(end(0, 7), Some(256 + 6));
     }
 
     /// The window's pixels and line counter follow the same start decision

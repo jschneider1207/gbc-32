@@ -869,6 +869,9 @@ impl Ctx<'_, '_> {
                 } else {
                     s.ppu.flush(at, self.mem, self.frame);
                 }
+                if reg == 0x4A {
+                    s.ppu.wy_write(now, self.mem);
+                }
                 self.mem.io[reg] = value;
                 match reg {
                     0x47..=0x49 => s.ppu.write_palette(
