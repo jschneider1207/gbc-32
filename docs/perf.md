@@ -576,3 +576,63 @@ the working tree has uncommitted changes under `crates/`, `tools/` or
 `Cargo.*` (the new side is the working tree, not HEAD), when the two sides
 have different run counts, and when ROMs fail to load. Use it on commits
 that restructure core timing, which must not change behavior.
+
+## Wall-clock benchmark (Stage 2 reference)
+
+`bench --wall` measures emulated frames per second on the desktop. It is a
+manual tool, not part of the gate: wall time is noisy (min..max spread of
+the runs is printed), unlike the Ir benchmark above.
+
+Run (quiet machine; no valgrind or build alongside):
+
+```
+cargo build --release -p bench
+./target/release/bench --wall [--frames 1200] [--runs 7] [--ghz 4.0] [--root test-roms] [--rom PATH]...
+```
+
+Each workload starts from power-on and runs a fixed 1,200 emulated frames
+(20 s) with the same call pattern as `run_emulation` (one frame per call,
+1,024-slot audio buffer). One warm-up run is discarded, then the median of
+7 timed runs is reported. Host cycles per frame is ns/frame x the nominal
+clock (`--ghz`, default 4.0): it is **not** a counter reading, because turbo
+and the TSC rate make a counter no more exact. Real-time speed is 59.73
+frames/s (16.74 ms per frame, 70,224 clocks), so frames/s / 59.73 is the
+margin over real time.
+
+Workloads (ROMs from `scripts/fetch-test-roms.sh`, hash-pinned; `synth:*`
+are built in memory): cpu_instrs (CPU), cgb_sound (APU), cgb-acid2 (PPU,
+mostly halted), cgb-acid-hell (PPU, objects), mealybug hdma_timing-C and
+same-suite hdma_mode0 (HDMA), and the synthetic worst-case, dma-storm,
+cgb-raster and apu-writes. Test ROMs that finish early idle (halted or
+spinning) for the rest of the run, so their numbers are a floor on cost,
+not a stress figure; synth:worst-case is the upper bound.
+
+Machine: Intel Core i7-4790K, 4.0 GHz base (turbo 4.4), 8 threads, WSL2
+(Linux 6.18 microsoft-standard), Windows host, release build
+(`opt-level` per workspace profile), commit 8ba9c4c, 2026-11-22.
+
+**Baseline** (Mcycles/frame at the nominal 4.0 GHz):
+
+| workload | stresses | frames/s | ns/frame | Mcycles/frame | min..max ns/frame |
+|---|---|---:|---:|---:|---|
+| cpu_instrs | CPU | 7554 | 132376 | 0.530 | 126715..173347 |
+| cgb_sound | APU | 13708 | 72950 | 0.292 | 69910..78732 |
+| cgb-acid2 | PPU, halted idle | 22051 | 45349 | 0.181 | 44188..47916 |
+| cgb-acid-hell | PPU, objects | 4884 | 204769 | 0.819 | 201100..220435 |
+| hdma_timing-C | HDMA | 10654 | 93857 | 0.375 | 89719..97328 |
+| hdma_mode0 | HDMA | 41128 | 24315 | 0.097 | 24252..24432 |
+| synth:worst-case | all paths | 2976 | 336075 | 1.344 | 316549..345562 |
+| synth:dma-storm | DMA | 5610 | 178258 | 0.713 | 173895..197414 |
+| synth:cgb-raster | mid-frame PPU writes | 4925 | 203061 | 0.812 | 189597..226890 |
+| synth:apu-writes | APU writes | 14543 | 68764 | 0.275 | 63303..75594 |
+
+This table is the reference for Stage 2: the MCU budget per frame is
+(core clock / 59.73), e.g. 480 MHz gives 8.04 Mcycles/frame, so these host
+figures scale by the Cortex-M7 vs. x86 IPC ratio, which Stage 2 must measure.
+
+Context only, **not reproducible** (the human's commercial games, copied to
+a scratch dir and run read-only from power-on for 1,200 frames, same method;
+the ROMs are not in the repo and the title screens/intros they show are not a
+fixed workload): Pokemon Crystal 13,835 frames/s (72,280 ns, 0.289
+Mcycles/frame), Shantae 6,965 (143,569 ns, 0.574), Wario Land 3 7,445
+(134,312 ns, 0.537). Pass them with `--rom PATH`.

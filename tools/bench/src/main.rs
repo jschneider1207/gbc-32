@@ -1,5 +1,7 @@
 //! Runs one ROM headless for a fixed number of emulated clocks.
 //!
+//! Wall-clock mode: `bench --wall` (wall.rs).
+//!
 //! Usage: `bench <rom | synth:<name>> <emulated-seconds>` (synthetic ROMs:
 //! synth.rs), or `bench --fingerprint` (fingerprint.rs). It is meant to run
 //! under
@@ -19,6 +21,7 @@ use gbc_core::{
 
 mod fingerprint;
 mod synth;
+mod wall;
 
 /// Audio buffer slots per call: one frame is 548.6 samples (70,224 / 128
 /// clocks), so a frame-sized call never fills it and `AUDIO_BUFFER_FULL`
@@ -96,6 +99,9 @@ pub fn run_emulation(
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--wall") {
+        return wall::main(&args[2..]);
+    }
     if args.get(1).is_some_and(|a| a == "--fingerprint") {
         return fingerprint_main(&args[2..]);
     }
