@@ -257,7 +257,7 @@ budget); nothing merges to `main` before step 2's human decision.
    manifest change). ADR 0018 amendment; this changes runner pass/fail
    logic, so it gets its review (or the milestone test-integrity review,
    before any result is relied on).
-10. [ ] **Docs**: architecture.md (APU module, catch-up points, audio
+10. [x] (4a66e07) **Docs**: architecture.md (APU module, catch-up points, audio
     contract: rate, buffer sizing, front ends own resampling + HPF),
     `docs/reference/apu.md` (distilled rules with sources, the SameBoy
     countdown conversions), `docs/perf.md` APU numbers.
