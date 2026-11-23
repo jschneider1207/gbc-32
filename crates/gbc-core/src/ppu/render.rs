@@ -403,6 +403,11 @@ impl Renderer {
         self.fine_scx = n & 7;
     }
 
+    /// The line's fine scroll (the discard count & 7).
+    pub(crate) const fn fine(&self) -> u8 {
+        self.fine_scx
+    }
+
     /// The slot of the line's last object fetch: the last object in
     /// priority (fetch) order on screen horizontally (X < 168; objects at
     /// X >= 168 are never fetched). CGB: fetched even with LCDC.1 clear.
@@ -433,7 +438,7 @@ impl Renderer {
         if x0 >= x1 {
             return;
         }
-        if usize::from(obj_rank.hold[1].end) > x0 {
+        if usize::from(obj_rank.hold[2].end) > x0 {
             return self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank);
         }
         if self.obj_dirty {
@@ -536,7 +541,7 @@ impl Renderer {
             self.render(row, x0, to, &held, src, obj_buf, obj_rank);
             let from = x0.max(end.saturating_sub(8));
             if h.planes != 0 && from < to {
-                let next = if i == 0 { regs_of(&hold[1]) } else { *regs };
+                let next = hold.get(i + 1).map_or(*regs, regs_of);
                 self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src);
             }
             x0 = to;
@@ -1246,7 +1251,7 @@ mod tests {
                 obj_buf: [0; OBJ_BUF_LEN],
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
-                    hold: [Held::default(); 2],
+                    hold: [Held::default(); 3],
                     next: 0,
                 },
             }
@@ -2013,7 +2018,7 @@ mod tests {
                 obj_buf: [0; OBJ_BUF_LEN],
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
-                    hold: [Held::default(); 2],
+                    hold: [Held::default(); 3],
                     next: 0,
                 },
             };

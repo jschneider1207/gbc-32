@@ -97,7 +97,7 @@ impl Memory {
                     scx: 0,
                     scy: 0,
                     planes: 0,
-                }; 2],
+                }; 3],
                 next: 0,
             },
             bg_pal: [0; 64],
@@ -143,8 +143,10 @@ pub(crate) struct ObjRank {
     /// part) with older map-select (LCDC.3/6), tile-data (LCDC.4), SCX and
     /// SCY values when those were written in mode 3 (`ppu::Ppu::hold_fetch`):
     /// the pixels before `end` are drawn with these values. In `end`
-    /// order; `[1]` is the last; `[1].end == 0`: none.
-    pub(crate) hold: [Held; 2],
+    /// order; `[2]` is the last; `[2].end == 0`: none. Three parts: a part whose
+    /// planes were read after a write keeps the next part's values even
+    /// when a later write lands before its end.
+    pub(crate) hold: [Held; 3],
     /// Position in the renderer's object fetch order of the line's first
     /// object not yet fetched or skipped (`Renderer::fetch_objects`); 0 at
     /// the line start (`Ppu::latch`).

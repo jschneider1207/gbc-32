@@ -1190,6 +1190,10 @@ impl Ppu {
             first_pixel = start + n;
             lt.first_pixel = first_pixel as u16;
             self.renderer.set_fine(n as u8);
+            // The objects' stalls follow the new tile alignment (`n & 7`).
+            if lt.n_stalls != 0 {
+                self.set_stalls(n as u8, self.renderer.window_wx());
+            }
         }
         let lt = &self.line;
         // The pixel being output: `drawn` after a `flush`; for a deferred
@@ -1216,12 +1220,28 @@ impl Ppu {
             }) & 7;
         // Screen x of the first pixel of the tile being output.
         let tile = pos - phase;
+        // An object stalls where the line position reaches X - 8 (SameBoy
+        // display.c, `x_for_object_match`; fine-scroll discard counted, so
+        // tile 0 starts at -(SCX & 7)). One left of that (X = 0, or X - 8 <
+        // -(SCX & 7)) is fetched while the junk pixels before tile 0 are
+        // popped, before tile 1's fetch begins: its stall, clamped to pixel
+        // 0 here, doesn't finish tile 1 (gambatte `scx_during_m3_spx*_ds`).
+        // Object stall `i` is the line's object `i` in fetch order (`i - 1`
+        // after the window's).
+        let r = &self.renderer;
+        let win = usize::from(lt.win_stall);
         // Only looked up where it decides `end` (not for most SCX writes).
         let stalled = || {
             t >= first_pixel
                 && lt.stalls[..usize::from(lt.n_stalls)]
                     .iter()
-                    .any(|&(sx, _)| (tile..=x).contains(&i32::from(sx)))
+                    .enumerate()
+                    .any(|(i, &(sx, _))| {
+                        let slot = r.order[(i - usize::from(i > win)) % objects::MAX_PER_LINE];
+                        let obj_x = i32::from(r.objects.get(usize::from(slot)).2);
+                        (i == win || obj_x >= 8 - i32::from(r.fine()))
+                            && (tile..=x).contains(&i32::from(sx))
+                    })
         };
         // Tile j + 1 (from `tile + 8`): fetched with the old values, its
         // map entry only (`planes`: the planes still to read), or not yet.
@@ -1263,10 +1283,14 @@ impl Ppu {
             planes,
         };
         let hold = &mut mem.obj_rank.hold;
-        if i32::from(hold[1].end) <= x {
-            *hold = [Held::default(), seg];
-        } else if seg.end > hold[1].end {
-            *hold = [hold[1], seg];
+        let last = hold[2];
+        if i32::from(last.end) <= x {
+            *hold = [Held::default(), Held::default(), seg];
+        } else if seg.end > last.end || (seg.end == last.end && last.planes != 0 && planes == 0) {
+            // Same end: the held tile's planes read after the earlier
+            // write were read with the values before this one, which the
+            // (empty) new part keeps for `Renderer::mix_planes`.
+            *hold = [hold[1], last, seg];
         }
         true
     }
@@ -1290,7 +1314,7 @@ impl Ppu {
         reg: usize,
         value: u8,
     ) {
-        if !self.attr_on && mem.obj_rank.hold[1].end == 0 {
+        if !self.attr_on && mem.obj_rank.hold[2].end == 0 {
             if !self.hold_fetch(now, mem, reg, value, true) {
                 self.flush(now, mem, frame);
             }
@@ -1457,7 +1481,7 @@ impl Ppu {
         t.mode3 = mode3;
         t.first_pixel = mode3 + 12 + u16::from(scx & 7);
         self.drawn = 0;
-        mem.obj_rank.hold[1].end = 0;
+        mem.obj_rank.hold[2].end = 0;
         mem.obj_rank.next = 0;
         // The pixels follow the window start the stalls are built with.
         self.renderer.start_line(l as u8, scx, &objs, order, window);
@@ -1594,7 +1618,10 @@ impl Ppu {
             }
             return;
         }
-        let scx = mem.io[0x43];
+        // The tile alignment the line's stalls were built with (the
+        // discard count, `latch` or `hold_fetch`), not the live SCX: an SCX
+        // write after the discard doesn't move the fetcher's tile phase.
+        let scx = self.renderer.fine();
         let window = self.window_wx(mem);
         self.set_stalls(scx, window);
         self.renderer.set_window(window);
@@ -2872,6 +2899,102 @@ mod tests {
         r.sync(l + u64::from(LINE));
         assert_eq!(first_of(&r, 1, 0, 4), Some(24));
         assert_eq!(first_of(&r, 1, 24, 1), Some(40));
+    }
+
+    #[test]
+    fn object_left_of_tile_0_stalls_before_tile_1_is_fetched() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // Map 9800 column 2: tile 1 (color 4); map row 2 column 1: tile 2,
+        // row 4 color 1, row 5 color 2.
+        r.mem.vram[0x1800 + 2] = 1;
+        r.mem.vram[0x1800 + 64 + 1] = 2;
+        r.mem.vram[32 + 8..32 + 12].copy_from_slice(&[0xFF, 0, 0, 0xFF]);
+        // Line 1: an object at X = 2 (fetched with the junk pixels, 9-dot
+        // stall); line 10: at X = 8 (pixel 0, 11 dots); line 20, SCX 3: at
+        // X = 6 (in tile 0, which starts at -3; 10 dots). All stall at
+        // pixel 0 here, from the first pixel (OBJ off: no object pixel).
+        let oam = [16 + 1, 2, 0, 0, 16 + 10, 8, 0, 0, 16 + 20, 6, 0, 0];
+        r.mem.oam[..12].copy_from_slice(&oam);
+        r.ppu.oam_written();
+        // SCX 0 -> 8, 4 dots into the stall. Line 1: tile 1 is fetched
+        // after it (column 2 at pixels 8-15). Line 10: tile 1 was fetched
+        // in the stall with SCX 0 (column 1), then column x / 8 + 1.
+        for (ly, want) in [(1, Some(8)), (10, None)] {
+            let l = clock(on, 0, ly * LINE);
+            write_fetch_reg(&mut r, l + 96 + 4, 0x43, 8);
+            r.sync(l + 300);
+            r.mem.io[0x43] = 0;
+            r.sync(l + u64::from(LINE));
+            assert_eq!(first_of(&r, ly as usize, 0, 4), want, "line {ly}");
+        }
+        // Line 20: SCY 0 -> 1 in the stall; tile 1 (column 1, pixels 5-12)
+        // was fetched in it, both planes from row 4 (color 1).
+        r.mem.io[0x43] = 3;
+        let l = clock(on, 0, 20 * LINE);
+        write_fetch_reg(&mut r, l + 99 + 4, 0x42, 1);
+        r.sync(l + 300);
+        r.mem.io[0x42] = 0;
+        r.sync(l + u64::from(LINE));
+        assert_eq!(r.frame[20 * SCREEN_WIDTH..][5..13], [2; 8]);
+    }
+
+    #[test]
+    fn second_scy_write_in_a_tile_keeps_the_planes_read_between() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        // Tile 0 row 1: color 1 (low plane); row 2: color 2 (high plane);
+        // row 3: color 0.
+        r.mem.vram[2..4].copy_from_slice(&[0xFF, 0]);
+        r.mem.vram[4..6].copy_from_slice(&[0, 0xFF]);
+        // Line 1: SCY 0 -> 1 between tile 3's plane reads, then 1 -> 2
+        // after both: tile 3's high plane was read with 1 (row 2), not 2.
+        let l = clock(on, 0, LINE);
+        write_fetch_reg(&mut r, l + 96 + 16 + FETCH_LOW as u64, 0x42, 1);
+        write_fetch_reg(&mut r, l + 96 + 16 + FETCH_HIGH as u64, 0x42, 2);
+        // Then 2 -> 0 between tile 4's plane reads (pixel 27): tile 3's
+        // part is still to draw.
+        write_fetch_reg(&mut r, l + 96 + 24 + FETCH_LOW as u64, 0x42, 0);
+        r.sync(l + u64::from(LINE));
+        let row = &r.frame[SCREEN_WIDTH..][..SCREEN_WIDTH];
+        assert_eq!((row[23], row[24], row[31], row[32]), (2, 4, 4, 1));
+    }
+
+    #[test]
+    fn object_stalls_follow_the_discard_not_the_live_scx() {
+        // Line 5, an object at X = 8 (pixel 0): 11 dots with fine scroll
+        // 0, 8 with 3. `scx`: SCX at the line start; `write`: (dot, SCX);
+        // `wx_at`: a WX = 0x77 write (window at x 112, LCDC.5 set, WX
+        // 0xFF before) at that dot. -> mode 3's end.
+        let end = |scx: u8, write: Option<(u32, u8)>, wx_at: Option<u32>| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            r.mem.oam[..4].copy_from_slice(&[16 + 5, 8, 0, 0]);
+            r.ppu.oam_written();
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4B] = 0xFF;
+            r.mem.io[0x43] = scx;
+            let l5 = clock(on, 0, 5 * LINE);
+            if let Some((t, v)) = write {
+                write_fetch_reg(&mut r, l5 + u64::from(t), 0x43, v);
+            }
+            if let Some(t) = wx_at {
+                let now = l5 + u64::from(t);
+                r.sync(now);
+                r.mem.io[0x4B] = 0x77;
+                r.ppu.window_write(now, &r.mem, false);
+            }
+            r.sync(l5 + 455);
+            (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
+        };
+        assert_eq!(end(3, None, None), Some(256 + 3 + 8));
+        // Seen in the discard (dot 89): it moves to 8 pixels, and the
+        // object's stall follows the new tile alignment.
+        assert_eq!(end(3, Some((89, 0)), None), Some(256 + 8 + 11));
+        // After the discard, an SCX write doesn't move the alignment: a
+        // window write rebuilding the stalls keeps the object's 11 dots.
+        assert_eq!(end(0, None, Some(160)), Some(256 + 11 + 6));
+        assert_eq!(end(0, Some((150, 3)), Some(160)), Some(256 + 11 + 6));
     }
 
     /// The pixels of tile 3 (x 24-31) and pixel 32 on line `ly`.
