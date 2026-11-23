@@ -598,7 +598,13 @@ impl Ctx<'_, '_> {
             self.mem.apu.power_off();
             self.mem.io[0x10..=0x25].fill(0);
         }
-        self.sys.set_div_apu_deadline(on, now);
+        // The first edge is the next one after the end of the write's
+        // M-cycle, consistent with the skip test above: an edge at that
+        // end falls while the APU is still off (SameBoy `cycle_write` runs
+        // the pending cycles, then `GB_apu_init`). One M-cycle is
+        // 4 counter ticks in either speed. Power-off ignores it.
+        self.sys
+            .set_div_apu_deadline(on, now + self.hot.mcycle as u64);
         self.reschedule();
     }
 
@@ -2412,6 +2418,43 @@ mod tests {
             assert_eq!(emu.hw.sys.timer.sc(emu.clock()), sc);
             write(emu, 0xFF26, 0x80);
             assert_eq!(emu.mem.apu.fs.skip, skip, "{sc:#x}");
+        }
+    }
+
+    /// An edge at the end of the NR52 power-on write's M-cycle (counter
+    /// 0x3FFC -> 0x4000, bit 12 or 13 falling) happens while the APU is
+    /// still off: no skip, and the first step comes one DIV-APU period
+    /// later, not at once. Normal and double speed.
+    #[test]
+    fn power_on_in_the_m_cycle_where_the_div_apu_bit_falls_waits_a_period() {
+        for double in [false, true] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            if double {
+                let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+                let Emulator { mem, hw } = &mut *emu;
+                let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+                assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
+            }
+            write(emu, 0xFF26, 0x00);
+            let k = emu.hw.sys.timer.div_apu_bit() + 1;
+            let period = 1u64 << k;
+            let sc0 = emu.hw.sys.timer.sc(emu.clock());
+            let sc = (((sc0 >> k) + 2) << k) - 4;
+            let _ = run_audio(emu, emu.hw.sys.timer.clock_at(sc) - emu.clock(), &mut []);
+            assert_eq!(emu.hw.sys.timer.sc(emu.clock()), sc, "double {double}");
+            write(emu, 0xFF26, 0x80);
+            assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (0, 0));
+            let first = emu.hw.sys.timer.clock_at(sc + 4 + period);
+            assert_eq!(
+                emu.hw.sys.sched.deadline(EventKind::DivApu),
+                first,
+                "double {double}"
+            );
+            let _ = run_audio(emu, first - 32 - emu.clock(), &mut []);
+            assert!(emu.clock() < first);
+            assert_eq!(emu.mem.apu.fs.step, 0, "double {double}");
+            let _ = run_audio(emu, 64, &mut []);
+            assert_eq!(emu.mem.apu.fs.step, 1, "double {double}");
         }
     }
 
