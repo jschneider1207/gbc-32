@@ -85,12 +85,6 @@ Open:
 - **`hdma-trigger` swap:** plan is to land it with step1b and fit the
   HDMA-period edge (0 regressions); the human may instead accept the 1-ROM swap
   (baseline would record a regression).
-- **Sign-off candidate: power-on OBJ palette RAM (3 ROMs).** gambatte
-  `scx_during_m3_spx2`, `spx2_ds`, `scx_attrib_during_m3_spx2_ds` pass timing
-  but differ by 8 px at x 0: OBJ palette 0 colour 2, which no ROM writes; the
-  cgb04c capture shows 0x21926C (that console's power-on palette RAM), we
-  start at 0. Model one console's dump (gambatte ships one, GPL, reference
-  only) vs sign off as "depends on uninitialised palette RAM".
 - **Sign-off proposal (upcoming): group-15 SameSuite applicability tally**
   (m9-triage): 1 C-applicable, 9 E-only, 7 unclear.
 - **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
@@ -124,6 +118,13 @@ Decided in session 11 (2026-11-23), human:
   approved: exclude them from `same-suite-apu`, own stretch group
   `same-suite-apu-cgbE` (keeps running, reported), baseline refresh with
   `--allow-removed`.
+
+- Power-on OBJ palette RAM: sign off gambatte `scx_during_m3_spx2`,
+  `scx_during_m3_spx2_ds`, `scx_attrib_during_m3_spx2_ds` as "depends on
+  uninitialised palette RAM" (they draw OBJ palette 0 colour 2, never
+  written; the cgb04c capture shows that console's power-on 0x21926C; we
+  start at 0, deterministic). "Sign off". Manifest change approved: own
+  stretch group (keeps running, reported), baseline with `--allow-removed`.
 
 Decided in session 10 (2026-11-23), human:
 - gbc-core total `.text` budget 96,000 -> 97,500 B (for mid-line PPU
