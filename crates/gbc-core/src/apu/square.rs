@@ -28,10 +28,14 @@ pub(crate) struct Square {
     pub(crate) duty: u8,
     /// The duty position, 0-7. Only APU power off resets it (Pan Docs).
     pub(crate) pos: u8,
-    /// The channel has stepped since it started: until then it outputs
-    /// digital 0 (Pan Docs: "On first startup, the channel outputs a
-    /// digital zero"; SameBoy marks `current_sample_index` with 0x80).
-    pub(crate) started: bool,
+    /// The output bit, latched from the duty pattern at each duty step:
+    /// an NRx1 duty change shows only from the next step (gambatte
+    /// `DutyUnit::nr1Change` keeps `high_`; its hardware-verified
+    /// `ch1_duty0_to_duty3_pos3*` ROMs, cgb04c; SameBoy's pre-CGB
+    /// `square_duty_output`). False from a trigger of a channel that was
+    /// off to its first step (Pan Docs: "On first startup, the channel
+    /// outputs a digital zero"; SameBoy `sample_surpressed`).
+    pub(crate) high: bool,
     /// The NR52 bit.
     pub(crate) on: bool,
     pub(crate) len: Length,
@@ -44,7 +48,7 @@ impl Square {
         freq: 0,
         duty: 0,
         pos: 0,
-        started: false,
+        high: false,
         on: false,
         len: Length::ZERO,
         env: Envelope::ZERO,
@@ -57,17 +61,11 @@ impl Square {
         NonZeroU32::new(p).unwrap_or(NonZeroU32::MIN)
     }
 
-    /// The duty bit at the current position.
-    #[inline]
-    fn high(&self) -> bool {
-        DUTY[usize::from(self.duty & 3)] >> self.pos & 1 != 0
-    }
-
-    /// The digital output, 0-15 (PCM12/PCM34): the volume while the duty
-    /// bit is 1, 0 while off or before the first step.
+    /// The digital output, 0-15 (PCM12/PCM34): the volume while the
+    /// latched duty bit is 1, 0 while off or before the first step.
     #[inline]
     pub(crate) fn digital(&self) -> u8 {
-        if self.on && self.started && self.high() {
+        if self.on && self.high {
             self.env.volume
         } else {
             0
@@ -84,12 +82,12 @@ impl Square {
         sq.digital()
     }
 
-    /// A duty step: the position moves on and the first-sample zero ends.
+    /// Moves the position on by `n` (mod 8) at a duty step and latches
+    /// the output bit there.
     #[inline]
-    fn tick(&mut self, period: NonZeroU32) {
-        self.pos = (self.pos + 1) & 7;
-        self.started = true;
-        self.countdown = period.get() as u16;
+    fn step(&mut self, n: u32) {
+        self.pos = (self.pos + (n & 7) as u8) & 7;
+        self.high = DUTY[usize::from(self.duty & 3)] >> self.pos & 1 != 0;
     }
 
     /// Advances by `dt` clocks without integrating (ADR 0021 section 9),
@@ -111,9 +109,7 @@ impl Square {
         // 2^32 clocks (DIV-APU steps every 8192), so the u64 remainder is
         // only for long STOP stretches (`rem_long`). `8 * p <= 65,536`.
         let rest = u32::try_from(rest).unwrap_or_else(|_| super::rem_long(rest, 8 * p.get()));
-        let steps = rest / p;
-        self.tick(p);
-        self.pos = (self.pos + (steps & 7) as u8) & 7;
+        self.step(rest / p + 1);
         self.countdown = (p.get() - rest % p) as u16;
     }
 
@@ -149,7 +145,7 @@ impl Square {
             // would double the function's size (docs/perf.md, APU cost).
             let dt = core::hint::black_box(dt);
             let cd = u32::from(self.countdown);
-            let bit = u32::from(self.started) & u32::from(duty >> self.pos & 1);
+            let bit = u32::from(self.high);
             let high = if dt < cd {
                 self.countdown = (cd - dt) as u16;
                 bit * dt
@@ -160,10 +156,11 @@ impl Square {
                 let pattern = duty.rotate_right(u32::from(first));
                 let m = (n & 7) as u8;
                 let ones = (n >> 3) * whole + (pattern & ((1 << m) - 1)).count_ones();
+                let last = u32::from(pattern >> m & 1);
                 self.pos = (first + m) & 7;
-                self.started = true;
+                self.high = last != 0;
                 self.countdown = (p.get() - r) as u16;
-                bit * cd + p.get() * ones + r * u32::from(pattern >> m & 1)
+                bit * cd + p.get() * ones + r * last
             };
             *o += (15 * dt as i32 - vol2 * high as i32) as i16;
         }
@@ -214,12 +211,13 @@ impl Square {
     /// `GB_apu_run`: the reload `(f ^ 0x7FF) * 2 + 1` gives the period
     /// `(2048 - f) * 2` ticks), so in base clocks: `(2048 - f) * 4 + 10 -
     /// 2 * lf_div` (off) or `+ 6 - 2 * lf_div` (on). See
-    /// `docs/reference/apu.md`.
+    /// `docs/reference/apu.md` (the double-speed sign is CGB-E's).
     fn trigger(&mut self, lf_div: u8) {
         let extra = (if self.on { 6 } else { 10 }) - 2 * u32::from(lf_div & 1);
         self.countdown = (self.period().get() + extra) as u16;
         if !self.on {
-            self.started = false;
+            // Digital 0 to the first step.
+            self.high = false;
         }
         self.env.trigger();
         self.on = self.env.dac();
@@ -419,10 +417,27 @@ mod tests {
         assert_eq!(a.integrate1(100), 15 * 100, "digital 0 -> +15");
         // Retriggering an active channel keeps the output and uses the
         // short delay; lf_div 1 subtracts 2 clocks.
-        sq.started = true;
+        sq.high = true;
         sq.write(4, 0x87, 0, 1);
-        assert!(sq.started);
+        assert!(sq.high);
         assert_eq!(sq.countdown, 1024 + 6 - 2);
+    }
+
+    #[test]
+    fn a_duty_change_shows_from_the_next_step() {
+        // Duty 0 at position 2 (low); duty 3 is high at positions 1-6.
+        let mut sq = playing(0, 9, 2047);
+        sq.advance(4);
+        assert_eq!((sq.pos, sq.digital()), (2, 0));
+        sq.write(1, 0xC0, 0, 0);
+        assert_eq!(sq.digital(), 0, "latched until the next step");
+        let mut a = sq;
+        assert_eq!(a.integrate1(3), 15 * 3, "digital 0 over the rest");
+        sq.advance(4);
+        assert_eq!((sq.pos, sq.digital()), (3, 9));
+        // And back: duty 0 is low at position 3, but the 1 stays latched.
+        sq.write(1, 0x00, 0, 0);
+        assert_eq!(sq.digital(), 9);
     }
 
     #[test]
