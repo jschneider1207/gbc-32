@@ -1756,24 +1756,26 @@ impl Ppu {
             // SameBoy display.c has the extra dot, `cycles_for_line += 1`,
             // for DMG only).
             let fine = u8::from(scx & 7 != 0);
-            let mut win = window.map(|wx| (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0)));
-            for &s in &stalls[..n_obj] {
-                if let Some(w) = win.filter(|w| w.0 <= s.0) {
-                    t.win_stall = k as u8;
-                    t.stalls[k] = w;
-                    k += 1;
-                    total += u16::from(w.1);
-                    win = None;
-                }
-                t.stalls[k] = s;
-                k += 1;
-                total += u16::from(s.1);
-            }
+            let win = window.map(|wx| (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0)));
+            // The window start goes before the first object at or after
+            // it (after all of them if none is).
+            let mut i = 0;
             if let Some(w) = win {
+                while i < n_obj && stalls[i].0 < w.0 {
+                    t.stalls[k] = stalls[i];
+                    k += 1;
+                    total += u16::from(stalls[i].1);
+                    i += 1;
+                }
                 t.win_stall = k as u8;
                 t.stalls[k] = w;
                 k += 1;
                 total += u16::from(w.1);
+            }
+            for &s in &stalls[i..n_obj] {
+                t.stalls[k] = s;
+                k += 1;
+                total += u16::from(s.1);
             }
         }
         t.n_stalls = k as u8;
