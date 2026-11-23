@@ -94,14 +94,16 @@ buffer: no samples, the APU only advanced).
 (buffers, no APU setup), from `scripts/check-bench.sh`-style callgrind
 runs of each `@<mask>` variant:
 
-| Variant | 9b0b8cc (stepping) | 29cacd2 (closed form) | 4dd75a2 (batches) |
-|---|---|---|---|
-| `@1` CH1 (sweep) | 73.0k | 32.4k | 23.7k |
-| `@2` CH2 | 73.1k | 32.4k | 23.6k |
-| `@4` CH3 (wave) | 409.6k | 81.3k | 44.3k |
-| `@8` CH4 (noise, 7-bit) | 84.4k | 83.1k | 70.9k |
-| all four | 682.6k | 276.0k | 214.5k |
-| worst-case, M Ir/frame | 4.312 | 3.907 | 3.834 |
+| Variant | 9b0b8cc (stepping) | 29cacd2 (closed form) | 4dd75a2 (batches) | 0fc52a8 (8b) |
+|---|---|---|---|---|
+| `@1` CH1 (sweep) | 73.0k | 32.4k | 23.7k | (unchanged code) |
+| `@2` CH2 | 73.1k | 32.4k | 23.6k | (unchanged code) |
+| `@4` CH3 (wave) | 409.6k | 81.3k | 44.3k | (unchanged code) |
+| `@8` CH4 (noise, 7-bit) | 84.4k | 83.1k | 70.9k | 27.8k |
+| all four | 682.6k | 276.0k | 214.5k | 171.3k |
+| `Apu::sync` on `@0` | | | 55.8k | 52.4k |
+| APU (`Ctx::apu_sync` incl.) | | | 270.6k | 224.1k |
+| worst-case, M Ir/frame | 4.312 | 3.907 | 3.834 | 3.780 |
 
 All exact: `bench --fingerprint --audio-buffer {7,64} --hash-samples`
 (samples hashed, synthetic programs included) is identical to d984a8a
@@ -132,6 +134,40 @@ before). Noise is now the largest channel (70.9k: 6 LFSR steps per word
 operation in 7-bit mode, 3 popcounts per window; plan 8b has exact
 ideas). thumbv7em `.text` 93,462 -> 94,120 B (`Apu::sync` 462 -> 832 B).
 
+**Task 8b** (d236d92, 0fc52a8; both sample-identical to 281186f by the
+same fingerprints at buffers 7 and 64):
+
+- **Noise as its output sequence** (d236d92). `Noise::integrate` runs a
+  batch on the outputs s(m) instead of the register: s(m + n) =
+  !(s(m) ^ s(m + 1)) (n = 15, or 7 in 7-bit mode), applied to itself
+  s(m + 2n) = !(s(m) ^ s(m + 2)) and s(m + 4n) = !(s(m) ^ s(m + 4)), so
+  one word operation yields 24 outputs (7-bit, lag 28) or 28 (15-bit,
+  lag 30), at most one per window. A window's high count is two lookups
+  in a 256-byte popcount table (`count_ones` has no instruction on
+  thumbv7em or baseline x86-64: a ~12-instruction SWAR sequence). The
+  register is rebuilt once per batch (7-bit: bits 7-14 are the last 8
+  feedback bits, with a shifted correction for the first 8 steps). CH4
+  70.9k -> 27.8k. Of the plan's ideas, (a) k-bit steps of the register
+  were what 4dd75a2 had (6 per operation in 7-bit mode); (b) the
+  doubling identity is what made the difference. Exactness tests: runs
+  of 0-16 steps against single steps (random registers, both modes,
+  register after each run) and random batches against clock by clock
+  (both modes, the shift-14/15 freeze); mutation-checked.
+- **Mixer bookkeeping** (0fc52a8). Batch spans in closed form (all
+  `SAMPLE_PERIOD` but the first and last), only a batch's last span can
+  leave a window open, sums and counters in locals, `sample` as one
+  shift. `Apu::sync` on `@0` 55.8k -> 52.4k. Skipping constant channels
+  was not done: worst-case has all four playing, so it cannot help the
+  budget, and a per-channel loop costs more than the four fixed
+  multiplies.
+
+The APU on worst-case (`Ctx::apu_sync` inclusive, measured directly) is
+now **224.1k Ir/frame: still over the 200k budget**. Per window (65,536
+per 2 s): CH3 ~114 Ir, CH4 ~83, CH1/CH2 ~76 each, the mixer ~59.
+worst-case 3.78 M Ir/frame, 94.0% of the 4.02 M line. thumbv7em
+`.text` 94,120 -> 94,492 B (`Noise::integrate` 1,094 B; `Apu::sync`
+832 -> 798 B; plus the 256 B table in `.rodata`).
+
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.
 
@@ -139,18 +175,19 @@ Current numbers (Ir) and wall time (valgrind run of all eight, ~35 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,669,050,639 |
-| cgb_sound.gb | 1,120,760,010 |
-| cgb-acid2.gbc | 658,607,503 |
-| synth:event-storm (2 s) | 400,774,655 |
-| synth:dma-storm (3 s) | 436,003,699 |
-| synth:halt-irq (10 s) | 281,230,164 |
-| synth:worst-case (2 s) | 457,154,167 |
-| synth:cgb-raster (2 s) | 317,857,897 |
+| cpu_instrs.gb | 1,664,998,305 |
+| cgb_sound.gb | 1,117,954,081 |
+| cgb-acid2.gbc | 654,553,744 |
+| synth:event-storm (2 s) | 400,369,260 |
+| synth:dma-storm (3 s) | 435,395,674 |
+| synth:halt-irq (10 s) | 279,203,312 |
+| synth:worst-case (2 s) | 451,592,462 |
+| synth:cgb-raster (2 s) | 317,452,483 |
 
-After M6 task 8a (perf/bench-baseline.txt: closed-form, batched APU
-integration). worst-case is 3.83 M Ir per emulated frame (119.455 frames
-in 2 s), 95% of the 4.02 M line. At M6 task 8 (9b0b8cc: buffers, four
+After M6 task 8b (perf/bench-baseline.txt: noise output sequence, mixer
+bookkeeping). worst-case is 3.78 M Ir per emulated frame (119.455 frames
+in 2 s), 94.0% of the 4.02 M line. After 8a: 1,669.1 / 1,120.8 / 658.6 /
+400.8 / 436.0 / 281.2 / 457.2 / 317.9 M; worst-case 3.83 M, 95%. At M6 task 8 (9b0b8cc: buffers, four
 channels, stepping): 1,685.5 / 1,124.8 / 671.4 / 402.1 / 437.9 / 287.6 /
 514.4 / 319.1 M; worst-case 4.31 M Ir per emulated frame (119.455 frames
 in 2 s), 107% of the 4.02 M (50% of M7) line; cgb-raster 2.67 M. Before

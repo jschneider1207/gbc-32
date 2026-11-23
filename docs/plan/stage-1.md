@@ -234,13 +234,16 @@ budget); nothing merges to `main` before step 2's human decision.
      214.5k Ir/frame (CH1/CH2 23.7k, CH3 44.3k, CH4 70.9k); with sample
      output (~56k, `Apu::sync` inclusive on `@0`) the APU is ~270k:
      **still over 200k**. worst-case 3.83 M/frame = 95% of the 4.02 M line.
-   - 8b. [ ] ADR option 1, noise multi-step: not done. Batching took CH4
-     from 84.4k to 70.9k; the LFSR still steps 6 at a time in 7-bit mode
-     (3 popcounts per window). Exact ideas, unmeasured: one popcount per
-     window over the accumulated output bits; or step the output sequence
-     instead of the state (7-bit: s(t+7) = !(s(t) ^ s(t+1)), so
-     s(t+14) = !(s(t) ^ s(t+2)) gives 12 steps per word operation), with
-     the 15-bit state rebuilt from the last 15 outputs after >= 8 steps.
+   - 8b. [x] (d236d92, 0fc52a8) ADR option 1, noise multi-step: the
+     LFSR runs as its output sequence with the doubling identity
+     (s(m + 4n) = !(s(m) ^ s(m + 4)): 24 outputs per word operation in
+     7-bit mode, 28 in 15-bit), popcount by a 256 B table; mixer spans in
+     closed form. Sample-identical (`--hash-samples`, buffers 7 and 64,
+     vs 281186f). CH4 70.9k -> 27.8k, `Apu::sync` on `@0` 55.8k -> 52.4k;
+     the APU (`Ctx::apu_sync` inclusive) 270.6k -> 224.1k Ir/frame:
+     **still over 200k**. worst-case 3.78 M/frame = 94.0% of the 4.02 M
+     line. What remains per window: CH3 ~114 Ir, CH4 ~83, CH1/CH2 ~76,
+     mixer ~59 (docs/perf.md, APU cost).
    - 8c. [ ] If still over: human decision (ADR options 2-3 change the
      output: mean level for ultrasonic wave periods, 16,384 Hz; or a
      different budget).
