@@ -339,10 +339,8 @@ impl Renderer {
         if x0 >= x1 {
             return;
         }
-        if usize::from(obj_rank.hold[1].0) > x0
-            && self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank)
-        {
-            return;
+        if usize::from(obj_rank.hold[1].0) > x0 {
+            return self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank);
         }
         if self.obj_dirty {
             *obj_buf = [0; OBJ_BUF_LEN];
@@ -407,9 +405,8 @@ impl Renderer {
     /// [`Renderer::render`] while pixels the fetcher fetched before a
     /// map-select or SCX write in mode 3 are still to be drawn
     /// (`Ppu::hold_fetch`): each held part with the LCDC bits 3 and 6 and
-    /// the SCX its tiles were fetched with, then the rest with `regs`;
-    /// false for a span inside one held part, drawn with its registers
-    /// already. Out of line and cold: only after such a write.
+    /// the SCX its tiles were fetched with, then the rest with `regs`. Out
+    /// of line and cold: only after such a write.
     #[cold]
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
@@ -422,9 +419,10 @@ impl Renderer {
         src: &Sources,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
         obj_rank: &mut ObjRank,
-    ) -> bool {
+    ) {
         const MAPS: u8 = LCDC_BG_MAP | LCDC_WIN_MAP;
-        let hold = obj_rank.hold;
+        // Taken while the parts are drawn, so they are drawn as usual.
+        let hold = core::mem::take(&mut obj_rank.hold);
         for &(end, lcdc, scx) in &hold {
             let end = usize::from(end);
             if end <= x0 {
@@ -435,17 +433,12 @@ impl Renderer {
                 scx,
                 ..*regs
             };
-            // Inside one held part with its registers (the calls below):
-            // drawn as usual.
-            if x1 <= end && held.lcdc == regs.lcdc && scx == regs.scx {
-                return false;
-            }
             let to = end.min(x1);
             self.render(row, x0, to, &held, src, obj_buf, obj_rank);
             x0 = to;
         }
         self.render(row, x0, x1, regs, src, obj_buf, obj_rank);
-        true
+        obj_rank.hold = hold;
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`

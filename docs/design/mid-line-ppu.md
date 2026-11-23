@@ -366,5 +366,11 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   after `bg_pairs`, 160 B with `bg_pairs` moved last), needed a second
   `Sources` pointer (+16 B in `draw`), or overflowed `Hw` (872 > 864 B in
   `Ppu`). With `ObjRank`, `draw` stays 146 B (budget 155) and total
-  `.text` is 95,588 of 96,000 B (`hold_fetch` and `render_held` cold, in
+  `.text` is 95,608 of 96,000 B (`hold_fetch` and `render_held` cold, in
   flash).
+- **Slow-path cost.** `synth:cgb-raster` (one SCX write per line) goes
+  from 315.93 M to 324.68 M x86 Ir over 2 s (+2.77% vs fe0e18f, ~500 Ir
+  per write: one more `render` span and `fill_plain` call per line).
+  `render_held` takes the hold while it draws the parts, so they don't
+  re-enter it (the first version re-checked and cost ~700 Ir per write).
+  `synth:worst-case` (no mode-3 writes): +0.04%.
