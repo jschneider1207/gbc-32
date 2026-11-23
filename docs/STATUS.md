@@ -7,23 +7,26 @@
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
   review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
   (ad56c23). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, session 12 (log
-  `logs/2026-11-23-12-m9-edges-window.md`). Baseline 45f12bb (must 86/86,
-  should 40/40, stretch 3,297/3,461); full gate last run at 9159e03 (passed).
-  Later merges: window re-trigger (8176991) and a behaviour-identical size
-  pass (10777f8, .text 96,824 -> 92,134 B).
+- **Last updated:** 2026-11-23, end of session 12 (log
+  `logs/2026-11-23-12-m9-edges-window.md`). Baseline 47f186c (must 86/86,
+  should 40/40, stretch 3,301/3,461); full gate passed at 47f186c.
 
-## Next up: M9
+## Next up (session 13): M9
 
 `docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
 checklist findings from the human become the first fixes when they arrive.
-1. Done in session 12 after the log: design step 5 (2c4ed4a: LYC=153 at
-   t = 5, mid-M-cycle PPU IRQ acknowledge, ds WY timing; +27). Still failing
-   there: `lyc153int_m2irq_late_retrigger_ds_1`,
-   `lycint152_lyc0irq_late_retrigger_ds_1` (possibly a half-dot edge).
-   Remaining lcd-offset design steps 4, 6-9.
-2. Window group 4 left (8): `late_enable_afterVblank*` (3), `late_wx_ff_*`
-   (2) (agent running at handoff, branch `m9-win-vblank`); Mealybug
+Failing by area at 47f186c (169 incl. 5 no-reference, 23 signed off):
+gambatte-cgb 108 (dma 32; m1/m2enable/m0enable/lycEnable/lcd_offset ~58),
+Mealybug 20, SameSuite 8 fix targets, cgb-acid-hell 1, AGE m3 1,
+`scx_0367c0` PNG 4.
+1. Line-0 mode-2 IRQ pulse in double speed is likely half a dot later than
+   ours (lcd-offset design step 5 leftover; needs a separate walk point in
+   the hot path): `window/late_enable_afterVblank_ds_lcdoffset1_2`,
+   `lyc153int_m2irq_late_retrigger_ds_1`, and probably
+   `lycint152_lyc0irq_late_retrigger_ds_1`. A probe moving line 0's `Ly4`
+   to t=5 in ds flipped two but regressed two LYC=0 `ds_lcdoffset1` rows.
+   Then lcd-offset design steps 4, 6-9.
+2. Window group 4 left (4): the ds row above; Mealybug
    `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` (window map/tile
    writes vs object stalls); `m3_wx_4_change_sprites` (CGB WX-match glitch,
    SameBoy `cgb_wx_glitch`).
@@ -33,7 +36,7 @@ checklist findings from the human become the first fixes when they arrive.
    `srcchange0000_busyinc`.
 5. Mealybug step F leftovers (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch),
    step G, `LCDC_TILES_LATE` lead.
-6. Headroom: `.text` 92,134 of 97,500 B, cgb-acid2 +2.40% of its +3% guard
+6. Headroom: `.text` 92,152 of 97,500 B, cgb-acid2 +2.43% of its +3% guard
    (after the 10777f8 size pass). Unused size ideas: share the
    `set_stalls`/`set_stalls_retriggered` tail (~60-100 B); de-unroll the
    `set_stalls` copy loops (~500 B, re-check Ir). M8 review lows still open
@@ -82,9 +85,7 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- `m9-win-vblank` (worktree `../gbc-32-wt-wvb`): window group 4
-  `late_enable_afterVblank*` / `late_wx_ff_*`. If found unmerged, check
-  `git log main..m9-win-vblank` before redoing it.
+- None (session 12 ended with no worktrees or unmerged agent branches).
 
 ## Needs human
 Open:
@@ -103,7 +104,7 @@ Open:
 - **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
   `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`,
   `ppu-edges-step1b` and `hdma-trigger` (landed as rebased copies in
-  session 12). Merged in session 12: `m9-spsw`, `m9-step1b-hdma`.
+  session 12). Merged in session 12: `m9-spsw`, `m9-step1b-hdma`, `m9-late-wy`.
   Fully merged (`git cherry main <b>` shows no `+`): `bench-worst-case-midline-scx`,
   `ppu-objmix`, `wip/speed-switch-h3`, `worktree-agent-a62aec9bd37d37e1c`,
   `worktree-agent-ab9ff6f40452030b3`, `worktree-agent-ae119d2f1346ad041`.
@@ -273,12 +274,12 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 45f12bb (`acceptance/results/stage1.json`, session 12; M8 tag
-`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` last run at 9159e03
-(passed); later merges ran every gate sub-check except the fuzz pass.
+Baseline 47f186c (`acceptance/results/stage1.json`, session 12 end; M8 tag
+`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at 47f186c.
+(.text 92,152 B, cgb-acid2 +2.43%, worst-case +0.02%.)
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 40 | 40 | |
-| stretch | 3,297 | 3,461 | 164 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |
+| stretch | 3,301 | 3,461 | 160 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |

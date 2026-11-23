@@ -56,3 +56,6 @@
   recommended pending a H735G-DK measurement; PC2_C SDNE0 timing issue.
 - Arm GNU toolchain 13.3.rel1 installed user-level at
   ~/.local/opt/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi (human OK).
+- Late LCDC.5 set matches WY only until the line's last check; WX writes
+  bringing the window on screen use lead 0 (193c3b7): +4; baseline 47f186c.
+  Full gate passed at 47f186c. Session ends with no worktrees in flight.
