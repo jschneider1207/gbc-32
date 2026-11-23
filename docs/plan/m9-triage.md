@@ -163,22 +163,32 @@ the extra delay when retriggering an active channel; `lf_div` derived from
 SameBoy `apu.c` (`lf_div`, square `sample_countdown` on trigger), ADR
 0021 section 12. Trigger path only, not the integrate loop.
 
-**Status (2026-11-23): 6 of 27 done**, 0 regressions. The cause was not
-one mechanism (`docs/reference/apu.md` has the details):
+**Status (2026-11-23): 17 of 27 done**, 0 regressions; plus 2 SameSuite
+ROMs outside the group's count. The cause was not one mechanism
+(`docs/reference/apu.md` has the details):
 - Done: the duty output bit latches at each step, so an NRx1 change
   shows from the next step (`ch1_duty0_to_duty3_pos3{,_2}`, 2); the
   post-boot CH1 keeps running at f = 0x7C1 in a phase fitted to
-  `ch1_init_pos_*` (`ch1_init_pos_{1,2,3,8}`, 4).
+  `ch1_init_pos_*` (`ch1_init_pos_{1,2,3,8}`, 4). The same round also
+  flipped SameSuite `channel_{1,2}_duty_delay` (2, group 15's set).
+- Done: in single speed a trigger's first duty step lands on the APU's
+  1 MHz grid (clocks `1 mod 4`, 3 clocks before SameBoy's step), and the
+  post-boot CH1 phase moves to that grid (145, inside its fitted window):
+  11 of the 12 `speedchange*_ch1_duty0_pos6_to_pos7_timing{,_nop}_2`
+  (trigger in single speed). Not the switch itself: each `_1`/`_2` pair
+  brackets the step to the same grid after 1-5 switches.
 - **Needs human (revision conflict)**: the CGB-C double-speed trigger
   delay (gambatte's linear `+ lf_div` rule) flips `ch1_duty0_pos6_to_pos7_
   timing_ds_6` and the 5 `speedchange*_ch1_duty0_pos6_to_pos7_timing*
   ds_2` (cgb04c), but regresses SameSuite `channel_{1,2}_align{,_cpu}`
   (4), whose README says real CPU-CGB-C fails them. Measured, not shipped;
-  same shape as sign-off candidate 2.
-- Different mechanism, open: the 12 `speedchange*_..._timing{,_nop}_2`
-  (trigger in single speed): the APU's tick phase across the speed switch
-  itself (one tick late). The 2 sweep ROMs (`ch1_init_reset_sweep_counter_
-  timing_10`, `_nr52_3`) are the sweep calculation delay, and
+  same shape as sign-off candidate 2. The 12th single-speed-named ROM,
+  `speedchange_ch1_nr4init_..._timing_2`, triggers in double speed and
+  belongs here: the grid rule in double speed too flips it with these 6,
+  and also costs SameSuite `channel_{1,2}_duty` and 4 `speedchange*_
+  ds_1` (measured).
+- Open: the 2 sweep ROMs (`ch1_init_reset_sweep_counter_timing_10`,
+  `_nr52_3`) are the sweep calculation delay, and
   `ch2_init_reset_env_counter_timing_15` the envelope timing: they belong
   with the deferred SameBoy sweep and envelope models, not with this group.
 
