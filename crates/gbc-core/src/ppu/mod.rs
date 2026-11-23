@@ -1302,6 +1302,7 @@ impl Ppu {
             if lt.n_stalls != 0 {
                 self.set_stalls(n as u8, self.renderer.window_wx());
             }
+            self.end_moved();
         }
         let lt = &self.line;
         // The pixel being output: `drawn` after a `flush`; for a deferred
@@ -1752,6 +1753,7 @@ impl Ppu {
                     lt.end -= u16::from(*d - keep);
                 }
                 *d = keep;
+                self.end_moved();
             }
             return;
         }
@@ -1768,6 +1770,23 @@ impl Ppu {
         if decided(self.window_stall_at(), lead - adj(mem.io[0x4B])) {
             self.set_stalls(scx, None);
             self.renderer.set_window(None);
+        }
+        self.end_moved();
+    }
+
+    /// After a mode-3 write moved `line.end` ([`Self::window_write`], the
+    /// SCX discard in [`Self::hold_fetch`]): the walk's pending `End`,
+    /// placed when it stepped past `Latch` ([`Self::step`]), moves with
+    /// it, so the line's draw and the HBlank interrupt follow the new end
+    /// as STAT and the access windows do. A write moves only stalls (or
+    /// discard pixels) still to come, or cuts the one running at it, so
+    /// the new end is after the write: the cursor stays the next point
+    /// after `synced` ([`Self::seek_point`]).
+    #[cold]
+    fn end_moved(&mut self) {
+        let c = &mut self.cursor;
+        if c.pt == Pt::End {
+            c.pos = u32::from(c.line) * LINE + u32::from(self.line.end);
         }
     }
 
@@ -3049,6 +3068,65 @@ mod tests {
             run3(Some(166), None, Some(256)),
             (Some(257), Some(257), (NO_MODE, 0))
         );
+    }
+
+    /// A mode-3 write that moves the end of mode 3 (a window stall added or
+    /// removed, the SCX discard moved) moves the HBlank interrupt and the
+    /// walk's `End` with it, both earlier and later. The sync to `mid`,
+    /// between the old and new ends, checks the walk against a fresh seek
+    /// (`Ppu::sync`'s debug assertion).
+    #[test]
+    fn mode3_writes_move_the_hblank_interrupt() {
+        // (initial WX or None, write (reg, value, dot), mid dot) on line 5
+        // -> (first mode-0 dot, HBlank interrupt dot).
+        let run = |wx: Option<u8>, (reg, v, t): (usize, u8, u32), mid: u32| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, SEL_MODE0, 0xFF);
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = wx.unwrap_or(0xFF);
+            r.mem.io[0x43] = 3;
+            let l5 = clock(on, 0, 5 * LINE);
+            r.sync(l5);
+            let now = l5 + u64::from(t);
+            if reg == 0x43 {
+                write_fetch_reg(&mut r, now, reg, v);
+            } else {
+                r.sync(now);
+                if reg == 0x40 {
+                    r.ppu.lcdc = v;
+                } else {
+                    r.mem.io[reg] = v;
+                }
+                r.ppu.window_write(now, &r.mem, false);
+            }
+            let mut irqs = r.irqs(l5 + u64::from(mid));
+            irqs.extend(r.irqs(l5 + 455));
+            let irq = irqs
+                .iter()
+                .find(|&&(_, f)| f & INT_STAT != 0)
+                .map(|&(at, _)| (at - l5) as u32);
+            let m0 = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            (m0, irq)
+        };
+        // Fine scroll 3: mode 3 ends at 259 with no window, 265 with one.
+        // The window (x = 64) goes: 6 dots earlier.
+        assert_eq!(
+            run(Some(0x47), (0x4B, 0xFF, 100), 261),
+            (Some(259), Some(260))
+        );
+        // The window appears: 6 dots later.
+        assert_eq!(run(None, (0x4B, 0x47, 100), 262), (Some(265), Some(266)));
+        // CGB: LCDC.5 cleared 2 dots into the window stall (dots 163-168)
+        // keeps those 2.
+        assert_eq!(
+            run(Some(0x47), (0x40, 0x91, 165), 263),
+            (Some(261), Some(262))
+        );
+        // The discard, seen at compare 1, stops at 2 (one dot earlier) or
+        // wraps to 8 (five later).
+        assert_eq!(run(None, (0x43, 2, 89), 258), (Some(258), Some(259)));
+        assert_eq!(run(None, (0x43, 0, 89), 261), (Some(264), Some(265)));
     }
 
     #[test]

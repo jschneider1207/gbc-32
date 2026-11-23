@@ -654,13 +654,20 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   the 3% guard), `synth:cgb-raster` +0.18% (the `stat_end` add in the
   palette fast path), `synth:worst-case` -0.00%. Counting the x = 159
   dots per push instead measured `cgb-acid2` +0.50%.
-- **Found, not fixed.** A mode-3 write that moves `end` (`window_write`,
-  the SCX discard move in `hold_fetch`) doesn't move the walk's `End`
-  already computed at `Latch`: the HBlank interrupt (and the draw) stay
-  at the old end, and a sync between the two ends trips the
-  `debug_assert` in `sync` (probe: WX 0x47 -> 0xFF at dot 100 of line 5).
-  No failing manifest ROM is an `m0irq`/`m0enable` one now, so none pins
-  it yet.
+- **Found, then fixed (branch `m9-end-reseek`).** A mode-3 write that
+  moved `end` (`window_write`, the SCX discard move in `hold_fetch`)
+  didn't move the walk's `End` already placed at `Latch`: the HBlank
+  interrupt (and the draw) stayed at the old end, and a sync between the
+  two ends tripped the `debug_assert` in `sync` (probe: WX 0x47 -> 0xFF
+  at dot 100 of line 5). Now `Ppu::end_moved` (cold, called only from
+  those write paths) moves a pending `End` cursor to the new end; a write
+  only moves stalls or discard pixels still to come, so the new end is
+  after it. Test `mode3_writes_move_the_hblank_interrupt` (window goes /
+  appears, CGB LCDC.5 cut of the stall, discard stopped earlier /
+  wrapped later), seen failing per call site (old-end interrupt in
+  release, the `sync` assert in debug). Full manifest: no flips, 0
+  regressions; `diff-fingerprint.sh main` identical (no ROM in the
+  corpus hits it observably). `.text` +94 B (96,098).
 
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
