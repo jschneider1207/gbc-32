@@ -73,6 +73,13 @@ Working rules that matter here:
   right before committing an ADR (next free: 0029).
 - PPU design size estimates ran ~2-3x low; measure early.
 
+## In flight (session 11)
+- Branch `hdma-trigger` (1a110de + 73ce532 docs, on fa2f8f1): HDMA trigger
+  2 dots after mode-0 STAT, block before IRQ dispatch, HBlank period,
+  lost triggers. +30 ROMs but swaps `hdma_late_m0halt_ds_lcdoffset1_{1,2}`
+  (1 regression) -> not merged. Branch `lcd-offset-phase` (group 6) builds
+  on it; both land together at 0 regressions.
+
 ## Needs human
 Open (session 11):
 - **APU double-speed trigger rule vs SameSuite (M9 group 7).** gambatte's
