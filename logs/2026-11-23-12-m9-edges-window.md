@@ -40,3 +40,19 @@
 - Group 4 left (16): the 5 ds late-WY, late_enable_afterVblank, late_wx_ff,
   re-trigger (on_screen/*, Mealybug m3_lcdc_win_*, m3_wx_4_change_sprites).
 - `.text` 96,306 of 97,500 B: little room left for M9.
+
+## Later in session 12
+- Design step 5 (2c4ed4a): LYC=153 compares at t = 5 in both speeds; PPU IRQ
+  bits acknowledged half-way into the dispatch's last M-cycle (SameBoy);
+  ds WY timing. +27, baseline 9159e03; full gate passed at 9159e03.
+- Window off at the next tile + same-line re-trigger (8176991): +3, but
+  +1,690 B; baseline 45f12bb.
+- Size pass, fingerprint identical (6fd5132, 10777f8): CB (HL) forms share
+  one body; .text 96,824 -> 92,134 B; cgb-acid2 and worst-case Ir down.
+- Code-size comparison with SameBoy/Gambatte on Cortex-M7 (docs/perf.md,
+  59346d4): at opt-level z gbc-core is ~4-7% above their emulation code.
+- Stage 3 ROM memory review for the human (4fafa44,
+  docs/reference/stage3-rom-memory-options.md): HyperRAM on OCTOSPI
+  recommended pending a H735G-DK measurement; PC2_C SDNE0 timing issue.
+- Arm GNU toolchain 13.3.rel1 installed user-level at
+  ~/.local/opt/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi (human OK).
