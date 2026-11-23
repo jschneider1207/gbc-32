@@ -48,7 +48,7 @@ Working rules that matter here:
 
 ## Needs human
 Open (session 09, M7):
-- **Interactive play check** (M7 acceptance): run `cargo run -p
+- **Never run the front end window under WSLg** (AGENTS.md; it crashed weston and then blue-screened the host, 2026-11-22). **Interactive play check** (M7 acceptance), on native Windows only: run `cargo run -p
   gbc-desktop --release -- <rom>` on WSLg and on native Windows (only a
   `cargo check --target x86_64-pc-windows-gnu` was done here); check
   picture, keyboard, a gamepad (untested: no pad in WSL), sound, and that

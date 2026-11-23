@@ -234,6 +234,13 @@ directory is a full separate build.
   isolating risky edits). Delete it, including its `target/`, when done.
 - Leave the `jobs` cap in `.cargo/config.toml` in place. Don't override it
   with `-j`.
+- **Never run the desktop front end's window under WSL/WSLg** (human,
+  2026-11-22). That means no `gbc-desktop <rom>` without `--headless`, and no
+  other GUI program either. On 2026-11-22 it crashed WSLg's compositor (weston), and
+  then the Windows host blue-screened (bugcheck 0x7E in
+  `dxgmms2!VIDMM_GLOBAL::CreateOneAllocation`, the WSLg GPU path).
+  `--headless` is fine. Interactive play happens on native Windows, and
+  the human runs it.
 
 ## Code conventions
 
