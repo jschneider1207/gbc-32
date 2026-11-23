@@ -374,3 +374,30 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   `render_held` takes the hold while it draws the parts, so they don't
   re-enter it (the first version re-checked and cost ~700 Ir per write).
   `synth:worst-case` (no mode-3 writes): +0.04%.
+
+### Step 2 (SCX low-bit carry, branch `ppu-midline-2`)
+
+- **Column rule.** `render::bg_column(scx, fine, x) = ((scx - fine +
+  FETCH_COL) & 0xF8) + fine + x`: the tile column from the whole SCX at
+  the tile's GET_TILE (`(SCX + X + FETCH_COL) / 8`, `X` = the tile's
+  first screen pixel `8k - fine`), the pixel within the tile from the
+  line-start fine scroll. It equals `scx + x` when `scx & 7 == fine`
+  (unit test over all 256 x 256). Held parts (step 1) carry their SCX, so
+  the carry applies per part with no change to `hold_fetch`. Cost: one
+  subtract per BG span, `.text` +8 B (95,616), `render` 1,094 B.
+- **Calibration:** `FETCH_COL = 0` (SameBoy's CGB `(SCX + position + 8 -
+  1) / 8` with the pixel popped before the fetcher advances): low bits
+  below the line-start fine scroll borrow a tile, higher ones never
+  carry. Full-manifest sweep vs main: 0 -> 23 flips, 0 regressions; 1 ->
+  18/1; 2 -> 17/2; 3-4 -> 3/2; 5-7 -> <= 3/6.
+- **Result:** 23 fail->pass, 0 regressions: AGE `m3-bg-scx{,-ds}`,
+  gambatte `scx{1_scx0,2_scx0,2_scx1}_during_m3_1` and 18
+  `scx_during_m3/scx_0*c0/scx_during_m3_{1..6}` (single speed). The `_ds`
+  variants change but still fail (step D's double-speed landing).
+  Still failing (single speed): `scx_0360c0` `_2`, `_3` (9,879 -> 14,872
+  px), `scx_0367c0` `_2`, `_3`, `scx_0761c0` `_2`-`_4`.
+- **Not fixed:** Mealybug `m3_scx_low_3_bits` stays at 540 px for every
+  `FETCH_COL` 0-7 (we draw nothing at 152-159), so its pixels 152-159 are
+  not the column carry; needs a separate diagnosis.
+- **Perf:** `synth:cgb-raster` +2.27% vs the committed baseline (same as
+  step 1), `synth:worst-case` -0.32%.
