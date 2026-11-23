@@ -307,11 +307,13 @@ the access clock. On a CGB in either mode, as today.
 - **Buffer contract** (ADR 0006): samples are written from `audio[0]`, one
   per completed window. When the last free slot completes, the
   `AudioBuffer` event ends the call (`AUDIO_BUFFER_FULL`). Overshoot past
-  that (rest of the instruction, a VRAM DMA step) is less than one window,
-  so it lands in `acc` and the next call continues the same window grid:
-  with buffers that never run out, the stream is independent of how the
-  caller chunks it. Size buffers `(clocks >> 7) + 1` per call, 550 for
-  `run_frame`.
+  that (rest of the instruction; a VRAM DMA stall stops at once, see the
+  GDMA stall amendment) is less than one window, so it lands in `acc` and
+  the next call continues the same window grid: for any non-empty
+  buffers, the stream is independent of how the caller chunks it. A call
+  of `n` clocks completes at most `(n >> 7) + 2` samples (the carried
+  partial window and the overshoot past the target can each complete
+  one); size buffers that, 550 for `run_frame`.
 
 ### 9. Empty buffer (romtest, benches)
 With no room (`audio.len() == audio_len`), `sync` takes the advance-only
@@ -392,3 +394,75 @@ alignment-dependent trigger); the sweep calculation delay; the DAC fade.
 - Classic (Pan Docs/blargg) envelope, sweep and noise timing pass the
   register-level tests; the gambatte audio ROMs may need the SameBoy-exact
   models of section 12.
+
+## Amendments
+
+### 2026-11-22: framework implementation notes (M6 task 1(a))
+Clarifications made while implementing; the decisions stand.
+- **"Room" means the call's buffer is non-empty.** Section 9's advance-only
+  test `audio.len() == audio_len` would also fire in the overshoot after
+  `AUDIO_BUFFER_FULL` (buffer full, rest of the instruction), which
+  section 8 wants integrated into `acc` so the next call continues the
+  same window grid. So `Apu::sync` integrates whenever the run call was
+  given a non-empty buffer and takes the advance-only path only for an
+  empty one; a window that completes with no slot left (not expected:
+  the overshoot is under one window) is dropped.
+- **Call start.** `Ctx::new` brings the APU to the clock if a caller left
+  it behind (advance only; normally a no-op after the end-of-call sync),
+  then with room restarts the grid if `!live` and sets the
+  `AudioBuffer` deadline, or `NEVER` without room, so a stale deadline
+  never survives a call.
+- `mem.io[0x26]` is no longer written: NR52 reads come from `Apu` only.
+- `Fs::phase` stores `(clock >> 1) & 1` at power on (SameBoy's 1 MHz
+  `lf_div` phase); task 1(b) fits its use.
+- Unit tests whose precondition is "nothing scheduled" (the idle and
+  halted-skip countdown tests) power the APU off first: post-boot it is
+  on, so `DivApu` fires every 8,192 clocks.
+
+### 2026-11-22: CH2 implementation notes (M6 task 1(b))
+- **Duty masks.** Section 5's literals (`0000_0001` ...) list positions 0-7
+  left to right, as SameBoy's `duties` does; as Rust masks with bit i =
+  position i they are `0x80, 0x81, 0xE1, 0x7E` (unit-tested against the
+  SameBoy sequences).
+- The trigger countdown conversion is in `docs/reference/apu.md`;
+  `lf_div` = `((now >> 1) ^ phase ^ 1) & 1` (SameBoy initialises it to 1).
+- NR52 bit 1 is `sq[1].on`; `Fs::active` keeps the bits of the channels
+  not yet implemented (CH1 post-boot) until their tasks.
+- The envelope timer loads 8 for a period of 0 (it never counts while the
+  period is 0; an NRx2 write giving a period then counts from 8).
+- Zombie mode's `16 - volume` wraps (volume 17 gives 15): Pan Docs keeps
+  the low 4 bits after all the operations.
+
+### 2026-11-22: GDMA stall across the buffer deadline (M6 review)
+A review found that a GDMA's CPU stall (`1 + 32 * blocks` dots, up to
+1,025 M-cycles at single speed or 2,049 at double speed: about 4,100
+clocks for 128 blocks) ran in one `idle_mcycles` inside `vram_dma`. If the
+`AudioBuffer` deadline fell inside it, `AUDIO_BUFFER_FULL` was raised but
+the call could not end until the stall did, and every window completed
+meanwhile found no slot and was dropped: up to 32 samples (a click), and
+output that depended on the caller's buffer size.
+
+**Decision: the stall is resumable.** `VramDma::stall` holds the stall's
+M-cycles left (a `u16` in the struct's padding: `Hw` doesn't grow).
+`vram_dma` copies the blocks and sets it; `Ctx::vdma_stall` runs it a
+deadline at a time and stops at the first deadline that raises a stop
+event or reaches the call's target (a single `step`: stop events only).
+The run loop resumes a non-zero stall before anything else, and ends the
+call if it stopped early. So FULL ends the call within an M-cycle of the
+last slot's window, nothing is dropped, and the stream and state are the
+same however the run is split (tests
+`a_gdma_stall_across_the_buffer_deadline_drops_no_sample` and
+`samples_and_state_are_independent_of_call_and_buffer_splits`, both seen
+failing under mutation).
+
+Why not hold pending samples instead: up to 32 samples (128 B) do not fit
+`Memory::apu`'s 128 B cap beside the APU state, and the call would still
+overshoot its target and FRAME_READY by up to 4,100 clocks (the PPU drawing
+the next frame's first lines into the buffer the caller is about to show).
+The resumable stall fixes all three, costs one branch per `cpu.run` return
+in the run loop (not per instruction), and is invisible to the emulated
+program, since the CPU is between instructions. The cost is the API
+contract: a call may now end inside a VRAM DMA stall, on an M-cycle
+boundary, instead of only on instruction boundaries (ADR 0006 amendment,
+`run_until`/`step` docs). `set_buttons_at`'s "between calls the clock is
+on an M-cycle boundary" still holds.

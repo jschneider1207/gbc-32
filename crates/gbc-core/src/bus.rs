@@ -17,7 +17,7 @@
 //! the one context pointer the CPU holds instead of through `Ctx::sys`
 //! (ADR 0008, amendments).
 
-use crate::apu::StereoSample;
+use crate::apu::{self, StereoSample};
 use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK, StopKind};
@@ -29,7 +29,7 @@ use crate::ppu::{Frame, Ppu};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
-use crate::{Buttons, Emulator, Events};
+use crate::{Buttons, Emulator, Events, RunResult};
 
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
@@ -122,6 +122,22 @@ impl Sys<'_> {
             .set(EventKind::Input, self.inputs.deadline(mcycle));
     }
 
+    /// Sets the `DivApu` deadline at clock `now`: the next falling edge of
+    /// the system counter's DIV-APU bit while the APU is `powered`, else
+    /// [`NEVER`] (ADR 0021 section 4). Called wherever the counter is
+    /// rebased or the APU powers on. The caller reschedules. Out of line:
+    /// off `speed_switch` and the event handlers (code-size budgets).
+    #[inline(never)]
+    pub(crate) fn set_div_apu_deadline(&mut self, powered: bool, now: u64) {
+        let at = if powered {
+            let k = self.timer.div_apu_bit() + 1;
+            self.timer.clock_at(((self.timer.sc(now) >> k) + 1) << k)
+        } else {
+            NEVER
+        };
+        self.sched.set(EventKind::DivApu, at);
+    }
+
     /// Power-on state after the boot ROM, for the inserted cartridge. The
     /// cartridge RAM, RTC, config and held buttons are kept.
     pub(crate) fn reset(&mut self, mem: &mut Memory) {
@@ -157,6 +173,9 @@ impl Sys<'_> {
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
+        // NR52 = F1 is APU state (ADR 0021 section 7).
+        mem.apu.post_boot();
+        self.set_div_apu_deadline(true, 0);
         // FF55 reads FF: no VRAM DMA active (`VramDma::read_hdma5`).
         mem.io[0x55] = 0xFF;
         // CGB mode: the boot ROM fades all 8 BG palettes to white (7FFF)
@@ -236,7 +255,6 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
     (0xFF23, 0xBF),
     (0xFF24, 0x77),
     (0xFF25, 0xF3),
-    (0xFF26, 0xF1),
     (0xFF47, 0xFC),
 ];
 
@@ -306,14 +324,12 @@ pub(crate) struct Ctx<'r, 'a> {
     pub(crate) mem: &'r mut Memory,
     pub(crate) sys: &'r mut Sys<'a>,
     pub(crate) frame: &'r mut Frame,
-    /// The caller's audio buffer and how much of it is written. TODO(M6).
-    #[allow(dead_code)]
+    /// The caller's audio buffer and how much of it is written.
     pub(crate) audio: &'r mut [StereoSample],
-    #[allow(dead_code)]
     pub(crate) audio_len: usize,
     pub(crate) events: Events,
     /// Events that end the run call.
-    stop_on: Events,
+    pub(crate) stop_on: Events,
     /// The run call ends once the clock reaches this (`u64::MAX`: no
     /// target, or already reached).
     target: u64,
@@ -354,6 +370,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             target,
             done: false,
         };
+        ctx.start_audio();
         ctx.reschedule();
         ctx
     }
@@ -456,8 +473,124 @@ impl Ctx<'_, '_> {
         let new = self.sys.timer.sc(now);
         let done = self.sys.serial.div_reset(old, new);
         self.serial_done(done);
+        self.apu_div_reset(old);
         self.set_timer_deadline();
         self.schedule_serial();
+    }
+
+    /// The APU part of a DIV write or STOP (`old`: the counter before it):
+    /// if the DIV-APU bit was 1, the reset is its falling edge and the
+    /// frame sequencer steps now (SameBoy `GB_set_internal_div_counter`,
+    /// `triggers & apu_bit`); then the deadline moves with the rebased
+    /// counter. The caller reschedules.
+    #[inline(never)]
+    fn apu_div_reset(&mut self, old: u64) {
+        if !self.mem.apu.powered() {
+            return;
+        }
+        if old >> self.sys.timer.div_apu_bit() & 1 != 0 {
+            let now = self.clock();
+            self.apu_sync(now);
+            self.mem.apu.step();
+        }
+        self.sys.set_div_apu_deadline(true, self.clock());
+    }
+
+    /// Brings the APU up to `now`, writing completed samples into the
+    /// caller's buffer (ADR 0021 section 3).
+    #[inline(never)]
+    pub(crate) fn apu_sync(&mut self, now: u64) {
+        let Memory { apu, io, .. } = &mut *self.mem;
+        apu.sync(now, io, self.audio, &mut self.audio_len);
+    }
+
+    /// The end of a run call that started at clock `start`: the samples
+    /// completed in it are written, a partial window carries over (ADR 0021
+    /// section 3), and the context is dropped. Out of line: once per call,
+    /// off `Emulator::run`.
+    #[inline(never)]
+    pub(crate) fn finish(mut self, start: u64) -> RunResult {
+        self.apu_sync(self.clock());
+        RunResult {
+            events: self.events,
+            clocks: self.clock() - start,
+            audio_samples: self.audio_len,
+        }
+    }
+
+    /// The start of a run call: the APU is brought to the clock (advance
+    /// only, if a caller left it behind), and with buffer room the
+    /// `AudioBuffer` deadline is where the last slot's window ends. The
+    /// caller reschedules. Out of line: once per call, off `Emulator::run`.
+    #[inline(never)]
+    fn start_audio(&mut self) {
+        let now = self.clock();
+        let apu = &mut self.mem.apu;
+        if apu.out.synced < now {
+            apu.sync(now, &self.mem.io, &mut [], &mut 0);
+        }
+        let at = match self.audio.len() {
+            0 => NEVER,
+            room => self.mem.apu.buffer_deadline(room),
+        };
+        self.sys.sched.set(EventKind::AudioBuffer, at);
+    }
+
+    /// A DIV-APU falling edge (`EventKind::DivApu`, due at `now`).
+    #[inline(never)]
+    fn div_apu_event(&mut self, now: u64) {
+        self.apu_sync(now);
+        self.mem.apu.step();
+        self.sys.set_div_apu_deadline(true, now);
+    }
+
+    /// The last free audio slot's window ended (`EventKind::AudioBuffer`):
+    /// write it and end the call. The deadline stays `NEVER`.
+    #[inline(never)]
+    fn audio_buffer_event(&mut self, now: u64) {
+        self.apu_sync(now);
+        self.raise(Events::AUDIO_BUFFER_FULL);
+    }
+
+    /// A write to FF10-FF3F (by the low 7 address bits): the APU is synced
+    /// to the access first, then the write applies (ADR 0021 section 3).
+    /// While the APU is off, FF10-FF25 ignore writes on CGB, the NRx1
+    /// lengths included (SameBoy `GB_apu_write`: only DMG accepts them);
+    /// NR52 and wave RAM stay writable. Out of line, off `write_high`.
+    #[inline(never)]
+    fn write_apu(&mut self, reg: usize, value: u8) {
+        let now = self.clock();
+        self.apu_sync(now);
+        match reg {
+            0x26 => self.write_nr52(value, now),
+            0x10..=0x25 if !self.mem.apu.powered() => {}
+            // Channel registers: stored, then decoded by the channels.
+            0x10..=0x25 => {
+                self.mem.io[reg] = value;
+                self.mem.apu.write(reg, value, now);
+            }
+            // Wave RAM: stored (CH3 playing: task 4).
+            _ => self.mem.io[reg] = value,
+        }
+    }
+
+    /// NR52: only bit 7 (power) is writable (Pan Docs: FF26 - NR52; ADR
+    /// 0021 section 7). Off zeroes FF10-FF25 and the APU state but the
+    /// output stream; on starts the frame sequencer. Synced to `now`.
+    fn write_nr52(&mut self, value: u8, now: u64) {
+        let on = value & 0x80 != 0;
+        if on == self.mem.apu.powered() {
+            return;
+        }
+        if on {
+            let high = self.sys.timer.sc(now) >> self.sys.timer.div_apu_bit() & 1 != 0;
+            self.mem.apu.power_on(now, high);
+        } else {
+            self.mem.apu.power_off();
+            self.mem.io[0x10..=0x25].fill(0);
+        }
+        self.sys.set_div_apu_deadline(on, now);
+        self.reschedule();
     }
 
     /// Records `events`, ending the run call after this instruction if
@@ -527,13 +660,7 @@ impl Ctx<'_, '_> {
                     s.iflags |= s.timer.reload(now);
                     s.sched.set_inline(EventKind::Timer, s.timer.deadline());
                 }
-                EventKind::Serial => {
-                    let done = self.sys.serial.shift();
-                    self.serial_done(done);
-                    // `boundary` reschedules after the loop.
-                    let at = self.serial_deadline(now);
-                    self.sys.sched.set_inline(EventKind::Serial, at);
-                }
+                EventKind::Serial => self.serial_event(now),
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
                 EventKind::Dma => {
@@ -541,8 +668,8 @@ impl Ctx<'_, '_> {
                     self.hot.dma = 0;
                 }
                 EventKind::VramDma => self.vdma_hblank(),
-                // Not scheduled yet: the APU in M6.
-                EventKind::DivApu | EventKind::AudioBuffer => {}
+                EventKind::DivApu => self.div_apu_event(now),
+                EventKind::AudioBuffer => self.audio_buffer_event(now),
             }
             if now < self.sys.sched.next() {
                 break;
@@ -550,10 +677,24 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// A serial bit shift is due at `now` (`EventKind::Serial`). Out of
+    /// line, off `boundary`: only while a transfer runs. `boundary`
+    /// reschedules after the event loop.
+    #[cold]
+    #[inline(never)]
+    fn serial_event(&mut self, now: u64) {
+        let done = self.sys.serial.shift();
+        self.serial_done(done);
+        let at = self.serial_deadline(now);
+        self.sys.sched.set_inline(EventKind::Serial, at);
+    }
+
     /// Applies the scheduled button changes due at the M-cycle boundary
     /// `now`: those at a clock inside the M-cycle that starts at `now` or
     /// earlier (rounded down, ADR 0012), so accesses from `now` on see
-    /// them. Then schedules the next one.
+    /// them. Then schedules the next one. Out of line, off `boundary`.
+    #[cold]
+    #[inline(never)]
     fn apply_inputs(&mut self, now: u64) {
         let m = self.hot.mcycle as u64;
         let s = &mut *self.sys;
@@ -817,8 +958,7 @@ impl Ctx<'_, '_> {
             0x01 => s.serial.sb = value,
             0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
             0x0F => s.iflags = value & INT_MASK,
-            // Sound: plain storage until M6.
-            0x10..=0x3F => self.mem.io[reg] = value,
+            0x10..=0x3F => self.write_apu(reg, value),
             0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
             0x46 => self.oam_dma(value),
             0x51..=0x54 if cgb => s.vdma.write_addr(reg - 0x50, value),
@@ -1096,6 +1236,9 @@ impl Ctx<'_, '_> {
         self.sys
             .timer
             .speed_switch(now, (freeze * m / 4) as i64 - short);
+        // The DIV-APU bit changes (12 <-> 13) with the counter speed.
+        let powered = self.mem.apu.powered();
+        self.sys.set_div_apu_deadline(powered, now);
         if !pending && self.sys.vdma.hblank {
             self.vdma_halt(true);
         }
@@ -1167,17 +1310,31 @@ impl Ctx<'_, '_> {
 
 /// CGB VRAM DMA (FF51-FF55; `hdma` module, ADR 0017).
 impl Ctx<'_, '_> {
-    /// `n` idle M-cycles (the CPU stalled), skipped a deadline at a time
-    /// (ADR 0011), each deadline handled on the M-cycle it was before.
-    fn idle_mcycles(&mut self, mut n: u32) {
-        while n > 0 {
+    /// Runs the CPU stall of the current transfer step (`VramDma::stall`
+    /// idle M-cycles left), skipped a deadline at a time (ADR 0011), each
+    /// deadline handled on the M-cycle it was before. Stops early at the
+    /// first deadline that raises a stop event or reaches `limit` (the
+    /// call's target; `u64::MAX` for a single step): the run call ends
+    /// there and the next one resumes the stall. Without this, a GDMA
+    /// stall (up to 4,100 clocks) crossing the `AudioBuffer` deadline
+    /// would complete windows with no slot left, dropping them (ADR 0021,
+    /// GDMA stall amendment).
+    #[inline(never)]
+    pub(crate) fn vdma_stall(&mut self, limit: u64) {
+        // In a local: no event handler touches the stall.
+        let mut n = u32::from(self.sys.vdma.stall);
+        while n != 0 {
             let k = self.mcycles_to_deadline().min(n);
             self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
             n -= k;
             if self.hot.budget <= 0 {
                 self.boundary();
+                if self.events.intersects(self.stop_on) || self.clock() >= limit {
+                    break;
+                }
             }
         }
+        self.sys.vdma.stall = n as u16;
     }
 
     /// Stores the FF55 read-back where `read_io` reads it.
@@ -1272,13 +1429,15 @@ impl Ctx<'_, '_> {
     }
 
     /// Runs the pending transfer step at an instruction fetch: all blocks
-    /// of a GDMA, or one HDMA block, then stalls the CPU for it
-    /// ([`hdma::stall_mcycles`]). The bytes are copied at once at the
-    /// start, after the PPU has drawn everything before it.
+    /// of a GDMA, or one HDMA block, and sets the CPU stall for it
+    /// ([`hdma::stall_mcycles`], run by [`Self::vdma_stall`]). The bytes
+    /// are copied at once at the start, after the PPU has drawn everything
+    /// before it.
     ///
     /// Sources: ROM, cartridge RAM and WRAM are read; VRAM and E000-FFFF
     /// read FF (SameBoy reads the CPU data bus there, which this core does
     /// not model).
+    #[inline(never)]
     pub(crate) fn vram_dma(&mut self) {
         let now = self.clock();
         self.run_ppu_to_call(now);
@@ -1308,9 +1467,10 @@ impl Ctx<'_, '_> {
                 break;
             }
         }
+        // At most 1 + 128 * 16 M-cycles: fits.
+        v.stall = hdma::stall_mcycles(blocks, self.hot.mcycle as u32) as u16;
         self.sys.vdma = v;
         self.vdma_sync_reg();
-        self.idle_mcycles(hdma::stall_mcycles(blocks, self.hot.mcycle as u32));
     }
 }
 
@@ -1600,11 +1760,11 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x02 => sys.serial.read_sc(cgb),
         0x04..=0x07 => sys.timer.read(hot.clock(), reg),
         0x0F => 0xE0 | sys.iflags,
-        // Sound: write-only and unused bits read 1 (`SOUND_READ_MASK`);
-        // wave RAM as stored. TODO(M6): channel status in NR52, wave RAM
-        // while channel 3 plays.
+        // NR52, wave RAM and PCM12/PCM34 depend on the APU state.
+        0x26 | 0x30..=0x3F | 0x76 | 0x77 => apu::read_apu(mem, hot.clock(), reg),
+        // Sound: write-only and unused bits read 1 (`SOUND_READ_MASK`;
+        // power off zeroes the stored bytes).
         0x10..=0x2F => mem.io[reg] | SOUND_READ_MASK[(reg - 0x10) & 0x1F],
-        0x30..=0x3F => mem.io[reg],
         0x40 => sys.ppu.lcdc,
         0x41 => sys.ppu.stat(hot.clock(), hot.mcycle == 2),
         0x44 => sys.ppu.ly(hot.clock(), hot.mcycle == 2),
@@ -1639,10 +1799,8 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         0x72 | 0x73 => mem.io[reg],
         0x74 if cgb => mem.io[reg],
         0x75 => 0x8F | mem.io[reg],
-        // FF76/FF77 PCM12/PCM34: the channel amplitudes (read only, on CGB
-        // in either mode; Mooneye `misc/bits/unused_hwio-C` reads 00 with
-        // the APU silent). TODO(M6): the live amplitudes.
-        0x76 | 0x77 => 0x00,
+        // FF76/FF77 PCM12/PCM34 (read only, on CGB in either mode; Mooneye
+        // `misc/bits/unused_hwio-C` reads 00 with the APU silent): above.
         _ => 0xFF,
     }
 }
@@ -1780,6 +1938,7 @@ mod tests {
     fn clock_countdown_is_capped_and_exact() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
         write(emu, 0xFF40, 0x11); // LCD off: no event scheduled
+        write(emu, 0xFF26, 0x00); // APU off: no frame-sequencer events
         let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
         let start = emu.clock();
         let Emulator { mem, hw } = &mut *emu;
@@ -1817,6 +1976,7 @@ mod tests {
     fn idle_halted_consumes_the_whole_countdown() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
         write(emu, 0xFF40, 0x11); // LCD off: no event scheduled
+        write(emu, 0xFF26, 0x00); // APU off: no frame-sequencer events
         let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
         let Emulator { mem, hw } = &mut *emu;
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
@@ -2104,6 +2264,373 @@ mod tests {
         // CGB mode leaves P1 alone.
         let emu = load(rom(0x8000, 0, 0, 0x80));
         assert_eq!(emu.peek(0xFF00), 0xCF);
+    }
+
+    // --- APU framework (ADR 0021; M6 task 1(a)) ---
+
+    fn run_audio(emu: &mut Emulator, clocks: u64, audio: &mut [StereoSample]) -> crate::RunResult {
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        emu.run_cycles(clocks, &mut fb, audio)
+    }
+
+    /// The clock of the first DIV-APU edge after reset: counter bit 12
+    /// falls when the counter reaches a multiple of 0x2000.
+    fn first_div_apu_edge() -> u64 {
+        let c0 = Timer::post_boot().sc(0);
+        (((c0 >> 13) + 1) << 13) - c0
+    }
+
+    #[test]
+    fn nr52_power_off_clears_the_registers_and_ignores_writes() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        assert_eq!(emu.peek(0xFF26), 0xF1, "post-boot");
+        write(emu, 0xFF26, 0x8E); // only bit 7 is writable
+        assert_eq!(emu.peek(0xFF26), 0xF1);
+        write(emu, 0xFF30, 0x5A);
+        write(emu, 0xFF26, 0x00);
+        assert_eq!(emu.peek(0xFF26), 0x70);
+        assert_eq!(
+            emu.hw.sys.sched.deadline(EventKind::DivApu),
+            NEVER,
+            "no frame sequencer while off"
+        );
+        for reg in 0xFF10..=0xFF25u16 {
+            let mask = SOUND_READ_MASK[usize::from(reg - 0xFF10)];
+            assert_eq!(emu.peek(reg), mask, "{reg:#06x} cleared");
+            write(emu, reg, 0xFF);
+            assert_eq!(emu.peek(reg), mask, "{reg:#06x} ignores writes while off");
+        }
+        // Wave RAM is kept and stays writable.
+        assert_eq!(emu.peek(0xFF30), 0x5A);
+        write(emu, 0xFF31, 0xA5);
+        assert_eq!(emu.peek(0xFF31), 0xA5);
+        write(emu, 0xFF26, 0x80);
+        assert_eq!(emu.peek(0xFF26), 0xF0);
+        assert_eq!(emu.peek(0xFF12), 0x00, "still cleared after power on");
+        write(emu, 0xFF12, 0xF3);
+        assert_eq!(emu.peek(0xFF12), 0xF3);
+    }
+
+    #[test]
+    fn div_apu_steps_on_each_falling_edge_of_counter_bit_12() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let first = first_div_apu_edge();
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), first);
+        let step_at = |emu: &mut Emulator, t: u64| {
+            let now = emu.clock();
+            let _ = run_audio(emu, t - now, &mut []);
+            emu.mem.apu.fs.step
+        };
+        assert_eq!(step_at(emu, first - 8), 0);
+        assert_eq!(step_at(emu, first + 4), 1);
+        assert_eq!(step_at(emu, first + 8192 - 8), 1);
+        assert_eq!(step_at(emu, first + 8192 + 4), 2);
+        assert_eq!(
+            emu.hw.sys.sched.deadline(EventKind::DivApu),
+            first + 2 * 8192
+        );
+    }
+
+    #[test]
+    fn a_div_write_with_bit_12_set_steps_the_frame_sequencer_early() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let first = first_div_apu_edge();
+        let _ = run_audio(emu, first + 0x800, &mut []);
+        assert_eq!(emu.mem.apu.fs.step, 1);
+        // Bit 12 is 0: no edge; the next one is 0x2000 after the reset.
+        write(emu, 0xFF04, 0);
+        assert_eq!(emu.mem.apu.fs.step, 1);
+        let reset = emu.clock();
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), reset + 0x2000);
+        // 0x1100 later bit 12 is 1: the reset is its falling edge.
+        let _ = run_audio(emu, 0x1100, &mut []);
+        assert_eq!(emu.mem.apu.fs.step, 1);
+        write(emu, 0xFF04, 0);
+        assert_eq!(emu.mem.apu.fs.step, 2);
+        let reset = emu.clock();
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), reset + 0x2000);
+        let _ = run_audio(emu, 0x2000 + 4, &mut []);
+        assert_eq!(emu.mem.apu.fs.step, 3);
+    }
+
+    #[test]
+    fn div_apu_follows_counter_bit_13_after_a_switch_to_double_speed() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let Emulator { mem, hw } = emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));
+        let t = &ctx.sys.timer;
+        assert_eq!(t.div_apu_bit(), 13);
+        let want = t.clock_at(((t.sc(ctx.clock()) >> 14) + 1) << 14);
+        assert_eq!(ctx.sys.sched.deadline(EventKind::DivApu), want);
+    }
+
+    #[test]
+    fn power_on_with_bit_12_set_skips_the_first_edge() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let first = first_div_apu_edge();
+        write(emu, 0xFF26, 0x00);
+        let _ = run_audio(emu, first + 0x1100, &mut []);
+        write(emu, 0xFF26, 0x80);
+        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, true));
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), first + 0x2000);
+        let _ = run_audio(emu, 0x1000, &mut []);
+        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, false));
+        let _ = run_audio(emu, 0x2000, &mut []);
+        assert_eq!(emu.mem.apu.fs.step, 2);
+    }
+
+    #[test]
+    fn one_sample_per_128_clocks_across_run_calls() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let mut audio = vec![StereoSample { left: 1, right: 1 }; 1000];
+        let mut total = 0;
+        for clocks in [100, 200, 28, 4, 1000, 40_000, 12] {
+            let start = emu.clock();
+            let r = run_audio(emu, clocks, &mut audio);
+            let end = emu.clock();
+            assert_eq!(
+                r.audio_samples as u64,
+                end / 128 - start / 128,
+                "{start}..{end}"
+            );
+            // No channels yet: silence.
+            assert!(
+                audio[..r.audio_samples]
+                    .iter()
+                    .all(|s| *s == StereoSample::default())
+            );
+            assert_eq!(emu.mem.apu.out.synced, end, "synced at the end of the call");
+            total += r.audio_samples as u64;
+        }
+        assert_eq!(total, emu.clock() / 128);
+        assert_eq!(crate::AUDIO_SAMPLE_RATE, 32_768);
+        assert_eq!(crate::CLOCK_HZ / crate::AUDIO_SAMPLE_CLOCKS, 32_768);
+    }
+
+    #[test]
+    fn a_full_audio_buffer_ends_the_call() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let mut audio = vec![StereoSample::default(); 10];
+        let r = run_audio(emu, u64::from(FRAME_CLOCKS), &mut audio);
+        assert!(r.events.contains(Events::AUDIO_BUFFER_FULL));
+        assert_eq!(r.audio_samples, 10);
+        assert!((1280..1280 + 128).contains(&r.clocks), "{}", r.clocks);
+        // The next call continues the window grid.
+        let mut audio = vec![StereoSample::default(); 100];
+        let r = run_audio(emu, 1000, &mut audio);
+        assert!(!r.events.contains(Events::AUDIO_BUFFER_FULL));
+        assert_eq!(r.audio_samples as u64, emu.clock() / 128 - 10);
+    }
+
+    #[test]
+    fn an_empty_audio_buffer_only_advances_and_restarts_the_grid() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let r = run_audio(emu, 1000, &mut []);
+        assert_eq!(r.audio_samples, 0);
+        assert!(!r.events.contains(Events::AUDIO_BUFFER_FULL));
+        assert!(!emu.mem.apu.out.live);
+        assert_eq!(emu.mem.apu.out.synced, emu.clock());
+        // 100 clocks into a window, then an empty-buffer stretch: the next
+        // call with room restarts the grid at its start.
+        let mut audio = vec![StereoSample::default(); 10];
+        assert_eq!(run_audio(emu, 100, &mut audio).audio_samples, 0);
+        let _ = run_audio(emu, 400, &mut []);
+        assert_eq!(run_audio(emu, 124, &mut audio).audio_samples, 0);
+        assert_eq!(run_audio(emu, 4, &mut audio).audio_samples, 1);
+    }
+
+    // --- CH2 (ADR 0021 section 5; M6 task 1(b)) ---
+
+    #[test]
+    fn ch2_length_expiry_clears_nr52_bit_1() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF0); // DAC on
+        write(emu, 0xFF16, 0x3E); // length 2
+        write(emu, 0xFF19, 0xC0); // trigger, length on (fs 0: no extra clock)
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        // The first DIV-APU edge is fs step 1: one length clock.
+        let _ = run_audio(emu, first_div_apu_edge() + 100, &mut []);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02, "2 -> 1");
+        // Step 3 is the next length clock.
+        let _ = run_audio(emu, 2 * 8192, &mut []);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x00, "1 -> 0: off");
+    }
+
+    #[test]
+    fn ch2_envelope_steps_at_fs_step_0() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF1); // volume 15, down, period 1
+        write(emu, 0xFF19, 0x80);
+        // Steps 1-7 don't clock the envelope; step 0 (the 8th) does.
+        let _ = run_audio(emu, first_div_apu_edge() + 6 * 8192 + 100, &mut []);
+        assert_eq!(emu.mem.apu.sq[1].env.volume, 15);
+        let _ = run_audio(emu, 8192, &mut []);
+        assert_eq!(emu.mem.apu.sq[1].env.volume, 14);
+    }
+
+    #[test]
+    fn ch2_dac_off_clears_nr52_bit_1() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF0);
+        write(emu, 0xFF19, 0x80);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        write(emu, 0xFF17, 0x07);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x00);
+    }
+
+    #[test]
+    fn pcm12_high_nibble_is_ch2s_digital_output() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF16, 0x40); // duty 25%: positions 0 and 7 high
+        write(emu, 0xFF17, 0xF0); // volume 15
+        write(emu, 0xFF18, 0x00);
+        write(emu, 0xFF19, 0x84); // f = 0x400: 4096 clocks per step
+        let _ = run_audio(emu, 2000, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0x00, "position 0, before the first step");
+        let _ = run_audio(emu, 4106 + 6 * 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0xF0, "position 7");
+        // A pure read: the same at the same clock.
+        assert_eq!(emu.peek(0xFF76), 0xF0);
+        let _ = run_audio(emu, 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0xF0, "position 0, started");
+        let _ = run_audio(emu, 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0x00, "position 1");
+    }
+
+    /// CH2 at volume 15, duty 12.5%, frequency `f`, on both sides at
+    /// volume 8, after `warm` windows; then `n` samples.
+    fn ch2_tone(f: u16, warm: usize, n: usize) -> std::vec::Vec<StereoSample> {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF24, 0x77);
+        write(emu, 0xFF25, 0x22);
+        write(emu, 0xFF16, 0x00);
+        write(emu, 0xFF17, 0xF0);
+        write(emu, 0xFF18, f as u8);
+        write(emu, 0xFF19, 0x80 | (f >> 8) as u8);
+        let mut audio = vec![StereoSample::default(); warm + n];
+        let r = run_audio(emu, 128 * (warm + n) as u64, &mut audio);
+        assert_eq!(r.audio_samples, warm + n);
+        audio.split_off(warm)
+    }
+
+    #[test]
+    fn a_known_ch2_tone_averages_through_the_mixer() {
+        // One duty high (digital 15 -> analog -15) and seven low (+15) per
+        // period: average 11.25, times volume 8, times 64 = 5760.
+        let want = StereoSample {
+            left: 5760,
+            right: 5760,
+        };
+        // f = 2044: one duty period per 128-clock window, every window.
+        assert!(ch2_tone(2044, 2, 20).iter().all(|&s| s == want));
+        // f = 2047: four whole periods per window (the closed-form path).
+        assert!(ch2_tone(2047, 2, 20).iter().all(|&s| s == want));
+        // f = 2016: one step per window; eight windows are one period.
+        let tone = ch2_tone(2016, 10, 32);
+        assert!(tone.iter().any(|&s| s != want));
+        for period in tone.chunks(8) {
+            let sum: i32 = period.iter().map(|s| i32::from(s.left)).sum();
+            assert_eq!(sum, 8 * 5760);
+        }
+    }
+
+    /// What a [`split_run`] ends with.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SplitEnd {
+        samples: std::vec::Vec<StereoSample>,
+        clock: u64,
+        regs: crate::Registers,
+        out: crate::apu::Output,
+        vram_sum: u64,
+    }
+
+    /// Runs `program` (at 0100, CGB mode, CH2 sounding on both sides) to
+    /// clock `end`, in run calls of at most `chunk` clocks with `k`-slot
+    /// audio buffers. Also returns whether a call ended inside a VRAM DMA
+    /// stall.
+    fn split_run(program: &[u8], end: u64, chunk: u64, k: usize) -> (SplitEnd, bool) {
+        let rom = rom(0x8000, 0, 0, 0x80);
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        let emu = load(rom);
+        for (reg, v) in [
+            (0xFF24, 0x77),
+            (0xFF25, 0x22),
+            (0xFF16, 0x80), // duty 50%
+            (0xFF17, 0xF0),
+            (0xFF18, 0x00),
+            (0xFF19, 0x87),
+        ] {
+            write(emu, reg, v);
+        }
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let mut buf = vec![StereoSample::default(); k];
+        let mut samples = std::vec::Vec::new();
+        let mut mid_stall = false;
+        while emu.clock() < end {
+            let t = emu.clock().saturating_add(chunk).min(end);
+            let r = emu.run_until(t, &mut fb, &mut buf);
+            samples.extend_from_slice(&buf[..r.audio_samples]);
+            mid_stall |= emu.hw.sys.vdma.stall != 0;
+        }
+        let vram_sum = emu.mem.vram.iter().enumerate();
+        let vram_sum = vram_sum.map(|(i, &b)| (i as u64 + 1) * u64::from(b)).sum();
+        let end = SplitEnd {
+            samples,
+            clock: emu.clock(),
+            regs: emu.registers(),
+            out: emu.mem.apu.out,
+            vram_sum,
+        };
+        (end, mid_stall)
+    }
+
+    /// A loop of 128-block GDMAs (each a 4,100-clock CPU stall) that
+    /// changes the CH2 frequency between them.
+    const GDMA_LOOP: [u8; 0x18] = [
+        0x3E, 0xC0, 0xE0, 0x51, // LD A,C0; LDH (51),A
+        0xAF, 0xE0, 0x52, // XOR A; LDH (52),A
+        0x3E, 0x80, 0xE0, 0x53, // LD A,80; LDH (53),A
+        0xAF, 0xE0, 0x54, // XOR A; LDH (54),A
+        0x3E, 0x7F, 0xE0, 0x55, // LD A,7F; LDH (55),A: GDMA, 128 blocks
+        0x04, 0x78, 0xE0, 0x18, // INC B; LD A,B; LDH (18),A
+        0x18, 0xE8, // JR 0100
+    ];
+
+    #[test]
+    fn a_gdma_stall_across_the_buffer_deadline_drops_no_sample() {
+        let end = 3 * u64::from(FRAME_CLOCKS) + 77;
+        let (want, _) = split_run(&GDMA_LOOP, end, u64::MAX, 10_000);
+        assert!(want.samples.len() as u64 >= end / 128 - 1);
+        for k in [1, 7, 33, 549] {
+            let (got, mid_stall) = split_run(&GDMA_LOOP, end, u64::MAX, k);
+            assert_eq!(got, want, "k = {k}");
+            assert!(mid_stall || k == 549, "k = {k}: no FULL inside a stall");
+        }
+        // Targets inside stalls too.
+        let (got, mid_stall) = split_run(&GDMA_LOOP, end, 1_001, 7);
+        assert_eq!(got, want);
+        assert!(mid_stall);
+    }
+
+    #[test]
+    fn samples_and_state_are_independent_of_call_and_buffer_splits() {
+        // INC B; LD A,B; LDH (18),A; LD C,20; DEC C; JR NZ,-3; JR 0100.
+        let program = [
+            0x04, 0x78, 0xE0, 0x18, 0x0E, 0x20, 0x0D, 0x20, 0xFD, 0x18, 0xF5,
+        ];
+        let end = 2 * u64::from(FRAME_CLOCKS) + 333;
+        let (want, _) = split_run(&program, end, u64::MAX, 10_000);
+        for k in [1, 7, 33, 549] {
+            for chunk in [u64::MAX, 997, 128 * 549] {
+                let (got, _) = split_run(&program, end, chunk, k);
+                assert_eq!(got, want, "k = {k}, chunk = {chunk}");
+            }
+        }
+        // A run of n clocks never completes more than n / 128 + 2.
+        let (got, _) = split_run(&program, end, 255, 4);
+        assert_eq!(got, want, "4 slots suffice for 255-clock calls");
     }
 
     #[test]
@@ -2607,6 +3134,8 @@ mod dma_tests {
     fn halted_skip_passes_the_dma_deadline() {
         let emu = setup();
         with_ctx(emu, |ctx| {
+            // APU off: no frame-sequencer events.
+            ctx.write(0xFF26, 0x00);
             let t0 = ctx.clock();
             ctx.write(0xFF46, 0xC1);
             idle_to(ctx, t0, 3);

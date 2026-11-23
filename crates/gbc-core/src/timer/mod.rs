@@ -154,6 +154,16 @@ impl Timer {
         (self.sc(now) >> 8) as u8
     }
 
+    /// The system-counter bit whose falling edge clocks the APU frame
+    /// sequencer: DIV bit 4, bit 5 in double speed, i.e. counter bit 12 or
+    /// 13 (Pan Docs "Audio details", DIV-APU; SameBoy `apu_bit`). The
+    /// counter runs twice as fast in double speed, so the edge stays at
+    /// 512 Hz.
+    #[inline]
+    pub(crate) fn div_apu_bit(&self) -> u32 {
+        12 + self.shift
+    }
+
     /// Reads FF04-FF07 (by the low address bits) at clock `now`. Out of
     /// line, so the counter arithmetic stays off `read_high` (ADR 0011).
     #[inline(never)]

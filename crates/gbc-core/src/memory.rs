@@ -1,5 +1,6 @@
 //! Large internal RAM arrays.
 
+use crate::apu::Apu;
 use crate::ppu::OBJ_BUF_LEN;
 
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
@@ -13,12 +14,21 @@ use crate::ppu::OBJ_BUF_LEN;
 /// caller: [`Emulator::new`](crate::Emulator::new) zero-fills them and
 /// `load`/`reset` write the post-boot values.
 ///
-/// INVARIANT: every field is an integer array whose power-on value is
-/// zero; non-zero power-on values (e.g. post-boot I/O registers) are
+/// INVARIANT: every field is an integer array (or, for `apu`, a struct of
+/// integers and flags) whose power-on value is zero; non-zero power-on values (e.g. post-boot I/O registers) are
 /// written by `reset`, not by `new`. Checked by the
 /// `memory_new_is_all_zero_bytes` test.
+// `repr(C)`: `apu` (8-byte aligned) last, so the hot arrays keep the
+// offsets they had before it (rustc puts the most aligned field first),
+// which the bus and renderer code size depends on (Thumb-2 immediates).
 #[cfg_attr(test, derive(PartialEq))]
+#[repr(C)]
 pub struct Memory {
+    /// Per BG palette, the pixel-pair table of its resolved colors
+    /// (`ppu::render::pair_table`), kept up to date on palette writes so
+    /// the renderer never builds one. Palette 0 in DMG compatibility mode
+    /// is BGP's colors.
+    pub(crate) bg_pairs: [[u32; 16]; 8],
     /// 8 banks of 4 KiB (CGB). Bank 0 at C000, banks 1-7 at D000 (SVBK).
     pub(crate) wram: [u8; 0x8000],
     /// 2 banks of 8 KiB (CGB, VBK).
@@ -52,11 +62,9 @@ pub struct Memory {
     pub(crate) bg_pal: [u8; 64],
     /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
     pub(crate) obj_pal: [u8; 64],
-    /// Per BG palette, the pixel-pair table of its resolved colors
-    /// (`ppu::render::pair_table`), kept up to date on palette writes so
-    /// the renderer never builds one. Palette 0 in DMG compatibility mode
-    /// is BGP's colors.
-    pub(crate) bg_pairs: [[u32; 16]; 8],
+    /// The APU's internal state (ADR 0021 section 2): here, not in `Hw`, as
+    /// it is only touched on cold paths. All zero is powered off.
+    pub(crate) apu: Apu,
 }
 
 impl Memory {
@@ -79,6 +87,7 @@ impl Memory {
             bg_pal: [0; 64],
             obj_pal: [0; 64],
             bg_pairs: [[0; 16]; 8],
+            apu: Apu::new(),
         }
     }
 
@@ -98,12 +107,14 @@ impl Memory {
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
+        self.apu = Apu::new();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Memory;
+    use crate::apu::Apu;
 
     #[test]
     fn memory_new_is_all_zero_bytes() {
@@ -124,6 +135,7 @@ mod tests {
             bg_pal,
             obj_pal,
             bg_pairs,
+            apu,
         } = &NEW;
         let fields: [&[u8]; 11] = [
             wram,
@@ -140,9 +152,12 @@ mod tests {
         ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
+        assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
-        // the tail to `bg_pairs`' 4-byte alignment (HRAM is 127 bytes).
-        let total: usize = fields.iter().map(|f| f.len()).sum::<usize>() + size_of_val(bg_pairs);
+        // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
+        let total: usize = fields.iter().map(|f| f.len()).sum::<usize>()
+            + size_of_val(bg_pairs)
+            + size_of::<Apu>();
         assert_eq!(
             size_of::<Memory>(),
             total.next_multiple_of(align_of::<Memory>())

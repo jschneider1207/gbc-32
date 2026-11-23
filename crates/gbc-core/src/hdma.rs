@@ -59,6 +59,11 @@ pub(crate) struct VramDma {
     /// HALT began outside mode 0 (`allow_hdma_on_wake`): waking up in
     /// mode 0 starts a block.
     pub(crate) wake_ok: bool,
+    /// M-cycles left of the current transfer step's CPU stall
+    /// ([`stall_mcycles`]; at most 2,049). A run call can end inside the
+    /// stall (a stop event or its target); the next call resumes it
+    /// before the CPU runs (ADR 0021, GDMA stall amendment).
+    pub(crate) stall: u16,
     /// Not VRAM DMA state: during the CGB speed-switch halt
     /// (`Ctx::speed_switch`), the low 32 bits of the clock at which its
     /// last M-cycle (the wake-up) starts; the halt is far shorter than
@@ -81,6 +86,7 @@ impl VramDma {
             pending: false,
             halted: false,
             wake_ok: false,
+            stall: 0,
             switch_end: 0,
             line: crate::schedule::NEVER,
         }

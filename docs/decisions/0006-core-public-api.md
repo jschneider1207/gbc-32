@@ -202,3 +202,28 @@ state at removal and the save-dirty flag; `into_buffers()` gives the old
 tuple), and the API gained `cart_info`, `save_dirty` and
 `clear_save_dirty`. "Buffers always come back" stands and now covers the
 RTC state too. Details and rationale: ADR 0015.
+
+### 2026-11-22: the audio sample rate (ADR 0021)
+
+The rate "fixed in M6" is **32,768 Hz** stereo (`CLOCK_HZ / 128`), the
+same in both CPU speeds. New public constants: `AUDIO_SAMPLE_RATE`
+(32,768) and `AUDIO_SAMPLE_CLOCKS` (128 base clocks per sample). Each
+sample is the average of the mixed signal over its 128-clock window; the
+core keeps DC, and resampling and the DC-blocking high-pass filter are the
+front end's job. The buffer contract is unchanged: samples are written from
+`audio[0]`, `RunResult::audio_samples` counts them, and an empty slice
+discards audio (the APU only advances; the next call with a buffer
+restarts the window grid). When the last slot's window completes,
+`AUDIO_BUFFER_FULL` ends the call at the next instruction boundary, or at
+once if the CPU is inside a VRAM DMA stall: that is the one place a run
+call ends between instruction boundaries, and the next call resumes the
+stall before the CPU runs (`run_until` and `step` docs; the stall also
+stops at the call's target, so a GDMA no longer overshoots it by up to
+4,100 clocks). So no sample is ever dropped and a partial window carries
+over: for any non-empty buffers, the samples and all state are identical
+however the caller splits calls and buffers. A call of `clocks` completes
+at most `clocks / 128 + 2` samples (the carried partial window and the
+overshoot can each complete one), so that size never fills (550 for
+`run_frame`). Sample scale: 64 per unit of mixed level, full scale
+±30,720, DC kept (`StereoSample` rustdoc). Details and rationale: ADR
+0021 sections 8-11 and its GDMA stall amendment.

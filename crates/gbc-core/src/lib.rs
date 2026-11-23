@@ -216,6 +216,20 @@ pub const CLOCK_HZ: u32 = 4_194_304;
 /// Base clocks per LCD frame (154 lines x 456 dots).
 pub const FRAME_CLOCKS: u32 = 70_224;
 
+/// Audio output rate: 32,768 Hz stereo, in both CPU speeds (ADR 0021).
+/// Each sample is the average of the mixed signal over its
+/// [`AUDIO_SAMPLE_CLOCKS`]-clock window, with DC kept: resampling to a
+/// device rate and the DC-blocking high-pass filter are the front end's
+/// job. A run call of `n` clocks completes at most `n / 128 + 2` samples
+/// (the partial window carried in from the last call and the overshoot
+/// past the target can each complete one more), so a buffer that size
+/// never fills; [`run_frame`](Emulator::run_frame) needs 550. Sample scale:
+/// see [`StereoSample`].
+pub const AUDIO_SAMPLE_RATE: u32 = CLOCK_HZ >> apu::SAMPLE_PERIOD_LOG2;
+
+/// Base clocks per audio sample (128).
+pub const AUDIO_SAMPLE_CLOCKS: u32 = 1 << apu::SAMPLE_PERIOD_LOG2;
+
 /// What a run call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
@@ -481,6 +495,11 @@ impl<'a> Emulator<'a> {
     /// Runs end on instruction boundaries, so the clock may overshoot
     /// `target` by part of an instruction (at most a few M-cycles);
     /// [`RunResult::clocks`] and [`Emulator::clock`] give the exact time.
+    /// The one exception is the CPU stall of a CGB VRAM DMA (up to 2,049
+    /// M-cycles): a run can end inside it, on an M-cycle boundary, at its
+    /// target or a stop event; the next call resumes the stall before the
+    /// CPU runs. The CPU is between instructions then, so this is
+    /// invisible to the emulated program.
     /// Callers that need a fixed total should loop on absolute targets so
     /// overshoot never accumulates. Returns immediately if `target` has
     /// already passed.
@@ -510,8 +529,17 @@ impl<'a> Emulator<'a> {
     ///
     /// # Audio
     ///
-    /// Audio samples are written from `audio[0]` on; see
-    /// [`RunResult::audio_samples`].
+    /// Audio samples ([`AUDIO_SAMPLE_RATE`]) are written from `audio[0]`
+    /// on; see [`RunResult::audio_samples`]. When the window of the last
+    /// free slot completes, [`Events::AUDIO_BUFFER_FULL`] ends the call at
+    /// the next instruction boundary (or inside a VRAM DMA stall, at the
+    /// M-cycle boundary that completes it), before another window can
+    /// complete: no sample is dropped, and a partial window carries over
+    /// to the next call. So for any non-empty buffers the samples, like
+    /// all emulated state, don't depend on how the run is split into
+    /// calls or buffers. An empty buffer discards audio: the APU only
+    /// advances, and the next call with a buffer starts a new window at
+    /// its start clock (the grid restarts).
     pub fn run_until(
         &mut self,
         target: u64,
@@ -521,11 +549,16 @@ impl<'a> Emulator<'a> {
         self.run(Some(target), frame, audio)
     }
 
-    /// Executes one instruction (or interrupt dispatch, or one idle M-cycle
-    /// while halted, stopped or locked up). The step that leaves HALT also
+    /// Executes at most one instruction (or interrupt dispatch, or one idle
+    /// M-cycle while halted, stopped or locked up); a step that ends inside
+    /// a VRAM DMA stall runs none (see below, and check
+    /// [`RunResult::events`]). The step that leaves HALT also
     /// includes the CGB wake-up M-cycle before the next instruction or
-    /// dispatch (`docs/reference/halt.md`). The frame buffer rules of
-    /// [`Emulator::run_until`] apply.
+    /// dispatch (`docs/reference/halt.md`). A step that meets a CGB VRAM
+    /// DMA (or one left inside its CPU stall by the last call) first runs
+    /// the rest of the stall, then the instruction, unless a stop event
+    /// (e.g. [`Events::AUDIO_BUFFER_FULL`]) ends it inside the stall. The
+    /// frame buffer and audio rules of [`Emulator::run_until`] apply.
     pub fn step(&mut self, frame: &mut Frame, audio: &mut [StereoSample]) -> RunResult {
         self.run(None, frame, audio)
     }
@@ -564,12 +597,16 @@ impl<'a> Emulator<'a> {
         // next one would fetch its opcode: a pending one ends `cpu.run`
         // (`Ctx::done`) after the current instruction. Steps one at a time
         // while it waits for a dispatch or a wake-up.
+        //
+        // Its CPU stall stops early at a stop event or the target (a
+        // single step: only a stop event), ending the call inside it; the
+        // next call resumes it first (ADR 0021, GDMA stall amendment).
+        let limit = if single { u64::MAX } else { end };
         loop {
-            if ctx.sys.vdma.pending && cpu.fetches_next(&ctx) {
-                ctx.vram_dma();
-                if !single && finished(&ctx) {
-                    break;
-                }
+            if (ctx.sys.vdma.pending || ctx.sys.vdma.stall != 0)
+                && vdma_turn(cpu, &mut ctx, limit, single)
+            {
+                break;
             }
             // A single step: done before it starts, so `run` stops after one.
             ctx.done = finished(&ctx) || ctx.sys.vdma.pending;
@@ -578,11 +615,7 @@ impl<'a> Emulator<'a> {
                 break;
             }
         }
-        RunResult {
-            events: ctx.events,
-            clocks: ctx.clock() - start,
-            audio_samples: ctx.audio_len,
-        }
+        ctx.finish(start)
     }
 
     // --- Debug access: plain field reads, nothing on the hot path. ---
@@ -593,7 +626,10 @@ impl<'a> Emulator<'a> {
         self.hw.sys.hot.clock()
     }
 
-    /// The CPU registers.
+    /// The CPU registers. After a call that ended inside a VRAM DMA stall,
+    /// the copy is already done (VRAM and FF55 show it) but `pc` is still
+    /// the instruction after the FF55 write: the CPU resumes only once the
+    /// stall has run out in a later call.
     #[inline]
     pub fn registers(&self) -> Registers {
         self.hw.cpu.regs
@@ -713,6 +749,27 @@ impl<'a> Emulator<'a> {
             sys.cart.set_rtc(state.masked(), sys.hot.clock());
         }
     }
+}
+
+/// The VRAM DMA part of a run-call step (ADR 0017; ADR 0021, GDMA stall
+/// amendment): a pending transfer step runs where the CPU would fetch its
+/// next opcode, then its CPU stall runs, stopping early at a stop event or
+/// `limit` (the target, or `u64::MAX` for a `single` step). Returns
+/// whether the call ends: inside the stall, or after it at a stop event
+/// or the target (not for a single step, which runs its instruction).
+/// Out of line, off `Emulator::run` (code-size budgets): only while a
+/// transfer is pending or stalls the CPU.
+#[inline(never)]
+fn vdma_turn(cpu: &Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
+    if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.fetches_next(ctx) {
+        ctx.vram_dma();
+    }
+    if ctx.sys.vdma.stall == 0 {
+        return false;
+    }
+    ctx.vdma_stall(limit);
+    ctx.sys.vdma.stall != 0
+        || (!single && (ctx.events.intersects(ctx.stop_on) || ctx.clock() >= limit))
 }
 
 #[cfg(test)]
