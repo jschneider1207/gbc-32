@@ -84,8 +84,11 @@ pub(crate) struct Fs {
     pub(crate) power: bool,
     /// Frame-sequencer steps since power on, mod 8 (SameBoy `div_divider`).
     pub(crate) step: u8,
-    /// The next DIV-APU edge is skipped (power on with the APU bit high).
-    pub(crate) skip: bool,
+    /// The power-on skip (power on with the APU bit high), in DIV-APU edges
+    /// left: 2, the next edge does nothing; 1, the next edge clocks the
+    /// units without stepping, so `step` stays 1 through both (SameBoy
+    /// `GB_SKIP_DIV_EVENT_SKIP`, then `_SKIPPED`); 0, inactive.
+    pub(crate) skip: u8,
     /// SameBoy's 1 MHz phase (`lf_div`) at power on, from the clock: the
     /// square trigger delay (ADR 0021 section 5, task 1(b)).
     pub(crate) phase: u8,
@@ -99,7 +102,7 @@ impl Apu {
             fs: Fs {
                 power: false,
                 step: 0,
-                skip: false,
+                skip: 0,
                 phase: 0,
             },
             sq: [Square::ZERO; 2],
@@ -155,28 +158,35 @@ impl Apu {
     /// NR52 bit 7 from 0 to 1 at clock `now`. The zero state already has
     /// the duty positions and the wave sample buffer at 0 (Pan Docs). If
     /// the counter's DIV-APU bit is 1 (`apu_bit_high`), the first falling
-    /// edge comes too soon and is skipped (SameBoy NR52 power on:
-    /// `skip_div_event`, `div_divider = 1`).
+    /// edge comes too soon and is skipped, and the one
+    /// after it clocks step 1 again without stepping: `step` is 1 (odd: a
+    /// length-enabling NRx4 write clocks length once more) from power on
+    /// to the third edge (SameBoy NR52 power on: `skip_div_event`,
+    /// `div_divider = 1`; `GB_apu_div_event`).
     pub(crate) fn power_on(&mut self, now: u64, apu_bit_high: bool) {
         self.fs = Fs {
             power: true,
             step: u8::from(apu_bit_high),
-            skip: apu_bit_high,
+            skip: 2 * u8::from(apu_bit_high),
             phase: ((now >> 1) & 1) as u8,
         };
     }
 
     /// A DIV-APU falling edge (after a sync to its clock): the frame
-    /// sequencer steps, unless the edge is the one skipped after power on.
-    /// Pan Docs "Audio details", DIV-APU; SameBoy `GB_apu_div_event`.
+    /// sequencer steps and clocks the units, except during the power-on
+    /// skip (`Fs::skip`). Pan Docs "Audio details", DIV-APU; SameBoy
+    /// `GB_apu_div_event`.
     #[inline(never)]
     pub(crate) fn step(&mut self) {
         let fs = &mut self.fs;
-        if fs.skip {
-            fs.skip = false;
-            return;
+        if fs.skip != 0 {
+            fs.skip -= 1;
+            if fs.skip != 0 {
+                return;
+            }
+        } else {
+            fs.step = (fs.step + 1) & 7;
         }
-        fs.step = (fs.step + 1) & 7;
         let step = fs.step;
         // Length (odd steps, 256 Hz) before the sweep (SameBoy
         // `GB_apu_div_event`); the envelopes on step 0 (64 Hz).
@@ -348,9 +358,13 @@ mod tests {
     fn frame_sequencer_skips_the_first_edge_after_a_high_power_on() {
         let mut apu = Apu::new();
         apu.power_on(0, true);
-        assert_eq!((apu.fs.step, apu.fs.skip), (1, true));
+        assert_eq!((apu.fs.step, apu.fs.skip), (1, 2));
         apu.step();
-        assert_eq!((apu.fs.step, apu.fs.skip), (1, false));
+        assert_eq!((apu.fs.step, apu.fs.skip), (1, 1));
+        // The second edge clocks step 1 without stepping (SameBoy
+        // `GB_SKIP_DIV_EVENT_SKIPPED`).
+        apu.step();
+        assert_eq!((apu.fs.step, apu.fs.skip), (1, 0));
         apu.step();
         assert_eq!(apu.fs.step, 2);
         let mut apu = Apu::new();
@@ -361,6 +375,26 @@ mod tests {
             apu.step();
         }
         assert_eq!(apu.fs.step, 0, "wraps mod 8");
+    }
+
+    /// Power on with the DIV-APU bit high, then CH2 triggered with length 2
+    /// and length on: step 1 is odd, so the trigger clocks length once
+    /// (2 -> 1). The first edge is skipped; the second clocks length at
+    /// step 1 again (1 -> 0) rather than stepping to 2, which has no length
+    /// clock. Gambatte `ch2_init_reset_length_counter_timing_nr52_*` and
+    /// `ch2_late_reset_nr52_*` (CGB); SameBoy `GB_apu_div_event`.
+    #[test]
+    fn the_second_edge_after_a_high_power_on_clocks_length_at_step_1() {
+        let mut apu = Apu::new();
+        apu.power_on(0, true);
+        apu.write(0x17, 0xF0, 0); // DAC on
+        apu.write(0x16, 0x3E, 0); // length 2
+        apu.write(0x19, 0xC0, 0); // trigger, length on
+        assert_eq!(apu.nr52() & 0x02, 0x02, "on after the trigger");
+        apu.step();
+        assert_eq!(apu.nr52() & 0x02, 0x02, "first edge skipped");
+        apu.step();
+        assert_eq!(apu.nr52() & 0x02, 0x00, "length 1 -> 0 at step 1");
     }
 
     /// A powered APU at step 0 with CH1 (DAC on, volume 15, duty 50%)

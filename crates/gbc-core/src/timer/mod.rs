@@ -63,14 +63,36 @@ const TAC_BITS: [u64; 4] = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
 /// The system counter when the CGB boot ROM hands over (clock 0, PC =
 /// 0100), for a DMG-mode cartridge on CGB rev. C: DIV = 26, 0x88 clocks
 /// (34 M-cycles) before it ticks to 27. Mooneye `misc/boot_div-cgbABCDE`
-/// (verified on CGB A-E) reads DIV = 27 "immediately after DIV has
-/// incremented" with its read 34 M-cycles after PC = 0100 (NOP, JP 0150,
-/// 27 NOPs, then LDH A,(04) reads in its third M-cycle), then checks the
-/// phase with reads 63-65 M-cycles apart. The boot ROM runs longer for
-/// DMG-mode cartridges than for CGB ones (Pan Docs: Power Up Sequence,
-/// "the boot ROM's duration depends on the header"); no test pins the
-/// CGB-mode value, so CGB mode uses the same one (unverified).
-pub(crate) const POST_BOOT_COUNTER: u64 = 0x2700 - 34 * 4;
+/// (a DMG-mode cartridge, header 0143 = 00; verified on CGB A-E) reads
+/// DIV = 27 "immediately after DIV has incremented" with its read 34
+/// M-cycles after PC = 0100 (NOP, JP 0150, 27 NOPs, then LDH A,(04) reads
+/// in its third M-cycle), then checks the phase with reads 63-65 M-cycles
+/// apart. The boot ROM runs longer for DMG-mode cartridges than for CGB
+/// ones (Pan Docs: Power Up Sequence, "the boot ROM's duration depends on
+/// the header"): see [`POST_BOOT_COUNTER_CGB`]. ADR 0022.
+pub(crate) const POST_BOOT_COUNTER_DMG: u64 = 0x2700 - 34 * 4;
+
+/// The system counter at hand-off for a CGB-mode cartridge (header 0143
+/// bit 7): DIV = 1E, 0x60 clocks (24 M-cycles) before it ticks to 1F.
+/// Gambatte `div/start_inc_1_cgb04c_out1E` and `start_inc_2_cgb04c_out1F`
+/// (CGB-only cartridges, results from a CGB04C) read DIV with LDH A,(04)
+/// after JP 0150, JP 1000 and 13 or 14 NOPs, i.e. in the 24th or 25th
+/// M-cycle after PC = 0100 (offsets 23 and 24, counted as above): 1E at
+/// offset 23 and 1F at offset 24, so the counter is 0x1F00 - 24 * 4 on the
+/// M-cycle grid. Gambatte's CGB initial state has the same counter (DIV 1E, same
+/// phase), as do its `sound/ch2_*_nr52_*` CGB results, which depend on the
+/// DIV-APU phase at an NR52 power on. ADR 0022.
+pub(crate) const POST_BOOT_COUNTER_CGB: u64 = 0x1F00 - 24 * 4;
+
+/// The post-boot system counter for CGB mode (`cgb_mode`) or DMG
+/// compatibility mode.
+pub(crate) const fn post_boot_counter(cgb_mode: bool) -> u64 {
+    if cgb_mode {
+        POST_BOOT_COUNTER_CGB
+    } else {
+        POST_BOOT_COUNTER_DMG
+    }
+}
 
 /// The timer interrupt bit in IF.
 pub(crate) const INT_TIMER: u8 = 0x04;
@@ -115,12 +137,13 @@ impl Timer {
         }
     }
 
-    /// The timer as the CGB boot ROM leaves it at clock 0 (PC = 0100):
-    /// every register 0, the system counter at [`POST_BOOT_COUNTER`].
-    pub(crate) const fn post_boot() -> Self {
+    /// The timer as the CGB boot ROM leaves it at clock 0 (PC = 0100) in
+    /// CGB mode (`cgb_mode`) or DMG compatibility mode: every register 0,
+    /// the system counter at [`post_boot_counter`].
+    pub(crate) const fn post_boot(cgb_mode: bool) -> Self {
         let mut t = Self::new();
-        t.base = POST_BOOT_COUNTER;
-        t.tima_from = POST_BOOT_COUNTER;
+        t.base = post_boot_counter(cgb_mode);
+        t.tima_from = t.base;
         t
     }
 

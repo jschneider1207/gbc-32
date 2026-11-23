@@ -1770,16 +1770,17 @@ mod tests {
         // Pinned (M5 review). Three LD A (8 clocks) and three LDH (12) put
         // STOP's fetch at 60-64; DIV resets at 64 and the second byte
         // (64-68) isn't counted by the timer, so the system counter is
-        // 2 * (clock - 68) in the halt (sibling test; ADR 0020). TIMA is 4
-        // at the reset: TAC is written at clock 20, the counter (0x2678 at
-        // clock 0, `POST_BOOT_COUNTER`) then falls through bit 3 at 0x2690,
-        // 0x26A0 and 0x26B0, and the reset (counter 0x26B8, bit 3 set) is a
-        // 4th falling edge. 252 more increments of 16 T-cycles overflow
-        // TIMA at counter 4032; IF is set one M-cycle (4 T-cycles) later,
-        // at 4036, i.e. clock 68 + 2018 = 2086. The halt ends there: the
+        // 2 * (clock - 68) in the halt (sibling test; ADR 0020). TIMA is 3
+        // at the reset: TAC is written at clock 20 (counter 0x1EB4, bit 3
+        // clear; 0x1EA0 at clock 0, the CGB-mode `post_boot_counter`, ADR
+        // 0022), the counter then falls through bit 3 at 0x1EC0 and 0x1ED0,
+        // and reaches 0x1EE0 (a 3rd fall) as the reset clears it, bit 3
+        // already clear. 253 more increments of 16 T-cycles overflow TIMA
+        // at counter 4048; IF is set one M-cycle (4 T-cycles) later, at
+        // 4052, i.e. clock 68 + 2026 = 2094. The halt ends there: the
         // wake-up M-cycle (2 clocks in double speed), then LD B,B's fetch
-        // (2) ends at 2090.
-        assert_eq!(now, 2090);
+        // (2) ends at 2098.
+        assert_eq!(now, 2098);
         assert_eq!(emu.peek(0xFF0F) & 0x04, 0x04);
     }
 
@@ -1800,7 +1801,10 @@ mod tests {
         assert_eq!(emu.peek(0xFF4D) & 0x81, 0x01, "still armed");
         // DIV ran on from its post-boot value through the STOP.
         let now = emu.clock();
-        assert_eq!(emu.hw.sys.timer.sc(now), timer::POST_BOOT_COUNTER + now);
+        assert_eq!(
+            emu.hw.sys.timer.sc(now),
+            timer::post_boot_counter(emu.hw.sys.cgb_mode) + now
+        );
     }
 
     /// Steps `emu` `n` instructions; returns (clock, PC, whether DIV was
@@ -1812,7 +1816,7 @@ mod tests {
             let _ = emu.step(&mut fb, &mut []);
         }
         let now = emu.clock();
-        let reset = emu.hw.sys.timer.sc(now) != timer::POST_BOOT_COUNTER + now;
+        let reset = emu.hw.sys.timer.sc(now) != timer::post_boot_counter(emu.hw.sys.cgb_mode) + now;
         (now, emu.hw.cpu.regs.pc, reset)
     }
 

@@ -149,7 +149,7 @@ impl Sys<'_> {
         self.config = config;
         self.buttons = buttons;
         self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|&f| f & 0x80 != 0);
-        self.timer = Timer::post_boot();
+        self.timer = Timer::post_boot(self.cgb_mode);
         // P1 select bits: in DMG compatibility mode the boot ROM reads the
         // joypad (palette selection) and leaves both select lines high,
         // so P1 reads FF (Mooneye `misc/boot_hwio-C`, verified on CGB). In
@@ -585,7 +585,14 @@ impl Ctx<'_, '_> {
             return;
         }
         if on {
-            let high = self.sys.timer.sc(now) >> self.sys.timer.div_apu_bit() & 1 != 0;
+            // The power-on skip tests the counter as of the end of the
+            // write's M-cycle, 4 counter ticks on in either speed: a write
+            // in the M-cycle at whose end bit 12 (13 in double speed) rises
+            // counts as high (gambatte `ch2_late_reset_nr52_2*` and
+            // `ch2_init_reset_length_counter_timing_nr52_*`, CGB; SameBoy
+            // `cycle_write` advances the pending cycles, then writes).
+            let sc = self.sys.timer.sc(now) + 4;
+            let high = sc >> self.sys.timer.div_apu_bit() & 1 != 0;
             self.mem.apu.power_on(now, high);
         } else {
             self.mem.apu.power_off();
@@ -2250,14 +2257,15 @@ mod tests {
     }
 
     /// The post-boot values Mooneye `misc/boot_hwio-C` and
-    /// `misc/boot_div-cgbABCDE` check that depend on the mode or phase.
+    /// `misc/boot_div-cgbABCDE` check that depend on the mode or phase,
+    /// and the CGB-mode DIV phase.
     #[test]
     fn post_boot_state_of_a_dmg_mode_cartridge() {
         let emu = load(rom(0x8000, 0, 0, 0x00));
         assert_eq!(emu.peek(0xFF00), 0xFF);
         assert_eq!((emu.peek(0xFF68), emu.peek(0xFF6A)), (0xC8, 0xD0));
         // DIV ticks to 27 at clock 136 (34 M-cycles).
-        let t = Timer::post_boot();
+        let t = Timer::post_boot(false);
         assert_eq!(
             (t.div(132), t.div(136), t.div(136 + 255)),
             (0x26, 0x27, 0x27)
@@ -2266,6 +2274,12 @@ mod tests {
         // CGB mode leaves P1 alone.
         let emu = load(rom(0x8000, 0, 0, 0x80));
         assert_eq!(emu.peek(0xFF00), 0xCF);
+        // A CGB-mode cartridge's boot is shorter: DIV ticks to 1F at clock
+        // 96 (24 M-cycles; gambatte `div/start_inc_*_cgb04c`, ADR 0022).
+        assert_eq!(emu.peek(0xFF04), 0x1E);
+        assert_eq!(emu.hw.sys.timer.sc(0), Timer::post_boot(true).sc(0));
+        let t = Timer::post_boot(true);
+        assert_eq!((t.div(92), t.div(96), t.div(96 + 255)), (0x1E, 0x1F, 0x1F));
     }
 
     // --- APU framework (ADR 0021; M6 task 1(a)) ---
@@ -2278,7 +2292,7 @@ mod tests {
     /// The clock of the first DIV-APU edge after reset: counter bit 12
     /// falls when the counter reaches a multiple of 0x2000.
     fn first_div_apu_edge() -> u64 {
-        let c0 = Timer::post_boot().sc(0);
+        let c0 = Timer::post_boot(true).sc(0);
         (((c0 >> 13) + 1) << 13) - c0
     }
 
@@ -2375,12 +2389,30 @@ mod tests {
         write(emu, 0xFF26, 0x00);
         let _ = run_audio(emu, first + 0x1100, &mut []);
         write(emu, 0xFF26, 0x80);
-        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, true));
+        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, 2));
         assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), first + 0x2000);
         let _ = run_audio(emu, 0x1000, &mut []);
-        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, false));
+        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, 1));
+        let _ = run_audio(emu, 0x2000, &mut []);
+        assert_eq!((emu.mem.apu.fs.step, emu.mem.apu.fs.skip), (1, 0));
         let _ = run_audio(emu, 0x2000, &mut []);
         assert_eq!(emu.mem.apu.fs.step, 2);
+    }
+
+    /// The power-on skip samples the counter at the end of the NR52 write's
+    /// M-cycle: a write in the M-cycle at whose end bit 12 rises (counter
+    /// 0x2FFC-0x3000) skips; one M-cycle earlier doesn't. Gambatte
+    /// `ch2_late_reset_nr52_1*` / `_2*` (CGB) differ by exactly that.
+    #[test]
+    fn power_on_in_the_m_cycle_where_bit_12_rises_skips() {
+        for (sc, skip) in [(0x2FF8, 0), (0x2FFC, 2)] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            write(emu, 0xFF26, 0x00);
+            let _ = run_audio(emu, sc - Timer::post_boot(true).sc(0), &mut []);
+            assert_eq!(emu.hw.sys.timer.sc(emu.clock()), sc);
+            write(emu, 0xFF26, 0x80);
+            assert_eq!(emu.mem.apu.fs.skip, skip, "{sc:#x}");
+        }
     }
 
     #[test]
@@ -3083,7 +3115,13 @@ mod dma_tests {
             let t0 = ctx.clock();
             ctx.write(0xFF46, 0xC1);
             assert_eq!(ctx.hot.dma, 0xFE00);
-            ctx.idle_halted();
+            // Other deadlines may come first (in CGB mode the first
+            // DIV-APU edge is 352 clocks after power on, ADR 0022): skip
+            // until the transfer ends; no skip may pass its deadline.
+            while ctx.hot.dma != 0 {
+                ctx.idle_halted();
+                assert!(ctx.clock() <= t0 + 162 * 4);
+            }
             assert_eq!(ctx.clock(), t0 + 162 * 4);
             assert_eq!(ctx.hot.dma, 0);
             assert_eq!(ctx.mem.oam[0x9F], 0x9F ^ 0xA5);
