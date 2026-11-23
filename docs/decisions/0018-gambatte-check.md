@@ -143,3 +143,32 @@ looser restrictions then right? If the whole point is to crash." The
 scope (gambatte groups with a `run_frames` exit only) was set narrowly so
 that a lockup under the serial, screenshot and fibonacci checks, where it
 means the emulator went wrong, still fails loudly.
+
+## Amendment 2 (2026-11-22): the lockup rule is a per-group opt-in
+
+**Why.** The M5 test-integrity review found the first amendment broader
+than approved: it applied to every all-`gambatte` group with a
+`run_frames` exit, so it covered all 3,154 `gambatte-cgb` ROMs, while the
+human only meant the 10 `gambatte/undef_ops` ROMs. The human chose to
+narrow it (decision recorded in `docs/STATUS.md`, 2026-11-22).
+
+**Decision.** Run-on depends only on an explicit group key,
+`lockup = "run_on"` (default `"crash"`). The first amendment's scope
+becomes validation: the key is accepted only on a group whose checks are
+all `gambatte = true` with a `run_frames` exit, otherwise the manifest is
+bad (exit 2). Every group without it, including `gambatte-cgb`, scores a
+lockup as `crash` again. The undef_ops ROMs are meant to move to their
+own opt-in group, with `gambatte-cgb` excluding them.
+
+**Keeping the groups apart.** romtest already allows a ROM in several
+groups (results are keyed by group and ROM, and it runs once per group);
+the manifest keeps groups apart with `exclude` (as the mooneye groups
+do). To stop an exclude from rotting silently, e.g. after a rename that
+would let the undef_ops ROMs back into `gambatte-cgb` as crashes or into
+both groups, an `exclude` glob that removes no ROM the group's `roms`
+match is now a bad manifest (exit 2). This only makes the runner
+stricter; every existing exclude in `stage1.toml` removes ROMs.
+
+**Manifest.** `acceptance/stage1.toml` is human-owned, so the new group
+and the exclude are a proposed diff awaiting approval. Until then the 10
+undef_ops ROMs report `crash` on `main`, which is the stricter state.
