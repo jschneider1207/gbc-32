@@ -192,7 +192,7 @@ budget); nothing merges to `main` before step 2's human decision.
    on the branch and merge `m6-apu` into `main` (merge commit, no
    rebase/force). Per-function budgets for the new APU symbols are added
    here too. While waiting, tasks 3-5 may stack on the branch.
-3. [ ] **CH1 = `Square` + `Sweep`**: classic sweep (trigger copy, period
+3. [x] **CH1 = `Square` + `Sweep`** (3bb48a4): classic sweep (trigger copy, period
    0 = 8, overflow check on trigger with shift != 0, second calculation,
    negate quirk on NR10 write), PCM12 low nibble. Arbiters: cgb_sound
    04, 05, 06 (`rom_singles`).
