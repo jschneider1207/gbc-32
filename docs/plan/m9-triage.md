@@ -243,6 +243,21 @@ Pan Docs "STAT interrupt" (blocking). Split per source when started.
 `if_and_ie_0_vector_4` is CPU dispatch (IE cleared during the push ->
 vector 0000; SameBoy `sm83_cpu.c`), S.
 
+**Source switch to LYC, done:** a CGB STAT write that sets the delayed
+select (LYC; double speed mode 0) keeps the selects it clears for the
+first phase too, so switching from an active source to an active LY=LYC
+keeps the line high (`docs/reference/stat-irq.md`). Flipped 7 of the 9
+`lycstatwirq_trigger_*` (`m0_*_08_40`, `m0_*_bf_40`, `ly94_10_40`) and
+`lycEnable/lyc153_late_enable_m1disable_3`. Left:
+`lycstatwirq_trigger_ly00_10_50_1`, `_ds_1`, a different mechanism (the
+mode-1 end at line 0 dot 4 and the LYC select landing at the same dot
+count as simultaneous; reference note "Open"). `m0enable/disable_{2,
+scx3_2,scx4_2,scx7_2}` and `lycdisable_ff45_{2,scx1_2,scx1_ds_2,scx2_2,
+scx3_2}` are not this mechanism: they clear the mode-0 source (STAT write
+`00`, or LYC -> `FF` with `48` selected) one M-cycle around the mode-0
+start, so they test where mode 0 starts against the write per SCX (CGB C
+differs from DMG), an edge-position question.
+
 ### 13. OAM DMA: VRAM source vs CPU reads, misc (10)
 **Diagnosed (session 10):** the 6 `src{8000,9F00}_busypop*` need
 gambatte's read side effect (CGB, VRAM source, conflicting CPU read
