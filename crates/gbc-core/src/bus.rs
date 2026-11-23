@@ -1285,17 +1285,30 @@ impl Ctx<'_, '_> {
 
 /// CGB VRAM DMA (FF51-FF55; `hdma` module, ADR 0017).
 impl Ctx<'_, '_> {
-    /// `n` idle M-cycles (the CPU stalled), skipped a deadline at a time
-    /// (ADR 0011), each deadline handled on the M-cycle it was before.
-    fn idle_mcycles(&mut self, mut n: u32) {
-        while n > 0 {
+    /// Runs the CPU stall of the current transfer step (`VramDma::stall`
+    /// idle M-cycles left), skipped a deadline at a time (ADR 0011), each
+    /// deadline handled on the M-cycle it was before. Stops early at the
+    /// first deadline that raises a stop event or reaches `limit` (the
+    /// call's target; `u64::MAX` for a single step): the run call ends
+    /// there and the next one resumes the stall. Without this, a GDMA
+    /// stall (up to 4,100 clocks) crossing the `AudioBuffer` deadline
+    /// would complete windows with no slot left, dropping them (ADR 0021,
+    /// GDMA stall amendment).
+    pub(crate) fn vdma_stall(&mut self, limit: u64) {
+        // In a local: no event handler touches the stall.
+        let mut n = u32::from(self.sys.vdma.stall);
+        while n != 0 {
             let k = self.mcycles_to_deadline().min(n);
             self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
             n -= k;
             if self.hot.budget <= 0 {
                 self.boundary();
+                if self.events.intersects(self.stop_on) || self.clock() >= limit {
+                    break;
+                }
             }
         }
+        self.sys.vdma.stall = n as u16;
     }
 
     /// Stores the FF55 read-back where `read_io` reads it.
@@ -1390,9 +1403,10 @@ impl Ctx<'_, '_> {
     }
 
     /// Runs the pending transfer step at an instruction fetch: all blocks
-    /// of a GDMA, or one HDMA block, then stalls the CPU for it
-    /// ([`hdma::stall_mcycles`]). The bytes are copied at once at the
-    /// start, after the PPU has drawn everything before it.
+    /// of a GDMA, or one HDMA block, and sets the CPU stall for it
+    /// ([`hdma::stall_mcycles`], run by [`Self::vdma_stall`]). The bytes
+    /// are copied at once at the start, after the PPU has drawn everything
+    /// before it.
     ///
     /// Sources: ROM, cartridge RAM and WRAM are read; VRAM and E000-FFFF
     /// read FF (SameBoy reads the CPU data bus there, which this core does
@@ -1426,9 +1440,10 @@ impl Ctx<'_, '_> {
                 break;
             }
         }
+        // At most 1 + 128 * 16 M-cycles: fits.
+        v.stall = hdma::stall_mcycles(blocks, self.hot.mcycle as u32) as u16;
         self.sys.vdma = v;
         self.vdma_sync_reg();
-        self.idle_mcycles(hdma::stall_mcycles(blocks, self.hot.mcycle as u32));
     }
 }
 
@@ -2492,6 +2507,103 @@ mod tests {
             let sum: i32 = period.iter().map(|s| i32::from(s.left)).sum();
             assert_eq!(sum, 8 * 5760);
         }
+    }
+
+    /// What a [`split_run`] ends with.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SplitEnd {
+        samples: std::vec::Vec<StereoSample>,
+        clock: u64,
+        regs: crate::Registers,
+        out: crate::apu::Output,
+        vram_sum: u64,
+    }
+
+    /// Runs `program` (at 0100, CGB mode, CH2 sounding on both sides) to
+    /// clock `end`, in run calls of at most `chunk` clocks with `k`-slot
+    /// audio buffers. Also returns whether a call ended inside a VRAM DMA
+    /// stall.
+    fn split_run(program: &[u8], end: u64, chunk: u64, k: usize) -> (SplitEnd, bool) {
+        let rom = rom(0x8000, 0, 0, 0x80);
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        let emu = load(rom);
+        for (reg, v) in [
+            (0xFF24, 0x77),
+            (0xFF25, 0x22),
+            (0xFF16, 0x80), // duty 50%
+            (0xFF17, 0xF0),
+            (0xFF18, 0x00),
+            (0xFF19, 0x87),
+        ] {
+            write(emu, reg, v);
+        }
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let mut buf = vec![StereoSample::default(); k];
+        let mut samples = std::vec::Vec::new();
+        let mut mid_stall = false;
+        while emu.clock() < end {
+            let t = emu.clock().saturating_add(chunk).min(end);
+            let r = emu.run_until(t, &mut fb, &mut buf);
+            samples.extend_from_slice(&buf[..r.audio_samples]);
+            mid_stall |= emu.hw.sys.vdma.stall != 0;
+        }
+        let vram_sum = emu.mem.vram.iter().enumerate();
+        let vram_sum = vram_sum.map(|(i, &b)| (i as u64 + 1) * u64::from(b)).sum();
+        let end = SplitEnd {
+            samples,
+            clock: emu.clock(),
+            regs: emu.registers(),
+            out: emu.mem.apu.out,
+            vram_sum,
+        };
+        (end, mid_stall)
+    }
+
+    /// A loop of 128-block GDMAs (each a 4,100-clock CPU stall) that
+    /// changes the CH2 frequency between them.
+    const GDMA_LOOP: [u8; 0x18] = [
+        0x3E, 0xC0, 0xE0, 0x51, // LD A,C0; LDH (51),A
+        0xAF, 0xE0, 0x52, // XOR A; LDH (52),A
+        0x3E, 0x80, 0xE0, 0x53, // LD A,80; LDH (53),A
+        0xAF, 0xE0, 0x54, // XOR A; LDH (54),A
+        0x3E, 0x7F, 0xE0, 0x55, // LD A,7F; LDH (55),A: GDMA, 128 blocks
+        0x04, 0x78, 0xE0, 0x18, // INC B; LD A,B; LDH (18),A
+        0x18, 0xE8, // JR 0100
+    ];
+
+    #[test]
+    fn a_gdma_stall_across_the_buffer_deadline_drops_no_sample() {
+        let end = 3 * u64::from(FRAME_CLOCKS) + 77;
+        let (want, _) = split_run(&GDMA_LOOP, end, u64::MAX, 10_000);
+        assert!(want.samples.len() as u64 >= end / 128 - 1);
+        for k in [1, 7, 33, 549] {
+            let (got, mid_stall) = split_run(&GDMA_LOOP, end, u64::MAX, k);
+            assert_eq!(got, want, "k = {k}");
+            assert!(mid_stall || k == 549, "k = {k}: no FULL inside a stall");
+        }
+        // Targets inside stalls too.
+        let (got, mid_stall) = split_run(&GDMA_LOOP, end, 1_001, 7);
+        assert_eq!(got, want);
+        assert!(mid_stall);
+    }
+
+    #[test]
+    fn samples_and_state_are_independent_of_call_and_buffer_splits() {
+        // INC B; LD A,B; LDH (18),A; LD C,20; DEC C; JR NZ,-3; JR 0100.
+        let program = [
+            0x04, 0x78, 0xE0, 0x18, 0x0E, 0x20, 0x0D, 0x20, 0xFD, 0x18, 0xF5,
+        ];
+        let end = 2 * u64::from(FRAME_CLOCKS) + 333;
+        let (want, _) = split_run(&program, end, u64::MAX, 10_000);
+        for k in [1, 7, 33, 549] {
+            for chunk in [u64::MAX, 997, 128 * 549] {
+                let (got, _) = split_run(&program, end, chunk, k);
+                assert_eq!(got, want, "k = {k}, chunk = {chunk}");
+            }
+        }
+        // A run of n clocks never completes more than n / 128 + 2.
+        let (got, _) = split_run(&program, end, 255, 4);
+        assert_eq!(got, want, "4 slots suffice for 255-clock calls");
     }
 
     #[test]

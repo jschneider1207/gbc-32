@@ -141,9 +141,22 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   "common palette" (acceptance/README.md); the desktop front end may choose
   per title.
 - **Audio:** the caller passes a `&mut [StereoSample]` to every run call;
-  the core writes from index 0 and reports the count. A full buffer ends
-  the call. The internal rate is fixed and resampling is the platform's job
-  (exact approach decided in M6).
+  the core writes from index 0 and reports the count (ADR 0021 sections
+  8-9). The rate is fixed at 32,768 Hz in both CPU speeds
+  (`AUDIO_SAMPLE_RATE`; `AUDIO_SAMPLE_CLOCKS` = 128 base clocks per
+  sample). Each sample is the box-filtered average of the mixed signal
+  over its window, 64 per unit of mixed level: full scale ±30,720, no
+  clamping, DC kept (`StereoSample` rustdoc, `apu/mix.rs` `sample`).
+  When the last slot's window completes, `AUDIO_BUFFER_FULL` ends the
+  call at the next instruction boundary, or at once inside a VRAM DMA
+  stall (the next call resumes the stall), so no sample is dropped and a
+  partial window carries over: for non-empty buffers, the stream and all
+  state are independent of how the caller splits calls and buffers. A
+  call of `n` clocks completes at most `n / 128 + 2` samples (550 for
+  `run_frame`). An empty buffer discards audio: the APU only advances,
+  and the next call with a buffer restarts the window grid at its start.
+  Resampling to the device rate and DC blocking (the high-pass filter)
+  are the platform's job.
 - **Input:** `set_buttons(Buttons)` (now) and `set_buttons_at(clock, Buttons)`
   (scheduled on the `Input` deadline, exact to the M-cycle, up to
   `SCHEDULED_INPUTS` pending; ADR 0012), where `Buttons` is a hand-written bit set

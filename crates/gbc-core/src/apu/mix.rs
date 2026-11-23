@@ -65,8 +65,10 @@ impl Apu {
     /// Brings the state from `out.synced` to `now`. With a buffer
     /// (`audio` non-empty: the run call started with room), the span is
     /// integrated and one sample is written at `audio[*len]` per completed
-    /// window while slots remain; a window completing with none left (the
-    /// overshoot after `AUDIO_BUFFER_FULL`, under one window) is dropped.
+    /// window while slots remain. A window completing with none left would
+    /// be dropped, but none does: `AUDIO_BUFFER_FULL` ends the call within
+    /// one window of the last slot's end (the rest of an instruction, or
+    /// at once inside a VRAM DMA stall: `Ctx::vdma_stall`).
     /// With an empty buffer, the channels only advance (ADR 0021 section
     /// 9). `io` is `Memory::io`: NR50/NR51 are constant over the span (a
     /// write to them syncs first).

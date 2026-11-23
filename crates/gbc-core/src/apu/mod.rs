@@ -25,7 +25,17 @@ use crate::memory::Memory;
 use square::Square;
 
 /// One stereo output sample, written by the core into the caller's audio
-/// buffer.
+/// buffer at [`AUDIO_SAMPLE_RATE`](crate::AUDIO_SAMPLE_RATE): the average
+/// of the mixed signal over its
+/// [`AUDIO_SAMPLE_CLOCKS`](crate::AUDIO_SAMPLE_CLOCKS)-clock window (a box
+/// filter).
+///
+/// Scale: 64 per unit of mixed level, the sum of the panned channels'
+/// analog levels (each -15..=15) times the side's NR50 volume plus 1. Full
+/// scale is therefore ±30,720 (4 channels x 15 x 8 x 64), with no
+/// clamping. DC is kept (a silent but powered DAC is a constant, not 0):
+/// the DC-blocking high-pass filter and resampling to the device rate are
+/// the front end's job.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StereoSample {
