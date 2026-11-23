@@ -683,8 +683,9 @@ mod sync_tests {
             at0(reg, v);
         }
         at0(0x14, 0xC5);
-        // CH2: duty 3; volume 2 up every 5; f = 0x7F0 (16 clocks per step).
-        for (reg, v) in [(0x16, 0xC0), (0x17, 0x2D), (0x18, 0xF0), (0x19, 0x87)] {
+        // CH2: duty 3; volume 2 up every 5; f = 0x7FD (12 clocks per step:
+        // whole 96-clock waveforms inside one window).
+        for (reg, v) in [(0x16, 0xC0), (0x17, 0x2D), (0x18, 0xFD), (0x19, 0x87)] {
             at0(reg, v);
         }
         // CH3: length 16, volume 100%, f = 0x610, length on.
@@ -703,6 +704,9 @@ mod sync_tests {
         let mid = STEPS / 2 * DIV_APU + 300;
         evs.push((mid, Ev::Write(0x22, 0x31)));
         evs.push((mid, Ev::Write(0x23, 0x80)));
+        // And CH3 goes to f = 0x7FF (2 clocks per step, 64 per waveform).
+        evs.push((mid + 7, Ev::Write(0x1D, 0xFF)));
+        evs.push((mid + 7, Ev::Write(0x1E, 0x87)));
         for _ in 0..300 {
             let t = 1 + rng.below(END - 1);
             let mut v = rng.byte();
@@ -726,6 +730,15 @@ mod sync_tests {
                 4 => 0x24 + rng.below(2) as usize,
                 _ => 0x30 + rng.below(16) as usize,
             };
+            // Half the frequency writes go near f = 2047, where whole
+            // waveform periods fit in a window (the closed-form sums).
+            if rng.below(2) == 0 {
+                match reg {
+                    0x13 | 0x18 | 0x1D => v |= 0xF8,
+                    0x14 | 0x19 | 0x1E => v |= 0x07,
+                    _ => {}
+                }
+            }
             evs.push((t, Ev::Write(reg, v)));
         }
         evs.sort_by_key(|&(t, _)| t);
