@@ -251,6 +251,16 @@ directory is a full separate build.
   - run them only when a change touches the window, audio or input code.
 
   A window briefly appears on the human's desktop.
+- **No GPU use from WSL at all, even headless** (same incident). The
+  crashing driver, `dxgmms2.sys` (the Windows video memory manager), is
+  what WSL's GPU paravirtualization (`/dev/dxg`) calls into. So nothing in
+  WSL may use OpenGL, EGL, Vulkan, wgpu, CUDA or DirectML, and that
+  includes test or diagnostic tools like `glxinfo` and `vulkaninfo`.
+  The desktop front end stays CPU-rendered (softbuffer). Moving it to a
+  GPU renderer needs the human.
+- **Never reproduce a crash in host or desktop components** (compositor,
+  drivers, WSL itself) without asking the human first. Diagnose from logs
+  instead (`/mnt/wslg/weston.log`, `/mnt/wslg/stderr.log`, read-only).
 
 ## Code conventions
 
