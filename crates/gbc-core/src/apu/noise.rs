@@ -78,6 +78,120 @@ fn reduce(n: u64, narrow: bool) -> u32 {
     }
 }
 
+/// Set bits per byte value: a table, as Cortex-M7 has no popcount
+/// instruction (LLVM's `count_ones` is a ~12-instruction SWAR sequence
+/// there, as on baseline x86-64).
+static POP8: [u8; 256] = {
+    let mut t = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = (i as u8).count_ones() as u8;
+        i += 1;
+    }
+    t
+};
+
+/// The LFSR as its output sequence, for a batch of windows: many steps per
+/// word operation without stepping the register (plan M6 task 8b).
+///
+/// Let `s(m)` be bit 0 after `m` steps from `x0`. The register's low `n`
+/// bits (`n` = 15, or 7 in 7-bit mode) are `s(0..n)`, and each step writes
+/// `!(b0 ^ b1)` at bit `n - 1` after the shift (and bit 14), so
+/// `s(m + n) = !(s(m) ^ s(m + 1))` for all `m >= 0`. Applied to itself:
+/// `s(m + 2n) = !(s(m) ^ s(m + 2))`, and again `s(m + 4n) = !(s(m) ^
+/// s(m + 4))` (the complements cancel in pairs). With lag `d` and tap `t`
+/// the `d - t` outputs after the `len` known ones are one word operation:
+/// 24 per operation in 7-bit mode (lag 28), 28 in 15-bit mode (lag 30).
+///
+/// Bit `j` of `bits` is `s(m - 1 + j)` after `m` steps, for `j < len`:
+/// bit 0 the output before the last step (unknown before the first), bit 1
+/// the current one. The register is rebuilt from it: 15-bit mode, the next
+/// 15 outputs; 7-bit mode, bits 0-6 the next 7 outputs and bits 7-14 the
+/// last 8 feedback bits, `s(m - 1 .. m + 7)`, except for the original bits
+/// 7-14 not yet overwritten in the first 8 steps: `corr` holds those
+/// differences, shifted along.
+struct Run {
+    bits: u64,
+    /// Known bits: at least `lag + 1` between steps.
+    len: u32,
+    lag: u32,
+    tap: u32,
+    corr: u32,
+    narrow: bool,
+}
+
+impl Run {
+    #[inline]
+    fn new(x0: u16, narrow: bool) -> Self {
+        let (n, lag, tap) = if narrow { (7, 28, 4) } else { (15, 30, 2) };
+        let bits = u64::from(x0 & ((1 << n) - 1)) << 1;
+        let mut run = Self {
+            bits,
+            len: n + 1,
+            lag: n,
+            tap: 1,
+            corr: if narrow {
+                (u32::from(x0) >> 7 ^ bits as u32) & 0xFF
+            } else {
+                0
+            },
+            narrow,
+        };
+        // Lags n and 2n until there are lag + 1 known bits.
+        while run.len <= lag {
+            if run.len > 2 * n {
+                (run.lag, run.tap) = (2 * n, 2);
+            }
+            run.fill();
+        }
+        (run.lag, run.tap) = (lag, tap);
+        run
+    }
+
+    /// One word operation: `lag - tap` more known bits (up to 64).
+    #[inline]
+    fn fill(&mut self) {
+        let lo = self.len - self.lag;
+        let k = self.lag - self.tap;
+        let f = !(self.bits >> lo ^ self.bits >> (lo + self.tap)) & ((1 << k) - 1);
+        self.bits |= f << self.len;
+        self.len = (self.len + k).min(64);
+    }
+
+    /// The current output (bit 0 of the register).
+    #[inline]
+    fn out(&self) -> u32 {
+        (self.bits >> 1) as u32 & 1
+    }
+
+    /// `n` (at most 16) steps; returns the number after which bit 0 is 1.
+    #[inline]
+    fn take(&mut self, n: u32) -> u32 {
+        debug_assert!(n <= 16);
+        // One operation adds at least 24 >= n bits: `len` stays > lag.
+        if self.len <= n + self.lag {
+            self.fill();
+        }
+        let v = (self.bits >> 2) as u32 & ((1 << n) - 1);
+        let ones = POP8[usize::from(v as u8)] + POP8[usize::from((v >> 8) as u8)];
+        self.bits >>= n;
+        self.len -= n;
+        self.corr >>= n;
+        u32::from(ones)
+    }
+
+    /// The register after the steps taken.
+    #[inline]
+    fn lfsr(&self) -> u16 {
+        let b = self.bits as u32;
+        if self.narrow {
+            (b >> 1 & 0x7F | ((b ^ self.corr) & 0xFF) << 7) as u16
+        } else {
+            (b >> 1 & 0x7FFF) as u16
+        }
+    }
+}
+
 impl Noise {
     pub(crate) const ZERO: Self = Self {
         countdown: 0,
@@ -164,31 +278,43 @@ impl Noise {
         if !self.on {
             return super::mix::constant(segs, out, 15);
         }
-        let spans = out.iter_mut().zip(segs);
         let vol2 = 2 * i32::from(self.env.volume);
+        if self.nr43 >> 4 >= 14 {
+            // Frozen LFSR (`clock`): a constant level; the countdown still
+            // runs.
+            super::mix::constant(segs, out, 15 - vol2 * i32::from(self.lfsr & 1));
+            let total = segs.iter().map(|&dt| u64::from(dt)).sum();
+            return self.advance(total);
+        }
         let p = self.period();
-        for (o, &dt) in spans {
+        let mut run = Run::new(self.lfsr, self.nr43 & 8 != 0);
+        let mut cd = self.countdown;
+        for (o, &dt) in out.iter_mut().zip(segs) {
             let dt = u32::from(dt);
+            // At most one window: at most 16 steps (p >= 8).
+            debug_assert!(u64::from(dt) <= super::SAMPLE_PERIOD);
             // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
             // would double the function's size (docs/perf.md, APU cost).
             let dt = core::hint::black_box(dt);
             // Clocks with bit 0 = 1: up to the first step at the old bit,
             // then `p` per step after which it is 1, minus the unelapsed
             // rest of the last step's period.
-            let bit = u32::from(self.lfsr & 1);
-            let cd = self.countdown;
+            let bit = run.out();
             let high = if dt < cd {
-                self.countdown = cd - dt;
+                cd -= dt;
                 bit * dt
             } else {
                 let rest = dt - cd;
                 let left = p.get() - rest % p;
-                let ones = self.clock(rest / p + 1);
-                self.countdown = left;
-                bit * cd + ones * p.get() - u32::from(self.lfsr & 1) * left
+                let ones = run.take(rest / p + 1);
+                let h = bit * cd + ones * p.get() - run.out() * left;
+                cd = left;
+                h
             };
             *o += 15 * dt as i32 - vol2 * high as i32;
         }
+        self.countdown = cd;
+        self.lfsr = run.lfsr();
     }
 
     /// One span through `integrate` (tests).
@@ -284,6 +410,71 @@ mod tests {
                     naive(x, n, narrow),
                     "x={x:#x} n={n} narrow={narrow}"
                 );
+            }
+        }
+    }
+
+    fn xorshift(seed: &mut u32) -> u32 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+        *seed
+    }
+
+    /// The output-sequence stepper against single steps: random registers,
+    /// random runs of 0-16 steps, both modes; the count and the rebuilt
+    /// register after every run (including fewer than 8 steps in 7-bit
+    /// mode, and the 15-bit all-ones fixed point).
+    #[test]
+    fn output_runs_match_single_steps() {
+        let mut seed = 0x9E37_79B9_u32;
+        for case in 0..3000 {
+            let x0 = match case {
+                0 => 0x7FFF,
+                1 => 0,
+                _ => (xorshift(&mut seed) & 0x7FFF) as u16,
+            };
+            for narrow in [false, true] {
+                let mut run = Run::new(x0, narrow);
+                let mut x = x0;
+                for _ in 0..40 {
+                    let n = xorshift(&mut seed) % 17;
+                    let (want, ones) = naive(x, n, narrow);
+                    assert_eq!(run.take(n), ones, "x0={x0:#x} narrow={narrow}");
+                    x = want;
+                    assert_eq!(run.lfsr(), x, "x0={x0:#x} narrow={narrow}");
+                    assert_eq!(run.out(), u32::from(x & 1));
+                }
+            }
+        }
+    }
+
+    /// Batches of random spans (at most one window each) against clock by
+    /// clock, in both modes and with the shift-14/15 freeze.
+    #[test]
+    fn batches_match_clock_by_clock() {
+        let mut seed = 0x0BAD_5EED_u32;
+        for nr43 in [0x00, 0x08, 0x01, 0x09, 0x10, 0x18, 0x27, 0xE8, 0xF0] {
+            let mut a = playing(nr43);
+            a.lfsr = (xorshift(&mut seed) & 0x7FFF) as u16;
+            let mut b = a;
+            for _ in 0..50 {
+                let k = 1 + xorshift(&mut seed) as usize % 16;
+                let mut segs = [0u8; 16];
+                let mut got = [0i32; 16];
+                for s in &mut segs[..k] {
+                    *s = (xorshift(&mut seed) % 129) as u8;
+                }
+                a.integrate(&segs[..k], &mut got[..k]);
+                for (i, &dt) in segs[..k].iter().enumerate() {
+                    let mut want = 0;
+                    for _ in 0..dt {
+                        want += 15 - 2 * i32::from(b.digital());
+                        b.advance(1);
+                    }
+                    assert_eq!(got[i], want, "nr43={nr43:#x}");
+                }
+                assert_eq!(a, b, "nr43={nr43:#x}");
             }
         }
     }
