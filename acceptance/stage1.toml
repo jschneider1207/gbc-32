@@ -237,6 +237,28 @@ checks = [{ fibonacci = true }]
 id = "same-suite-apu"
 tier = "stretch"
 roms = ["same-suite/apu/**/*.gb"]
+exclude = [
+  "same-suite/apu/channel_1/channel_1_align.gb",
+  "same-suite/apu/channel_1/channel_1_align_cpu.gb",
+  "same-suite/apu/channel_2/channel_2_align.gb",
+  "same-suite/apu/channel_2/channel_2_align_cpu.gb",
+]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+# Signed off (human, 2026-11-23): CGB E results; SameSuite apu/README:
+# CPU-CGB-C fails most channel 1/2 tests. We follow gambatte cgb04c
+# captures (ADR 0003: CPU CGB C). See docs/STATUS.md, session 11.
+[[group]]
+# source: same-suite/game-boy-test-roms-howto.md
+id = "same-suite-apu-cgbE"
+tier = "stretch"
+roms = [
+  "same-suite/apu/channel_1/channel_1_align.gb",
+  "same-suite/apu/channel_1/channel_1_align_cpu.gb",
+  "same-suite/apu/channel_2/channel_2_align.gb",
+  "same-suite/apu/channel_2/channel_2_align_cpu.gb",
+]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
 
