@@ -222,6 +222,19 @@ budget); nothing merges to `main` before step 2's human decision.
    rebaseline in the same commit. Budget: APU <= 200k x86 Ir/frame on
    worst-case; if over, the ADR 0021 options in order. Run `check-bench.sh`
    alone.
+   Bench part done (9b0b8cc): buffers in every entry, four channels in
+   worst-case, rebaselined. **Over budget:** channels 682.6k Ir/frame
+   (CH3 wave 409.6k, CH4 84.4k, CH1/CH2 73k each), worst-case 4.31 M/frame
+   = 107% of the 4.02 M line (docs/perf.md "APU cost"). Open:
+   - 8a. [ ] Exact wave speed-up (not in the ADR list, pure): sum wave
+     samples 8 at a time from the wave RAM words (SWAR) instead of
+     stepping; prove with the clock-by-clock reference test and
+     `diff-fingerprint.sh` 0 diffs.
+   - 8b. [ ] ADR option 1, noise multi-step (15-bit mode; worst-case uses
+     7-bit, so measure what it buys there).
+   - 8c. [ ] If still over: human decision (ADR options 2-3 change the
+     output: mean level for ultrasonic wave periods, 16,384 Hz; or a
+     different budget).
 9. [x] (660cabd) **romtest audio rule** (`_outaudio0/1`, 131 ROMs): empty buffer until
    the last frame, then 550 slots; silent = all returned samples equal
    (Gambatte testrunner). Cross-check once in a scratch worktree with
