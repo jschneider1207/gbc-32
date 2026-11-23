@@ -4,9 +4,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gbc_core::{
-    Buttons, Emulator, Events, Frame, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, WHITE,
-};
+use gbc_core::{Emulator, Events, Frame, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, WHITE};
+use gilrs::{Axis, EventType, GamepadId, Gilrs};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -15,7 +14,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::input::key_to_button;
+use crate::input::{HeldInput, key_to_button, pad_button_to_button};
 use crate::pacing::Pacing;
 use crate::session::Autosave;
 use crate::video;
@@ -38,7 +37,9 @@ struct App<'e, 'a> {
     draw: Box<Frame>,
     shown: Box<Frame>,
     audio: [StereoSample; AUDIO_SLOTS],
-    held: Buttons,
+    held: HeldInput<GamepadId>,
+    /// `None` when gilrs could not start: keyboard only.
+    pads: Option<Gilrs>,
     pacing: Pacing,
     error: Option<String>,
 }
@@ -46,7 +47,7 @@ struct App<'e, 'a> {
 impl App<'_, '_> {
     /// Runs one frame and returns how many audio samples it wrote.
     fn run_one_frame(&mut self) -> usize {
-        self.emu.set_buttons(self.held);
+        self.emu.set_buttons(self.held.held());
         let r = self.emu.run_frame(&mut self.draw, &mut self.audio);
         if r.events.contains(Events::FRAME_READY) {
             std::mem::swap(&mut self.draw, &mut self.shown);
@@ -56,6 +57,26 @@ impl App<'_, '_> {
         }
         self.autosave.after_frame(self.emu);
         r.audio_samples.min(AUDIO_SLOTS)
+    }
+
+    /// Drains gamepad events (hotplug included) into `held`.
+    fn poll_pads(&mut self) {
+        let Some(g) = &mut self.pads else { return };
+        while let Some(ev) = g.next_event() {
+            let id = ev.id;
+            match ev.event {
+                EventType::ButtonPressed(b, _) | EventType::ButtonReleased(b, _) => {
+                    let down = matches!(ev.event, EventType::ButtonPressed(..));
+                    if let Some(b) = pad_button_to_button(b) {
+                        self.held.set_pad_button(id, b, down);
+                    }
+                }
+                EventType::AxisChanged(Axis::LeftStickX, v, _) => self.held.set_pad_stick_x(id, v),
+                EventType::AxisChanged(Axis::LeftStickY, v, _) => self.held.set_pad_stick_y(id, v),
+                EventType::Disconnected => self.held.release_pad(id),
+                _ => {}
+            }
+        }
     }
 
     fn redraw(&mut self) {
@@ -114,7 +135,8 @@ impl ApplicationHandler for App<'_, '_> {
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::Focused(false) => self.held = Buttons::default(),
+            // Release everything, pads too: simplest, and nothing sticks.
+            WindowEvent::Focused(false) => self.held.clear(),
             WindowEvent::Resized(_) => self.redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::KeyboardInput { event, .. } => {
@@ -125,7 +147,7 @@ impl ApplicationHandler for App<'_, '_> {
                 if code == KeyCode::Escape && down {
                     el.exit();
                 } else if let Some(b) = key_to_button(code) {
-                    self.held.set(b, down);
+                    self.held.set_key(b, down);
                 }
             }
             _ => {}
@@ -133,6 +155,7 @@ impl ApplicationHandler for App<'_, '_> {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.poll_pads();
         self.pacing.begin(Instant::now());
         let mut ran = 0;
         while self.pacing.should_run(ran) {
@@ -163,11 +186,23 @@ pub fn run(
         draw: Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]),
         shown: Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]),
         audio: [StereoSample::default(); AUDIO_SLOTS],
-        held: Buttons::default(),
+        held: HeldInput::new(),
+        pads: pads_init(),
         pacing: Pacing::open(Instant::now()),
         error: None,
     };
     el.run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
     app.error.map_or(Ok(()), Err)
+}
+
+/// Gamepads are optional: a failure (e.g. no udev) is one warning.
+fn pads_init() -> Option<Gilrs> {
+    match Gilrs::new() {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("warning: gamepads unavailable ({e}); keyboard only");
+            None
+        }
+    }
 }
