@@ -49,9 +49,10 @@
 //!   window start also stalls one dot more (`LineTiming`, AGE
 //!   `stat-mode-window`), which places the mid-line register writes of
 //!   `m3_window_timing_wx_0` right: it passes.
-//! - Mid-line SCX writes keep the line-start SCX & 7 (Pan Docs).
-//!   `m3_scx_low_3_bits` differs at pixels 152-159, which this doesn't
-//!   model; unresolved.
+//! - Mid-line SCX writes keep the line-start SCX & 7 (Pan Docs), but new
+//!   low bits still carry into the tile column ([`bg_column`]).
+//!   `m3_scx_low_3_bits` still differs at pixels 152-159 (unchanged by the
+//!   carry at any calibration); unresolved.
 //! - Mid-line writes to the tile map/data selects, SCY and object
 //!   attributes take effect per pixel here, per fetch on hardware
 //!   (`m3_lcdc_*_change`, `m3_scy_change*` fail); M3 doesn't need it.
@@ -72,6 +73,27 @@ const LCDC_BG_MAP: u8 = 0x08;
 const LCDC_TILES_8000: u8 = 0x10;
 const LCDC_WIN_ON: u8 = 0x20;
 const LCDC_WIN_MAP: u8 = 0x40;
+
+/// Calibration of the BG tile column (see [`bg_column`]): the fetch of
+/// the tile whose first pixel is screen x `X` reads map column
+/// `(SCX + X + FETCH_COL) / 8`.
+const FETCH_COL: u8 = 0;
+
+/// Map column (pixels) of BG pixel `x` with SCX `scx` and the line-start
+/// SCX & 7 `fine`. The fine scroll is applied once, at line start (Pan
+/// Docs: Scrolling), but the fetcher computes each tile's column from the
+/// whole SCX at its GET_TILE step (SameBoy `advance_fetcher_state_machine`,
+/// MIT: `(SCX + position_in_line + 8 - is_cgb) / 8`), and that tile starts
+/// at screen x `X = 8k - fine`. So low bits of SCX that differ from `fine`
+/// still move the column by a carry or borrow:
+/// `((scx + X + FETCH_COL) & !7) + (x - X)`, which is the form below. With
+/// `scx & 7 == fine` it is `scx + x`. `docs/design/mid-line-ppu.md` step 2.
+#[inline(always)]
+const fn bg_column(scx: u8, fine: u8, x: u8) -> u8 {
+    (scx.wrapping_sub(fine).wrapping_add(FETCH_COL) & 0xF8)
+        .wrapping_add(fine)
+        .wrapping_add(x)
+}
 
 // OAM attribute bits (Pan Docs: OAM, byte 3).
 const ATTR_BEHIND_BG: u8 = 0x80;
@@ -490,11 +512,7 @@ impl Renderer {
             (&[][..], &[][..])
         };
         if !bg.is_empty() {
-            // BG pixel x is map column SCX + x; the fine part was latched
-            // at line start, the tile part is read per fetch.
-            let col = (regs.scx & 0xF8)
-                .wrapping_add(self.fine_scx)
-                .wrapping_add(x0 as u8);
+            let col = bg_column(regs.scx, self.fine_scx, x0 as u8);
             let map = if lcdc & LCDC_BG_MAP != 0 {
                 0x1C00
             } else {
@@ -1540,6 +1558,39 @@ mod tests {
                 [101, 101, 101, 101, 102, 102, 102, 102],
                 "x {x}"
             );
+        }
+    }
+
+    #[test]
+    fn bg_column_with_constant_scx_is_scx_plus_x() {
+        for scx in 0..=255u8 {
+            for x in 0..=255u8 {
+                assert_eq!(bg_column(scx, scx & 7, x), scx.wrapping_add(x), "{scx} {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn scx_low_bits_carry_into_the_tile_column() {
+        // Line-start SCX 3 (fine 3): map column 9 (pixels 72-79) is at
+        // screen x 69-76. At x 40 SCX changes: the tile column comes from
+        // the whole new SCX minus the line-start fine scroll, so low bits
+        // below 3 borrow one tile (SameBoy `advance_fetcher_state_machine`).
+        let mut s = Scene::new();
+        s.solid_tile(0x10, 1);
+        s.solid_tile(0x20, 2);
+        s.vram[0x1800..0x1820].fill(1);
+        s.vram[0x1800 + 9] = 2;
+        for (scx, from) in [(3, 69), (7, 69), (2, 77), (0, 77), (11, 61)] {
+            let mut row = [0; W];
+            s.regs.scx = 3;
+            s.begin(0);
+            s.span(&mut row, 0, 40);
+            s.regs.scx = scx;
+            s.span(&mut row, 40, W);
+            run(&row, 40, from, 101);
+            run(&row, from, from + 8, 102);
+            run(&row, from + 8, W, 101);
         }
     }
 
