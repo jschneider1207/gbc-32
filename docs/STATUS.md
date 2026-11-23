@@ -134,6 +134,13 @@ Open:
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
+Decided in session 13 (2026-11-23), human:
+- cgb-acid2 bench at +3.37% after the STAT 144/153/0 correctness fixes
+  (perf pass recovered what it could, fingerprint identical; worst-case
+  4.007 M Ir/frame stays under the 4.02 M line): **rebaseline**
+  `perf/bench-baseline.txt` ("Rebaseline (Recommended)"), over raising the
+  `point_irq` budget, raising the `Hw` size limit, or backing fixes out.
+
 Decided in session 12 (2026-11-23), human:
 - SameSuite group 15: sign off the 9 E-only ROMs (ch1/2 `nrx2_glitch`,
   `nrx2_speed_change`; ch4 `lfsr_7_15`, `lfsr_restart{,_fast}`,
