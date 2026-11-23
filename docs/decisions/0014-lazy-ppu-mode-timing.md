@@ -86,3 +86,17 @@ the DMA conflict clear), so lines without objects skip the OAM scan.
 - Further cuts if the per-line cost matters on the MCU: commit the walk's
   simulated state at the event instead of re-walking, and a cursor
   instead of the division-based `next_point`.
+
+## Amendment 1 (2026-11-23, session 10): post-boot position 171
+
+The post-boot PPU position moved from 163 to 171 (740154c). "Mooneye
+`intr_2_*` fail by one M-cycle otherwise" holds only for positions off the
+4-dot M-cycle grid: `intr_2_*`, `boot_*` and `stat_irq_blocking` pass at
+every on-grid position from 155 to 171. 163 was the grid point nearest
+Gambatte's measured 164, which is in Gambatte's own line origin. What pins
+171 is Gambatte `display_startstate/stat{,_scx2,_scx3,_scx5}_{1,2}` (CGB04C
+results: two STAT reads one M-cycle apart must see 87 then 84); of 155-179
+only 171 satisfies both halves. With it, the CGB B/C line-0 dot-3 mode-0
+read (AGE `stat-mode.inc` `M1E`) no longer breaks `stat_irq_blocking`. One
+position serves both cartridge modes; no test we have measures the DMG-mode
+handover separately (compare ADR 0022 for DIV).
