@@ -549,8 +549,10 @@ impl<'a> Emulator<'a> {
         self.run(Some(target), frame, audio)
     }
 
-    /// Executes one instruction (or interrupt dispatch, or one idle M-cycle
-    /// while halted, stopped or locked up). The step that leaves HALT also
+    /// Executes at most one instruction (or interrupt dispatch, or one idle
+    /// M-cycle while halted, stopped or locked up); a step that ends inside
+    /// a VRAM DMA stall runs none (see below, and check
+    /// [`RunResult::events`]). The step that leaves HALT also
     /// includes the CGB wake-up M-cycle before the next instruction or
     /// dispatch (`docs/reference/halt.md`). A step that meets a CGB VRAM
     /// DMA (or one left inside its CPU stall by the last call) first runs
@@ -624,7 +626,10 @@ impl<'a> Emulator<'a> {
         self.hw.sys.hot.clock()
     }
 
-    /// The CPU registers.
+    /// The CPU registers. After a call that ended inside a VRAM DMA stall,
+    /// the copy is already done (VRAM and FF55 show it) but `pc` is still
+    /// the instruction after the FF55 write: the CPU resumes only once the
+    /// stall has run out in a later call.
     #[inline]
     pub fn registers(&self) -> Registers {
         self.hw.cpu.regs
