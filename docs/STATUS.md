@@ -74,6 +74,18 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## Needs human
+Open (session 11):
+- **APU double-speed trigger rule vs SameSuite (M9 group 7).** gambatte's
+  linear CGB rule (first duty step at `+6+2*lf_div` base clocks from off,
+  `+2+2*lf_div` from on, both speeds) flips 6 gambatte cgb04c captures
+  (`ch1_duty0_pos6_to_pos7_timing_ds_6`, 5 `speedchange*_timing*ds_2`)
+  but regresses SameSuite `channel_{1,2}_align{,_cpu}` (4). SameSuite's
+  own README (`test-roms/same-suite/apu/README.md`): "CPU-CGB-C - passes
+  the channel 3 tests and non-channel-specific tests. Most other tests
+  fail"; they're CGB E results. Proposal: follow gambatte (our revision)
+  and sign off those 4 as "CGB E result" (like the 7 already signed off).
+  Same evidence likely covers much of group 15 (20 SameSuite ch1/2/4 ROMs).
+
 Open (session 10):
 - **Real-game checklist** (plan, bottom; now an M9 task), on native
   Windows. Extra checks: Ctrl+C in the window still saves; change the
