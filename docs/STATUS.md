@@ -4,30 +4,32 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M6 (APU), not started. M5 is `stage1-m5` (690a194), M4
+- **Milestone:** M6 (APU), in progress on branch `m6-apu`. M5 is `stage1-m5` (690a194), M4
   `stage1-m4`, M3 `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, end of session 07 (M5 close; log
-  `logs/2026-11-22-07-m5-cgb.md`)
+- **Last updated:** 2026-11-22, session 08 (M6 in progress)
 
 ## Next up
 
-Start M6 (`docs/plan/stage-1.md` "M6") in a fresh session. Acceptance:
-must-tier `blargg/cgb_sound` (the only failing must ROM).
+M6 in progress on branch `m6-apu` (worktree `../gbc-32-m6`; plan M6
+tasks, ADR 0021). Done there: 1a framework (52b1756), 1b CH2 (f4e7eb0,
+5cfc7b5, 840ae2e, 344e112). In progress: fix for the API review's medium
+finding (a GDMA stall across the AudioBuffer deadline drops up to ~32
+samples) and its low doc findings.
 
-1. **Code size first.** Total `.text` is 85,068 of 85,100 B (32 B left).
-   Human decision (session 07): the total budget is raised once for M6, to
-   a figure measured after the first APU channel lands. So build the first
-   channel (e.g. on a branch, over budget), measure `.text`, estimate the
-   full APU, and bring the human a number before merging. Per-function
-   budgets stay.
-2. APU design per ADR 0002 (batched sample generation into a caller
-   buffer); the romtest audio rule (`_outaudio0/1`, 131 gambatte ROMs
-   `unsupported`) needs the core's audio output across the boundary
-   (ADR 0018).
+1. **Before merging `m6-apu`:** bring the per-function overruns from 1a
+   back under budget (`Ctx::boundary` 2,288/2,220, `speed_switch`
+   1,082/880; check `draw`, `Emulator::run` too), then the budget commit
+   (total `.text` 96,000 B, human decision below) and merge (merge
+   commit). Measured: F = 88,614 B, F+S = 90,348 B, estimate F+3.3S =
+   94,336 B.
+2. Then plan M6 tasks 3-11 (CH1+sweep, CH3, CH4, cgb_sound, sync
+   invariants, bench audio, romtest audio rule, docs, close). cgb_sound
+   at 344e112: 01, 09, 10, 11 pass; 02-08, 12 fail. Five stretch
+   gambatte `ch2_*nr52*_out0` ROMs went pass->fail with CH2 (they passed
+   only because CH2 was silent): investigate in the cgb_sound/timing task.
 3. Stage 1 completion rule (README "Done when", human 2026-11-22): every
    manifest ROM must pass before Stage 1 is done, except groups the human
-   signs off with a recorded reason. That is milestone M9; don't treat
-   stretch failures as "fine" in planning.
+   signs off with a recorded reason (M9).
 
 Perf watch: `synth:worst-case` 3.54 M x86 Ir/frame (88% of the 4.02 M
 line, which assumes 1 Ir = 1 M7 cycle; thumbv7em code is 1-2x), now with
@@ -46,7 +48,9 @@ Working rules that matter here:
 
 ## Needs human
 
-Open: none. (Coming in M6: the total `.text` budget number, see Next up.)
+Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 08 (2026-11-22), human: total gbc-core `.text` budget = 96,000 B (was 85,100), from the measured full-APU estimate 94,336 B + margin. Per-function budgets stay. Over it later: come back with numbers.
 
 Decided in session 07 (2026-11-22), human: Stage 1 is done only when every
 manifest test ROM passes, except groups the human signs off with a recorded
