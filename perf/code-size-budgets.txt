@@ -78,6 +78,19 @@
 745 <gbc_core::bus::Ctx>::vram_dma
 221 <gbc_core::bus::Ctx>::vdma_arm
 481 <gbc_core::Emulator>::run
+# M6 APU (ADR 0021; measured 1456, 152, 398, 462, 276, 50, 42, 258 bytes
+# after the M6 code-size pass; +10%): the output sync and frame-sequencer
+# step, the channel register decode (`Square::write` is inlined into
+# `Apu::write`), the bus side of APU writes and reads, the DIV-APU event
+# and the deadline it sets.
+1600 <gbc_core::apu::Apu>::sync
+167 <gbc_core::apu::Apu>::step
+438 <gbc_core::apu::Apu>::write
+508 <gbc_core::bus::Ctx>::write_apu
+304 gbc_core::apu::read_apu
+55 <gbc_core::bus::Ctx>::div_apu_event
+46 <gbc_core::bus::Ctx>::apu_sync
+284 <gbc_core::bus::Sys>::set_div_apu_deadline
 # Total gbc-core code: the sum of all .text* sections in the rlib (the
 # special name below; M4 review / stage-1 plan task, a stricter check).
 # Measured 83,408 B at 2446bc2; budget +2%. ITCM is 64 KB, so this caps
