@@ -857,7 +857,7 @@ impl Ctx<'_, '_> {
                         value,
                         &s.config.dmg_palettes,
                         s.cgb_mode,
-                        &mut self.mem.bg_pairs.pal,
+                        &mut self.mem.bg_pairs,
                     ),
                     0x4A => s.ppu.check_wy_at(now, self.mem),
                     _ => {}

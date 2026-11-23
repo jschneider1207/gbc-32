@@ -59,7 +59,7 @@
 use super::objects::{LineObjects, MAX_PER_LINE};
 use super::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::DmgPalettes;
-use crate::memory::BgPairs;
+use crate::memory::ObjRank;
 
 const W: usize = SCREEN_WIDTH;
 
@@ -192,9 +192,8 @@ pub(crate) struct Sources<'a> {
     /// on a line OAM DMA touches (`Ppu::fix_attrs`); else they read `oam`.
     pub(crate) attrs: Option<&'a [(u8, u8); MAX_PER_LINE]>,
     pub(crate) colors: &'a Colors,
-    /// Per BG palette, [`pair_table`] of `colors.bg`, and the held fetches
-    /// ([`Renderer::render_held`]).
-    pub(crate) pairs: &'a BgPairs,
+    /// Per BG palette, [`pair_table`] of `colors.bg` (kept in `Memory`).
+    pub(crate) pairs: &'a [[u32; 16]; 8],
 }
 
 /// Row `ly` (0-143) of a frame, for [`Renderer::render`].
@@ -334,13 +333,13 @@ impl Renderer {
         regs: &Regs,
         src: &Sources,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut ObjRank,
     ) {
         let x1 = x1.min(W);
         if x0 >= x1 {
             return;
         }
-        if usize::from(src.pairs.hold[1].0) > x0
+        if usize::from(obj_rank.hold[1].0) > x0
             && self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank)
         {
             return;
@@ -388,7 +387,7 @@ impl Renderer {
         // written to it. Fetching per span (not per line) keeps split and
         // whole-line rendering identical.
         if self.objects.len() != 0 {
-            self.fetch_objects(obj_buf, obj_rank, src, lcdc, x0, x1);
+            self.fetch_objects(obj_buf, &mut obj_rank.rank, src, lcdc, x0, x1);
         }
 
         // LCDC.1 is checked when pixels are output, not at the scan (CGB;
@@ -422,10 +421,11 @@ impl Renderer {
         regs: &Regs,
         src: &Sources,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut ObjRank,
     ) -> bool {
         const MAPS: u8 = LCDC_BG_MAP | LCDC_WIN_MAP;
-        for &(end, lcdc, scx) in &src.pairs.hold {
+        let hold = obj_rank.hold;
+        for &(end, lcdc, scx) in &hold {
             let end = usize::from(end);
             if end <= x0 {
                 continue;
@@ -866,7 +866,7 @@ fn fill_tiles<const MIX: bool>(
             // No object pixel: two pixels per lookup (and, merged by the
             // compiler on little-endian targets, per store).
             None => {
-                let pairs = &src.pairs.pal[pal];
+                let pairs = &src.pairs[pal];
                 for (j, p) in tile.as_chunks_mut::<2>().0.iter_mut().enumerate() {
                     let v = pairs[usize::from((w >> (12 - 4 * j)) as u8 & 15)];
                     *p = [v as u16, (v >> 16) as u16];
@@ -1056,7 +1056,7 @@ mod tests {
         regs: Regs,
         r: Renderer,
         obj_buf: [u8; OBJ_BUF_LEN],
-        obj_rank: [u8; OBJ_BUF_LEN],
+        obj_rank: ObjRank,
     }
 
     impl Scene {
@@ -1074,7 +1074,10 @@ mod tests {
                 },
                 r,
                 obj_buf: [0; OBJ_BUF_LEN],
-                obj_rank: [0; OBJ_BUF_LEN],
+                obj_rank: ObjRank {
+                    rank: [0; OBJ_BUF_LEN],
+                    hold: [(0, 0, 0); 2],
+                },
             }
         }
 
@@ -1114,10 +1117,7 @@ mod tests {
                 oam: &self.oam,
                 attrs: None,
                 colors: &self.colors,
-                pairs: &BgPairs {
-                    pal: core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
-                    hold: [(0, 0, 0); 2],
-                },
+                pairs: &core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
             };
             self.r.render(
                 row,
@@ -1802,7 +1802,10 @@ mod tests {
                 regs: s.regs,
                 r: Renderer::new(),
                 obj_buf: [0; OBJ_BUF_LEN],
-                obj_rank: [0; OBJ_BUF_LEN],
+                obj_rank: ObjRank {
+                    rank: [0; OBJ_BUF_LEN],
+                    hold: [(0, 0, 0); 2],
+                },
             };
             split.r.start_frame();
             split.r.cgb = cgb;

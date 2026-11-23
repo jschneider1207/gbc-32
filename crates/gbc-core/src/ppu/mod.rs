@@ -1037,7 +1037,7 @@ impl Ppu {
     /// After [`Ppu::flush`], before a write at clock `now` of `value` to
     /// LCDC (`reg` 0x40) or SCX (0x43): if it changes the map select
     /// (LCDC.3, LCDC.6) or SCX in mode 3, the tiles the fetcher already has
-    /// keep the old values (`Memory::hold`). The fetcher reads them at each
+    /// keep the old values (`ObjRank::hold`). The fetcher reads them at each
     /// tile's GET_TILE step (SameBoy `advance_fetcher_state_machine`, MIT;
     /// Pan Docs: Pixel FIFO). When pixel `x` is the next out, the tile it
     /// belongs to is in the FIFO, and the next one is fetched from the dot
@@ -1101,7 +1101,7 @@ impl Ppu {
             return;
         }
         let seg = (end.min(176) as u8, self.lcdc, mem.io[0x43]);
-        let hold = &mut mem.bg_pairs.hold;
+        let hold = &mut mem.obj_rank.hold;
         if i32::from(hold[1].0) <= x {
             *hold = [(0, 0, 0), seg];
         } else if seg.0 > hold[1].0 {
@@ -1141,7 +1141,7 @@ impl Ppu {
         let (pal, c, i) = ((index >> 3) & 7, (index >> 1) & 3, index & 0x3E);
         let col = u16::from_le_bytes([mem.bg_pal[i], mem.bg_pal[i + 1]]) & 0x7FFF;
         self.colors.bg[pal][c] = col;
-        set_pair_color(&mut mem.bg_pairs.pal[pal], c, col);
+        set_pair_color(&mut mem.bg_pairs[pal], c, col);
     }
 
     /// An OCPD write (CGB mode) to OBJ palette RAM byte `index` (0-63),
@@ -1186,7 +1186,7 @@ impl Ppu {
         if cgb {
             self.colors.set_cgb(&mem.bg_pal, &mem.obj_pal);
         }
-        for (t, pal) in mem.bg_pairs.pal.iter_mut().zip(&self.colors.bg) {
+        for (t, pal) in mem.bg_pairs.iter_mut().zip(&self.colors.bg) {
             *t = pair_table(pal);
         }
     }
@@ -1290,7 +1290,7 @@ impl Ppu {
         t.n_stalls = k as u8;
         t.end = first_pixel + 160 + total;
         self.drawn = 0;
-        mem.bg_pairs.hold[1].0 = 0;
+        mem.obj_rank.hold[1].0 = 0;
         self.renderer.start_line(l as u8, scx, &objs, order);
         self.attr_on = false;
         if aware {
@@ -2353,7 +2353,7 @@ mod tests {
                 0x1B,
                 &DmgPalettes::GRAYSCALE,
                 true,
-                &mut r.mem.bg_pairs.pal,
+                &mut r.mem.bg_pairs,
             );
         }
         assert_eq!(r.ppu.colors, before);

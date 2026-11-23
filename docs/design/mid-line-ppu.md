@@ -360,15 +360,11 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Result:** 35 fail->pass, 0 regressions (`bgtilemap` 20 incl. 4 `_ds`,
   `scx_during_m3` 11, Mealybug `m3_lcdc_bg_map_change2`,
   `m3_lcdc_win_map_change2`, `m3_scx_high_5_bits{,_change2}`).
-- **Blocked on code size.** thumbv7em `.text` +864 B over the branch point's
-  95,260 B (96,124 > 96,000), with `hold_fetch` 480, `render_held` 346,
-  `render` +46, `latch` +72, `draw` 146 -> 158 (> 155 budget). The `draw`
-  and `latch` growth is layout, not code: `Memory` is `repr(C)` and the
-  hold sits in a widened `bg_pairs` (`BgPairs`), shifting later fields'
-  offsets out of Thumb-2 immediates. Moving the hold to the end of
-  `Memory` needs a second `Sources` pointer (+16 B in `draw`, also over
-  155). `Hw` has no room (+6 B in `Ppu` makes it 872 > 864). Options for
-  the human: raise `.text` (design section 6 asks 97,000) and `draw`
-  (~175); or a cheaper "draw ahead" variant (at the write, draw the held
-  pixels at once with the old registers: ~500 B, no storage, but palette,
-  LCDC.0/1 and WX writes within the next <= 16 pixels land late).
+- **Code size.** The hold lives in `Memory::obj_rank` (`ObjRank { rank,
+  hold }`): `Memory` is `repr(C)`, and every other spot either shifted hot
+  arrays out of Thumb-2 immediates (`Ppu::draw` 146 -> 158 B with the hold
+  after `bg_pairs`, 160 B with `bg_pairs` moved last), needed a second
+  `Sources` pointer (+16 B in `draw`), or overflowed `Hw` (872 > 864 B in
+  `Ppu`). With `ObjRank`, `draw` stays 146 B (budget 155) and total
+  `.text` is 95,588 of 96,000 B (`hold_fetch` and `render_held` cold, in
+  flash).

@@ -28,7 +28,7 @@ pub struct Memory {
     /// (`ppu::render::pair_table`), kept up to date on palette writes so
     /// the renderer never builds one. Palette 0 in DMG compatibility mode
     /// is BGP's colors.
-    pub(crate) bg_pairs: BgPairs,
+    pub(crate) bg_pairs: [[u32; 16]; 8],
     /// 8 banks of 4 KiB (CGB). Bank 0 at C000, banks 1-7 at D000 (SVBK).
     pub(crate) wram: [u8; 0x8000],
     /// 2 banks of 8 KiB (CGB, VBK).
@@ -55,7 +55,7 @@ pub struct Memory {
     /// Per `obj_buf` pixel, the drawing-priority rank of the object that
     /// owns it (`ppu::render::Renderer::render`; meaningful only where
     /// `obj_buf` is opaque).
-    pub(crate) obj_rank: [u8; OBJ_BUF_LEN],
+    pub(crate) obj_rank: ObjRank,
     /// CGB BG palette RAM (BCPD, FF69): 8 palettes of 4 colors, RGB555
     /// little-endian, bytes as written (bit 15 included, for read-back).
     /// Pan Docs: LCD Color Palettes (CGB only).
@@ -83,13 +83,13 @@ impl Memory {
             extra_oam: [0; 0x60],
             io: [0; 0x80],
             obj_buf: [0; OBJ_BUF_LEN],
-            obj_rank: [0; OBJ_BUF_LEN],
-            bg_pal: [0; 64],
-            obj_pal: [0; 64],
-            bg_pairs: BgPairs {
-                pal: [[0; 16]; 8],
+            obj_rank: ObjRank {
+                rank: [0; OBJ_BUF_LEN],
                 hold: [(0, 0, 0); 2],
             },
+            bg_pal: [0; 64],
+            obj_pal: [0; 64],
+            bg_pairs: [[0; 16]; 8],
             apu: Apu::new(),
         }
     }
@@ -106,21 +106,24 @@ impl Memory {
         self.extra_oam.fill(0);
         self.io.fill(0);
         self.obj_buf.fill(0);
-        self.obj_rank.fill(0);
+        self.obj_rank.rank.fill(0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
-        self.bg_pairs.pal = [[0; 16]; 8];
+        self.bg_pairs = [[0; 16]; 8];
         self.apu = Apu::new();
     }
 }
 
-/// Per BG palette, `ppu::render::pair_table` of its colors (kept here and
-/// rebuilt when the palette changes), and the renderer's held fetches.
-/// Both reach `Renderer::render` through the one `Sources::pairs` pointer
-/// (a second pointer would grow `Ppu::draw` past its code-size budget).
+/// Per [`Memory::obj_buf`] pixel, the drawing-priority rank of the object
+/// that owns it, and the renderer's held fetches. Both reach
+/// `Renderer::render` through one pointer: a second one would grow
+/// `Ppu::draw` past its code-size budget, and placed here (after the hot
+/// arrays in this `repr(C)` struct) the hold moves no offset that the bus
+/// or the PPU address with Thumb-2 immediates.
 #[cfg_attr(test, derive(PartialEq))]
-pub(crate) struct BgPairs {
-    pub(crate) pal: [[u32; 16]; 8],
+pub(crate) struct ObjRank {
+    /// Meaningful only where `obj_buf` is opaque.
+    pub(crate) rank: [u8; OBJ_BUF_LEN],
     /// Pixels of the current line the fetcher had already fetched with
     /// older map-select (LCDC.3/6) and SCX values when those were written
     /// in mode 3 (`ppu::Ppu::hold_fetch`): `(end, LCDC, SCX)`, the pixels
@@ -165,18 +168,19 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
-            obj_rank,
+            &obj_rank.rank,
             bg_pal,
             obj_pal,
         ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
-        assert!(bg_pairs.pal.as_flattened().iter().all(|&w| w == 0));
-        assert!(bg_pairs.hold.iter().all(|&h| h == (0, 0, 0)));
+        assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
+        assert!(obj_rank.hold.iter().all(|&h| h == (0, 0, 0)));
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
         let total: usize = fields.iter().map(|f| f.len()).sum::<usize>()
             + size_of_val(bg_pairs)
+            + size_of_val(&obj_rank.hold)
             + size_of::<Apu>();
         assert_eq!(
             size_of::<Memory>(),
