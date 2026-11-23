@@ -161,8 +161,9 @@ impl Apu {
     /// Its duty phase at hand-over is fitted to gambatte's hardware-verified
     /// `ch1_init_pos_*` ROMs (cgb04c), which freeze the position by
     /// retriggering at a varied clock: the step into position 1 (duty 2
-    /// low) must fall in clocks 144-147 + 504 here; 147 keeps the steps on
-    /// the single-speed write grid, as the boot ROM's own trigger left them.
+    /// low) must fall in clocks 144-147 + 504 here; 145 puts the steps on
+    /// the APU's 1 MHz grid (1 mod 4), where the boot ROM's own
+    /// single-speed trigger leaves them (`Apu::trigger_delay`).
     /// The length counter stays 0 (provisional).
     pub(crate) fn post_boot(&mut self) {
         *self = Self::new();
@@ -173,7 +174,7 @@ impl Apu {
         ch1.freq = 0x7C1;
         ch1.pos = 6;
         ch1.high = true;
-        ch1.countdown = 147;
+        ch1.countdown = 145;
         ch1.env.nrx2 = 0xF3;
     }
 
@@ -259,19 +260,41 @@ impl Apu {
         ((now >> 1) as u8 ^ self.fs.phase ^ 1) & 1
     }
 
+    /// Base clocks from a trigger at `now` to a square channel's first duty
+    /// step, beyond one period, for a channel that is off (`Square::trigger`;
+    /// 4 fewer for one that is on). `docs/reference/apu.md`, "Square
+    /// channel trigger countdown":
+    /// - single speed: the step lands on the APU's own 1 MHz grid, the
+    ///   first clock 1 mod 4 at least 5 clocks on (gambatte cgb04c
+    ///   `speedchange*_ch1_duty0_pos6_to_pos7_timing*`: a trigger before a
+    ///   speed switch, read back after it). The grid runs on through
+    ///   switches, so after one to single speed (odd CPU grid) the delay
+    ///   still ends on it.
+    /// - double speed: SameBoy's `6 - lf_div` ticks (the CGB-E sign; the
+    ///   CGB-C rule is a revision conflict with SameSuite, m9-triage
+    ///   group 7).
+    #[inline]
+    fn trigger_delay(&self, now: u64, double: bool) -> u8 {
+        if double {
+            10 - 2 * self.lf_div(now)
+        } else {
+            5 + ((now as u8).wrapping_neg() & 3)
+        }
+    }
+
     /// A write to a channel register FF10-FF25 (by the low 7 address bits)
-    /// at clock `now`, after a sync, with the APU on. The byte is already
-    /// stored in `Memory::io`.
+    /// at clock `now` (`double`: in double speed), after a sync, with the
+    /// APU on. The byte is already stored in `Memory::io`.
     #[inline(never)]
-    pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64) {
+    pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64, double: bool) {
         // FF10-FF14 are CH1's NR10-NR14 and FF15-FF19 CH2's (FF15 unused)
         // NR21-NR24: one call site for both squares keeps a single inlined
         // copy. NR10 and FF15 (offset 0) are no-ops in `Square::write`.
         let i = reg.wrapping_sub(0x10);
         if i < 10 {
             let ch = usize::from(i >= 5);
-            let (fs, lf) = (self.fs.step, self.lf_div(now));
-            self.sq[ch].write(i - 5 * ch, value, fs, lf);
+            let (fs, delay) = (self.fs.step, self.trigger_delay(now, double));
+            self.sq[ch].write(i - 5 * ch, value, fs, delay);
         }
         // NR10, CH1's trigger after the channel's own, or CH4. One
         // unconditional tail call instead of a test on every exit (code
@@ -377,9 +400,9 @@ mod tests {
         mem.apu.post_boot();
         // Duty 25% (positions 0 and 7 high), volume 15, f = 0x400: 4096
         // clocks per step.
-        mem.apu.write(0x16, 0x40, 0);
-        mem.apu.write(0x17, 0xF0, 0);
-        mem.apu.write(0x19, 0x84, 0);
+        mem.apu.write(0x16, 0x40, 0, false);
+        mem.apu.write(0x17, 0xF0, 0, false);
+        mem.apu.write(0x19, 0x84, 0, false);
         let first = u64::from(mem.apu.sq[1].countdown);
         assert_eq!(read_apu(&mem, 0, 0x76), 0x00, "not started");
         // Position 7 after 7 steps, with the state still at clock 0.
@@ -392,11 +415,12 @@ mod tests {
     #[test]
     fn post_boot_ch1_runs_on_at_0x7c1_in_the_fitted_phase() {
         // gambatte `ch1_init_pos_*` (cgb04c): high (duty 2, position 0)
-        // through clock 650, low (position 1) from 651 for 4 steps.
+        // through clock 648, low (position 1) from 649 for 4 steps (the
+        // ROMs allow 648-651; 649 is 1 mod 4, the trigger grid).
         let mut apu = Apu::new();
         apu.post_boot();
         let mut ch1 = apu.sq[0];
-        ch1.advance(650);
+        ch1.advance(648);
         assert_eq!((ch1.pos, ch1.high), (0, true));
         ch1.advance(1);
         assert_eq!((ch1.pos, ch1.high), (1, false));
@@ -452,9 +476,9 @@ mod tests {
     fn the_second_edge_after_a_high_power_on_clocks_length_at_step_1() {
         let mut apu = Apu::new();
         apu.power_on(0, true);
-        apu.write(0x17, 0xF0, 0); // DAC on
-        apu.write(0x16, 0x3E, 0); // length 2
-        apu.write(0x19, 0xC0, 0); // trigger, length on
+        apu.write(0x17, 0xF0, 0, false); // DAC on
+        apu.write(0x16, 0x3E, 0, false); // length 2
+        apu.write(0x19, 0xC0, 0, false); // trigger, length on
         assert_eq!(apu.nr52() & 0x02, 0x02, "on after the trigger");
         apu.step();
         assert_eq!(apu.nr52() & 0x02, 0x02, "first edge skipped");
@@ -462,16 +486,48 @@ mod tests {
         assert_eq!(apu.nr52() & 0x02, 0x00, "length 1 -> 0 at step 1");
     }
 
+    #[test]
+    fn single_speed_triggers_step_on_the_1mhz_grid() {
+        // gambatte cgb04c `speedchange*_ch1_duty0_pos6_to_pos7_timing*`:
+        // in single speed the first step after a trigger is the first clock
+        // 1 mod 4 at least 5 clocks after one period (an off channel), 1
+        // for an on channel; the CPU grid can be odd after a switch to
+        // single speed. f = 0x7E0: 128 clocks per step.
+        for now in 100..108u64 {
+            let mut apu = Apu::new();
+            apu.power_on(0, false);
+            apu.write(0x12, 0xF0, now, false);
+            apu.write(0x13, 0xE0, now, false);
+            apu.write(0x14, 0x87, now, false);
+            let first = now + u64::from(apu.sq[0].countdown);
+            assert_eq!(first % 4, 1, "off, trigger at {now}");
+            assert!((now + 128 + 5..now + 128 + 9).contains(&first), "{now}");
+            apu.write(0x14, 0x87, now, false);
+            let first = now + u64::from(apu.sq[0].countdown);
+            assert_eq!(first % 4, 1, "on, trigger at {now}");
+            assert!((now + 128 + 1..now + 128 + 5).contains(&first), "{now}");
+        }
+        // Double speed keeps SameBoy's `6 - lf_div` ticks (CGB-E sign):
+        // lf_div is 1 at power on (clock 0) and toggles every 2 clocks.
+        for (now, extra) in [(100, 8), (102, 10)] {
+            let mut apu = Apu::new();
+            apu.power_on(0, false);
+            apu.write(0x12, 0xF0, now, true);
+            apu.write(0x14, 0x87, now, true);
+            assert_eq!(apu.sq[0].countdown, 1024 + extra, "double, {now}");
+        }
+    }
+
     /// A powered APU at step 0 with CH1 (DAC on, volume 15, duty 50%)
     /// triggered at frequency `f` with NR10 = `nr10`, through `Apu::write`.
     fn ch1_playing(nr10: u8, f: u16) -> Apu {
         let mut apu = Apu::new();
         apu.power_on(0, false);
-        apu.write(0x10, nr10, 0);
-        apu.write(0x11, 0x80, 0);
-        apu.write(0x12, 0xF0, 0);
-        apu.write(0x13, f as u8, 0);
-        apu.write(0x14, 0x80 | (f >> 8) as u8, 0);
+        apu.write(0x10, nr10, 0, false);
+        apu.write(0x11, 0x80, 0, false);
+        apu.write(0x12, 0xF0, 0, false);
+        apu.write(0x13, f as u8, 0, false);
+        apu.write(0x14, 0x80 | (f >> 8) as u8, 0, false);
         apu
     }
 
@@ -511,9 +567,9 @@ mod tests {
     fn nr10_writes_go_to_the_sweep_and_ff15_is_ignored() {
         let mut apu = ch1_playing(0x19, 0x400);
         let before = apu;
-        apu.write(0x15, 0xFF, 0);
+        apu.write(0x15, 0xFF, 0, false);
         assert_eq!(apu, before, "FF15 unused");
-        apu.write(0x10, 0x11, 0); // clears negate after a negate calculation
+        apu.write(0x10, 0x11, 0, false); // clears negate after a negate calculation
         assert!(!apu.sq[0].on);
     }
 
@@ -528,8 +584,8 @@ mod tests {
         assert_eq!(read_apu(&mem, first, 0x76), 0x00);
         assert_eq!(read_apu(&mem, first + 4 * 4096, 0x76), 0x0F, "position 5");
         // CH2 in the high nibble at the same time.
-        mem.apu.write(0x17, 0xA0, 0);
-        mem.apu.write(0x19, 0x87, 0);
+        mem.apu.write(0x17, 0xA0, 0, false);
+        mem.apu.write(0x19, 0x87, 0, false);
         let t = first + 4 * 4096;
         assert_eq!(read_apu(&mem, t, 0x76) & 0x0F, 0x0F);
     }
@@ -565,7 +621,7 @@ mod noise_tests {
         mem.apu.power_on(0, false);
         for (reg, v) in [(0x21, 0xF0), (0x22, 0x00), (0x23, 0x80)] {
             mem.io[reg] = v;
-            mem.apu.write(reg, v, 0);
+            mem.apu.write(reg, v, 0, false);
         }
         mem
     }
@@ -577,7 +633,7 @@ mod noise_tests {
         assert_eq!(read_apu(&mem, 15 * 8 - 1, 0x77), 0x00);
         assert_eq!(read_apu(&mem, 15 * 8, 0x77), 0xF0);
         assert_eq!(mem.apu.out.synced, 0, "pure");
-        mem.apu.write(0x21, 0x00, 0);
+        mem.apu.write(0x21, 0x00, 0, false);
         assert_eq!(mem.apu.nr52(), 0xF0, "DAC off");
         assert_eq!(read_apu(&mem, 15 * 8, 0x77), 0x00);
     }
@@ -585,8 +641,8 @@ mod noise_tests {
     #[test]
     fn frame_sequencer_clocks_the_ch4_length() {
         let mut mem = ch4_playing();
-        mem.apu.write(0x20, 0x3F, 0); // length 1
-        mem.apu.write(0x23, 0x40, 0); // enable at step 0: no extra clock
+        mem.apu.write(0x20, 0x3F, 0, false); // length 1
+        mem.apu.write(0x23, 0x40, 0, false); // enable at step 0: no extra clock
         assert_eq!(mem.apu.nr52() & 8, 8);
         mem.apu.step(); // step 1: length
         assert_eq!(mem.apu.nr52() & 8, 0);
@@ -595,11 +651,11 @@ mod noise_tests {
     #[test]
     fn power_off_clears_the_ch4_length() {
         let mut mem = ch4_playing();
-        mem.apu.write(0x20, 0x3F, 0); // length 1
+        mem.apu.write(0x20, 0x3F, 0, false); // length 1
         mem.apu.power_off();
         mem.apu.power_on(0, false);
-        mem.apu.write(0x21, 0xF0, 0);
-        mem.apu.write(0x23, 0xC0, 0); // trigger, length on: 64 if cleared
+        mem.apu.write(0x21, 0xF0, 0, false);
+        mem.apu.write(0x23, 0xC0, 0, false); // trigger, length on: 64 if cleared
         mem.apu.step(); // step 1: length
         assert_eq!(mem.apu.nr52() & 8, 8);
     }
@@ -758,7 +814,7 @@ mod sync_tests {
             0x1A..=0x1E | 0x30..=0x3F => write_wave(mem, reg, value),
             _ => {
                 mem.io[reg] = value;
-                mem.apu.write(reg, value, now);
+                mem.apu.write(reg, value, now, false);
             }
         }
     }

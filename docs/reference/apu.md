@@ -97,10 +97,37 @@ The trigger (`GB_apu_write`, NRx4 bit 7) loads
 
 `lf_div` is SameBoy's 1 MHz phase: 1 at power on (`GB_apu_init`), toggling
 every tick. The core derives it as `((now >> 1) ^ phase ^ 1) & 1`, with
-`phase = (power-on clock >> 1) & 1` (`Apu::lf_div`). A trigger at an odd
-base clock is not modelled (half a tick); the exact fit, and SameBoy's
-extra delay when retriggering an active channel, are deferred (ADR 0021
-section 12, gambatte `ch*_duty*_pos*`).
+`phase = (power-on clock >> 1) & 1` (`Apu::lf_div`). The core uses this
+table in **double speed** only; SameBoy's extra delay when retriggering an
+active channel is deferred (ADR 0021 section 12, gambatte
+`ch*_duty*_pos*`).
+
+**Single speed: the first step lands on the APU's 1 MHz grid.** The core
+puts the first duty step after a single-speed trigger at the first clock
+`1 mod 4` that is at least one period plus 5 clocks after the write (off
+channel), or plus 1 (on channel: 4 fewer, as in both references):
+`(2048 - f) * 4 + 5 + (-now mod 4)` and `+ 1 + (-now mod 4)`
+(`Apu::trigger_delay`). Before any speed switch the CPU writes on clocks
+`0 mod 4`, so this is `+ 5` (off) and `+ 1` (on): 3 clocks earlier than the
+table with `lf_div` = 1, which single speed always had. Source: gambatte's
+cgb04c `speedchange{,2,3,4,5}{,_nop}_ch1_duty0_pos6_to_pos7_timing{,_nop}_{1,2}`
+(trigger CH1 at f = 0x7E0 in single speed, switch speed one to five times,
+then retrigger to freeze the position: `_1` must still read position 6,
+`_2` position 7). Traced in this core, each `_1`/`_2` pair brackets the
+step into position 7: one switch (and four, five) allow it 2 or 3 clocks
+before the table's step, two and three switches (whose CPU then writes on
+odd clocks, ADR 0020) 3 or 4. Only 3 fits all five, a step on a clock `1
+mod 4`; with all periods multiples of 4 the channel stays on that grid
+through any number of switches. The single-speed `sound/ch1_duty0_pos6_
+to_pos7_timing_{1,2}` pair allows 0-3 clocks, so it agrees, and so do the
+`ch1_init_pos_*` window (post-boot, below) and SameSuite (its channel
+1/2 tests pass unchanged). The `+ (-now mod 4)` term only matters for a
+single-speed trigger after a switch to single speed (odd CPU grid), which
+no ROM here tests: it keeps the step on the same grid (gambatte's
+`DutyUnit::nr4Change` likewise snaps the first step to its counter's
+parity). This is gambatte's linear rule in shape (`+ 6 + 2 * lf_div`,
+below) with the grid phase fitted to the ROMs; the double-speed half of it
+is the revision conflict below and is not applied.
 
 **Double speed: a revision conflict.** In double speed `lf_div` alternates
 per M-cycle, and the sign of the `lf_div` term differs by revision (SameBoy
@@ -244,12 +271,13 @@ duty step; a new wave channel reads the kept buffer's output at once.
 - **Post-boot**: powered on, NR52 reads F1: CH1 on, DAC on, volume 0,
   envelope stopped (the boot chime has decayed by hand-over). CH1 keeps
   running at the chime's last note, f = 0x7C1 (252 clocks per step), duty
-  2, position 6 with 147 clocks to its next step at clock 0. The phase is
+  2, position 6 with 145 clocks to its next step at clock 0. The phase is
   fitted to gambatte's cgb04c `ch1_init_pos_1..8`, which retrigger CH1 at
   clocks spread over 4 steps to freeze its position: the step into
-  position 1 must fall within clocks 144-147 (+ 504) for all 8; 147 puts
-  the steps on the single-speed write grid, as the boot ROM's own trigger
-  does. The length counter stays 0 (provisional).
+  position 1 must fall within clocks 144-147 (+ 504) for all 8; 145 puts
+  the steps on the 1 MHz grid (`1 mod 4`) where the boot ROM's own
+  single-speed trigger leaves them (above). The length counter stays 0
+  (provisional).
 
 ## Wave RAM access while CH3 is on (CGB)
 
@@ -276,20 +304,14 @@ gambatte `sound/` and SameSuite APU ROMs:
 
 - SameBoy's envelope lock/clock model, the secondary DIV event and the
   CGB-C `_nrx2_glitch` (the classic model plus zombie mode is used).
-- The square trigger delay fit: a trigger at an odd base clock (half a
-  tick), the extra delay when retriggering an active channel (gambatte
-  `ch*_duty*_pos*`), and the CGB-C double-speed sign (above: a revision
-  conflict with SameSuite).
-- The APU's 2 MHz phase across a speed switch: 12 gambatte
-  `speedchange*_ch1_duty0_pos6_to_pos7_timing*_2` ROMs (trigger in single
-  speed, retrigger after one to four switches) see the step to position 7
-  one tick (2 base clocks) earlier relative to the retrigger than the core
-  does. Not the trigger delay (the trigger is in single speed) and not the
-  odd-clock CPU grid after a switch to single speed (snapping triggers to
-  the 2 MHz grid changed nothing); deriving `lf_div` from the DIV counter
-  (gambatte's `cycleCounter_` keeps its phase across NR52 power on and
-  loses it on DIV resets, which STOP does) made things worse. Likely the
-  APU ticks counted over the switch itself.
+- The square trigger delay fit: the extra delay when retriggering an
+  active channel (gambatte `ch*_duty*_pos*`), and the CGB-C double-speed
+  sign (above: a revision conflict with SameSuite). A double-speed trigger
+  after a switch with the APU already on (`speedchange_ch1_nr4init_*_2`)
+  needs the same grid rule as single speed; it is part of that conflict.
+  The single-speed grid phase across switches is fitted, not derived: the
+  APU is not ticked differently over the switch (the CPU's position
+  against the APU and PPU is ADR 0020's).
 - The noise counter's phase at trigger (SameBoy loads `r * 4 + 6` plus
   alignment corrections; the core loads one full period), its background
   counting while the channel is off, the alignment term when an NR43

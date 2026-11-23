@@ -585,7 +585,7 @@ impl Ctx<'_, '_> {
             // Channel registers: stored, then decoded by the channels.
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
-                self.mem.apu.write(reg, value, now);
+                self.mem.apu.write(reg, value, now, self.hot.mcycle == 2);
             }
             // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,

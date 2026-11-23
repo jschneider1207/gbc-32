@@ -174,10 +174,11 @@ impl Square {
         i32::from(out[0])
     }
 
-    /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`
-    /// and SameBoy's 1 MHz phase `lf_div` (0 or 1) at the write.
+    /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`;
+    /// a trigger's first duty step comes `delay` clocks after one period
+    /// (`Apu::trigger_delay`; 4 fewer if the channel is on).
     #[inline]
-    pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, lf_div: u8) {
+    pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, delay: u8) {
         match off {
             1 => {
                 self.duty = value >> 6;
@@ -196,7 +197,7 @@ impl Square {
                     self.on = false;
                 }
                 if value & 0x80 != 0 {
-                    self.trigger(lf_div);
+                    self.trigger(delay);
                 }
             }
             _ => {}
@@ -204,16 +205,13 @@ impl Square {
     }
 
     /// A trigger (NRx4 bit 7; the length reload is in `Length::write_nrx4`).
-    /// The duty position is kept; the first step comes after SameBoy's
-    /// `sample_countdown = (f ^ 0x7FF) * 2 + delay` 2 MHz ticks, with
-    /// `delay = 6 - lf_div` for a channel that is off and `4 - lf_div` for
-    /// one that is on. A countdown of n fires after n + 1 ticks (SameBoy
-    /// `GB_apu_run`: the reload `(f ^ 0x7FF) * 2 + 1` gives the period
-    /// `(2048 - f) * 2` ticks), so in base clocks: `(2048 - f) * 4 + 10 -
-    /// 2 * lf_div` (off) or `+ 6 - 2 * lf_div` (on). See
-    /// `docs/reference/apu.md` (the double-speed sign is CGB-E's).
-    fn trigger(&mut self, lf_div: u8) {
-        let extra = (if self.on { 6 } else { 10 }) - 2 * u32::from(lf_div & 1);
+    /// The duty position is kept; the first step comes one period plus
+    /// `delay` clocks later for a channel that is off, 4 fewer for one that
+    /// is on (SameBoy `GB_apu_write`: `sample_countdown` delay `6 - lf_div`
+    /// off, `4 - lf_div` on, 2 ticks apart; `Apu::trigger_delay` and
+    /// `docs/reference/apu.md` have the delay itself).
+    fn trigger(&mut self, delay: u8) {
+        let extra = u32::from(delay) - 4 * u32::from(self.on);
         self.countdown = (self.period().get() + extra) as u16;
         if !self.on {
             // Digital 0 to the first step.
@@ -375,10 +373,10 @@ mod tests {
     /// and frequency `f`, then run to its first step.
     fn playing(duty: u8, vol: u8, f: u16) -> Square {
         let mut sq = Square::ZERO;
-        sq.write(1, duty << 6, 0, 0);
-        sq.write(2, vol << 4, 0, 0);
-        sq.write(3, f as u8, 0, 0);
-        sq.write(4, 0x80 | (f >> 8) as u8, 0, 0);
+        sq.write(1, duty << 6, 0, 10);
+        sq.write(2, vol << 4, 0, 10);
+        sq.write(3, f as u8, 0, 10);
+        sq.write(4, 0x80 | (f >> 8) as u8, 0, 10);
         let cd = u64::from(sq.countdown);
         sq.advance(cd);
         sq
@@ -408,8 +406,8 @@ mod tests {
     fn a_started_channel_outputs_zero_until_its_first_step() {
         let mut sq = Square::ZERO;
         sq.pos = 7; // duty 0: high at position 7
-        sq.write(2, 0xF0, 0, 0);
-        sq.write(4, 0x87, 0, 0); // f = 0x700, period 1024
+        sq.write(2, 0xF0, 0, 10);
+        sq.write(4, 0x87, 0, 10); // f = 0x700, period 1024
         assert!(sq.on);
         assert_eq!(sq.digital(), 0, "first-sample zero");
         assert_eq!(sq.countdown, 1024 + 10);
@@ -418,7 +416,7 @@ mod tests {
         // Retriggering an active channel keeps the output and uses the
         // short delay; lf_div 1 subtracts 2 clocks.
         sq.high = true;
-        sq.write(4, 0x87, 0, 1);
+        sq.write(4, 0x87, 0, 8);
         assert!(sq.high);
         assert_eq!(sq.countdown, 1024 + 6 - 2);
     }
@@ -429,14 +427,14 @@ mod tests {
         let mut sq = playing(0, 9, 2047);
         sq.advance(4);
         assert_eq!((sq.pos, sq.digital()), (2, 0));
-        sq.write(1, 0xC0, 0, 0);
+        sq.write(1, 0xC0, 0, 10);
         assert_eq!(sq.digital(), 0, "latched until the next step");
         let mut a = sq;
         assert_eq!(a.integrate1(3), 15 * 3, "digital 0 over the rest");
         sq.advance(4);
         assert_eq!((sq.pos, sq.digital()), (3, 9));
         // And back: duty 0 is low at position 3, but the 1 stays latched.
-        sq.write(1, 0x00, 0, 0);
+        sq.write(1, 0x00, 0, 10);
         assert_eq!(sq.digital(), 9);
     }
 
@@ -473,7 +471,7 @@ mod tests {
             for f in [2047, 2046, 2043, 2017, 1900, 0x700] {
                 // Started and right after a trigger (first-sample zero).
                 let mut fresh = playing(duty, 9, f);
-                fresh.write(4, 0x80 | (f >> 8) as u8, 0, 0);
+                fresh.write(4, 0x80 | (f >> 8) as u8, 0, 10);
                 for start in [playing(duty, 9, f), fresh] {
                     let (mut a, mut b) = (start, start);
                     for dt in [1, 128, 37, 2, 3, 4, 5, 31, 32, 33, 128, 91, 127, 128, 128] {
@@ -496,13 +494,13 @@ mod tests {
     fn the_dac_off_turns_the_channel_off() {
         let mut sq = playing(2, 15, 2000);
         assert!(sq.on);
-        sq.write(2, 0x08, 0, 0); // volume 0, up: DAC still on
+        sq.write(2, 0x08, 0, 10); // volume 0, up: DAC still on
         assert!(sq.on);
-        sq.write(2, 0x07, 0, 0); // bits 3-7 all 0: DAC off
+        sq.write(2, 0x07, 0, 10); // bits 3-7 all 0: DAC off
         assert!(!sq.on);
         assert_eq!(sq.integrate1(128), 0);
         // A trigger with the DAC off leaves it off, but reloads length.
-        sq.write(4, 0x80, 0, 0);
+        sq.write(4, 0x80, 0, 10);
         assert!(!sq.on);
         assert_eq!(sq.len.counter, 64);
     }
@@ -510,9 +508,9 @@ mod tests {
     #[test]
     fn length_expiry_turns_the_channel_off() {
         let mut sq = Square::ZERO;
-        sq.write(1, 0x3E, 0, 0); // length 2
-        sq.write(2, 0xF0, 0, 0);
-        sq.write(4, 0xC0, 0, 0);
+        sq.write(1, 0x3E, 0, 10); // length 2
+        sq.write(2, 0xF0, 0, 10);
+        sq.write(4, 0xC0, 0, 10);
         assert!(sq.on);
         sq.clock_length();
         assert!(sq.on);
@@ -523,11 +521,11 @@ mod tests {
     #[test]
     fn extra_length_clocking_on_nrx4_can_turn_the_channel_off() {
         let mut sq = Square::ZERO;
-        sq.write(1, 0x3F, 0, 0); // length 1
-        sq.write(2, 0xF0, 0, 0);
-        sq.write(4, 0x80, 0, 0); // trigger, length disabled
+        sq.write(1, 0x3F, 0, 10); // length 1
+        sq.write(2, 0xF0, 0, 10);
+        sq.write(4, 0x80, 0, 10); // trigger, length disabled
         assert!(sq.on);
-        sq.write(4, 0x40, 1, 0); // enable with fs odd: 1 -> 0
+        sq.write(4, 0x40, 1, 10); // enable with fs odd: 1 -> 0
         assert!(!sq.on);
     }
 
@@ -536,10 +534,10 @@ mod tests {
     fn ch1(nr10: u8, f: u16) -> (Sweep, Square) {
         let mut sw = Sweep::ZERO;
         let mut sq = Square::ZERO;
-        sq.write(2, 0xF0, 0, 0);
+        sq.write(2, 0xF0, 0, 10);
         sw.write(nr10, &mut sq);
-        sq.write(3, f as u8, 0, 0);
-        sq.write(4, 0x80 | (f >> 8) as u8, 0, 0);
+        sq.write(3, f as u8, 0, 10);
+        sq.write(4, 0x80 | (f >> 8) as u8, 0, 10);
         sw.trigger(&mut sq);
         (sw, sq)
     }
@@ -641,7 +639,7 @@ mod tests {
         // A retrigger forgets it.
         let (mut sw, mut sq) = ch1(0x19, 0x400);
         sw.write(0x10, &mut sq); // off
-        sq.write(4, 0x84, 0, 0);
+        sq.write(4, 0x84, 0, 10);
         sw.trigger(&mut sq); // shift 0 now: no calculation
         sw.write(0x00, &mut sq);
         assert!(sq.on);
