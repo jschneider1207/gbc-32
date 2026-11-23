@@ -559,7 +559,7 @@ impl<'a> Cart<'a> {
         }
         let rtc = self.has_rtc().then(|| self.rtc_at(now));
         Some(EjectedCart {
-            rom: self.rom.into_inner(),
+            rom: self.rom.into_inner(), // check-rom-loads: allowed (hand-back)
             cart_ram: self.ram_buf,
             rtc,
             save_dirty: self.save_dirty,
