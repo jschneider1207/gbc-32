@@ -623,6 +623,45 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   more; 94,450 B after rebasing on the cold-code cut 65dc4a9). Bench: all `check-bench.sh` rows +0.00% before the rebase (`synth:worst-case`
   476,467,536 -> 476,467,546 Ir; `cgb-acid2` +4,748).
 
+### HBlank interrupt vs stalls at pixel 159 (WX = A6 / object X = A7, branch `m9-win-a6`)
+
+- **Rule.** Stalls at the last pixel (x = 159: the window at WX = 166,
+  objects at X = 167) delay the STAT mode-0 change but not the HBlank
+  (mode-0) interrupt. gambatte (behaviour only) requests it at xpos 166
+  (`predictedNextXposTime(lcd_hres + 6)`) and changes STAT at xpos 168
+  (`xpos168`), so a stall at xpos 167 falls between them; SameBoy
+  display.c has the window half (`wx_166_interrupt_glitch`: interrupt one
+  dot after a WX = 166 trigger). The `out` pairs pin it: every
+  `m3stat` variant already passed and only the `m0irq_2` / `m0enable`
+  ones failed (interrupt late by the stall); `10xposA6_m0irq_*` (stalls
+  at x = 158) pass with and without the rule, so they still delay it.
+- **Model.** `LineTiming::edge` = stall dots at x = 159 (`edge_dots`,
+  cold, called only when the last stall is at 159). `end` is now the
+  interrupt's end (the walk's `End`/`HBlank`, `mode_source` for STAT
+  writes, `mode3_pixel`); `stat_end()` = `end + edge` for the STAT mode
+  bits, VRAM/OAM/palette blocking, HDMA's `mode0_start` and the mid-line
+  write windows. The walk is unchanged. A CGB LCDC.5 clear that cuts a
+  window stall at x = 159 shortens `edge`, not `end`. The line is drawn
+  at the walk's `End`, so a register write in those last stall dots
+  misses pixel 159.
+- **Result.** 10 fail->pass, 0 regressions: `m0enable/enable_wxA6_2x_spxA7_*`
+  (6), `window/m2int_wxA6_{,spxA7_}m0irq_2`, `m0irq2_2`,
+  `sprites/10spritesPrLine_10xposA7_m0irq_2`. Test
+  `hblank_interrupt_skips_the_stalls_at_the_last_pixel`, mutation-checked
+  (edge 0, threshold 158, no trim adjust, `mode_source` on the STAT end).
+- **Cost.** `.text` 95,720 -> 96,004 B (`set_stalls` +40, `edge_dots`
+  118, `window_write` +48). Bench vs main: `cgb-acid2` +0.08% (+2.39% of
+  the 3% guard), `synth:cgb-raster` +0.18% (the `stat_end` add in the
+  palette fast path), `synth:worst-case` -0.00%. Counting the x = 159
+  dots per push instead measured `cgb-acid2` +0.50%.
+- **Found, not fixed.** A mode-3 write that moves `end` (`window_write`,
+  the SCX discard move in `hold_fetch`) doesn't move the walk's `End`
+  already computed at `Latch`: the HBlank interrupt (and the draw) stay
+  at the old end, and a sync between the two ends trips the
+  `debug_assert` in `sync` (probe: WX 0x47 -> 0xFF at dot 100 of line 5).
+  No failing manifest ROM is an `m0irq`/`m0enable` one now, so none pins
+  it yet.
+
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
 - **Rule 1, objects left of tile 0.** SameBoy (display.c,

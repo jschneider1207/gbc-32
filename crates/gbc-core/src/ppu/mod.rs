@@ -263,7 +263,8 @@ pub(crate) struct LineTiming {
     mode3: u16,
     /// The first pixel is output at this position (no stall before it).
     first_pixel: u16,
-    /// Mode 3 ends: STAT reads mode 0 (single speed).
+    /// Mode 3 ends for the HBlank interrupt (the walk's `End`); STAT reads
+    /// mode 0 (single speed) from `end + edge` ([`Self::stat_end`]).
     end: u16,
     /// Pipeline stalls `(pixel x, dots)` in x order: objects and the
     /// window start.
@@ -272,6 +273,19 @@ pub(crate) struct LineTiming {
     /// Which stall is the window's (`NO_STALL`: none); the others are the
     /// objects', in fetch order.
     win_stall: u8,
+    /// Stall dots at the last pixel (x = 159: the window at WX = 166,
+    /// objects at X = 167). They delay the STAT mode-0 change but not the
+    /// HBlank interrupt. gambatte (behaviour only) requests it when the
+    /// pipeline reaches xpos 166, two before the STAT change at 168
+    /// (video.cpp `predictedNextXposTime(lcd_hres + 6)`, ppu.cpp
+    /// `xpos168`), so a stall at xpos 167, the last pixel, doesn't delay
+    /// it. SameBoy (display.c, MIT) models the window case: a start at
+    /// WX = 166 requests it one dot after the trigger
+    /// (`wx_166_interrupt_glitch`). CGB04C captures: gambatte
+    /// `window/m2int_wxA6_*m0irq*`, `m0enable/enable_wxA6_2x_spxA7_*`,
+    /// `sprites/10spritesPrLine_10xposA7_m0irq_*` (objects at X = 166
+    /// still delay it: `10xposA6_m0irq_*`).
+    edge: u8,
 }
 
 const NO_STALL: u8 = 0xFF;
@@ -354,7 +368,15 @@ impl LineTiming {
         stalls: [(0, 0); 11],
         n_stalls: 0,
         win_stall: NO_STALL,
+        edge: 0,
     };
+
+    /// Mode 3 ends for the STAT mode bits and the CPU access windows: STAT
+    /// reads mode 0 from here (single speed).
+    #[inline]
+    fn stat_end(&self) -> u16 {
+        self.end + u16::from(self.edge)
+    }
 
     /// Pixels output before line position `t` (0-160), under the
     /// per-object stall model above.
@@ -551,8 +573,10 @@ impl Ppu {
         }
     }
 
-    /// The mode-3 end of line `l` (line position), if its timing is
-    /// latched; `line_start` is the clock of its position 0.
+    /// The walk's `End` of line `l` (line position), if its timing is
+    /// latched; `line_start` is the clock of its position 0. The HBlank
+    /// interrupt's mode-3 end, before the STAT one by the stalls at the
+    /// last pixel (`LineTiming::edge`).
     #[inline]
     fn latched_end(&self, line_start: u64) -> Option<u32> {
         (self.line.start == line_start).then_some(u32::from(self.line.end))
@@ -617,10 +641,14 @@ impl Ppu {
     /// in double speed: SameBoy changes STAT at state 22 there), or, if
     /// not latched yet, past any position it can be read at (the line's
     /// `End` deadline, at the earliest possible end, latches it first).
-    fn mode3_end(&self, now: u64, a: At, double: bool) -> u32 {
+    /// `irq`: the HBlank interrupt's end instead, without the stalls at the
+    /// last pixel ([`Self::latched_end`]).
+    fn mode3_end(&self, now: u64, a: At, double: bool, irq: bool) -> u32 {
         let start = now.wrapping_sub(u64::from(a.t));
-        self.latched_end(start)
-            .map_or(LINE, |e| e + edges::MODE0_DS_LATE * u32::from(double))
+        let edge = if irq { 0 } else { u32::from(self.line.edge) };
+        self.latched_end(start).map_or(LINE, |e| {
+            e + edge + edges::MODE0_DS_LATE * u32::from(double)
+        })
     }
 
     /// STAT mode bits at `a` (Pan Docs: LCD Status Registers).
@@ -630,7 +658,7 @@ impl Ppu {
             return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
         }
         if a.first {
-            return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, double) {
+            return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, double, false) {
                 0
             } else {
                 3
@@ -649,7 +677,7 @@ impl Ppu {
             u8::from(l == 0 && (t != edges::LINE0_MODE0_QUIRK || double || !quirk))
         } else if t < edges::MODE3 {
             2
-        } else if t < self.mode3_end(now, a, double) {
+        } else if t < self.mode3_end(now, a, double, false) {
             3
         } else {
             0
@@ -725,7 +753,7 @@ impl Ppu {
         let a = self.at(now);
         a.line < LINES
             && a.t >= from[usize::from(a.first)]
-            && a.t < self.mode3_end(now, a, double) + end_extra
+            && a.t < self.mode3_end(now, a, double, false) + end_extra
     }
 
     /// CPU access to CGB palette RAM (BCPD/OCPD) is blocked at clock `now`:
@@ -752,7 +780,7 @@ impl Ppu {
         let t = now.wrapping_sub(self.line.start);
         if t < u64::from(LINE + edges::PALETTE_FROM) && self.line.mode3 != 0 && self.lcd_enabled() {
             return t < u64::from(
-                u32::from(self.line.end) + edges::MODE0_DS_LATE * u32::from(double) + extra,
+                u32::from(self.line.stat_end()) + edges::MODE0_DS_LATE * u32::from(double) + extra,
             );
         }
         self.cpu_blocked(
@@ -787,7 +815,7 @@ impl Ppu {
         if l >= LINES {
             return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
         }
-        let end = self.mode3_end(now, a, double);
+        let end = self.mode3_end(now, a, double, true);
         if a.first {
             return if t >= end { 0 } else { NO_MODE };
         }
@@ -1247,7 +1275,7 @@ impl Ppu {
         // matches `lt.start`); `flush` drew up to the pixel being output.
         if !changed
             || lt.start != now.wrapping_sub(u64::from(a.t))
-            || !(i32::from(lt.mode3)..i32::from(lt.end)).contains(&t)
+            || !(i32::from(lt.mode3)..i32::from(lt.stat_end())).contains(&t)
         {
             return false;
         }
@@ -1457,7 +1485,11 @@ impl Ppu {
         if !self.lcd_enabled() || self.line.start == NEVER {
             return None;
         }
-        Some(self.line.start.wrapping_add(u64::from(self.line.end)))
+        Some(
+            self.line
+                .start
+                .wrapping_add(u64::from(self.line.stat_end())),
+        )
     }
 
     /// Whether clock `now` is in HDMA's HBlank period of the latched
@@ -1586,6 +1618,7 @@ impl Ppu {
             let t = &mut self.line;
             t.win_stall = NO_STALL;
             t.n_stalls = 0;
+            t.edge = 0;
             t.end = t.first_pixel + 160;
         }
         self.attr_on = false;
@@ -1647,7 +1680,13 @@ impl Ppu {
             }
         }
         t.n_stalls = k as u8;
-        t.end = t.first_pixel + 160 + total;
+        // The stalls at pixel 159 (the trailing ones) don't delay the
+        // HBlank interrupt (`LineTiming::edge`); rare, out of line.
+        t.edge = 0;
+        if k != 0 && t.stalls[(k - 1) % 11].0 >= 159 {
+            t.edge = edge_dots(&t.stalls[..k]);
+        }
+        t.end = t.first_pixel + 160 + total - u16::from(t.edge);
     }
 
     /// Clock (line position) at which the window's stall begins, under the
@@ -1688,7 +1727,7 @@ impl Ppu {
         let a = self.at(now);
         let t = a.t as i32;
         if lt.start != now.wrapping_sub(u64::from(a.t))
-            || !(i32::from(lt.mode3)..i32::from(lt.end)).contains(&t)
+            || !(i32::from(lt.mode3)..i32::from(lt.stat_end())).contains(&t)
         {
             return;
         }
@@ -1705,9 +1744,13 @@ impl Ppu {
             // CGB only; `window/late_disable*_1` cgb04c out0, dmg08 out3).
             if let (Some(c), 0) = (at, self.lcdc & 0x20) {
                 let lt = &mut self.line;
-                let d = &mut lt.stalls[usize::from(lt.win_stall) % 11].1;
+                let (x, d) = &mut lt.stalls[usize::from(lt.win_stall) % 11];
                 let keep = (t + WINDOW_OFF_LEAD - c).clamp(0, i32::from(*d)) as u8;
-                lt.end -= u16::from(*d - keep);
+                if *x >= 159 {
+                    lt.edge -= *d - keep;
+                } else {
+                    lt.end -= u16::from(*d - keep);
+                }
                 *d = keep;
             }
             return;
@@ -2137,6 +2180,9 @@ impl Ppu {
     /// is in mode 3 (pixels `0..x` are out), else `None`. The renderer
     /// flushes up to here before a register write changes the picture
     /// (ADR 0002 catch-up). Valid once the line's pipeline has started.
+    /// Ends at the walk's `End`, which draws the rest of the line: before
+    /// the STAT end when pixel 159 stalls (`LineTiming::edge`; a write in
+    /// those dots misses that one pixel).
     pub(crate) fn mode3_pixel(&self, now: u64) -> Option<(u8, u8)> {
         if !self.lcd_enabled() {
             return None;
@@ -2253,6 +2299,21 @@ fn sorted_object_stalls(
         k += 1;
     }
     k
+}
+
+/// The dots of `stalls` (in x order) at pixel 159, the last
+/// (`LineTiming::edge`).
+#[cold]
+#[inline(never)]
+fn edge_dots(stalls: &[(u8, u8)]) -> u8 {
+    let mut dots = 0;
+    for &(x, d) in stalls.iter().rev() {
+        if x < 159 {
+            break;
+        }
+        dots += d;
+    }
+    dots
 }
 
 /// The total mode-3 penalty of the objects at X coordinates `xs` (see
@@ -2924,6 +2985,70 @@ mod tests {
                 assert_eq!(p, if obj { 8 } else { 2 }, "({x}, {ly})");
             }
         }
+    }
+
+    #[test]
+    fn hblank_interrupt_skips_the_stalls_at_the_last_pixel() {
+        // (WX, object X) on line 5 -> (first mode-0 dot, HBlank interrupt
+        // dot, the interrupt's mode source at dots 255 and 258, as STAT
+        // writes see it). A stall at pixel 159 (WX = 166, X = 167) delays the STAT
+        // mode but not the interrupt (gambatte: requested at xpos 166).
+        let run3 = |wx: Option<u8>, obj: Option<u8>, clear: Option<u32>| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, SEL_MODE0, 0xFF);
+            r.ppu.lcdc |= 0x02 | if wx.is_some() { 0x20 } else { 0 };
+            r.mem.io[0x4B] = wx.unwrap_or(0xFF);
+            if let Some(x) = obj {
+                // Lines 0-7.
+                r.mem.oam[..4].copy_from_slice(&[16, x, 0, 0]);
+                r.ppu.oam_written();
+            }
+            let l5 = clock(on, 0, 5 * LINE);
+            r.sync(l5);
+            if let Some(t) = clear {
+                // CGB: LCDC.5 cleared during the window stall shortens it.
+                let now = l5 + u64::from(t);
+                r.sync(now);
+                r.ppu.lcdc &= !0x20;
+                r.ppu.window_write(now, &r.mem, false);
+            }
+            let irq = r
+                .irqs(l5 + 455)
+                .iter()
+                .find(|&&(_, f)| f & INT_STAT != 0)
+                .map(|&(at, _)| (at - l5) as u32);
+            let m0 = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            let src = |t: u64| {
+                let now = l5 + t;
+                r.ppu
+                    .mode_source(now, r.ppu.at(now), false, View::StatPhase2)
+            };
+            let src = (src(255), src(258));
+            (m0, irq, src)
+        };
+        let run = |wx, obj| run3(wx, obj, None);
+        assert_eq!(run(None, None), (Some(256), Some(257), (NO_MODE, 0)));
+        assert_eq!(run(Some(166), None), (Some(262), Some(257), (NO_MODE, 0)));
+        assert_eq!(
+            run(Some(165), None),
+            (Some(262), Some(263), (NO_MODE, NO_MODE))
+        );
+        assert_eq!(run(None, Some(167)), (Some(262), Some(257), (NO_MODE, 0)));
+        assert_eq!(
+            run(None, Some(166)),
+            (Some(262), Some(263), (NO_MODE, NO_MODE))
+        );
+        // The window and an object both at pixel 159: neither delays it.
+        assert_eq!(
+            run(Some(166), Some(167)),
+            (Some(273), Some(257), (NO_MODE, 0))
+        );
+        // The window stall (dots 255-260) cut to 1 dot by LCDC.5 clear at
+        // 256: the interrupt and its source stay where they were.
+        assert_eq!(
+            run3(Some(166), None, Some(256)),
+            (Some(257), Some(257), (NO_MODE, 0))
+        );
     }
 
     #[test]

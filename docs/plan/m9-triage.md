@@ -120,6 +120,10 @@ match; section 7 "Step E2"). 31 left: double-speed `late_wy_1toFF_ds_2`/
 `late_wy_ds_2`, `late_wy_FFto*`/`10to0`, `late_enable_afterVblank*`,
 `late_wx_ff_*`, the WX=A6/obj X=A7 edge (10), re-trigger (`on_screen/*`,
 Mealybug `m3_lcdc_win_*`, `m3_wx_4_change_sprites`).
+**Status (`m9-win-a6`):** the WX=A6/obj X=A7 edge (10) fixed: stalls at
+pixel 159 delay the STAT mode-0 change but not the HBlank interrupt
+(gambatte xpos 166 vs 168; section 7 "HBlank interrupt vs stalls at pixel
+159"). The other leftovers above are unchanged by it.
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-
