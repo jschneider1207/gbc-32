@@ -131,6 +131,13 @@ pub trait Bus {
     /// A halted CPU wakes up: called at the start of the wake-up M-cycle
     /// (the CGB +1 idle before the next fetch or the dispatch). Free.
     fn halt_end(&mut self) {}
+    /// At the end of a wake-up M-cycle (after [`Bus::halt_end`] and the
+    /// idle): whether something runs before the next opcode fetch or
+    /// dispatch, so the step ends there. The emulator: a VRAM DMA block
+    /// the wake-up starts (ADR 0017, amendment). Free.
+    fn wake_stalls(&mut self) -> bool {
+        false
+    }
     /// The IE register (FFFF). Free: no M-cycle.
     fn interrupt_enable(&self) -> u8;
     /// The IF register (FF0F), low 5 bits significant. Free: no M-cycle.
@@ -373,6 +380,12 @@ impl Cpu {
                     bus.halt_end();
                     bus.idle();
                     self.mode = Mode::Running;
+                    // A VRAM DMA block the wake-up started runs before the
+                    // next instruction: SameBoy fetches its opcode, runs
+                    // `GB_hdma_run`, then executes it (ADR 0017, amendment).
+                    if bus.wake_stalls() {
+                        return None;
+                    }
                     Some(1)
                 } else {
                     bus.idle_halted();

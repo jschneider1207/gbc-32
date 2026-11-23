@@ -56,8 +56,9 @@ pub(crate) struct VramDma {
     /// The CPU is in HALT while an HBlank transfer is active: HBlanks
     /// don't start blocks (SameBoy: `!gb->halted` in the HBlank trigger).
     pub(crate) halted: bool,
-    /// HALT began outside mode 0 (`allow_hdma_on_wake`): waking up in
-    /// mode 0 starts a block.
+    /// HALT began outside the HBlank (`allow_hdma_on_wake`) during an
+    /// HBlank transfer: the wake-up, in mode 0, starts a block. Cleared at
+    /// the wake-up (and by the end of a speed-switch countdown).
     pub(crate) wake_ok: bool,
     /// M-cycles left of the current transfer step's CPU stall
     /// ([`stall_mcycles`]; at most 2,049). A run call can end inside the
@@ -136,6 +137,7 @@ impl VramDma {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use super::HBLANK_DELAY;
     use crate::bus::Ctx;
     use crate::ppu::Frame;
     use crate::{Config, Emulator, Events};
@@ -149,8 +151,9 @@ mod tests {
     fn setup(lcdc: u8, cgb_flag: u8) -> &'static mut Emulator<'static> {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x143] = cgb_flag;
-        // HALT, far enough not to be reached by stepping from 0100.
-        rom[0x7000] = 0x76;
+        // HALT, far enough not to be reached by stepping from 0100, then
+        // LD A,(8000).
+        rom[0x7000..0x7004].copy_from_slice(&[0x76, 0xFA, 0x00, 0x80]);
         let emu = crate::tests::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         for i in 0..0x100 {
@@ -343,6 +346,90 @@ mod tests {
         }
         assert!(!emu.hw.cpu.halted());
         assert_eq!(emu.mem.vram[..16], block(0));
+    }
+
+    /// Wakes a CPU halted (IME off) in an HBlank transfer at the next
+    /// mode 0 at least 8 dots past its start, in a line whose HBlank
+    /// trigger passed in HALT: returns whether the wake-up started a block.
+    fn wake_in_next_mode_0(emu: &mut Emulator) -> bool {
+        let m0 = emu.hw.sys.ppu.mode0_start().unwrap_or(0);
+        loop {
+            let s = emu.hw.sys.ppu.mode0_start().unwrap_or(0);
+            let t = emu.clock();
+            if s > m0 && emu.peek(0xFF41) & 3 == 0 && (s + 8..s + 40).contains(&t) {
+                break;
+            }
+            step(emu);
+        }
+        let before = emu.peek(0xFF55);
+        emu.hw.sys.iflags = 0x04;
+        for _ in 0..3 {
+            step(emu);
+        }
+        assert!(!emu.hw.cpu.halted());
+        emu.peek(0xFF55) != before
+    }
+
+    #[test]
+    fn a_wake_up_block_runs_before_the_next_instruction() {
+        let emu = setup(0x91, 0x80);
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x81);
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x7000;
+        emu.hw.cpu.set_registers(r);
+        emu.hw.sys.ie = 0x04;
+        step(emu); // HALT, in mode 2
+        assert!(wake_in_next_mode_0(emu));
+        // LD A,(8000) after the HALT ran after the block (SameBoy: fetch,
+        // `GB_hdma_run`, execute), so it reads the copied byte.
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.hw.cpu.registers().a, block(0)[0]);
+    }
+
+    #[test]
+    fn halt_after_the_mode_0_stat_change_but_before_the_trigger_counts_as_before_it() {
+        // A HALT whose fetch M-cycle ends at the mode-0 STAT change or up
+        // to 2 dots after it: the SCX fine scroll moves the mode-3 end
+        // against the CPU's 4-dot grid until one does.
+        let mut tested = false;
+        for scx in 0..4 {
+            let emu = setup(0x91, 0x80);
+            write(emu, 0xFF43, scx);
+            while emu.peek(0xFF41) & 3 != 2 {
+                step(emu);
+            }
+            write(emu, 0xFF55, 0x81);
+            // This line's mode-0 start, then the next line's.
+            while emu.peek(0xFF41) & 3 != 0 {
+                step(emu);
+            }
+            let m0 = emu.hw.sys.ppu.mode0_start().unwrap() + 456;
+            while emu.clock() + 4 < m0 {
+                step(emu);
+            }
+            let end = emu.clock() + 4;
+            if end >= m0 + HBLANK_DELAY {
+                continue;
+            }
+            // This line's block already ran (the trigger came before).
+            assert_eq!(emu.mem.vram[0], block(0)[0]);
+            let mut r = emu.hw.cpu.registers();
+            r.pc = 0x7000;
+            emu.hw.cpu.set_registers(r);
+            emu.hw.sys.ie = 0x04;
+            step(emu); // HALT
+            assert!(emu.hw.cpu.halted());
+            assert_eq!(emu.hw.sys.ppu.mode0_start(), Some(m0));
+            assert_eq!(emu.peek(0xFF41) & 3, 0, "scx {scx}");
+            // The trigger fell into the HALT: not this line's block, but
+            // the wake-up's (gambatte `dma/hdma_late_m3halt_m0unhalt_*`).
+            assert!(wake_in_next_mode_0(emu), "scx {scx}");
+            tested = true;
+        }
+        assert!(tested);
     }
 
     #[test]

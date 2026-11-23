@@ -1519,6 +1519,9 @@ mod tests {
         fn halt_end(&mut self) {
             self.0.halt_end();
         }
+        fn wake_stalls(&mut self) -> bool {
+            self.0.wake_stalls()
+        }
         fn run_done(&self) -> bool {
             self.0.run_done()
         }

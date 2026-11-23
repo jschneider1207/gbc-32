@@ -1314,7 +1314,7 @@ impl Ctx<'_, '_> {
         let powered = self.mem.apu.powered();
         self.sys.set_div_apu_deadline(powered, now);
         if !pending && self.sys.vdma.hblank {
-            self.vdma_halt(true);
+            self.vdma_halt();
         }
         if short != 0 {
             // The halt's odd clocks (`switch_end` below), idled first (the
@@ -1359,13 +1359,20 @@ impl Ctx<'_, '_> {
 
     /// As [`Bus::halt_end`], except that the end of the countdown (not an
     /// interrupt) starts no HDMA block: SameBoy clears `halted` in
-    /// `GB_advance_cycles` without the wake-up's `hdma_on`.
+    /// `GB_advance_cycles` without the wake-up's `hdma_on`. An interrupt
+    /// wake-up checks for its block here, at the wake-up M-cycle's start,
+    /// and the block runs after the next instruction (ADR 0017; the HALT
+    /// wake-up's timing, [`Bus::wake_stalls`], regressed speed-switch ROMs
+    /// here).
     #[inline]
     pub(crate) fn speed_switch_end(&mut self) {
-        if self.sys.vdma.halted && self.speed_switch_over() {
-            self.sys.vdma.halted = false;
+        if self.speed_switch_over() {
+            self.sys.vdma.wake_ok = false;
         }
         self.halt_end();
+        if self.sys.vdma.wake_ok {
+            self.vdma_wake();
+        }
     }
 
     /// The halted skip ([`Bus::idle_halted`]), stopping at the halt's
@@ -1487,17 +1494,31 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// HALT begins (`halt`) or ends during an HBlank transfer. Waking up
-    /// in mode 0 from a HALT that began outside it starts a block
-    /// (SameBoy `allow_hdma_on_wake`).
+    /// HALT begins during an HBlank transfer: HBlanks start no blocks
+    /// until the wake-up, and the wake-up may start one (`wake_ok`) if the
+    /// HALT began outside the HBlank (SameBoy `allow_hdma_on_wake`: STAT
+    /// mode at the HALT). The HBlank here starts at this line's HDMA
+    /// trigger ([`hdma::HBLANK_DELAY`] after the mode-0 STAT change), not
+    /// at the STAT change: a HALT between the two counts as before it
+    /// (gambatte `dma/hdma_late_m3halt_m0unhalt_scx{1_3,2_2}`, CGB C
+    /// captures; `hdma_late_m0halt_*` bound the other side).
     #[cold]
-    fn vdma_halt(&mut self, halt: bool) {
-        let mode0 = self.stat_mode0();
+    fn vdma_halt(&mut self) {
+        let now = self.clock();
+        let in_hblank = self.stat_mode0()
+            && (self.sys.ppu.mode0_start())
+                .is_none_or(|s| now < s || now >= s + hdma::HBLANK_DELAY);
         let v = &mut self.sys.vdma;
-        v.halted = halt;
-        if halt {
-            v.wake_ok = !mode0;
-        } else if v.hblank && v.wake_ok && mode0 {
+        v.halted = true;
+        v.wake_ok = !in_hblank;
+    }
+
+    /// The wake-up from a HALT that began outside the HBlank: in mode 0 it
+    /// starts a block (SameBoy `GB_cpu_run`, `allow_hdma_on_wake`).
+    #[cold]
+    fn vdma_wake(&mut self) {
+        self.sys.vdma.wake_ok = false;
+        if self.sys.vdma.hblank && self.stat_mode0() {
             self.vdma_request();
         }
     }
@@ -1591,6 +1612,19 @@ impl Bus for Ctx<'_, '_> {
         self.done
     }
 
+    /// The wake-up's HDMA block: SameBoy `GB_cpu_run` checks STAT for it
+    /// after the wake-up M-cycle, and runs it after the next opcode fetch,
+    /// before that instruction (ADR 0017, amendment). gambatte
+    /// `dma/hdma_late_m0unhalt_{1,ds_1}`: a wake-up M-cycle that ends in
+    /// the next line's mode 2 starts none.
+    #[inline(always)]
+    fn wake_stalls(&mut self) -> bool {
+        if self.sys.vdma.wake_ok {
+            self.vdma_wake();
+        }
+        self.sys.vdma.pending
+    }
+
     /// SameBoy `stop()`: a button held on a selected P1 line ends STOP at
     /// once, with no DIV reset and no speed switch (Pan Docs: "Using the
     /// STOP instruction"). Otherwise STOP resets DIV (Pan Docs: FF04).
@@ -1641,7 +1675,7 @@ impl Bus for Ctx<'_, '_> {
             self.dma_pause();
         }
         if self.sys.vdma.hblank {
-            self.vdma_halt(true);
+            self.vdma_halt();
         }
     }
 
@@ -1649,9 +1683,11 @@ impl Bus for Ctx<'_, '_> {
         if self.sys.ppu.dma.paused != NEVER {
             self.dma_resume();
         }
-        if self.sys.vdma.halted {
-            self.vdma_halt(false);
-        }
+        // HBlanks start blocks again from the wake-up M-cycle on. SameBoy
+        // still has `halted` set in it; only the gambatte `lcdoffset1` pair
+        // tells the two apart, and which of its halves passes depends on
+        // the lcd_offset phase (M9 triage), so this keeps the old timing.
+        self.sys.vdma.halted = false;
     }
 }
 
