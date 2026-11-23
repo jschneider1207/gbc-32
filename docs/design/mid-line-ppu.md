@@ -401,3 +401,39 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   not the column carry; needs a separate diagnosis.
 - **Perf:** `synth:cgb-raster` +2.27% vs the committed baseline (same as
   step 1), `synth:worst-case` -0.32%.
+
+### Step 3 (per-plane SCY and LCDC.4, branch `ppu-midline-3`)
+
+- **Model.** `hold_fetch` also takes SCY writes and LCDC.4 changes; a
+  held part (`memory::Held { end, lcdc, scx, scy, planes }`) carries SCY
+  and LCDC.4 too. Tile j+1 caught between its map read and its DATA_HIGH
+  step keeps its map entry (old map select, SCX, SCY row) and `planes`
+  marks the bit planes still to read (`3` both, `2` the high one).
+  `render_held` draws the part as before, then `Renderer::mix_planes`
+  (cold) redraws that one tile: two `Fetch::row` reads (old and next
+  LCDC.4/SCY row) merged by plane (`0x5555` low, `0xAAAA` high), then
+  `fill_partial::<true>`. Window tiles mix LCDC.4 only (SCY not used).
+  Only SCY/LCDC.4 writes set `planes`, so SCX/map writes never redraw.
+  Approximations: a tile cut by the window start keeps its planes as of
+  the map read; two writes within one tile fetch compose only by part
+  ends (the later write's planes are not tracked).
+- **Calibration** (full-manifest sweeps vs main, all 0 regressions):
+  `FETCH_LOW`/`FETCH_HIGH` (dots after a tile's first output pixel at
+  which the next tile's planes are read) `= FETCH_SAMPLED + 2 / + 4`
+  (SameBoy's 2-dot steps): 30 flips; `+3/+5` gives 33 but loses 15 SCY
+  ROMs and gains the `bgtiledata` ones, so LCDC.4 lands one dot later than
+  SCY: `LCDC_TILES_LATE = 1` (SameBoy `GB_CONFLICT_LCDC_CGB` phases):
+  0 -> 30, 1 -> 45, 2 -> 39 flips.
+- **Result:** 45 fail->pass, 0 regressions: gambatte `scy_during_m3_{1..6}`
+  (`scy/` and `scy/scx3/`), `scy_during_m3_spx0{8,9,A,B}_{1..4}`,
+  `bgtiledata_spx*` 16 (incl. `spx09_ds_{1..4}`), Mealybug
+  `m3_scy_change2`. Still failing: `scy_during_m3_*ds*` (step D landing),
+  Mealybug `m3_scy_change` (10,703 -> ~560 px), `m3_lcdc_tile_sel_change`
+  and `_win_change` (CGB TILE_SEL glitch / window, steps E/G).
+  `diff-fingerprint.sh main`: only ROMs that write SCY or LCDC.4 in mode 3
+  differ (AGE `m3-bg-lcdc*`, Mealybug `m3_scy_change*`, `m3_lcdc_tile_sel*`).
+- **Cost.** `.text` 95,010 -> 95,636 B (+626; `mix_planes`, `render_held`,
+  `hold_fetch`, all cold). `Ppu::draw` 146 B unchanged. `synth:cgb-raster`
+  (one SCX write per line) +2.63% vs the committed baseline (main +2.27%,
+  ~+65 Ir per write: the wider `Held` copies and `regs_of`);
+  `synth:worst-case` -0.32% (same as main).
