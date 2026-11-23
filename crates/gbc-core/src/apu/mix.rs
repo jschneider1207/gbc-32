@@ -68,10 +68,13 @@ pub(crate) fn weights(nr50: u8, nr51: u8) -> [[i32; 4]; 2] {
     [side(nr51 >> 4, nr50 >> 4), side(nr51, nr50)]
 }
 
-/// The mixed sums of one span from the channel integrals.
+/// The mixed sums of one span from the channel integrals. An explicit sum:
+/// `w.map(..)` left out-of-line `try_map`/`Drain` copies (136 B, code size).
 #[inline]
 pub(crate) fn mix(levels: [i32; 4], w: &[[i32; 4]; 2]) -> [i32; 2] {
-    w.map(|side| (0..4).map(|ch| levels[ch] * side[ch]).sum())
+    let [a, b, c, d] = levels;
+    let side = |s: &[i32; 4]| a * s[0] + b * s[1] + c * s[2] + d * s[3];
+    [side(&w[0]), side(&w[1])]
 }
 
 /// A completed window's sum as a sample: the average level times 64, so
