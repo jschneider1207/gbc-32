@@ -172,6 +172,10 @@ impl ApplicationHandler for App<'_, '_> {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if crate::shutdown::requested() {
+            el.exit();
+            return;
+        }
         self.poll_pads();
         self.pacing.begin(Instant::now());
         let mut ran = 0;
@@ -219,7 +223,9 @@ pub fn run(
         pads: pads_init(),
         pacing: Pacing::open(Instant::now()),
         blank: false,
-        frames_left: frames,
+        // +1: the first call ends early at the first frame boundary (see
+        // `headless::run`), so `frames` complete frames follow it.
+        frames_left: frames.map(|f| f + 1),
         error: None,
     };
     el.run_app(&mut app)

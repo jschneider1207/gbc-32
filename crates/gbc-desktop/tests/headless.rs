@@ -200,3 +200,67 @@ fn screenshot_writes_a_160x144_png() {
     assert_eq!(&png[png.len() - 12..], b"\0\0\0\0IEND\xAE\x42\x60\x82");
     assert!(png.len() > 144 * (160 * 3 + 1), "raw pixel data present");
 }
+
+/// Live RTC seconds of the save a `--frames N` run leaves (RTC cart, no
+/// prior save, so the clock starts at zero).
+fn rtc_seconds_after(name: &str, frames: &str) -> u32 {
+    let dir = Dir::new(name);
+    let rom_path = dir.path("t.gbc");
+    fs::write(&rom_path, rom(0x10, IDLE)).unwrap();
+    assert!(headless(&rom_path, frames).status.success());
+    let sav = fs::read(dir.path("t.sav")).unwrap();
+    le32(&sav[0x2000..])
+}
+
+#[test]
+fn frames_means_complete_frames() {
+    // 70,224 clocks per frame, 4,194,304 per second, and an unnamed first
+    // run of about 70,000 clocks to the first frame boundary: 58 frames
+    // end under one second, 59 over. If that first run counted as a frame,
+    // 59 would fall short.
+    assert_eq!(rtc_seconds_after("f58", "58"), 0);
+    assert_eq!(rtc_seconds_after("f59", "59"), 1);
+    assert_eq!(rtc_seconds_after("f120", "120"), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_still_writes_the_exit_save() {
+    let dir = Dir::new("sigterm");
+    let rom_path = dir.path("g.gbc");
+    fs::write(&rom_path, rom(0x10, IDLE)).unwrap();
+    // A save from an hour ago. The idle game never dirties it, so only the
+    // exit save can refresh its time stamp.
+    let mut sav = vec![0u8; 0x2000 + FOOTER];
+    let old = now() - 3600;
+    sav[0x2000 + 40..].copy_from_slice(&old.to_le_bytes());
+    fs::write(dir.path("g.sav"), &sav).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gbc-desktop"))
+        .args(["--headless", "--frames", "1000000000"])
+        .arg(&rom_path)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // Bounded wait: a run that ignores the signal must fail, not hang.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let exit = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("still running 10 s after SIGTERM");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(exit.code(), Some(0), "clean exit, not killed: {exit:?}");
+    let back = fs::read(dir.path("g.sav")).unwrap();
+    let stamp = u64::from_le_bytes(back[0x2000 + 40..].try_into().unwrap());
+    assert!(stamp > old + 3000, "exit save rewrote the time stamp");
+}

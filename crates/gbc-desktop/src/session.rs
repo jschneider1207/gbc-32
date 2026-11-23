@@ -96,14 +96,20 @@ pub fn run<R>(
         tracker: SettleTracker::new(u64::from(CLOCK_HZ), u64::from(CLOCK_HZ) * MAX_OWED_SECS),
         now: opts.now,
     };
-    let result = body(&mut emu, &mut autosave);
+    // A panic in the loop still gets the exit save, then keeps unwinding.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        body(&mut emu, &mut autosave)
+    }));
 
     let ejected = emu.eject().expect("a cartridge is loaded");
     if let Some(file) = &autosave.file {
         file.store(ejected.save_ram(), ejected.rtc, (opts.now)())
             .map_err(|e| format!("can't write {}: {e}", file.path.display()))?;
     }
-    Ok(result)
+    match result {
+        Ok(r) => Ok(r),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +157,32 @@ mod tests {
         .unwrap();
         assert!(!early, "still settling after half a second");
         assert_eq!(late.map(|s| s[0]), Some(0x42), "written during play");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_panic_in_the_loop_still_writes_the_exit_save() {
+        let dir = std::env::temp_dir().join(format!("gbc-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom_path = dir.join("p.gb");
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x147] = 0x03; // MBC1+RAM+BATTERY
+        rom[0x149] = 0x02;
+        rom[0x14D] = rom[0x134..=0x14C]
+            .iter()
+            .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
+        std::fs::write(&rom_path, &rom).unwrap();
+        let opts = Options {
+            rom_path: &rom_path,
+            now: || 1,
+            sync_rtc_on_load: false,
+            dmg_palette: compat_palette::Mode::Auto,
+        };
+        let r = std::panic::catch_unwind(|| {
+            let _ = run(&opts, |_, _| panic!("boom"));
+        });
+        assert!(r.is_err(), "the panic keeps unwinding");
+        assert!(dir.join("p.sav").exists(), "exit save written");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

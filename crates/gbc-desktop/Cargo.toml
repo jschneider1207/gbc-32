@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 cpal = "0.18.2"
+ctrlc = { version = "3.5.3", features = ["termination"] }
 gbc-core = { path = "../gbc-core" }
 gilrs = "0.11.2"
 ringbuf = "0.6.0"

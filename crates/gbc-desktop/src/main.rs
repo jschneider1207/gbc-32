@@ -14,6 +14,7 @@ mod pacing;
 mod png;
 mod save;
 mod session;
+mod shutdown;
 mod video;
 mod window;
 
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    shutdown::install();
     let opts = Options {
         rom_path: &args.rom,
         now: session::unix_now,

@@ -10,7 +10,8 @@ use crate::session::{self, Options};
 /// Samples per frame at 32,768 Hz is 546.1: 550 always fits one frame.
 const AUDIO_SLOTS: usize = 550;
 
-/// Runs `frames` frames, discarding video and audio. Returns whether the
+/// Runs `frames` complete frames (after one unnamed run to the first frame
+/// boundary), discarding video and audio. Returns whether the
 /// CPU locked up (the run still completes: a locked CPU is a ROM
 /// behavior, not a front-end failure; a warning is printed once).
 pub fn run(opts: &Options<'_>, frames: u64, screenshot: Option<&Path>) -> Result<bool, String> {
@@ -18,7 +19,13 @@ pub fn run(opts: &Options<'_>, frames: u64, screenshot: Option<&Path>) -> Result
         let mut frame: Box<Frame> = Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]);
         let mut audio = [StereoSample::default(); AUDIO_SLOTS];
         let mut locked = false;
-        for n in 0..frames {
+        // The core starts mid-frame (post-boot), so the first call ends early at
+        // the first FRAME_READY. It is not counted: `frames` complete frames
+        // follow it, each `FRAME_CLOCKS` long.
+        for n in 0..=frames {
+            if crate::shutdown::requested() {
+                break;
+            }
             let r = emu.run_frame(&mut frame, &mut audio);
             if r.events.contains(Events::CPU_LOCKED) && !locked {
                 locked = true;
