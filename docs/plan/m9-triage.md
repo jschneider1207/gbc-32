@@ -124,6 +124,14 @@ Mealybug `m3_lcdc_win_*`, `m3_wx_4_change_sprites`).
 pixel 159 delay the STAT mode-0 change but not the HBlank interrupt
 (gambatte xpos 166 vs 168; section 7 "HBlank interrupt vs stalls at pixel
 159"). The other leftovers above are unchanged by it.
+**Status (`m9-late-wy`):** 5 single-speed `arg/late_wy*` fixed (a WY
+write from dot 455 no longer matches the current LY; `WY_LEAD` measured
+after the SCX discard; a write before the pipeline starts is decided at
+`latch`; section 7 "Late WY writes"). Left in the WY cluster: 5 double
+speed (`late_wy_ds_2`, `arg/late_wy_1toFF_ds_2`,
+`arg/late_wy_FFto{0,2}_ly2_ds_1`, `arg/late_wy_FFto2_ly2_scx5_ds_1`):
+their LYC=153 sync looks 3 dots late in double speed (lcd-offset step 5),
+not a WY rule. Group 4 now has 16 left.
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-

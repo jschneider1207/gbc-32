@@ -169,6 +169,12 @@ pub(crate) const PALETTE_EXTRA_DS: u32 = 2;
 /// 0, other lines (see the use in `wy_write`).
 pub(crate) const WY_CHECK_AT: [u32; 2] = [t(h(7)), t(h(3))];
 
+/// Line dot from which a WY write no longer matches the current LY (see
+/// `Ppu::wy_written`): gambatte (ppu.cpp, behaviour only) checks WY == LY
+/// at line cycle 450 and WY == LY + 1 at 454; with the latter as
+/// [`WY_CHECK_AT`]\[1\] (next line's 3), the former is 455.
+pub(crate) const WY_LAST_AT: u32 = t(h(455));
+
 /// A LYC write is deferred to the PPU's next update before this dot
 /// (lines 0-152, while LY changes): single speed at the write's view (one
 /// dot after the access), double speed at the access. Double speed:

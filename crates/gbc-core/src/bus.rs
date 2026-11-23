@@ -918,11 +918,9 @@ impl Ctx<'_, '_> {
                         s.cgb_mode,
                         &mut self.mem.bg_pairs,
                     ),
-                    // The window start in mode 3 (`Ppu::window_write`).
-                    0x4A => {
-                        s.ppu.check_wy_at(now, self.mem);
-                        s.ppu.window_write(at, self.mem, true);
-                    }
+                    // The WY condition and the window start in mode 3
+                    // (`Ppu::wy_written`; WY lands at the access).
+                    0x4A => s.ppu.wy_written(now, self.mem),
                     0x4B => s.ppu.window_write(at, self.mem, false),
                     _ => {}
                 }

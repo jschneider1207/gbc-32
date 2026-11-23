@@ -669,6 +669,51 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   regressions; `diff-fingerprint.sh main` identical (no ROM in the
   corpus hits it observably). `.text` +94 B (96,098).
 
+### Late WY writes (branch `m9-late-wy`)
+
+- **Rule 1, the line's last WY check.** gambatte (ppu.cpp `M2_LyNon0`,
+  behaviour only) sets its sticky WY match only at line cycle 450
+  (WY == LY) and 454 (WY == LY + 1); the latter is our `WY_CHECK_AT`
+  (next line's 3), so the former is 455 (`edges::WY_LAST_AT`). A WY write
+  from there no longer matches the current LY (we checked it at once):
+  `window/arg/late_wy_FFto{0,1}_ly2_2`, `late_wy_10to0_ly1_2` write at
+  455 (no window next line), their `_1` at 451. `Ppu::wy_written` (cold)
+  now holds the FF4A path: the check, then `window_write`.
+- **Rule 2, `WY_LEAD` after the discard.** E1 measured the WY lead on the
+  line clock (`WY_LEAD + fine`); `late_wy_FFto2_ly2_scx5_1` (write at 95,
+  window on) vs `scx{2,3}` (off at 95) shows the deadline moves with
+  SCX & 7. `WY_LEAD` = 5 against the window's stall clock fits every
+  single-speed `late_wy_FFto2_ly2_*` and `late_scx_late_wy_*` row, and
+  no other value does (4 -> 1 regression, 6 -> 4).
+- **Rule 3, a write before the pipeline starts.** A WY write at
+  84..88 (mode 3, line not latched) just set the match, so `latch` always
+  started the window. With WX < 7 the stall is at x = WX - 7, inside
+  `WY_LEAD`: `late_wy_FFto2_ly2_wx00_2` (87, off). The write's position is
+  kept in `LineTiming::wy_late` (a padding byte; LCD off/on clears it)
+  and `latch` hands it to `window_write` once the stalls exist.
+- **Calibration** (full manifest): `WY_LAST_AT` 452-455 -> 5 flips / 0,
+  451 -> 3 regressions, 456 (never) -> 2 flips. Kept 455 (gambatte's 4-dot
+  gap).
+- **Result.** 5 fail->pass, 0 regressions; `diff-fingerprint.sh main`:
+  exactly those 5. Test `wy_write_starts_the_window_until_its_check`,
+  mutation-checked (`WY_LAST_AT` 456, no `latch` hand-off, `+ fine` back,
+  lead 4, lead 6). Cost: `.text` 96,098 -> 96,306 B; ITCM set 55,104 ->
+  55,072; bench vs main `cgb-acid2` +0.05% (+2.44% of the 3% guard),
+  `synth:worst-case` +0.01% (the byte test in `latch`).
+- **Left: double speed (5).** `late_wy_ds_2`, `late_wy_1toFF_ds_2`,
+  `late_wy_FFto{0,2}_ly2_ds_1`, `late_wy_FFto2_ly2_scx5_ds_1`. Not a WY
+  rule: they need STAT mode 3 at t = 263 on a window line, where
+  `m2int_wx07_m3stat_ds_2` (same CPU phase, mode-2 IRQ sync) needs mode
+  0; and their keep-the-old-match thresholds (line 0: 10-11, line 1:
+  6-7) contradict their `ds_lcdoffset1` siblings (7-8, 3-4), which fit
+  single speed (7, 3). Moving every position of these LYC=153-synced
+  ROMs 3 dots earlier makes all five fit the single-speed rules, with a
+  double-speed WY lead of 2 (gambatte delays its `wy2` 6 dots in single
+  speed, 2.5 in double). So the default-phase double-speed LYC=153
+  dispatch is likely late (`lyc153int_m2irq_*_ds_1` fail too): first
+  `docs/design/lcd-offset-phase.md` step 5 (line-153 edges), then a
+  per-speed `WY_LEAD`.
+
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
 - **Rule 1, objects left of tile 0.** SameBoy (display.c,
