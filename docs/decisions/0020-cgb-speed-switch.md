@@ -167,3 +167,29 @@ reset when STOP is two bytes, i.e. IE & IF = 0): if the timer runs at
 model of the ADR 0011 differential test mirrors it. CGB E (glitch on all
 but 262 kHz) is not modelled. Gains `spsw-tima-cgbBC` and 14 Gambatte
 `speedchange*_tima0[123]*` ROMs, no regressions (full stage1 manifest).
+
+## Amendment (2026-11-23): the held DIV reset with an interrupt pending (CGB B/C)
+
+With an interrupt pending at a speed-switch STOP (one byte, no halt) and
+IME on, the timer now starts 4 T-cycles (one M-cycle at the new speed)
+late, the same hold as with IME off: `Ctx::speed_switch` freezes for
+`!ime || pending`, was `!ime`. In both directions the first counted
+M-cycle after the DIV reset is now the dispatch's first M-cycle.
+
+Source: AGE `spsw-interrupts` (`src/speed-switch/caution/`, verified on
+CPU CGB B and C, `OFS_B = 1`; the `cgbE` build, verified on CGB E, uses
+`OFS_B = 0`). Its "immediate interrupt" rows (`ld [rIF],a; ld [rIE],a;
+...; ei; stop`) read DIV and the 16 kHz TIMA a fixed delay after the
+dispatch; the edges sit one M-cycle later on CGB B/C than on CGB E, at
+either speed. Before this change the core produced exactly the CGB E
+values (SameBoy's model; SameBoy's default model is CGB E and its
+`enter_stop_mode` holds the reset only with IME off, marked "I don't
+trust this if"). The test's other rows (a timer interrupt ending the
+post-switch halt early, IME on, nothing pending at the STOP) already
+passed: the halt is interruptible as decided above. Pan Docs' STOP chart
+calls the pending + IME-off case a non-deterministic CPU glitch, so the
+existing IME-off hold there is unchanged and not stacked with this one.
+
+The timer differential test's reference mirrors the hold (one more
+M-cycle that doesn't tick, an idle as the dispatch's on hardware). Gains
+`spsw-interrupts-cgbBC`; no other flips (full stage1 manifest).

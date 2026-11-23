@@ -68,7 +68,8 @@ mod tests {
 
         /// STOP: DIV reset, then (if `switch`) the speed switch with an
         /// interrupt pending and IME on: to double speed, one M-cycle that
-        /// doesn't tick the timer (`Ctx::speed_switch`).
+        /// doesn't tick the timer, then (CGB B/C) the held DIV reset, one
+        /// more at the new speed (`Ctx::speed_switch`).
         fn stop(&mut self, switch: bool) {
             // IE = 0 in this harness: STOP is two bytes.
             self.timer.stop_edge();
@@ -79,6 +80,7 @@ mod tests {
                 if self.mcycle == 2 {
                     self.clock += self.mcycle;
                 }
+                self.clock += self.mcycle;
             }
         }
 
@@ -243,9 +245,14 @@ mod tests {
             self.ctx.sys.key1 = u8::from(switch);
             let kind = crate::cpu::Bus::stop_begin(&mut self.ctx);
             assert_eq!(kind == crate::cpu::StopKind::Switch, switch);
-            // With an interrupt pending (no halt) and IME on (no held DIV
-            // reset): the only switch this harness can mirror per M-cycle.
-            if switch && crate::cpu::Bus::speed_switch(&mut self.ctx, true, true) {
+            // With an interrupt pending (no halt) and IME on: the only
+            // switch this harness can mirror per M-cycle. The held DIV
+            // reset's M-cycle is an idle, as the dispatch's first M-cycle
+            // that follows on hardware.
+            if switch {
+                if crate::cpu::Bus::speed_switch(&mut self.ctx, true, true) {
+                    crate::cpu::Bus::idle(&mut self.ctx);
+                }
                 crate::cpu::Bus::idle(&mut self.ctx);
             }
             self.eager.stop(switch);

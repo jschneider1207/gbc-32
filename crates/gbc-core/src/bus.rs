@@ -1333,7 +1333,9 @@ impl Ctx<'_, '_> {
     ///   M-cycles take 6 clocks for the PPU (one more M-cycle here, which
     ///   the timer doesn't count).
     /// - IME off: the timer starts 4 T-cycles late (`enter_stop_mode`:
-    ///   `div_cycles = -4`, the DIV reset held).
+    ///   `div_cycles = -4`, the DIV reset held). On CGB B/C the same hold
+    ///   applies with an interrupt pending and IME on (below; SameBoy,
+    ///   modelling CGB E, has none there).
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
         self.sys.key1 = 0;
         let m = 6 - self.hot.mcycle as u64;
@@ -1346,7 +1348,13 @@ impl Ctx<'_, '_> {
         }
         self.hot.mcycle = m as i32;
         let now = self.clock();
-        let mut freeze = if ime { 0 } else { 4 };
+        // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
+        // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`
+        // (pending, IME on, both directions): the first DIV increment and
+        // the 16 kHz TIMA increment after the switch come one M-cycle
+        // later on CGB B/C (`OFS_B`, verified on CPU CGB B and C) than on
+        // CGB E, which SameBoy's model (no hold with IME on) matches.
+        let mut freeze = if ime && !pending { 0 } else { 4 };
         if pending && m == 2 {
             freeze += 4;
         }

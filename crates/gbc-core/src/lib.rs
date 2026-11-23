@@ -1795,6 +1795,35 @@ mod tests {
     }
 
     #[test]
+    fn speed_switch_with_an_interrupt_pending_holds_the_div_reset_on_cgb_bc() {
+        // IE = IF = VBlank, then EI; STOP (IME on at the STOP, the case Pan
+        // Docs' STOP chart calls deterministic). The dispatch goes to 0040,
+        // LD B,B; from there IF is set again and the switch back runs the
+        // same way: 0041: LDH (0F),A; LDH (4D),A; EI; STOP.
+        let program = [0x3E, 0x01, 0xE0, 0xFF, 0xE0, 0x0F, 0xE0, 0x4D, 0xFB, 0x10];
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x100..0x100 + program.len()].copy_from_slice(&program);
+        rom[0x40..0x48].copy_from_slice(&[0x40, 0xE0, 0x0F, 0xE0, 0x4D, 0xFB, 0x10, 0x00]);
+        rom[0x143] = 0x80;
+        let emu = fresh();
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        // CGB B/C hold the DIV reset one M-cycle at the new speed even with
+        // IME on (AGE `spsw-interrupts-cgbBC`: the first DIV and 16 kHz
+        // TIMA increments after the switch come one M-cycle later than on
+        // CGB E and in SameBoy). To double speed: STOP's fetch ends at 52
+        // (DIV reset), the idle M-cycle (not counted), the dispatch (its
+        // first M-cycle not counted: the hold), LD B,B. The timer counts
+        // the dispatch's other 4 M-cycles and LD B,B: 20 T-cycles.
+        assert_eq!(to_ld_b_b(emu), (52 + 2 + 10 + 2, 0x41, 0x14));
+        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        // Back to normal speed: the STOP fetch ends 16 clocks later, then
+        // the dispatch and LD B,B, of which the timer again counts all but
+        // the dispatch's first M-cycle.
+        assert_eq!(to_ld_b_b(emu), (66 + 16 + 20 + 4, 0x41, 0x14));
+        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+    }
+
+    #[test]
     fn speed_switch_halt_ends_early_on_an_interrupt() {
         // TAC = 05 (TIMA every 16 T-cycles), IE = timer, IME off; then
         // the switch to double speed. TIMA overflows 256 increments after
