@@ -97,9 +97,10 @@ The trigger (`GB_apu_write`, NRx4 bit 7) loads
 
 `lf_div` is SameBoy's 1 MHz phase: 1 at power on (`GB_apu_init`), toggling
 every tick. The core derives it as `((now >> 1) ^ phase ^ 1) & 1`, with
-`phase = (power-on clock >> 1) & 1` (`Apu::lf_div`). The core uses this
-table in **double speed** only; SameBoy's extra delay when retriggering an
-active channel is deferred (ADR 0021 section 12, gambatte
+`phase = (power-on clock >> 1) & 1` (`Apu::lf_div`). The core uses neither
+row as is: single speed uses the 1 MHz grid rule and double speed
+gambatte's linear rule (both below). SameBoy's extra delay when
+retriggering an active channel is deferred (ADR 0021 section 12, gambatte
 `ch*_duty*_pos*`).
 
 **Single speed: the first step lands on the APU's 1 MHz grid.** The core
@@ -126,23 +127,25 @@ single-speed trigger after a switch to single speed (odd CPU grid), which
 no ROM here tests: it keeps the step on the same grid (gambatte's
 `DutyUnit::nr4Change` likewise snaps the first step to its counter's
 parity). This is gambatte's linear rule in shape (`+ 6 + 2 * lf_div`,
-below) with the grid phase fitted to the ROMs; the double-speed half of it
-is the revision conflict below and is not applied.
+below) with the grid phase fitted to the ROMs.
 
-**Double speed: a revision conflict.** In double speed `lf_div` alternates
-per M-cycle, and the sign of the `lf_div` term differs by revision (SameBoy
-`GB_apu_write`: `6 + lf_div` for an off channel on CGB C and older in
-double speed, `6 - lf_div` otherwise). The core keeps `- lf_div`, which
-SameSuite's `channel_{1,2}_align{,_cpu}` need; SameSuite's APU README says
-real CPU-CGB-C fails its channel 1/2/4 tests (CGB-E results). Gambatte's
-cgb04c ROMs `ch1_duty0_pos6_to_pos7_timing_ds_6` and the five
-`speedchange*_ch1_duty0_pos6_to_pos7_timing*ds_2` need the CGB-C sign;
-measured in this core, gambatte's own linear rule (`DutyUnit::nr4Change`:
-first step `(2048 - f) * 2 + 3 + lf_div` ticks after an off-channel
-trigger, 2 fewer for an on channel, both speeds; in base clocks `+ 6 + 2 *
-lf_div` and `+ 2 + 2 * lf_div`) flips those 6 and regresses the 4
-SameSuite ROMs. Which revision's ROMs win is the human's call (m9-triage
-group 7).
+**Double speed: gambatte's CGB-C linear rule.** In double speed `lf_div`
+alternates per M-cycle, and the sign of the `lf_div` term differs by
+revision (SameBoy `GB_apu_write`: `6 + lf_div` for an off channel on CGB C
+and older in double speed, `6 - lf_div` otherwise). The core follows
+gambatte's linear rule (`DutyUnit::nr4Change`, behaviour only: first step
+`(2048 - f) * 2 + 3 + lf_div` ticks after an off-channel trigger, 2 fewer
+for an on channel): in base clocks one period plus `6 + 2 * lf_div` (off)
+or `2 + 2 * lf_div` (on) (`Apu::trigger_delay`). Source: gambatte's cgb04c
+`ch1_duty0_pos6_to_pos7_timing_ds_6` and the five
+`speedchange*_ch1_duty0_pos6_to_pos7_timing*ds_2`, which it passes.
+SameSuite's `channel_{1,2}_align{,_cpu}` expect SameBoy's CGB-E sign and
+fail; its APU README says real CPU-CGB-C fails most of its channel 1/2
+tests. The human signed those 4 off as CGB-E results (2026-11-23, ADR
+0003: CPU CGB C); the manifest runs them in the stretch group
+`same-suite-apu-cgbE`. Applying the single-speed grid rule in double speed
+instead was measured and rejected: it also costs SameSuite
+`channel_{1,2}_duty` and four gambatte `speedchange*_ds_1`.
 
 **The output bit is latched at each duty step.** `Square::high` holds the
 duty bit sampled when the position last moved; an NRx1 duty change shows
@@ -305,10 +308,10 @@ gambatte `sound/` and SameSuite APU ROMs:
 - SameBoy's envelope lock/clock model, the secondary DIV event and the
   CGB-C `_nrx2_glitch` (the classic model plus zombie mode is used).
 - The square trigger delay fit: the extra delay when retriggering an
-  active channel (gambatte `ch*_duty*_pos*`), and the CGB-C double-speed
-  sign (above: a revision conflict with SameSuite). A double-speed trigger
+  active channel (gambatte `ch*_duty*_pos*`). A double-speed trigger
   after a switch with the APU already on (`speedchange_ch1_nr4init_*_2`)
-  needs the same grid rule as single speed; it is part of that conflict.
+  still fails with the linear rule; the grid rule in double speed flips it
+  but costs the ROMs named above.
   The single-speed grid phase across switches is fitted, not derived: the
   APU is not ticked differently over the switch (the CPU's position
   against the APU and PPU is ADR 0020's).
