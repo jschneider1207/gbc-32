@@ -10,6 +10,7 @@ pub const NAMES: &[&str] = &[
     "halt-irq",
     "worst-case",
     "cgb-raster",
+    "apu-writes",
 ];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
@@ -90,7 +91,10 @@ const HALT_IRQ: &[u8] = &[
 /// also keeps a CGB HBlank HDMA going: 128 blocks from ROM 0000 to VRAM
 /// 8800 (tiles 128-255, which nothing displays), restarted as soon as one
 /// ends, so every visible line copies a 16-byte block. All four sound
-/// channels play before this ([`worst_case`]).
+/// channels play before this, and the STAT handler (one IRQ per line,
+/// about 146 a frame) toggles NR50's right volume, like a game playing PCM
+/// through the master volume: every APU write syncs the APU, so its fixed
+/// cost per sync counts ([`worst_case`], [`STAT_HANDLER_NR50`]).
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
@@ -244,7 +248,8 @@ const APU_CHANNELS: [&[u8]; 4] = [
 /// playing: [`APU_ON`] and their [`APU_CHANNELS`] setup (none at all for
 /// mask 0), then [`WORST_CASE`] (its jumps are relative).
 /// `synth:worst-case` is mask F; `synth:worst-case@<hex digit>` builds the
-/// others, to measure the APU's cost per channel (docs/perf.md).
+/// others, to measure the APU's cost per channel (docs/perf.md). Mask 0
+/// also keeps the plain STAT handler (no APU writes: no APU at all).
 fn worst_case(mask: u8) -> Vec<u8> {
     let mut code = Vec::new();
     if mask != 0 {
@@ -339,6 +344,53 @@ fn cgb_raster() -> Vec<u8> {
 /// POP HL; POP AF; RETI.
 const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0xD9];
 
+/// The worst-case STAT handler with the channels on (15 bytes, over the
+/// unused timer vector): [`STAT_HANDLER`] plus LDH A,(NR50); XOR 07;
+/// LDH (NR50),A before the pops.
+const STAT_HANDLER_NR50: &[u8] = &[
+    0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xF0, 0x24, 0xEE, 0x07, 0xE0, 0x24, 0xE1, 0xF1, 0xD9,
+];
+
+/// `synth:apu-writes`: 8 kHz PCM through NR50 (M6 review: the per-sync
+/// fixed cost). All four channels as in `synth:worst-case` ([`APU_ON`],
+/// [`APU_CHANNELS`]), single speed, then TIMA at 262 kHz from TMA=E0
+/// overflows every 512 base clocks (8,192 Hz, 137.2 a frame) and the
+/// timer handler ([`PCM_HANDLER`]) toggles NR50's right volume; the CPU
+/// HALTs in between. `synth:apu-writes@hram` toggles HRAM FF80 instead
+/// (the same program without APU writes): Ir per APU write is the
+/// difference over the writes (docs/perf.md, APU cost).
+const PCM_IDLE: &[u8] = &[
+    0x3E, 0xE0, //       LD A,E0
+    0xE0, 0x06, //       LDH (TMA),A
+    0x3E, 0x05, //       LD A,05
+    0xE0, 0x07, //       LDH (TAC),A     on, 262 kHz
+    0x3E, 0x04, //       LD A,04
+    0xE0, 0xFF, //       LDH (IE),A      timer only
+    0xAF, //             XOR A
+    0xE0, 0x0F, //       LDH (IF),A
+    0xFB, //             EI
+    // idle:
+    0x76, //             HALT
+    0x00, //             NOP
+    0x18, 0xFC, //       JR idle
+];
+
+/// The `synth:apu-writes` timer handler at 0x50, for HRAM address `reg`:
+/// LDH A,(reg); XOR 07; LDH (reg),A; RETI.
+const fn pcm_handler(reg: u8) -> [u8; 7] {
+    [0xF0, reg, 0xEE, 0x07, 0xE0, reg, 0xD9]
+}
+const PCM_HANDLER: [u8; 7] = pcm_handler(0x24);
+const PCM_HANDLER_HRAM: [u8; 7] = pcm_handler(0x80);
+
+/// The `synth:apu-writes` code: every channel on, then [`PCM_IDLE`].
+fn apu_writes() -> Vec<u8> {
+    let mut code = APU_ON.to_vec();
+    APU_CHANNELS.iter().for_each(|c| code.extend_from_slice(c));
+    code.extend_from_slice(PCM_IDLE);
+    code
+}
+
 /// The ROM image for `name`, or `None` if there is no such ROM.
 pub fn build(name: &str) -> Option<Vec<u8>> {
     let raster = cgb_raster();
@@ -349,11 +401,19 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
         None => (name == "worst-case").then_some(0xF),
     };
     let worst = mask.map(worst_case).unwrap_or_default();
+    let stat = if mask == Some(0) {
+        STAT_HANDLER
+    } else {
+        STAT_HANDLER_NR50
+    };
+    let pcm = apu_writes();
     let (code, stat_vector, timer_vector): (&[u8], &[u8], &[u8]) = match name {
         "event-storm" => (EVENT_STORM, &[], &[]),
         "dma-storm" => (DMA_STORM, &[], &[]),
         "halt-irq" => (HALT_IRQ, &[], &[0xD9]), // RETI
-        _ if mask.is_some() => (&worst, STAT_HANDLER, &[]),
+        _ if mask.is_some() => (&worst, stat, &[]),
+        "apu-writes" => (&pcm, &[], &PCM_HANDLER),
+        "apu-writes@hram" => (&pcm, &[], &PCM_HANDLER_HRAM),
         "cgb-raster" => (&raster, &[], &[]),
         _ => return None,
     };
@@ -483,7 +543,8 @@ mod tests {
             u64::from(CLOCK_HZ) / 2,
             &[0xFF24, 0xFF25, 0xFF26],
         );
-        assert_eq!(r, [0x77, 0xFF, 0xFF]);
+        // NR50: the STAT handler toggles the right volume (7 or 0).
+        assert_eq!([r[0] | 7, r[1], r[2]], [0x77, 0xFF, 0xFF]);
         // Masks: one channel each, and none at all (the plain program).
         for ch in 0..4u8 {
             let r = run(&format!("worst-case@{:X}", 1 << ch), 70_224, &[0xFF26]);
@@ -499,6 +560,24 @@ mod tests {
             build("worst-case").unwrap()[0x150..]
         );
         assert!(build("worst-case@G").is_none() && build("worst-case@10").is_none());
+    }
+
+    #[test]
+    fn apu_writes_toggles_nr50_at_8_khz_with_every_channel_on() {
+        // Over one frame: TMA, TAC, IE, NR52 (all four on), NR51.
+        let addrs = [0xFF06, 0xFF07, 0xFFFF, 0xFF26, 0xFF25];
+        let r = run("apu-writes", 70_224, &addrs);
+        assert_eq!(r, [0xE0, 0xFD, 0x04, 0xFF, 0xFF]);
+        // The handler ran an odd and an even number of times 512 clocks
+        // apart: NR50 (or FF80) toggled between them.
+        let at = |name, c| run(name, c, &[0xFF24, 0xFF80]);
+        let (a, b) = (at("apu-writes", 70_224), at("apu-writes", 70_224 + 512));
+        assert_eq!(a[0] ^ b[0], 0x07);
+        let (a, b) = (
+            at("apu-writes@hram", 70_224),
+            at("apu-writes@hram", 70_224 + 512),
+        );
+        assert_eq!((a[0], a[1] ^ b[1]), (0x77, 0x07));
     }
 
     #[test]
