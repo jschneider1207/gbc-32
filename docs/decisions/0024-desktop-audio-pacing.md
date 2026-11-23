@@ -62,3 +62,19 @@ path. Headless runs open no device.
 - Under WSLg, the compositor (weston) segfaulted twice during early smoke
   runs with audio on; not reproduced since, and not seen with
   `GBC_NO_AUDIO=1` or with `paplay` alone. Cause unknown; worth watching.
+
+## Amendments
+
+**2026-11-22: audio recovers after a fallback.** Falling back to the wall
+clock is no longer permanent. When the device never opened, or a stream
+was lost or stalled, `Pacing::Clock` carries a `RetryPolicy` (`pacing.rs`,
+pure, unit-tested): the first attempt is 2 s after the loss, each failed
+attempt doubles the wait up to 16 s. `Pacing::begin` checks it with one
+comparison per wake-up and, when due, calls `AudioOut::open()` on the
+default device on the main thread (it can block for tens of ms on some
+backends, once per 2-16 s). On success it replaces the pacing with a fresh
+`AudioOut`: empty ring, new DC blocker, resampler phase and DRC state, so
+no stale samples play and the first frames refill the 50 ms target as at
+start-up. `GBC_NO_AUDIO=1` stays silent with no retries. Verified: the
+policy by unit tests; the open/switch path only by code reading and a
+native Windows smoke run (a device can't be unplugged by an agent).

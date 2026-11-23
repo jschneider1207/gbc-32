@@ -85,6 +85,39 @@ pub fn audio_wake_after(fill: usize, target: usize, rate: u32) -> Duration {
     drain.clamp(AUDIO_WAKE_MIN, AUDIO_WAKE_MAX)
 }
 
+/// When to retry opening the audio device after it was lost (ADR 0024
+/// amendment). Pure: the caller passes `now`. First retry `BASE` after the
+/// loss, each failed retry doubles the wait up to `MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    next: Instant,
+    wait: Duration,
+}
+
+impl RetryPolicy {
+    pub const BASE: Duration = Duration::from_secs(2);
+    pub const MAX: Duration = Duration::from_secs(16);
+
+    /// The device was lost (or never opened) at `now`.
+    pub fn new(now: Instant) -> Self {
+        RetryPolicy {
+            next: now + Self::BASE,
+            wait: Self::BASE,
+        }
+    }
+
+    /// Whether an attempt is due. Cheap: one comparison per wake-up.
+    pub fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    /// An attempt at `now` failed: back off.
+    pub fn failed(&mut self, now: Instant) {
+        self.wait = (self.wait * 2).min(Self::MAX);
+        self.next = now + self.wait;
+    }
+}
+
 /// How the window loop paces frames: by the audio buffer when a device is
 /// open (ADR 0024), else by the wall clock, silently. Each wake-up calls
 /// [`Pacing::begin`], runs frames while [`Pacing::should_run`] (feeding
@@ -92,7 +125,12 @@ pub fn audio_wake_after(fill: usize, target: usize, rate: u32) -> Duration {
 /// [`Pacing::next_wake`].
 pub enum Pacing {
     Audio(Box<AudioOut>),
-    Clock { pacer: Pacer, due: u32 },
+    /// `retry` is `Some` when audio was wanted and should be reopened.
+    Clock {
+        pacer: Pacer,
+        due: u32,
+        retry: Option<RetryPolicy>,
+    },
 }
 
 impl Pacing {
@@ -106,15 +144,26 @@ impl Pacing {
             Ok(a) => Pacing::Audio(Box::new(a)),
             Err(e) => {
                 eprintln!("warning: no audio ({e}); running silent on the wall clock");
-                Self::clock(now)
+                Self::clock_retrying(now)
             }
         }
     }
 
+    /// Silent and permanent (no retries).
     pub fn clock(now: Instant) -> Self {
         Pacing::Clock {
             pacer: Pacer::new(now),
             due: 0,
+            retry: None,
+        }
+    }
+
+    /// Silent until the default device opens again.
+    fn clock_retrying(now: Instant) -> Self {
+        Pacing::Clock {
+            pacer: Pacer::new(now),
+            due: 0,
+            retry: Some(RetryPolicy::new(now)),
         }
     }
 
@@ -131,9 +180,25 @@ impl Pacing {
             && let Some(e) = a.failure(now)
         {
             eprintln!("warning: audio stopped ({e}); running silent on the wall clock");
-            *self = Self::clock(now);
+            *self = Self::clock_retrying(now);
         }
-        if let Pacing::Clock { pacer, due } = self {
+        if let Pacing::Clock {
+            retry: Some(policy),
+            ..
+        } = self
+            && policy.due(now)
+        {
+            // A fresh AudioOut: empty ring, new resampler and DRC state,
+            // so nothing stale is played.
+            match AudioOut::open() {
+                Ok(a) => {
+                    eprintln!("audio: output device back; resuming audio pacing");
+                    *self = Pacing::Audio(Box::new(a));
+                }
+                Err(_) => policy.failed(now),
+            }
+        }
+        if let Pacing::Clock { pacer, due, .. } = self {
             *due = pacer.due(now);
         }
     }
@@ -210,6 +275,35 @@ mod tests {
         assert_eq!(p.next_deadline(), now + P);
         assert_eq!(p.due(now), 0, "no remaining debt");
         assert_eq!(p.due(now + P), 1);
+    }
+
+    #[test]
+    fn retry_waits_the_base_interval_before_the_first_attempt() {
+        let t0 = Instant::now();
+        let r = RetryPolicy::new(t0);
+        assert!(!r.due(t0));
+        assert!(!r.due(t0 + RetryPolicy::BASE - Duration::from_millis(1)));
+        assert!(r.due(t0 + RetryPolicy::BASE));
+    }
+
+    #[test]
+    fn retry_backs_off_and_caps() {
+        let mut now = Instant::now();
+        let mut r = RetryPolicy::new(now);
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            now += RetryPolicy::MAX * 2;
+            assert!(r.due(now));
+            r.failed(now);
+            assert!(!r.due(now), "never immediately after a failure");
+            let mut w = Duration::ZERO;
+            while !r.due(now + w) {
+                w += Duration::from_millis(500);
+            }
+            waits.push(w);
+        }
+        let s = Duration::from_secs;
+        assert_eq!(waits, [s(4), s(8), s(16), s(16), s(16), s(16)]);
     }
 
     #[test]
