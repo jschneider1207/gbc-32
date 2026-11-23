@@ -62,6 +62,15 @@ fn nibble(byte: u8, index: u8) -> u8 {
     }
 }
 
+/// The sum of the 8 nibbles of `w` (<= 120): nibbles into bytes (<= 30
+/// each), bytes by one multiplication.
+#[inline]
+fn nibble_sum(w: u32) -> u32 {
+    const LOW: u32 = 0x0F0F_0F0F;
+    let t = (w & LOW) + (w >> 4 & LOW);
+    t.wrapping_mul(0x0101_0101) >> 24
+}
+
 impl Wave {
     pub(crate) const ZERO: Self = Self {
         countdown: 0,
@@ -130,24 +139,26 @@ impl Wave {
         io[RAM + w.ram_offset(i)]
     }
 
-    /// Recomputes the cached waveform sum from wave RAM and NR32: wave RAM
-    /// as two 64-bit words of 16 nibbles, each nibble shifted in place
-    /// (`(w >> s) & mask` keeps its own bits only), the nibbles summed
-    /// into bytes (<= 30 each) and the bytes by one multiplication (<= 240).
-    /// SWAR instead of a 32-nibble loop: 208 B instead of 380 on thumbv7em.
+    /// Wave RAM as the digital outputs in play order: four 32-bit words of
+    /// 8 nibbles, sample `8j` in word `j`'s top nibble, each nibble shifted
+    /// by the NR32 code in place (`(w >> s) & mask` keeps its own bits).
+    /// 32-bit words: 64-bit shifts are long on thumbv7em.
+    #[inline]
+    fn words(&self, io: &[u8; 0x80]) -> [u32; 4] {
+        let s = self.shift();
+        let mask = u32::from(0xF_u8 >> s) * 0x1111_1111;
+        core::array::from_fn(|j| {
+            let at = RAM + 4 * j;
+            let bytes = io[at..at + 4].try_into().unwrap_or([0; 4]);
+            u32::from_be_bytes(bytes) >> s & mask
+        })
+    }
+
+    /// Recomputes the cached waveform sum from wave RAM and NR32 (SWAR
+    /// instead of a 32-nibble loop).
     #[inline(never)]
     pub(crate) fn resum(&mut self, io: &[u8; 0x80]) {
-        const NIBBLES: u64 = 0x1111_1111_1111_1111;
-        const LOW: u64 = 0x0F0F_0F0F_0F0F_0F0F;
-        let s = self.shift();
-        let mask = u64::from(0xF_u8 >> s) * NIBBLES;
-        let word = |at: usize| {
-            let bytes = io[at..at + 8].try_into().unwrap_or([0; 8]);
-            let y = u64::from_le_bytes(bytes) >> s & mask;
-            let t = (y & LOW) + (y >> 4 & LOW);
-            (t.wrapping_mul(0x0101_0101_0101_0101) >> 56) as u16
-        };
-        self.sum = word(RAM) + word(RAM + 8);
+        self.sum = self.words(io).into_iter().map(nibble_sum).sum::<u32>() as u16;
     }
 
     /// A sample step: the index moves on and the buffer loads its byte.
@@ -185,43 +196,55 @@ impl Wave {
 
     /// Advances by `dt` clocks (<= one sample window) and returns the
     /// analog level times clocks: `15 - 2 * digital` while the DAC is on,
-    /// 0 while it is off (Pan Docs DAC). Whole 32-step waveform periods
-    /// use the cached sum, so at most 31 steps iterate.
+    /// 0 while it is off (Pan Docs DAC). In closed form: after the first
+    /// step the buffer always holds the byte at the index (wave RAM is
+    /// constant over a sync span), so the `n` whole sample periods are a
+    /// run of wave RAM nibbles, a difference of two prefix sums from the
+    /// SWAR words and the cached sum, and the last partial period
+    /// is the nibble at the final index. Exact: the same state and integral
+    /// as stepping (`integrate_matches_a_clock_by_clock_reference_and_advance`).
     #[inline(never)]
     pub(crate) fn integrate(&mut self, dt: u32, io: &[u8; 0x80]) -> i32 {
         if !self.dac {
             return 0;
         }
-        let level = |w: &Self| 15 - 2 * i32::from(w.digital());
+        let total = 15 * dt as i32;
         if !self.on {
-            return 15 * dt as i32;
+            return total;
         }
-        let p = self.period();
-        let mut dt = dt;
-        let mut sum = 0;
+        // Clocks times digital output, up to the first step from the
+        // buffer (right after a trigger, the old one).
         let cd = u32::from(self.countdown);
-        if dt >= cd {
-            sum += level(self) * cd as i32;
-            dt -= cd;
-            self.tick(p, io);
-            let wave = 32 * p.get();
-            let full = dt / NonZeroU32::new(wave).unwrap_or(NonZeroU32::MIN);
-            if full != 0 {
-                let per = 32 * 15 - 2 * i32::from(self.sum);
-                sum += full as i32 * p.get() as i32 * per;
-                dt -= full * wave;
-            }
+        if dt < cd {
+            self.countdown = (cd - dt) as u16;
+            return total - 2 * (u32::from(self.digital()) * dt) as i32;
         }
-        loop {
-            let cd = u32::from(self.countdown);
-            if dt < cd {
-                self.countdown = (cd - dt) as u16;
-                return sum + level(self) * dt as i32;
-            }
-            sum += level(self) * cd as i32;
-            dt -= cd;
-            self.tick(p, io);
-        }
+        let mut high = u32::from(self.digital()) * cd;
+        let p = self.period();
+        let rest = dt - cd;
+        let (n, r) = (rest / p, rest % p);
+        let first = u32::from(self.index + 1) & 31;
+        let w = self.words(io);
+        let (s0, s1, s2) = (nibble_sum(w[0]), nibble_sum(w[1]), nibble_sum(w[2]));
+        let before = [0, s0, s0 + s1, s0 + s1 + s2];
+        let sum = u32::from(self.sum);
+        // The sum of the samples `0..k` of the endless waveform: whole
+        // waveforms, whole words, then the word's top `k % 8` nibbles.
+        let prefix = |k: u32| {
+            let j = (k >> 3 & 3) as usize;
+            (k >> 5) * sum + before[j] + nibble_sum(w[j] & !(u32::MAX >> (4 * (k & 7))))
+        };
+        // Samples `first..first + n`, a whole period each.
+        let to = first + n;
+        let run = prefix(to) - prefix(first);
+        let end = to & 31;
+        let byte = io[RAM + (end >> 1) as usize];
+        let last = nibble(byte, end as u8) >> self.shift();
+        high += p.get() * run + r * u32::from(last);
+        self.index = end as u8;
+        self.buffer = byte;
+        self.countdown = (p.get() - r) as u16;
+        total - 2 * high as i32
     }
 
     /// A write to NR30-NR34 (`off` 0-4) with the frame sequencer at `fs`.
@@ -400,7 +423,9 @@ mod tests {
             for vol in 0..4 {
                 let mut a = playing(&io, vol, f);
                 let (mut b, mut c) = (a, a);
-                for dt in [1, 128, 37, 128, 128, 128, 91, 128, 128, 128, 128] {
+                for dt in [
+                    1, 128, 37, 128, 2, 3, 64, 65, 63, 128, 91, 128, 127, 128, 128,
+                ] {
                     assert_eq!(
                         a.integrate(dt, &io),
                         slow(&mut b, dt, &io),

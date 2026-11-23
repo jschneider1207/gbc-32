@@ -131,41 +131,31 @@ impl Square {
         if !self.on {
             return 15 * dt_i;
         }
-        let hi = 15 - 2 * i32::from(self.env.volume);
-        let p = self.period();
-        let mut dt = dt;
-        let mut sum = 0;
-        // Up to the first step (the only stretch that can be the
-        // first-sample zero).
+        // Clocks times duty bit: up to the first step at the current bit
+        // (0 before the first step), then the `n` whole periods from the
+        // duty byte rotated to the first position (whole patterns by its
+        // popcount), then the final position's bit for the rest. Exact:
+        // the same state and integral as stepping
+        // (`integrate_matches_a_clock_by_clock_reference`).
+        let vol2 = 2 * i32::from(self.env.volume);
         let cd = u32::from(self.countdown);
-        let level = if self.started && self.high() { hi } else { 15 };
+        let bit = u32::from(self.started && self.high());
         if dt < cd {
             self.countdown = (cd - dt) as u16;
-            return level * dt_i;
+            return 15 * dt_i - vol2 * (bit * dt) as i32;
         }
-        sum += level * cd as i32;
-        dt -= cd;
-        self.tick(p);
-        // Whole waveform periods: 8 steps contain the whole pattern.
-        let wave = 8 * p.get();
-        let full = dt / NonZeroU32::new(wave).unwrap_or(NonZeroU32::MIN);
-        if full != 0 {
-            let ones = DUTY[usize::from(self.duty & 3)].count_ones() as i32;
-            sum += full as i32 * p.get() as i32 * (ones * hi + (8 - ones) * 15);
-            dt -= full * wave;
-        }
-        // At most 8 more steps.
-        loop {
-            let cd = u32::from(self.countdown);
-            let level = if self.high() { hi } else { 15 };
-            if dt < cd {
-                self.countdown = (cd - dt) as u16;
-                return sum + level * dt as i32;
-            }
-            sum += level * cd as i32;
-            dt -= cd;
-            self.tick(p);
-        }
+        let p = self.period();
+        let rest = dt - cd;
+        let (n, r) = (rest / p, rest % p);
+        let first = (self.pos + 1) & 7;
+        let pattern = DUTY[usize::from(self.duty & 3)].rotate_right(u32::from(first));
+        let m = (n & 7) as u8;
+        let ones = (n >> 3) * pattern.count_ones() + (pattern & ((1 << m) - 1)).count_ones();
+        let high = bit * cd + p.get() * ones + r * u32::from(pattern >> m & 1);
+        self.pos = (first + m) & 7;
+        self.started = true;
+        self.countdown = (p.get() - r) as u16;
+        15 * dt_i - vol2 * high as i32
     }
 
     /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`
@@ -434,6 +424,31 @@ mod tests {
             left -= dt;
         }
         assert_eq!(int, one);
+    }
+
+    #[test]
+    fn integrate_matches_a_clock_by_clock_reference() {
+        for duty in 0..4 {
+            for f in [2047, 2046, 2043, 2017, 1900, 0x700] {
+                // Started and right after a trigger (first-sample zero).
+                let mut fresh = playing(duty, 9, f);
+                fresh.write(4, 0x80 | (f >> 8) as u8, 0, 0);
+                for start in [playing(duty, 9, f), fresh] {
+                    let (mut a, mut b) = (start, start);
+                    for dt in [1, 128, 37, 2, 3, 4, 5, 31, 32, 33, 128, 91, 127, 128, 128] {
+                        let want: i32 = (0..dt)
+                            .map(|_| {
+                                let l = 15 - 2 * i32::from(b.digital());
+                                b.advance(1);
+                                l
+                            })
+                            .sum();
+                        assert_eq!(a.integrate(dt), want, "duty {duty} f {f}");
+                        assert_eq!(a, b, "duty {duty} f {f}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
