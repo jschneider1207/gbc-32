@@ -210,7 +210,7 @@ budget); nothing merges to `main` before step 2's human decision.
    fails in 01/02/03/07/08/11 (registers, length, trigger, frame-sequencer
    sync, power). If more than two subtests fail here, one agent per
    subtest. Must-tier gate step green.
-7. [ ] **Sync invariant checks** (ADR 0021 section 3): unit test advancing
+7. [x] (34a4d91, 75b3c29, 8ae9575) **Sync invariant checks** (ADR 0021 section 3): unit test advancing
    the APU with random split points vs one span (bit-identical state and,
    with a buffer that never fills, identical samples); `bench --fingerprint`
    gets an audio-buffer option and the fingerprint with and without it must
