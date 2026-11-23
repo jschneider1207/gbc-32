@@ -96,3 +96,16 @@ tests still cover the length rule itself (one per SameBoy branch).
 - SameBoy's "odd mode" (`double_speed_alignment & 7`, a 2-cycle freeze in
   the pending case) is not modelled; the pending case to single speed keeps
   whole M-cycles.
+
+## Amendment (2026-11-23, session 10): frame-sequencer delay after switching to double speed
+
+Each switch to double speed toggles a 2-clock (one double-speed M-cycle)
+delay on the DIV-APU frame-sequencer edge: the 1st and 3rd switches add it,
+the 2nd removes it. It survives DIV writes and the STOP DIV reset, is
+cleared by NR52 power off/on, and is ignored in single speed (0a83ae5).
+Sources: AGE `spsw-ch2-lc-delay` (`TEST_DS`, `TEST_DS_NS_DS`,
+`TEST_DS_NS_DS_NS_DS`, `TEST_DS_OFF_ON`, verified on CGB B/C/E) and the AGE
+emulator's `gb_sound::after_speed_change` (Apache-2.0, read only). SameBoy
+does not model it. AGE also re-applies it after a single-speed DIV write;
+no checked test covers that, so we don't. Gains `spsw-ch2-lc-delay-cgbBCE`
+and Gambatte `speedchange{,2,5}_ch2_nr52_*` (6).
