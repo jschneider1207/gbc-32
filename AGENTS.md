@@ -241,6 +241,16 @@ directory is a full separate build.
   `dxgmms2!VIDMM_GLOBAL::CreateOneAllocation`, the WSLg GPU path).
   `--headless` is fine. Interactive play happens on native Windows, and
   the human runs it.
+- **Exception, the native Windows `.exe` via WSL interop** (human,
+  2026-11-22). Agents may launch the cross-built
+  `x86_64-pc-windows-gnu` binary through `scripts/run-windows.sh`. It runs
+  as a native Win32 process, not through WSLg. Rules for these runs:
+  - keep them short, and always use `--frames N` so the window closes
+    itself; don't rely on killing the process from WSL;
+  - use a scratch copy of the ROM, never the human's save files;
+  - run them only when a change touches the window, audio or input code.
+
+  A window briefly appears on the human's desktop.
 
 ## Code conventions
 
