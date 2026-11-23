@@ -1,6 +1,6 @@
 # Design: PPU edges at every CPU/PPU clock phase (`lcd_offset`)
 
-- Status: Proposed. Step 0 done (8e3d711); step 0b dropped; step 1
+- Status: Proposed. Step 0 done (ba63b92); step 0b dropped; step 1
   measured and held (branch `lcd-offset-step1`, see 4.3). M9 triage
   groups 6 and 9, and the phase-dependent ROMs of groups 8 and 12.
 - Date: 2026-11-23. Written against 65fe096 (main), with branches
@@ -531,7 +531,7 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
 0. **Edges table, no value change.** Move the constants in 3.5 into
    `edges.rs` (half-dots and observers, `const fn` thresholds). Verify:
    fingerprint identical, size within +50 B.
-   **Done** (8e3d711): fingerprint identical (4,020 runs), `.text` and
+   **Done** (ba63b92): fingerprint identical (4,020 runs), `.text` and
    every budgeted function byte-identical, bench within noise.
    `hdma::HBLANK_DELAY` stays in `hdma.rs` (step 10 replaces it).
    0b. The `tune` feature, `romtest --edge`, and the sweep script. Verify:
