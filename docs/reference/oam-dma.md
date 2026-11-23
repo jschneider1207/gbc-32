@@ -88,11 +88,20 @@ STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
 | ROM / SRAM | DMA byte | free | redirected |
 | VRAM | free | DMA byte | free |
 | WRAM | free | free | DMA byte |
-| E000-FFFF | open (FF / dropped) | free | redirected |
+| E000-FFFF | open (FF / to OAM) | free | redirected |
 
-  - *DMA byte:* a read returns the byte the DMA reads (`source + i`); a
-    write is dropped and, if the source is below A000, clears the OAM byte
-    just transferred (CGB C; SameBoy `GB_write_memory`, model checks).
+  - *DMA byte:* a read returns the byte the DMA reads (`source + i`). A
+    write never reaches its target; the OAM byte just transferred (`i`)
+    gets the CPU's data for a ROM/SRAM source, 00 for a VRAM source, and
+    keeps the DMA's byte for a WRAM source. *Open* (E000-FFFF source,
+    external bus): reads FF, a write puts its data in OAM byte `i` too.
+    Source: gambatte cgb04c hardware captures (`oamdma_src*_busypush*`,
+    `busywrite*`; gambatte `Memory::nontrivial_write` matches them), ADR
+    0028. **SameBoy disagrees:** it drops the write and clears OAM byte
+    `i` for any source below A000 (`GB_write_memory`, a model check its
+    author applies to CGB C); the human chose gambatte (session 10).
+    Not modelled yet: gambatte also clears OAM byte `i` on a conflicting
+    CPU *read* with a VRAM source (`nontrivial_read`; triage group 13).
   - *Redirected:* the access goes to WRAM at the CPU's low 12 bits with bit
     12 (the C000/D000 half) taken from the DMA's address; reads and writes
     both go there.

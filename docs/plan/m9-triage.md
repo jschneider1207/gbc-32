@@ -61,6 +61,9 @@ Fast path untouched: the check sits behind the PPU sync the palette write
 already does.
 
 ### 2. OAM DMA: CPU write during a conflicting transfer (58)
+**Done (session 10, ADR 0028):** gambatte rule implemented; 57 flip to
+pass. Left: `src0000_busyint0002` (want `FF941234`; the interrupt
+dispatch's pushes, not the bus rule; undiagnosed).
 `oamdma_src{0000,7F00,A000,BF00,E000,EF00,F000,FE00,FF00}_busy{push,call,int,rst}*`
 and `srcA000_busywrite4000`. The pass/fail pattern is sharp: for every
 source, **all `busypop*`/`busyread*` pass; the failures are pushes whose
@@ -201,6 +204,10 @@ Pan Docs "STAT interrupt" (blocking). Split per source when started.
 vector 0000; SameBoy `sm83_cpu.c`), S.
 
 ### 13. OAM DMA: VRAM source vs CPU reads, misc (10)
+**Diagnosed (session 10):** the 6 `src{8000,9F00}_busypop*` need
+gambatte's read side effect (CGB, VRAM source, conflicting CPU read
+clears OAM byte `i`; ADR 0028 "Not modelled"). Needs a side effect on
+the shared-reference read path: a design task.
 `oamdma_src{8000,9F00}_busypop{7FFF,9FFF}*` (6; e.g. `src8000_busypop7FFF`
 shows the DMG answer `65765576`, CGB wants `65005576`) and
 `src8000_srcchange0000_busyinc` (1): our table has VRAM-source vs external

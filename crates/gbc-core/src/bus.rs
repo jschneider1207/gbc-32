@@ -1124,8 +1124,10 @@ impl Ctx<'_, '_> {
     /// A CPU write while an OAM DMA transfer runs: OAM writes are dropped
     /// for the whole transfer, start delay included (SameBoy
     /// `write_high_memory`), and the rest follows [`dma::conflict`] for
-    /// CGB C (SameBoy `GB_write_memory`). The transfer is synced first,
-    /// because the write may change a source byte or its mapping.
+    /// CGB C. A write that conflicts with the DMA never reaches its
+    /// target; what it does to OAM follows gambatte's cgb04c captures
+    /// (ADR 0028). The transfer is synced first, because the write may
+    /// change a source byte or its mapping.
     #[inline(never)]
     fn write_during_dma(&mut self, addr: u16, value: u8) {
         let now = self.clock();
@@ -1138,13 +1140,16 @@ impl Ctx<'_, '_> {
         }
         match dma_conflict(&self.sys.ppu.dma, now, self.hot.mcycle, addr) {
             (Conflict::None, _) => self.write_to(addr, value),
-            (Conflict::Open, _) => {}
             (Conflict::Wram(a), _) => self.write_to(a, value),
-            (Conflict::Dma, i) => {
-                // CGB C: the OAM byte just written is cleared when the
-                // DMA reads below A000 (SameBoy: `oam[dest - 1] = 0`).
-                if self.sys.ppu.dma.base < 0xA000 {
-                    self.mem.oam[usize::from(i)] = 0;
+            (Conflict::Open | Conflict::Dma, i) => {
+                // CGB C (gambatte cgb04c `oamdma_src*_busypush*`, ADR
+                // 0028): the CPU's data replaces the OAM byte just
+                // transferred, except that a VRAM source gets 00 there
+                // and a WRAM source leaves it. SameBoy instead clears it
+                // for any source below A000 and drops the rest.
+                let base = self.sys.ppu.dma.base;
+                if !(0xC000..0xE000).contains(&base) {
+                    self.mem.oam[usize::from(i)] = if base & 0xE000 == 0x8000 { 0 } else { value };
                     self.sys.ppu.oam_written();
                 }
             }
@@ -3280,10 +3285,10 @@ mod dma_tests {
             assert_eq!(ctx.read(0xD123), 0x42);
             ctx.write(0xD124, 0x43); // M-cycle 6, goes to C124
             assert_eq!(ctx.mem.wram[0x124], 0x43);
-            // An external-bus write is dropped and clears the OAM byte
-            // just transferred (byte 5; CGB C).
+            // An external-bus write is dropped, and its data replaces the
+            // OAM byte just transferred (byte 5; CGB C, ADR 0028).
             ctx.write(0x2000, 0x05); // M-cycle 7
-            assert_eq!(ctx.mem.oam[5], 0);
+            assert_eq!(ctx.mem.oam[5], 0x05);
             assert_eq!(ctx.mem.oam[4], 4 ^ 0x3C);
             assert_eq!(ctx.sys.cart.read_rom(0x4000), 0x3C); // bank unchanged
             // VRAM is free.
@@ -3380,6 +3385,40 @@ mod dma_tests {
             assert_eq!((ctx.clock(), ctx.hot.dma), (end, 0));
         });
         assert!((0..0xA0).all(|i| emu.mem.oam[i] == i as u8 ^ 0xA5));
+    }
+
+    /// A CPU write on the bus the transfer reads, in the M-cycle of byte
+    /// 5: it never reaches its target, and OAM byte 5 gets the CPU's data
+    /// (ROM/SRAM and E000-FFFF sources), 00 (VRAM source) or keeps the
+    /// DMA's byte (WRAM source). gambatte cgb04c `oamdma_src*_busypush*`,
+    /// ADR 0028.
+    #[test]
+    fn conflicting_write_lands_in_oam_by_source() {
+        // (FF46 value, CPU write address, OAM byte 5 afterwards).
+        let cases = [
+            (0x40, 0xA123, 0x9A),
+            (0x40, 0x7FFF, 0x9A),
+            (0x80, 0x9123, 0x00),
+            (0xC1, 0xD123, 5 ^ 0xA5),
+            (0xFE, 0x2000, 0x9A),
+            (0xFE, 0xB000, 0x9A),
+        ];
+        for (src, addr, want) in cases {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                let t0 = ctx.clock();
+                ctx.write(0xFF46, src);
+                idle_to(ctx, t0, 2 + 5);
+                ctx.write(addr, 0x9A);
+                ctx.dma_sync(ctx.clock());
+            });
+            assert_eq!(emu.mem.oam[5], want, "source {src:02X}, write {addr:04X}");
+            match addr {
+                0x9123 => assert_eq!(emu.mem.vram[0x1123], 0),
+                0xD123 => assert_eq!(emu.mem.wram[0x1123], 0),
+                _ => {}
+            }
+        }
     }
 
     /// The halted skip passes the (cleared) `Dma` deadline: a paused

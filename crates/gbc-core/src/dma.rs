@@ -165,15 +165,16 @@ impl OamDma {
 pub(crate) enum Conflict {
     /// The access is unaffected.
     None,
-    /// Reads FF, writes are dropped (an external-bus access while the DMA
-    /// reads E000-FFFF).
+    /// Reads FF; a write puts its data in the OAM byte just transferred
+    /// (an external-bus access while the DMA reads E000-FFFF; ADR 0028).
     Open,
     /// The access goes to this WRAM address instead: the CPU's low 12 bits
     /// with bit 12 (the bank half) from the DMA's address.
     Wram(u16),
     /// The access sees the DMA's own address `cur`: a read returns the
-    /// byte the DMA reads; a write is dropped, and on CGB C clears the OAM
-    /// byte just written if `cur` is below A000.
+    /// byte the DMA reads; a write never reaches `addr`, and the OAM byte
+    /// just written gets its data (ROM/SRAM source), 00 (VRAM source) or
+    /// stays (WRAM source). gambatte cgb04c captures, ADR 0028.
     Dma,
 }
 
