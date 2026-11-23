@@ -32,6 +32,13 @@ one was not yet in its last M-cycle (SameBoy: `dma_restarting = dest !=
 0xA1 && dest != 0xA0`), CPU OAM reads keep returning FF through the new
 start delay. A write in the old transfer's last M-cycle is a fresh start.
 Mooneye `acceptance/oam_dma_restart`.
+Not modelled: gambatte keeps the old transfer running through the new
+start delay with the *new* source's conflict area, so the CPU access one
+M-cycle after the FF46 write already conflicts on the new bus and reads
+the byte the old transfer is writing (taken from the new source page).
+gambatte cgb04c `oamdma_src8000_srcchange0000_busyinc` pins it: the
+first `INC A` fetched after the restart (from ROM, source 00) is lost;
+we lose only the two at bytes 0-1 and show 1, not 0.
 
 ## HALT pauses the transfer
 While the CPU is halted the DMA makes no progress, and the halted M-cycles
@@ -100,8 +107,13 @@ STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
     0028. **SameBoy disagrees:** it drops the write and clears OAM byte
     `i` for any source below A000 (`GB_write_memory`, a model check its
     author applies to CGB C); the human chose gambatte (session 10).
-    Not modelled yet: gambatte also clears OAM byte `i` on a conflicting
-    CPU *read* with a VRAM source (`nontrivial_read`; triage group 13).
+    A *read* that conflicts with a VRAM source returns the DMA byte and
+    also clears OAM byte `i` (gambatte cgb04c
+    `oamdma_src{8000,9F00}_busypop{7FFF,9FFF}*`; gambatte
+    `nontrivial_read` matches them; ADR 0028 amendment). The read only
+    records it (`dma::ReadClears` in `Memory`, atomics: the read path keeps
+    shared references); `Ctx::dma_sync` applies it after copying the bytes
+    due. SameBoy has no read side effect.
   - *Redirected:* the access goes to WRAM at the CPU's low 12 bits with bit
     12 (the C000/D000 half) taken from the DMA's address; reads and writes
     both go there.

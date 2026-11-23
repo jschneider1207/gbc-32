@@ -259,7 +259,15 @@ start, so they test where mode 0 starts against the write per SCX (CGB C
 differs from DMG), an edge-position question.
 
 ### 13. OAM DMA: VRAM source vs CPU reads, misc (10)
-**Diagnosed (session 10):** the 6 `src{8000,9F00}_busypop*` need
+**Done (session 10, ADR 0028 amendment):** the 6
+`src{8000,9F00}_busypop{7FFF,9FFF}*` pass (a conflicting read with a VRAM
+source clears OAM byte `i`; recorded through atomics in `Memory`, applied
+by `dma_sync`; no bench ROM slower). `src8000_srcchange0000_busyinc` is
+re-diagnosed: not VRAM-vs-external but a restart, where the access one
+M-cycle after the FF46 write already conflicts on the new source's bus
+(gambatte keeps the old transfer running through the new start delay;
+`oam-dma.md` "Restart"). We show 1, want 0. Not done.
+Original diagnosis: the 6 `src{8000,9F00}_busypop*` need
 gambatte's read side effect (CGB, VRAM source, conflicting CPU read
 clears OAM byte `i`; ADR 0028 "Not modelled"). Needs a side effect on
 the shared-reference read path: a design task.
