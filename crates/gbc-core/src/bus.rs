@@ -25,7 +25,7 @@ use crate::dma::{self, Conflict, OamDma};
 use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
-use crate::ppu::{Frame, Ppu};
+use crate::ppu::{Frame, Ppu, edges};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
@@ -836,16 +836,17 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu.write_stat(now, first, &mut s.iflags, double);
-                self.run_ppu_to_call(now + 1);
+                let at = now + edges::STAT_PHASE2.delay(double);
+                self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
-                s.ppu.write_stat(now + 1, value, &mut s.iflags, double);
+                s.ppu.write_stat(at, value, &mut s.iflags, double);
             }
             0x44 => {} // LY is read-only.
             0x45 => {
                 // Single speed: one dot into the M-cycle (SameBoy
                 // `GB_CONFLICT_WRITE_CPU`); double speed: at the access
                 // (`GB_CONFLICT_READ_OLD`).
-                let at = now + u64::from(!double);
+                let at = now + edges::LYC_WRITE.delay(double);
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
                 s.ppu.write_lyc(at, value, &mut s.iflags, double);

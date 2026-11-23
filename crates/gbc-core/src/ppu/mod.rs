@@ -72,6 +72,7 @@ use objects::LineObjects;
 pub(crate) use render::OBJ_BUF_LEN;
 use render::{Colors, Regs, Renderer, Sources, pair_table, set_pair_color};
 
+pub(crate) mod edges;
 mod objects;
 mod render;
 
@@ -95,7 +96,7 @@ pub(crate) const ON_POS: u32 = 7;
 
 /// Frame position of the VBlank interrupt and `FRAME_READY`: line 144,
 /// dot 5 ([`Pt::VBlank`]).
-pub(crate) const VBLANK_POS: u32 = 144 * LINE + 5;
+pub(crate) const VBLANK_POS: u32 = 144 * LINE + edges::VBLANK;
 
 /// Frame position at clock 0 after reset, where the CGB boot ROM hands
 /// over: LY = 144, 171 dots in.
@@ -316,7 +317,7 @@ const WINDOW_OFF_LEAD: i32 = 0;
 /// earlier relative to the line; SameBoy checks at each line start
 /// (`wy_check`). Calibrated (step E2): one value for all lines, 7 -> 6
 /// flips / 0 regressions, 3-6 -> 2-4 regressions (line 0 ROMs).
-const WY_CHECK_AT: [u32; 2] = [7, 3];
+use edges::WY_CHECK_AT;
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -549,11 +550,18 @@ impl Ppu {
             // "glitch" rows) and `gb_lcd::read_ly` (Apache-2.0, read only);
             // only the CPU/PPU alignments after speed switches show the
             // glitch and the line 144-153 dot.
-            1..=152 if t >= 3 => l,
-            1..=152 if t + 2 - double as u32 >= 3 => (l - 1) & l,
+            1..=152 if t >= edges::LY_NEW => l,
+            1..=152 if t + edges::LY_GLITCH - double as u32 >= edges::LY_NEW => (l - 1) & l,
             1..=152 => l - 1,
-            _ if t < 3 => 152,
-            _ if t < if double { 8 } else { 7 } => 153,
+            _ if t < edges::LY_NEW => 152,
+            _ if t < if double {
+                edges::LY153_ZERO_DS
+            } else {
+                edges::LY153_ZERO_SS
+            } =>
+            {
+                153
+            }
             _ => 0,
         };
         ly as u8
@@ -566,15 +574,15 @@ impl Ppu {
         let (l, t) = (a.line, a.t);
         match l {
             0 => (Some(0), 0),
-            1..=143 if t < 3 => (Some((l - 1) as u8), 0),
-            1..=143 if t < 4 => (None, (l - 1) as u8),
+            1..=143 if t < edges::CMP_OFF => (Some((l - 1) as u8), 0),
+            1..=143 if t < edges::CMP_ON => (None, (l - 1) as u8),
             1..=143 => (Some(l as u8), 0),
-            144..=152 if t < 4 => (None, (l - 1) as u8),
+            144..=152 if t < edges::CMP_ON => (None, (l - 1) as u8),
             144..=152 => (Some(l as u8), 0),
-            _ if t < 6 => (None, 152),
-            _ if t < 8 => (Some(153), 0),
-            _ if t < 12 && !double => (None, 153),
-            _ if t < 12 => (Some(153), 0),
+            _ if t < edges::L153_CMP => (None, 152),
+            _ if t < edges::L153_OFF => (Some(153), 0),
+            _ if t < edges::L153_ZERO && !double => (None, 153),
+            _ if t < edges::L153_ZERO => (Some(153), 0),
             _ => (Some(0), 0),
         }
     }
@@ -586,23 +594,23 @@ impl Ppu {
     fn mode3_end(&self, now: u64, a: At, double: bool) -> u32 {
         let start = now.wrapping_sub(u64::from(a.t));
         self.latched_end(start)
-            .map_or(LINE, |e| e + u32::from(double))
+            .map_or(LINE, |e| e + edges::MODE0_DS_LATE * u32::from(double))
     }
 
     /// STAT mode bits at `a` (Pan Docs: LCD Status Registers).
     fn mode(&self, now: u64, a: At, double: bool, quirk: bool) -> u8 {
         let (l, t) = (a.line, a.t);
         if l >= LINES {
-            return if l == 144 && t < 5 { 0 } else { 1 };
+            return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
         }
         if a.first {
-            return if t < 86 || t >= self.mode3_end(now, a, double) {
+            return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, double) {
                 0
             } else {
                 3
             };
         }
-        if t < 4 {
+        if t < edges::MODE2 {
             // Line 0 is still mode 1 from VBlank, but on CGB B/C it reads
             // mode 0 for one M-cycle at `t = 3` in single speed. AGE
             // `stat-mode/stat-mode.inc` (`M1E`: "no mode-0 m-cycle at the
@@ -612,8 +620,8 @@ impl Ppu {
             // clears the mode there on DMG only: it models CGB-E here.
             // `quirk` is for STAT register reads only: internal HBlank
             // users (HDMA start) see mode 1 here, as SameBoy does.
-            u8::from(l == 0 && (t != 3 || double || !quirk))
-        } else if t < 84 {
+            u8::from(l == 0 && (t != edges::LINE0_MODE0_QUIRK || double || !quirk))
+        } else if t < edges::MODE3 {
             2
         } else if t < self.mode3_end(now, a, double) {
             3
@@ -675,8 +683,12 @@ impl Ppu {
     /// (first line after LCD enable: the pipeline start, or the STAT change
     /// in double speed) to the mode-3 end (one dot later in double speed).
     pub(crate) fn vram_blocked(&self, now: u64, double: bool) -> bool {
-        let first = if double { 86 } else { 91 };
-        self.cpu_blocked(now, double, [84, first], 0)
+        let first = if double {
+            edges::VRAM_FROM_FIRST_DS
+        } else {
+            edges::VRAM_FROM_FIRST_SS
+        };
+        self.cpu_blocked(now, double, [edges::VRAM_FROM, first], 0)
     }
 
     /// The CPU access windows ([`Self::vram_blocked`],
@@ -707,16 +719,27 @@ impl Ppu {
     /// (BCPD/OCPD are closed there).
     #[inline(never)]
     pub(crate) fn palette_blocked(&self, now: u64, double: bool) -> bool {
-        let extra = if double { 2 } else { 4 };
+        let extra = if double {
+            edges::PALETTE_EXTRA_DS
+        } else {
+            edges::PALETTE_EXTRA_SS
+        };
         // Fast path (hi-color raster writes, synth:cgb-raster): a latched
         // line (`mode3` set) is latched past position 89, at or before
         // `now`. So `now` is on it, past the window start, or on the next
         // line before position 87, where `t` is past the window end.
         let t = now.wrapping_sub(self.line.start);
-        if t < u64::from(LINE + 87) && self.line.mode3 != 0 && self.lcd_enabled() {
-            return t < u64::from(self.line.end + u16::from(double) + extra);
+        if t < u64::from(LINE + edges::PALETTE_FROM) && self.line.mode3 != 0 && self.lcd_enabled() {
+            return t < u64::from(
+                u32::from(self.line.end) + edges::MODE0_DS_LATE * u32::from(double) + extra,
+            );
         }
-        self.cpu_blocked(now, double, [87, 88], u32::from(extra))
+        self.cpu_blocked(
+            now,
+            double,
+            [edges::PALETTE_FROM, edges::PALETTE_FROM_FIRST],
+            extra,
+        )
     }
 
     /// CPU access to OAM (FE00-FEFF) is blocked at clock `now`: reads give
@@ -728,10 +751,10 @@ impl Ppu {
     /// from SameBoy's nominal 76 and reads from 78 (no OAM scan).
     pub(crate) fn oam_blocked(&self, now: u64, double: bool, write: bool) -> bool {
         let from = match (write, double) {
-            (true, false) => [0, 84],
-            (true, true) => [2, 84],
-            (false, false) => [3, 86],
-            (false, true) => [4, 86],
+            (true, false) => [edges::OAM_WRITE_FROM_SS, edges::OAM_WRITE_FROM_FIRST],
+            (true, true) => [edges::OAM_WRITE_FROM_DS, edges::OAM_WRITE_FROM_FIRST],
+            (false, false) => [edges::OAM_READ_FROM_SS, edges::OAM_READ_FROM_FIRST],
+            (false, true) => [edges::OAM_READ_FROM_DS, edges::OAM_READ_FROM_FIRST],
         };
         self.cpu_blocked(now, double, from, 0)
     }
@@ -741,13 +764,13 @@ impl Ppu {
     fn mode_source(&self, now: u64, a: At, double: bool) -> u8 {
         let (l, t) = (a.line, a.t);
         if l >= LINES {
-            return if l == 144 && t < 5 { 0 } else { 1 };
+            return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
         }
         let end = self.mode3_end(now, a, double);
         if a.first {
             return if t >= end { 0 } else { NO_MODE };
         }
-        if t < 4 {
+        if t < edges::MODE2_SOURCE_END {
             if l == 0 { 1 } else { 2 }
         } else if t < end {
             NO_MODE
@@ -767,13 +790,17 @@ impl Ppu {
         let base = l * LINE;
         if l < LINES {
             let first_line = first && l == 0;
-            let pipe = if first_line { 91 } else { 89 };
+            let pipe = if first_line {
+                edges::PIPE_FIRST
+            } else {
+                edges::PIPE
+            };
             if !first_line {
-                if t < 3 {
-                    return (base + 3, Pt::Ly3);
+                if t < edges::PT_LY {
+                    return (base + edges::PT_LY, Pt::Ly3);
                 }
-                if t < 4 {
-                    return (base + 4, Pt::Ly4);
+                if t < edges::CMP_ON {
+                    return (base + edges::CMP_ON, Pt::Ly4);
                 }
             }
             if t < pipe {
@@ -781,37 +808,37 @@ impl Ppu {
             }
             match self.latched_end(start.wrapping_add(u64::from(base))) {
                 // The earliest end: 167 dots after the pipeline start.
-                None => return (base + pipe + 167, Pt::End),
+                None => return (base + pipe + edges::MIN_MODE3, Pt::End),
                 Some(e) if t < e => return (base + e, Pt::End),
-                Some(e) if t <= e => return (base + e + 1, Pt::HBlank),
+                Some(e) if t <= e => return (base + e + edges::HBLANK_AFTER_END, Pt::HBlank),
                 Some(_) => {}
             }
             return if l < LINES - 1 {
-                (base + LINE + 3, Pt::Ly3)
+                (base + LINE + edges::PT_LY, Pt::Ly3)
             } else {
-                (base + LINE, Pt::V0)
+                (base + LINE + edges::VCMP_OFF, Pt::V0)
             };
         }
         if l == 144 {
             return match t {
-                0..2 => (base + 2, Pt::Quirk2),
-                2..4 => (base + 4, Pt::V4),
-                4 => (VBLANK_POS, Pt::VBlank),
-                _ => (base + LINE, Pt::V0),
+                _ if t < edges::QUIRK2 => (base + edges::QUIRK2, Pt::Quirk2),
+                _ if t < edges::CMP_ON => (base + edges::CMP_ON, Pt::V4),
+                _ if t < edges::VBLANK => (VBLANK_POS, Pt::VBlank),
+                _ => (base + LINE + edges::VCMP_OFF, Pt::V0),
             };
         }
         if l < 153 {
-            return if t < 4 {
-                (base + 4, Pt::V4)
+            return if t < edges::CMP_ON {
+                (base + edges::CMP_ON, Pt::V4)
             } else {
-                (base + LINE, Pt::V0)
+                (base + LINE + edges::VCMP_OFF, Pt::V0)
             };
         }
         match t {
-            0..6 => (base + 6, Pt::L153Cmp),
-            6..8 => (base + 8, Pt::L153Off),
-            8..12 => (base + 12, Pt::L153Zero),
-            _ => (FRAME + 3, Pt::Ly3),
+            _ if t < edges::L153_CMP => (base + edges::L153_CMP, Pt::L153Cmp),
+            _ if t < edges::L153_OFF => (base + edges::L153_OFF, Pt::L153Off),
+            _ if t < edges::L153_ZERO => (base + edges::L153_ZERO, Pt::L153Zero),
+            _ => (FRAME + edges::PT_LY, Pt::Ly3),
         }
     }
 
@@ -823,17 +850,21 @@ impl Ppu {
         let (l, t) = (after / LINE, after % LINE);
         let base = l * LINE;
         if l < LINES {
-            let pipe = if first && l == 0 { 91 } else { 89 };
+            let pipe = if first && l == 0 {
+                edges::PIPE_FIRST
+            } else {
+                edges::PIPE
+            };
             if t < pipe {
                 return (base + pipe, Pt::Latch);
             }
             match self.latched_end(start.wrapping_add(u64::from(base))) {
-                None => return (base + pipe + 167, Pt::End),
+                None => return (base + pipe + edges::MIN_MODE3, Pt::End),
                 Some(e) if t < e => return (base + e, Pt::End),
                 Some(_) => {}
             }
             return if l < LINES - 1 {
-                (base + LINE + 89, Pt::Latch)
+                (base + LINE + edges::PIPE, Pt::Latch)
             } else {
                 (VBLANK_POS, Pt::VBlank)
             };
@@ -841,7 +872,7 @@ impl Ppu {
         if after < VBLANK_POS {
             return (VBLANK_POS, Pt::VBlank);
         }
-        (FRAME + 89, Pt::Latch)
+        (FRAME + edges::PIPE, Pt::Latch)
     }
 
     /// The cursor for the current state: the first update point after
@@ -874,39 +905,43 @@ impl Ppu {
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
-            Pt::Ly3 => (c.pos + 1, l, Pt::Ly4),
-            Pt::Ly4 => (base + 89, l, Pt::Latch),
+            Pt::Ly3 => (c.pos + (edges::CMP_ON - edges::PT_LY), l, Pt::Ly4),
+            Pt::Ly4 => (base + edges::PIPE, l, Pt::Latch),
             Pt::Latch => {
                 let end = match self.latched_end(start.wrapping_add(u64::from(base))) {
                     Some(e) => base + e,
                     // The earliest end: 167 dots after the pipeline start.
-                    None => c.pos + 167,
+                    None => c.pos + edges::MIN_MODE3,
                 };
                 (end, l, Pt::End)
             }
-            Pt::End if !quiet => (c.pos + 1, l, Pt::HBlank),
+            Pt::End if !quiet => (c.pos + edges::HBLANK_AFTER_END, l, Pt::HBlank),
             Pt::End | Pt::HBlank if l < LINES - 1 => {
                 if quiet {
-                    (base + LINE + 89, l + 1, Pt::Latch)
+                    (base + LINE + edges::PIPE, l + 1, Pt::Latch)
                 } else {
-                    (base + LINE + 3, l + 1, Pt::Ly3)
+                    (base + LINE + edges::PT_LY, l + 1, Pt::Ly3)
                 }
             }
             Pt::End => (VBLANK_POS, LINES, Pt::VBlank),
-            Pt::HBlank => (base + LINE, LINES, Pt::V0),
+            Pt::HBlank => (base + LINE + edges::VCMP_OFF, LINES, Pt::V0),
             Pt::V0 => match l {
-                144 => (c.pos + 2, l, Pt::Quirk2),
-                153 => (c.pos + 6, l, Pt::L153Cmp),
-                _ => (c.pos + 4, l, Pt::V4),
+                144 => (c.pos + (edges::QUIRK2 - edges::VCMP_OFF), l, Pt::Quirk2),
+                153 => (c.pos + (edges::L153_CMP - edges::VCMP_OFF), l, Pt::L153Cmp),
+                _ => (c.pos + (edges::CMP_ON - edges::VCMP_OFF), l, Pt::V4),
             },
-            Pt::Quirk2 => (c.pos + 2, l, Pt::V4),
+            Pt::Quirk2 => (c.pos + (edges::CMP_ON - edges::QUIRK2), l, Pt::V4),
             Pt::V4 if l == LINES => (VBLANK_POS, l, Pt::VBlank),
-            Pt::V4 => (base + LINE, l + 1, Pt::V0),
-            Pt::VBlank if quiet => (FRAME + 89, 0, Pt::Latch),
-            Pt::VBlank => (base + LINE, l + 1, Pt::V0),
-            Pt::L153Cmp => (c.pos + 2, l, Pt::L153Off),
-            Pt::L153Off => (c.pos + 4, l, Pt::L153Zero),
-            Pt::L153Zero => (FRAME + 3, 0, Pt::Ly3),
+            Pt::V4 => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
+            Pt::VBlank if quiet => (FRAME + edges::PIPE, 0, Pt::Latch),
+            Pt::VBlank => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
+            Pt::L153Cmp => (c.pos + (edges::L153_OFF - edges::L153_CMP), l, Pt::L153Off),
+            Pt::L153Off => (
+                c.pos + (edges::L153_ZERO - edges::L153_OFF),
+                l,
+                Pt::L153Zero,
+            ),
+            Pt::L153Zero => (FRAME + edges::PT_LY, 0, Pt::Ly3),
         };
         Cursor {
             pos,
@@ -1446,7 +1481,11 @@ impl Ppu {
         let scx = mem.io[0x43];
         let window = self.window_wx(mem);
         let tall = self.lcdc & 0x04 != 0;
-        let start = self.synced.wrapping_sub(if first { 91 } else { 89 });
+        let start = self.synced.wrapping_sub(u64::from(if first {
+            edges::PIPE_FIRST
+        } else {
+            edges::PIPE
+        }));
         // One OAM scan per line, for both the stalls and the pixels. On a
         // line OAM DMA touches (from the FF46 write to the transfer's end
         // as the PPU sees it), entry by entry, and the objects' fetches
@@ -1928,8 +1967,8 @@ impl Ppu {
         let a = self.at(now);
         let (l, t) = (a.line, a.t);
         let deferred = match l {
-            0..=152 => t < 2 && !a.first,
-            _ => (6..12).contains(&t),
+            0..=152 => t < edges::LYC_DEFER_UNTIL && !a.first,
+            _ => (edges::L153_CMP..edges::L153_ZERO).contains(&t),
         };
         if deferred {
             return;
@@ -1937,12 +1976,12 @@ impl Ppu {
         // Line 153, dots 2-5 and 12-23 (6-11 were deferred above): first
         // compared with 153; in 12-23 the usual update follows.
         if l == 153
-            && (2..24).contains(&t)
+            && (edges::LYC153_OLD_FROM..edges::LYC153_OLD_UNTIL).contains(&t)
             && self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153))
         {
             *iflags |= INT_STAT;
         }
-        if !(l == 153 && (2..6).contains(&t)) {
+        if !(l == 153 && (edges::LYC153_OLD_FROM..edges::L153_CMP).contains(&t)) {
             self.update_at(now, iflags, double);
         }
     }
