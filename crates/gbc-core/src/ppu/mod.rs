@@ -473,12 +473,18 @@ impl Ppu {
         let (l, t) = (a.line, a.t);
         let ly = match l {
             0 => 0,
-            1..=143 if t < 3 => l - 1,
-            1..=143 => l,
-            144..=152 if t < 2 => l - 1,
-            144..=152 => l,
-            _ if t < 2 => 152,
-            _ if t < if double { 8 } else { 6 } => 153,
+            // LY changes 3 dots into every line 1-153. Just before, for 2
+            // dots (1 in double speed), it reads LY & (LY + 1), the
+            // counter's bits mid-carry. 153 lasts 4 dots (5 in double
+            // speed). AGE `lcd-align-ly` (verified on CGB B/C; its
+            // "glitch" rows) and `gb_lcd::read_ly` (Apache-2.0, read only);
+            // only the CPU/PPU alignments after speed switches show the
+            // glitch and the line 144-153 dot.
+            1..=152 if t >= 3 => l,
+            1..=152 if t + 2 - double as u32 >= 3 => (l - 1) & l,
+            1..=152 => l - 1,
+            _ if t < 3 => 152,
+            _ if t < if double { 8 } else { 7 } => 153,
             _ => 0,
         };
         ly as u8
@@ -1922,8 +1928,12 @@ mod tests {
         let l153 = clock(on, 0, 153 * LINE);
         let irqs = r.irqs(l153 + 100);
         assert_eq!(irqs.last(), Some(&(l153 + 6, INT_STAT)));
-        let ly: Vec<u8> = [0, 2, 5, 6, 12].iter().map(|&t| r.ly(l153 + t)).collect();
-        assert_eq!(ly, [152, 153, 153, 0, 0]);
+        // 152 & 153 = 152 mid-carry (t = 1, 2), 153 from t = 3, 0 from 7.
+        let ly: Vec<u8> = [0, 2, 3, 6, 7, 12]
+            .iter()
+            .map(|&t| r.ly(l153 + t))
+            .collect();
+        assert_eq!(ly, [152, 152, 153, 153, 0, 0]);
         // Double speed: 0 from t = 8.
         assert_eq!(
             (r.ppu.ly(l153 + 7, true), r.ppu.ly(l153 + 8, true)),
@@ -1964,14 +1974,31 @@ mod tests {
         assert_eq!(r.iflags, INT_STAT);
     }
 
+    /// LY reads LY & (LY + 1) for the 2 dots (1 in double speed) before it
+    /// changes at dot 3, on every line 1-152 (AGE `lcd-align-ly` glitch
+    /// rows, CGB B/C).
+    #[test]
+    fn ly_reads_mid_carry_before_it_changes() {
+        let on = 1000;
+        let r = Rig::on_at(on, 0, 0xFF);
+        let ly = |l: u32, double: bool| -> Vec<u8> {
+            let s = clock(on, 0, l * LINE);
+            (0..4).map(|t| r.ppu.ly(s + t, double)).collect()
+        };
+        assert_eq!(ly(4, false), [3, 0, 0, 4]);
+        assert_eq!(ly(4, true), [3, 3, 0, 4]);
+        assert_eq!(ly(144, false), [143, 0x80, 0x80, 144]);
+        assert_eq!(ly(146, true), [145, 145, 144, 146]);
+    }
+
     #[test]
     fn power_on_is_in_vblank_on_the_mcycle_grid() {
         let mut p = Ppu::new();
         p.reset(false);
         assert_eq!((p.ly(0, false), p.stat(0, false) & 3), (144, 1));
         // Line 144, dot 171: line 145 starts 285 clocks later, and LY
-        // reads 145 from its dot 2.
-        assert_eq!((p.ly(286, false), p.ly(287, false)), (144, 145));
+        // reads 145 from its dot 3 (144 & 145 = 144 at dot 2).
+        assert_eq!((p.ly(287, false), p.ly(288, false)), (144, 145));
         // No interrupt source is enabled: the first deadline is the end of
         // the next frame's line 0 mode 3 (70224 - 65835 + 256).
         assert_eq!(p.next_event(false), 4645);
