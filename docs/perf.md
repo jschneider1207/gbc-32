@@ -834,3 +834,26 @@ double speed, ~3.8k in mode 3):
 
 Such a game would run slower than real time on the MCU rather than fail;
 frame pacing absorbs it. Stage 2 task: measure these on the M7.
+
+## Code size vs other cores (2026-11-23, session 12)
+
+One-off comparison for context (input to the M10 code-size review). All
+`.text` on thumbv7em / Cortex-M7, summed over the objects (no LTO, no
+linking); C/C++ with Arm GNU 13.3 `-mcpu=cortex-m7 -mthumb
+-mfloat-abi=hard -mfpu=fpv5-d16 -ffunction-sections -fdata-sections`.
+
+| Core | O3 / -O2 | s / -Os | z |
+|---|---|---|---|
+| gbc-core 9159e03 (opt-level 3 = release profile = check-code-size) | 95,134 | 82,304 | 63,732 |
+| gbc-core opt-level 2 | 86,340 | | |
+| SameBoy ea667ad, emulation only (9 files, `GB_DISABLE_*`) | 78,924 (-O2) | 61,098 | |
+| SameBoy, full `Core/` | 130,256 (-O2) | 104,186 | |
+| Gambatte (libretro fork 138bcbb), minus statesaver/initstate | 92,468 (-O2) | 59,696 | |
+| Gambatte, full `libgambatte/src` | 114,196 (-O2) | 68,530 | |
+
+Reading: gcc `-Os` is closest to rustc `opt-level = "z"`, where gbc-core
+(CGB C only) is ~4-7% above SameBoy/Gambatte's emulation code (which also
+cover DMG, and SameBoy SGB/AGB). The release profile's opt-level 3 costs
+~31 KB over z; per-module opt levels (cold paths at z, hot set at 3) are a
+lever, but any change needs bench numbers (the 4.02 M line). Rough
+(+-15%): different languages and optimizers.
