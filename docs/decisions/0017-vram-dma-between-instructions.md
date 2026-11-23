@@ -119,3 +119,29 @@ the double-speed LYC comparison at `t = 5` (it syncs the
 from dot 86 (`hdma_late_enable_lcdoffset3_1` reads VRAM after its
 block's stall; design step 7). `HBLANK_DELAY` and `HBLANK_UNTIL` are
 unchanged; all 8 `hdma_late_{enable,m0halt}_*lcdoffset*` ROMs pass.
+
+## Amendment (2026-11-23, M9 group 8): HDMA across a speed switch
+
+Fitted to gambatte's CGB C captures (gambatte `Memory::stop`/`dma`/
+`intevent_unhalt`, GPL, read for behaviour only). A block triggered in a
+speed-switch STOP's first M-cycle (gambatte samples at `stop(cc - 4)`)
+makes STOP's second byte run as the next opcode (`VramDma::refetch`, PC
+rewound; gambatte `prefetched`). To double speed the block runs in the
+halt and ends the transfer (FF55 bit 7 set, length kept: `Memory::dma`
+while `halted()`); to single speed it runs at the wake-up before that
+opcode, its stall one M-cycle shorter (`cc -= 4` in the `hdma_requested`
+state). A trigger in the last M-cycle is still lost.
+
+The "Kept as before" rule of the HALT amendment is replaced: the
+speed-switch wake-up checks for its block like HALT's (`Bus::wake_stalls`,
+end of the wake-up M-cycle, block before the next instruction), also when
+the countdown ends it (gambatte `intevent_unhalt`;
+`hdma_m3speedchange_late_m0wakeup_1`), and an HBlank inside its wake-up
+M-cycle starts no block (SameBoy clears `halted` after it;
+`hdma_m0speedchange_late_m3wakeup_scx2_2`).
+
+Known gap: the refetched byte is read again from memory, where hardware
+runs the latched one; they differ only if the in-halt block overwrote it
+(`hdma_transition_speedchange_7fffstop_inc`). Fixing it needs a
+latched-opcode path in the CPU fetch (a branch per fetch or a second
+dispatch copy); not worth it for one ROM. +20 `dma` ROMs, no regressions.

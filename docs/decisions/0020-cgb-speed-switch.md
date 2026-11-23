@@ -193,3 +193,12 @@ existing IME-off hold there is unchanged and not stacked with this one.
 The timer differential test's reference mirrors the hold (one more
 M-cycle that doesn't tick, an idle as the dispatch's on hardware). Gains
 `spsw-interrupts-cgbBC`; no other flips (full stage1 manifest).
+
+## Amendment (2026-11-23): OAM DMA after the speed-switch halt
+
+OAM DMA paused by the switch resumes at the end of the wake-up M-cycle,
+one M-cycle later than after HALT (`Ctx::speed_switch_end`). gambatte CGB
+C `oamdma/oamdmasrcC0_speedchange_readC000` and
+`dma/hdma_transition_speedchange_oamdma` read WRAM mid-transfer right
+after a switch to double speed and see it one byte earlier than the HALT
+rule gives. The switch to single speed is untested.
