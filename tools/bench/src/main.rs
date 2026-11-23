@@ -30,8 +30,13 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
     let mut secs = 3u64;
     let mut root = "test-roms".to_string();
     let mut audio = 0usize;
+    let mut hash_samples = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        if a == "--hash-samples" {
+            hash_samples = true;
+            continue;
+        }
         let v = it.next();
         match (a.as_str(), v) {
             // At least 1 s: a shorter run (0 runs nothing) would make
@@ -48,13 +53,17 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
             _ => {
                 eprintln!(
                     "usage: bench --fingerprint [--seconds N (>= 1)] [--root DIR] \
-                     [--audio-buffer N (>= 1)]"
+                     [--audio-buffer N (>= 1) [--hash-samples]]"
                 );
                 return ExitCode::from(2);
             }
         }
     }
-    fingerprint::run(Path::new(&root), secs, audio)
+    if hash_samples && audio == 0 {
+        eprintln!("bench: --hash-samples needs --audio-buffer N");
+        return ExitCode::from(2);
+    }
+    fingerprint::run(Path::new(&root), secs, audio, hash_samples)
 }
 
 /// The measured region: callgrind collects only while this function is on

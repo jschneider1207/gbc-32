@@ -425,7 +425,7 @@ ROM list or durations also needs a baseline update in the same commit.
 
 ## Behavior fingerprint
 
-`bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N]` (N defaults to 3 and must be
+`bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N [--hash-samples]]` (N defaults to 3 and must be
 at least 1, root to `test-roms`) prints one line per run, `<16-hex FNV-1a
 hash> <path>`, sorted by path, so two builds can be compared bit for bit (ADR
 0011 "Verification"). Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`,
@@ -458,6 +458,14 @@ the output must be identical to the run without it: the APU sync invariant
 (ADR 0021 section 3), checked over the corpus (plan M6 task 7). A small N
 (e.g. 3) splits most chunks mid-way, the strictest setting. Compare the two
 outputs with `diff`; it is a heavy step, so run it alone.
+
+`--hash-samples` (with `--audio-buffer`) also folds every sample the calls
+wrote into the hash and adds the synthetic programs (`synth:<name>` for
+every bench program, plus `worst-case@1/2/4/8`, all for N seconds), so an
+exact APU optimization can be shown sample-identical: run it before and
+after, at two buffer sizes (e.g. 7 and 64; the hashes do not depend on the
+split), and `diff`. 3,831 runs, about 11 s wall. Without the flag the
+output is unchanged.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
 worktree and the working tree, runs both fingerprints with the same args,

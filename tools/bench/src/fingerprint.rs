@@ -34,7 +34,11 @@
 //! hash must not change: the APU state, and so every register read, is the
 //! same whether the syncs integrated or only advanced, however the calls
 //! split the run (ADR 0021 section 3, the sync invariant; plan M6 task 7).
-//! The samples themselves are not hashed.
+//! The samples themselves are not hashed, unless `--hash-samples` (needs
+//! `--audio-buffer`) is given: then every sample the calls wrote is folded
+//! into the hash too, and the synthetic ROMs (`synth:<name>`, the bench's
+//! programs) are added to the corpus, so an exact APU optimization can be
+//! shown sample-identical. Without the flag the lines are unchanged.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -183,8 +187,17 @@ fn collect(dir: &Path, name_contains: Option<&str>, out: &mut Vec<PathBuf>) {
 
 /// `Err` if the ROM fails to read or load. `audio`: the per-call audio
 /// buffer length (0: empty).
-fn fingerprint(path: &Path, end: u64, input: bool, audio: usize) -> Result<u64, String> {
-    let rom = std::fs::read(path).map_err(|e| e.to_string())?;
+fn fingerprint(
+    path: &Path,
+    end: u64,
+    input: bool,
+    audio: usize,
+    hash_samples: bool,
+) -> Result<u64, String> {
+    let rom = match path.to_str().and_then(|p| p.strip_prefix("synth:")) {
+        Some(name) => crate::synth::build(name).ok_or("unknown synthetic ROM")?,
+        None => std::fs::read(path).map_err(|e| e.to_string())?,
+    };
     let ram_size = cart_ram_size(&rom).map_err(|e| format!("{e:?}"))?;
     let mut cart_ram = vec![0u8; ram_size];
     let mut mem = Box::new(Memory::new());
@@ -221,6 +234,12 @@ fn fingerprint(path: &Path, end: u64, input: bool, audio: usize) -> Result<u64, 
         loop {
             let r = emu.run_until(target, &mut frame, &mut samples);
             clocks += r.clocks;
+            if hash_samples {
+                for s in &samples[..r.audio_samples] {
+                    h.bytes(&s.left.to_le_bytes());
+                    h.bytes(&s.right.to_le_bytes());
+                }
+            }
             let ev = r.events - Events::AUDIO_BUFFER_FULL;
             events |= ev;
             if ev.intersects(stop)
@@ -261,8 +280,24 @@ struct Run {
     input: bool,
 }
 
-pub fn run(root: &Path, secs: u64, audio: usize) -> std::process::ExitCode {
+pub fn run(root: &Path, secs: u64, audio: usize, hash_samples: bool) -> std::process::ExitCode {
     let mut runs = Vec::new();
+    if hash_samples {
+        // The worst case one channel at a time too (`@<mask>`).
+        let solo = [
+            "worst-case@1",
+            "worst-case@2",
+            "worst-case@4",
+            "worst-case@8",
+        ];
+        for name in crate::synth::NAMES.iter().chain(&solo) {
+            runs.push(Run {
+                path: PathBuf::from(format!("synth:{name}")),
+                end: secs * u64::from(CLOCK_HZ),
+                input: false,
+            });
+        }
+    }
     for s in CORPUS {
         let mut roms = Vec::new();
         collect(&root.join(s.dir), s.name_contains, &mut roms);
@@ -301,7 +336,7 @@ pub fn run(root: &Path, secs: u64, audio: usize) -> std::process::ExitCode {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(r) = runs.get(i) else { break };
-                    let h = fingerprint(&r.path, r.end, r.input, audio);
+                    let h = fingerprint(&r.path, r.end, r.input, audio, hash_samples);
                     results.lock().expect("lock")[i] = Some(h);
                 }
             });
