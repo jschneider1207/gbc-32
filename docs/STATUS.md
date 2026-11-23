@@ -7,43 +7,47 @@
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
   review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
   (ad56c23). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, end of session 12 (log
-  `logs/2026-11-23-12-m9-edges-window.md`). Baseline 47f186c (must 86/86,
-  should 40/40, stretch 3,301/3,461); full gate passed at 47f186c.
+- **Last updated:** 2026-11-23, end of session 13 (log
+  `logs/2026-11-23-13-m9-stat-hdma.md`). Baseline 1b4e0f8 (must 86/86,
+  should 40/40, stretch 3,376/3,461); full gate passed at f584639 + the
+  human-approved bench rebaseline.
 
-## Next up (session 13): M9
+## Next up (session 14): M9
 
 `docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
 checklist findings from the human become the first fixes when they arrive.
-Failing by area at 47f186c (169 incl. 5 no-reference, 23 signed off):
-gambatte-cgb 108 (dma 32; m1/m2enable/m0enable/lycEnable/lcd_offset ~58),
-Mealybug 20, SameSuite 8 fix targets, cgb-acid-hell 1, AGE m3 1,
-`scx_0367c0` PNG 4.
-1. Line-0 mode-2 IRQ pulse in double speed is likely half a dot later than
-   ours (lcd-offset design step 5 leftover; needs a separate walk point in
-   the hot path): `window/late_enable_afterVblank_ds_lcdoffset1_2`,
-   `lyc153int_m2irq_late_retrigger_ds_1`, and probably
-   `lycint152_lyc0irq_late_retrigger_ds_1`. A probe moving line 0's `Ly4`
-   to t=5 in ds flipped two but regressed two LYC=0 `ds_lcdoffset1` rows.
-   Then lcd-offset design steps 4, 6-9.
-2. Window group 4 left (4): the ds row above; Mealybug
-   `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` (window map/tile
-   writes vs object stalls); `m3_wx_4_change_sprites` (CGB WX-match glitch,
-   SameBoy `cgb_wx_glitch`).
-3. Group 12 remaining: m0enable/disable_*, lycdisable_ff45_* edge positions;
-   lycstatwirq ly00 pair.
-4. HDMA HALT sub-group leftovers (16), GDMA ds length (4), OAM DMA restart
-   `srcchange0000_busyinc`.
-5. Mealybug step F leftovers (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch),
-   step G, `LCDC_TILES_LATE` lead.
-6. Headroom: `.text` 92,152 of 97,500 B, cgb-acid2 +2.43% of its +3% guard
-   (after the 10777f8 size pass). Unused size ideas: share the
-   `set_stalls`/`set_stalls_retriggered` tail (~60-100 B); de-unroll the
-   `set_stalls` copy loops (~500 B, re-check Ir). M8 review lows still open
-   (ITCM globs, per-function budgets, `power_cycle`/`eject` stack frames).
+Failing at 1b4e0f8 (90 incl. 5 no-reference, 23 signed off): SameSuite 28
+(20 signed off, 8 fix targets), Mealybug 20, gambatte m0enable 11,
+`scx_during_m3` 7 (3 signed off, 4 = `scx_0367c0` PNG), oamdma 4,
+lcd_offset 4, m2int_m0irq 3, cgbpal_m3 2, singles (window, speedchange,
+oam_access, miscmstatirq, lycEnable, lyc153int_m2irq, ly0, irq_precedence,
+dma), cgb-acid-hell 1, AGE 1.
+1. **Perf headroom is thin; measure every fix.** Bench rebaselined at
+   f584639 (worst-case 4.007 M Ir/frame, 99.7% of the 4.02 M line; cgb-acid2
+   682.33 M). `.text` 93,984 of 97,500 B. `Hw` is exactly at its 864 B
+   limit. A second entry into the opcode dispatch costs ~1 Ir/instruction
+   (route special opcodes through `Bus::fetch`).
+2. `gambatte/m0enable` (11): `disable_*`, `lycdisable_ff4{1,5}_*`, where
+   mode 0 starts against a STAT/LYC write per SCX (triage group 12). Same
+   gambatte T to t mapping as ADR 0029.
+3. Line-0 mode-2 pulse in double speed at t = 5 (needs a ds-only walk
+   point; hot path): `window/late_enable_afterVblank_ds_lcdoffset1_2`,
+   `lyc153int_m2irq_late_retrigger_ds_1`, `lycint152_lyc0irq_late_retrigger_ds_1`.
+   Then lcd-offset design steps 6-9 (`lcd_offset` 4).
+4. STAT singles: `lyc_ff45_trigger_delay_2` (delayed IF request 5 cycles
+   after an LYC write, CGB single speed; a bus-scheduled event),
+   `lycstatwirq_trigger_ly00_10_50_1` (phase 2 vs the walk at line 0, open
+   in `docs/reference/stat-irq.md`), `m2int_m0irq` 3.
+5. Window/Mealybug: `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change`,
+   `m3_wx_4_change_sprites` (SameBoy `cgb_wx_glitch`); step F leftovers
+   (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch), step G, `LCDC_TILES_LATE`.
+6. OAM DMA: `hdma_transition_oamdma_1` (OAM DMA during a VRAM DMA, ADR 0017
+   deferred), `oamdma` 4 incl. `srcchange0000_busyinc`.
 7. SameSuite group 15 fix targets (8): `channel_1_freq_change_timing-cgb0BC`
-   and the 7 unclear (ch1 sweep x2, volume x2, ch4 align/delay/
-   equivalent_frequencies).
+   and the 7 unclear. APU budgets near full (219.5k/230k, 908/950 per write).
+8. Size ideas unused: share the `set_stalls`/`set_stalls_retriggered` tail
+   (~60-100 B); de-unroll `set_stalls` copy loops (~500 B, re-check Ir). M8
+   review lows still open.
 After M9: M10, in-depth review (human starts it on Fable).
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
@@ -64,12 +68,12 @@ arrows, Z = B, X = A, Enter = Start, Right Shift/Backspace = Select, Esc
 quits. Real-game headless smoke (scratch copies of `/mnt/x/gbc-roms`,
 3600 frames) is clean at c8e8626.
 
-Perf watch (`perf/bench-baseline.txt`): `synth:worst-case` is +0.02% vs its
-baseline (476.57 M Ir; ~99.4% of the 4.02 M x86 Ir/frame line). cgb-acid2
-+2.40% of the +3% guard on main (10777f8). APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
-`Ctx::write_apu` 498/508 B. `.text` 92,134 of 97,500 B on main (10777f8). The 50% bar
+Perf watch (`perf/bench-baseline.txt`, rebaselined f584639+, human-approved):
+`synth:worst-case` 478.60 M Ir = 4.007 M Ir/frame, 99.7% of the 4.02 M x86
+line. cgb-acid2 682.33 M (guard +3% from there). APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
+`Ctx::write_apu` 498/508 B. `.text` 93,984 of 97,500 B (f584639). The 50% bar
 covers realistic worst cases; dense mid-mode-3 writes are outside it
-(docs/perf.md). ITCM set 48,692 of 57,344 B (ADR 0026 Proposed). Gate checks:
+(docs/perf.md). ITCM set 49,066 of 57,344 B (ADR 0026 Proposed). Gate checks:
 code size, ITCM set, byte-wide ROM loads (ADR 0027), bench. Fingerprint corpus
 4,020 runs. Wall-clock baseline: `bench --wall` (docs/perf.md).
 
@@ -81,25 +85,11 @@ Working rules that matter here:
   diff-fingerprint, gate) alone; core work in scratch worktrees with their
   own target dir, merged by `--ff-only` after a rebase.
 - Parallel agents can collide on ADR numbers: check `docs/decisions/`
-  right before committing an ADR (next free: 0029).
+  right before committing an ADR (next free: 0030).
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Session 13 (2026-11-23): four M9 fixes merged to main (c274be8 HDMA speed
-  switch +21; 8e30952..046958f STAT 144/0 +23; b05f1b3..ced776f STAT/LYC +20;
-  dcfa9f8 latched opcode around VRAM DMA +11; ADR 0017/0020 amendments,
-  ADR 0029). Combined: must 86, should 40, stretch 3,376/3,461, 0 regressions.
-- **Gate FAILS at ba25229 on check-bench**: cgb-acid2 +4.29%, halt-irq +3.37%,
-  worst-case +1.60% = 4.053 M Ir/frame, OVER the 4.02 M line. Everything else
-  passes (.text 93,912 B, ITCM 49,122 B). Baseline NOT updated. Perf agent on
-  `m9-perf` (worktree `../gbc-32-perf`) attributing and recovering Ir,
-  behavior-preserving (fingerprint identical). No more code work until it lands.
-- HDMA leftover: `hdma_transition_oamdma_1` = OAM DMA during a VRAM DMA
-  (ADR 0017 deferred).
-- STAT leftovers (agent hypotheses): `lyc_ff45_trigger_delay_2` needs a delayed
-  IF request 5 cycles after an LYC write (gambatte CGB single speed);
-  `lycstatwirq_trigger_ly00_10_50_1` is phase 2 vs the walk at line 0 (open);
-  the two ds retrigger ROMs need a double-speed-only line-0 walk point (t = 5).
+- None (session 13 ended with no worktrees or unmerged agent branches).
 
 ## Needs human
 Open:
@@ -295,12 +285,12 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 47f186c (`acceptance/results/stage1.json`, session 12 end; M8 tag
-`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at 47f186c.
-(.text 92,152 B, cgb-acid2 +2.43%, worst-case +0.02%.)
+Baseline 1b4e0f8 (`acceptance/results/stage1.json`, session 13 end; M8 tag
+`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at f584639 with the rebaselined bench.
+(.text 93,984 B, worst-case 4.007 M Ir/frame.)
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 40 | 40 | |
-| stretch | 3,301 | 3,461 | 160 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |
+| stretch | 3,376 | 3,461 | 85 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |
