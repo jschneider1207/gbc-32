@@ -206,7 +206,7 @@ budget); nothing merges to `main` before step 2's human decision.
    shift 14/15 frozen, shared length/envelope, PCM34 high nibble. Result:
    cgb_sound passes whole (must 86/86), gambatte `ch4_*` +3, same-suite
    `channel_4` +4, no regressions.
-6. [ ] **cgb_sound to pass**: run `--filter 'blargg/cgb_sound/**'`, fix what
+6. [x] (passes whole after a86cc85, CH4; no separate fixes needed) **cgb_sound to pass**: run `--filter 'blargg/cgb_sound/**'`, fix what
    fails in 01/02/03/07/08/11 (registers, length, trigger, frame-sequencer
    sync, power). If more than two subtests fail here, one agent per
    subtest. Must-tier gate step green.
