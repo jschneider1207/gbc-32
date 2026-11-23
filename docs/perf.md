@@ -97,6 +97,13 @@ a recorded optimization target if the M7 measurement needs the room (plan
 M8 task "APU cost is over its original estimate"). worst-case was 3.78 M
 Ir/frame, 94.0% of the 4.02 M line, then; with NR50 writes per line it is
 3.908 M, 97.2% (per-sync fixed cost, below); thumbv7em `.text` 94,754 of 96,000 B.
+**Split APU budget (human, 2026-11-22, after the M6 perf review):** (a) channels
+and mixing, measured on a worst case without APU register writes: 230k
+Ir/frame (224.1k at 0fc52a8); (b) APU register writes: <= 950 x86 Ir per
+write (884.6 at 117461b, `synth:apu-writes` minus its `@hram` control).
+The overall bar, `synth:worst-case` <= 4.02 M Ir/frame (now with ~146
+NR50 writes/frame, APU share ~353k), stays the real guard.
+
 The rest of this section is how it got there (the table's earlier columns
 and the 270k statement are history). `synth:worst-case`
 (2 s, 119.455 frames), all with buffers; channel cost = Ir over `@0`

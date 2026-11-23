@@ -546,3 +546,16 @@ differences from SameBoy (docs/reference/apu.md): the trigger phase and
 its alignment terms, the alignment term on an NR43 reload, the counter
 not running while the channel is off, and the revision-specific NR43
 glitch steps (`nr43_write`, including CGB-C's intermediate 0xFF write).
+
+## Amendment: split APU perf budget (2026-11-22, human)
+
+The M6 perf review found that the per-sync fixed cost scales with the APU
+register write rate, and the 230 k budget did not cover it (`synth:worst-case`
+made no APU writes). `synth:apu-writes` (b78ed12) measures 884.6 x86 Ir per
+write after 117461b. `synth:worst-case` now toggles NR50 about 146 times a
+frame. That brings it to 3.908 M Ir/frame (97.2% of the 4.02 M line), with
+an APU share of about 353 k. The human split the budget into two parts:
+**230 k Ir/frame for channels and mixing** (measured without register
+writes) and **<= 950 Ir per APU register write**. The 4.02 M worst-case
+line stays the overall guard. Both parts remain optimization targets (plan
+M8).
