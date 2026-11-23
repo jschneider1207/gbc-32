@@ -437,3 +437,31 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   (one SCX write per line) +2.63% vs the committed baseline (main +2.27%,
   ~+65 Ir per write: the wider `Held` copies and `regs_of`);
   `synth:worst-case` -0.32% (same as main).
+
+### Step D (double-speed write timing, branch `ppu-midline-d`)
+
+- **Rule.** In double speed, LCDC, SCY and SCX writes reach the fetcher
+  one dot before the access: `write_ppu` flushes and calls `hold_fetch`
+  at `now - 1` (LCDC: `now - u64::from(double)`; the rest of the LCDC
+  write, `write_lcdc`, stays at `now`). It is a per-speed constant, not a
+  per-register one: the speed is applied where the write dot is chosen,
+  so `hold_fetch` and its split points (`FETCH_SAMPLED`, `FETCH_LOW`,
+  `FETCH_HIGH`, `LCDC_TILES_LATE`) are unchanged and single speed is
+  untouched. References: SameBoy `cgb_double_conflict_map` puts SCX
+  (`GB_CONFLICT_SCX_DMG_AND_CGB_DOUBLE`) and LCDC
+  (`GB_CONFLICT_LCDC_CGB_DOUBLE`, then the TILE_SEL glitch for one dot)
+  at `pending_cycles - 2` 8 MHz ticks = one dot early; it keeps SCY at the
+  access (`GB_CONFLICT_READ_OLD`), but gambatte's hardware-verified
+  `scy_during_m3_*ds*` need SCY one dot early too (0 -> 15 flips).
+- **Calibration** (full manifest vs main, offsets LCDC/SCY/SCX in dots):
+  0/0/1 -> 35, 0/1/0 -> 15, 1/0/0 -> 6, 0/0/2 -> 35 (same ROMs as 1),
+  0/2/0 -> 11, 2/0/0 -> 2 flips with 6 regressions, 1/1/1 -> 56,
+  1/1/2 -> 56, 1/2/1 -> 52; all others 0 regressions.
+- **Result:** 56 fail->pass, 0 regressions: gambatte `scx_during_m3_ds_*`
+  (38, all SCX groups), `scy_during_m3_ds_{1..7}`,
+  `scy_during_m3_spx0{8,9}_ds_{1..4}`, `bgtilemap_spx0{8,9}_ds_{1,4}`,
+  `bgtiledata_spx08_ds_{3,4}`. Still failing: AGE `m3-bg-lcdc-ds`,
+  gambatte `scx_attrib_during_m3_spx{1,2}_ds`, `scx_during_m3_spx2_ds`.
+- **Cost.** `.text` 95,636 -> 95,730 B. `synth:cgb-raster` +2.60% vs the
+  committed baseline (main +2.63%), `synth:worst-case` -0.32% (as main).
+  `Held` not repacked (not needed for this step).
