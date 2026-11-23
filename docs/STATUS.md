@@ -84,6 +84,13 @@ Working rules that matter here:
 
 ## Needs human
 Open:
+- **Stage 3 ROM memory (hardware repo, human-owned):** independent review
+  `docs/reference/stage3-rom-memory-options.md` (session 12) recommends
+  3.0 V HyperRAM on OCTOSPI (as on the STM32H735G-DK) over the ADR 0001 FMC
+  SDRAM, medium confidence, pending a DK measurement; revisiting ADR 0001 is
+  the human's call. Also found: the ADR 0002 pin draft puts SDNE0 on PC2_C,
+  which adds 4.5 ns (DS13312 Table 76 note 2, checked) and breaks 95 MHz
+  SDRAM timing if SDRAM stays.
 - **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
   checks: Ctrl+C in the window still saves; change the default audio output
   device mid-game (expect `audio stopped`, then within ~2 s `output device
