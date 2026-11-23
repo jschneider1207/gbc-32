@@ -4019,4 +4019,63 @@ mod dma_tests {
             });
         }
     }
+
+    /// CGB, single speed: with the LCD on (frame position = clock - E +
+    /// 7), selects `sel`, then a STAT write of `value` with its access at
+    /// frame position `pos`; returns IF's STAT bit from the write to `n`
+    /// M-cycles after it.
+    fn stat_irq_after_write(sel: u8, pos: u64, value: u8, n: u64) -> u8 {
+        let emu = setup();
+        let mut stat = 0;
+        with_ctx(emu, |ctx| {
+            let e = ctx.clock();
+            ctx.write(0xFF45, 0xFF);
+            ctx.write(0xFF40, 0x91);
+            ctx.write(0xFF41, sel);
+            idle_to(ctx, e, (pos - 3) / 4);
+            ctx.sys.iflags = 0;
+            ctx.write(0xFF41, value);
+            idle_to(ctx, e, (pos - 3) / 4 + n);
+            stat = ctx.sys.iflags & crate::ppu::INT_STAT;
+        });
+        stat
+    }
+
+    /// Line 143's mode 0 ends for STAT writes at line 144 dot 3, and a
+    /// write from there to VBlank (dot 5) no longer changes the selects
+    /// that block the mode-1 interrupt (gambatte `m1/ly143_late_m0enable`,
+    /// `m1irq_m0disable` `_1`/`_2`, CGB04C; `edges::MODE_HOLD_SS`).
+    #[test]
+    fn line_144_stat_writes_from_dot_3_keep_the_mode_part() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let (l143_455, l144_3) = (143 * 456 + 455, 144 * 456 + 3);
+        // Enabling mode 0: on time, then too late.
+        assert_eq!(stat_irq_after_write(0, l143_455, 0x08, 1), STAT);
+        assert_eq!(stat_irq_after_write(0, l144_3, 0x08, 3), 0);
+        // Clearing mode 0 with mode 1 selected: the mode-1 interrupt
+        // follows, then stays blocked by the old select.
+        assert_eq!(stat_irq_after_write(0x18, l143_455, 0x10, 3), STAT);
+        assert_eq!(stat_irq_after_write(0x18, l144_3, 0x10, 3), 0);
+        // Line 0 dot 3: a mode-1 enable is too late (`m1irq_late_enable`).
+        let (l153_455, l0_3) = (153 * 456 + 455, 154 * 456 + 3);
+        assert_eq!(stat_irq_after_write(0x40, l153_455, 0x10, 1), STAT);
+        assert_eq!(stat_irq_after_write(0x40, l0_3, 0x10, 1), 0);
+    }
+
+    /// Line 144's mode-2 quirk interrupt is at dot 3, once, and with mode
+    /// 2 selected the mode-1 interrupt at VBlank is blocked (gambatte
+    /// `m1/m2m1irq_ifw_2`, `ly143_late_m2enable_2`, CGB04C;
+    /// `edges::QUIRK2`).
+    #[test]
+    fn line_144_mode_2_quirk_once_at_dot_3() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        // Writes of the same selects: the line doesn't change. From line
+        // 143 dot 455: the quirk at dot 3.
+        assert_eq!(stat_irq_after_write(0x30, 143 * 456 + 455, 0x30, 2), STAT);
+        // From dot 3, with the quirk already in: nothing at VBlank.
+        assert_eq!(stat_irq_after_write(0x30, 144 * 456 + 3, 0x30, 3), 0);
+        // Mode 2 enabled at dot 3 is too late for the quirk, and VBlank
+        // doesn't repeat it.
+        assert_eq!(stat_irq_after_write(0, 144 * 456 + 3, 0x20, 3), 0);
+    }
 }

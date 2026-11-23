@@ -33,6 +33,30 @@ INT $48 STAT: https://gbdev.io/pandocs/Interrupt_Sources.html
   `m2enable/*m0disable*`, `lycEnable/*disable*` need (making every
   clear land in the second phase regressed 10 of them).
 
+## Line 144 and line 0 (single speed)
+
+Sources: gambatte `video.cpp` `statChangeTriggersM0LycOrM1StatIrqCgb`,
+`statChangeTriggersM2IrqCgb`, `mstat_irq.h` `doM1Event` and
+`statRegChange` (behavior only, GPL); CGB04C results of gambatte
+`m1/*`. gambatte's `timeToNextLy` T maps to our line position as
+t = 7 - T on the next line (its line-144 mode-1 interrupt at T = 2 is our
+VBlank at t = 5; its mode-2 interrupt at T = 4 is our `Ly3`, t = 3).
+
+- The line-144 mode-2 quirk interrupt is at t = 3, as every line's
+  mode-2 interrupt, and only once: SameBoy also requests it at VBlank,
+  but `m1/m2m1irq_ifw_2` (an IF write at t = 3 leaves only VBlank) rules
+  that out.
+- The mode-1 interrupt is blocked by a mode-0 or mode-2 select as of
+  t = 3 (`doM1Event` uses the selects latched at the last event or STAT
+  write landing at `T > 4`). Our walk holds the line's mode part from
+  t = 3 (sources modes 0 and 2) to VBlank.
+- STAT writes at line 144 t = 3-4 and line 0 t = 3 neither raise nor
+  lower the mode part (`MODE_HOLD`): a mode-0 enable at line 143 and a
+  mode-1 enable at line 153 trigger only while `T > 4`, an old mode-1
+  select blocks while `T > 3`, and such a write no longer changes the
+  selects the mode-1 interrupt is blocked by. Double speed is not
+  changed (its phase 2 lands half a dot in, design step 4).
+
 ## Open
 
 - `lycstatwirq_trigger_ly00_10_50_1` and `_ds_1` (want `E0`): the write

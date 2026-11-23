@@ -201,8 +201,29 @@ pub(crate) const LYC_DEFER_UNTIL_DS: u32 = 3;
 /// [`CMP_ON`].
 pub(crate) const VCMP_OFF: u32 = 0;
 
-/// Line 144: the mode-2 interrupt quirk.
-pub(crate) const QUIRK2: u32 = t(h(2));
+/// Line 144: the mode-2 interrupt quirk, where the mode-2 interrupt of
+/// lines 1-143 is ([`PT_LY`]): gambatte (behaviour only, `video.cpp`)
+/// schedules line 144's at frame cycle `143 * 456 + 452`
+/// (`mode2_irq_line_cycle`), the same line cycle as every other line's.
+/// From here to [`VBLANK`] the mode-2 and mode-0 sources are both live for
+/// the walk (`MODE_0_2`): a mode-1 interrupt is blocked by either select
+/// (gambatte `mstat_irq.h` `doM1Event`), and no IRQ at [`VBLANK`] repeats
+/// the quirk. CGB04C: `m1/m2m1irq_ifw_2` (an IF write here clears it and
+/// nothing follows), `m1/ly143_late_m2enable_2` (a write enabling mode 2
+/// here is too late for it).
+pub(crate) const QUIRK2: u32 = t(h(3));
+
+/// Single speed: STAT writes at line 144 from [`QUIRK2`] to [`VBLANK`],
+/// and at line 0's [`PT_LY`], neither raise nor lower the mode part of the
+/// STAT line (`MODE_HOLD`). gambatte (behaviour only, `video.cpp`
+/// `statChangeTriggersM0LycOrM1StatIrqCgb`): with `timeToNextLy` T = 7 - t
+/// on our grid, a mode-0 enable triggers at line 143 only while
+/// `T > 4`, a mode-1 enable at line 153 only while `T > 4`, while an old
+/// mode-1 select blocks until `T <= 3`; a write at `T <= 4` no longer
+/// updates the selects the mode-1 interrupt is blocked by
+/// (`mstat_irq.h` `statRegChange`: `cc + 2 < m1 time`). CGB04C:
+/// `m1/ly143_late_m0enable_2`, `m1irq_m0disable_2`, `m1irq_late_enable_2`.
+pub(crate) const MODE_HOLD_SS: u32 = t(h(3));
 
 /// Line 144: mode 1, the VBlank interrupt and the frame.
 pub(crate) const VBLANK: u32 = t(h(5));
