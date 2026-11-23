@@ -4,51 +4,58 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M7 (desktop front end), not started. M6 is `stage1-m6`
-  (578fd0d), M5 `stage1-m5`, M4 `stage1-m4`, M3 `stage1-m3`, M2
-  `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, end of session 08 (M6 close; log
-  `logs/2026-11-22-08-m6-apu.md`)
+- **Milestone:** M8 (game compatibility + perf baseline), not started. M7
+  is `stage1-m7`, M6 `stage1-m6`, M5 `stage1-m5`, M4 `stage1-m4`, M3
+  `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
+- **Last updated:** 2026-11-22, end of session 09 (M7 close; log
+  `logs/2026-11-22-09-m7-desktop.md`)
 
 ## Next up
 
-Start M7 (`docs/plan/stage-1.md` "M7") in a fresh session. Desktop system
-libraries are installed (`install-system-deps.sh --check` ok, session 08).
-The core's audio contract for the front end is in architecture.md: 32,768
-Hz stereo `i16`, buffers sized `n/128 + 2`, the front end resamples and
-DC-blocks, audio-paced frame timing. M7 acceptance:
-`cargo build -p gbc-desktop` plus `--headless --frames N` exits 0; the
-human checks interactive play.
+Start M8 (`docs/plan/stage-1.md` "M8") in a fresh session. The first M8
+task, "fix issues found in the real-game checklist", needs the human's
+play-testing on the new front end (Needs human). Until then, take the
+unblocked M8 items: the headless frames/second benchmark, the M6/M7
+review lows, code-size/ITCM planning, unaligned ROM reads.
 
-1. Then M8 (game compatibility + perf baseline) and M9 (every manifest ROM
-   passes, or a human-signed group). The Stage 1 completion rule is in
-   README "Done when" (human, 2026-11-22).
-2. Plan M8 now carries the M6 leftovers: APU over its original estimate
-   (an optimization target), per-write cost as the next lead, and the M6
-   review lows (stale APU per-function budgets, u64 divides, dead
-   `try_map` symbols, envelope period 0, post-boot APU details, romtest
-   capture-length check, a hangable DMA test). It also has the ITCM/I-cache
-   item (APU hot set ~4.4 KB).
+Desktop front end (`crates/gbc-desktop`, M7): `gbc-desktop <rom>
+[--scale K] [--headless --frames N]`. winit 0.30 + softbuffer (CPU blit,
+integer scale), cpal 0.18 audio with audio-driven pacing (ADR 0024: 20 Hz
+DC blocker, Catmull-Rom resampler, ±0.5% DRC, 50 ms target, falls back to
+clock pacing if no device or the callback stalls 500 ms), gilrs 0.11
+gamepad, `.sav` next to the ROM with the 48-byte BGB/VBA-M RTC footer and
+a 1 s settle / 10 s cap autosave (ADR 0023). Keys: arrows, Z = B, X = A,
+Enter = Start, Right Shift/Backspace = Select, Esc quits. Env:
+`GBC_NO_AUDIO=1` (silent clock pacing), `GBC_AUDIO_STATS=1` (underrun /
+fill stats). The gate now builds it and runs `cpu_instrs.gb` headless for
+600 frames (contract item 8).
 
-Perf watch: `synth:worst-case` 3.908 M x86 Ir/frame, **97.2% of the 4.02
-M line** (~110k headroom), now with all four channels at their worst
-periods and ~146 NR50 writes/frame. The APU budget is split (human): 230k
-channels+mixing (224.1k), <= 950 Ir per APU write (884.6). Code size:
-`.text` 94,754 of 96,000 B (1.2 KB left). Run `check-bench.sh` and
-`check-code-size.sh` on every hot-path step. `cargo doc -D warnings`
-fails on 3 links in `cpu/mod.rs`, which predate M6 and aren't in the gate.
+Perf watch (unchanged in M7; the core was not touched): `synth:worst-case`
+3.908 M x86 Ir/frame, **97.2% of the 4.02 M line** (~110k headroom). APU
+budget (human): 230k channels+mixing (224.1k), <= 950 Ir per APU write
+(884.6). Code size: `.text` 94,754 of 96,000 B (1.2 KB left). Run
+`check-bench.sh` and `check-code-size.sh` on every hot-path step. `cargo
+doc -D warnings` fails on 3 links in `cpu/mod.rs` (not in the gate).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
 - `scripts/diff-fingerprint.sh <rev>` proves "no behavior change";
-  behavior changes must list and explain every differing ROM. A STOP
-  counter attributed all 1,368 speed-switch diffs (session 07).
+  behavior changes must list and explain every differing ROM.
 - Resources: at most 2 concurrent builds, heavy steps (bench, fingerprint,
   gate) alone; scratch worktrees get their own target dir and are deleted
   when done (AGENTS.md "Machine resources").
-- Agents with one theme and a ~20-45 tool-call cap stay on budget.
+- Agents with one theme and a ~15-45 tool-call cap stay on budget.
 
 ## Needs human
+Open (session 09, M7):
+- **Interactive play check** (M7 acceptance): run `cargo run -p
+  gbc-desktop --release -- <rom>` on WSLg and on native Windows (only a
+  `cargo check --target x86_64-pc-windows-gnu` was done here); check
+  picture, keyboard, a gamepad (untested: no pad in WSL), sound, and that
+  a battery game's `.sav` survives a restart. WSLg's weston crashed twice
+  (SIGSEGV) during the agent's early audio runs; not reproduced since.
+  Then the real-game checklist (plan M8).
+
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
@@ -142,7 +149,7 @@ Context on earlier human decisions:
   toolchain; a change to either is a rebaseline commit.
 - **SM83 single-step data:** `scripts/fetch-sm83-tests.sh` →
   `test-data/sm83/`. Set `GBC_REQUIRE_TEST_DATA=1` locally.
-- **Desktop system libraries:** installed. WSL2 Ubuntu 24.04, no `jq`.
+- **Desktop system libraries:** installed. Windows target `x86_64-pc-windows-gnu` added to rustup (user-level, session 09) for `cargo check`. WSL2 Ubuntu 24.04, no `jq`.
   Scripts are bash or Elixir, not Python.
 - **Datasheets:** `../gbc-32-hardware/datasheets/` (read-only for agents).
 - **Commits:** stage by explicit path only (AGENTS.md Git). Other agents
@@ -162,7 +169,7 @@ None.
 
 ## Acceptance snapshot
 
-M6 baseline (`stage1-m6`, 578fd0d). `scripts/gate-stage1.sh` passes.
+M7 baseline (`stage1-m7`; identical to M6, the core is unchanged). `scripts/gate-stage1.sh` passes.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|

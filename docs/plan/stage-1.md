@@ -277,11 +277,11 @@ section 12), not part of the M6 gate:
 
 ## M7: Desktop front end
 
-- [ ] Window with integer-scaled 160×144 output, keyboard and gamepad input
-- [ ] Audio output with frame pacing driven by audio
-- [ ] Load ROM from a path; battery saves and RTC persisted next to the ROM (`.sav`)
-- [ ] Builds and runs on Windows and on WSL2 (WSLg)
-- [ ] Before starting: likely needs system libraries (ALSA, udev, Wayland, xkbcommon dev packages). Check STATUS "Needs human" and don't install them yourself
+- [x] (1aae786, 07fa0a0) Window with integer-scaled 160×144 output, keyboard and gamepad input
+- [x] (30a66f0, ADR 0024) Audio output with frame pacing driven by audio
+- [x] (ceb1f48, afa921f, ADR 0023) Load ROM from a path; battery saves and RTC persisted next to the ROM (`.sav`)
+- [x] Builds and runs on WSL2 (WSLg); Windows: `cargo check --target x86_64-pc-windows-gnu` passes, a native Windows build and run is the human's check
+- [x] Before starting: likely needs system libraries (ALSA, udev, Wayland, xkbcommon dev packages). Check STATUS "Needs human" and don't install them yourself
 
 **Acceptance:** `cargo build -p gbc-desktop` succeeds; the front end runs a
 test ROM headlessly for N frames via `--headless --frames N` and exits 0.
@@ -308,6 +308,9 @@ The human checks interactive play.
 - [ ] Benchmark: headless emulated frames/second on desktop for a fixed set of ROMs; record host cycles per emulated frame as the baseline for Stage 2
 - [ ] PPU edge cases from the M3 hardware review (low, no ROM): WY==LY only checked at t=89 and on writes, not at mode-2 start (a WY/LCDC.5 write in [4,89) loses the window trigger); a palette write whose line end == `now` misses pixel 159 (`bus.rs` palette flush: run to `at`, flush, then sync); a coarse mid-line SCX change applies mid-tile, hardware at the next fetch; mode-3 window stall latched at t=89 (WY/LCDC.5/WX writes in mode 3 change pixels, not mode-3 length); LCDC.2 (object height) latched at t=89, not per scanned entry; running-DMA OAM scan uses the mode-2 bus (SameBoy) vs Pan Docs "off-screen"; `stat_during_dma` mode-0 window vs the PPU's start-delay "off"; WY write in HBlank triggers the window next line (SameBoy) vs Pan Docs mode-2-only
 - [ ] Code size (M3 perf review): gbc-core `.text` 79.6 KB after 3b556ae (61.2 KB at M2), no longer fits the H753's 64 KB ITCM; per-frame hot set ~52 KB. Plan per-function ITCM placement (front-end link sections), and add a total-`.text` budget to `check-code-size.sh` (stricter)
+
+- [ ] M7 review lows (desktop): headless `--frames N` counts `run_frame` calls (the first stops at the first FRAME_READY), and no integration test asserts N frames ran (e.g. 120 frames → RTC live seconds >= 32); window ignores `screen_blank()`/`lcd_enabled()` (LCD off keeps the last frame instead of white, and the first frame after LCD on is shown); `game.gb` and `game.gbc` side by side share `game.sav`; Ctrl+C/kill/panic skips the exit save (signal handler); audio never returns after a clock fallback (device resume); tests `atomic_write_replaces_and_leaves_no_temp` (passes with plain `fs::write`) and `rtc_cart_file_without_footer_loads_ram_quietly` (asserts a warning) are weaker than their names
+- [ ] Desktop: WSLg's weston crashed twice (SIGSEGV, `/mnt/wslg/stderr.log`) during early audio runs in session 09, not reproduced since; watch for it
 
 **Acceptance:** `./scripts/gate-stage1.sh` exits 0.
 
