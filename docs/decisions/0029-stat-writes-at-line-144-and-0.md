@@ -49,3 +49,24 @@ need: the quirk at t = 3 (`ly143_late_m0enable_lcdoffset1_1`,
 `offset1_lyc99int_m2irq_count_1`) and the double-speed hold at line 144
 t = 4 (`ly143_late_m2enable_ds_lcdoffset1_2`). Where SameBoy and gambatte
 differ elsewhere on STAT, this ADR doesn't decide it.
+
+## Amendment (2026-11-23): more STAT and LYC write windows
+
+The gambatte-over-SameBoy rule extends to:
+
+- (a) The STAT write mode-2 and mode-0 windows on lines 0-143. A write
+  before t = 3 sees mode 0. A double-speed first phase sees mode 2 up to
+  t = 6. In double speed, line 0 triggers at t = 4-5.
+- (b) The selects latched for LYC-interrupt blocking in VBlank. A write
+  1-2 dots before the comparison can't lower the mode-1 part
+  (`MODE_1_STICKY`; gambatte `lyc_irq.cpp` `regChange`).
+- (c) Single-speed LYC writes on line 153. They compare with 153 up to
+  t = 7, and the held 152 comparison ends at t = 4
+  (`edges::LYC153_SS_UNTIL`). SameBoy's dots 12-23 window stays, for
+  double speed only.
+- (d) The LCD-off LYC-select interrupt (gambatte `memory.cpp` FF41).
+
+Same T to t mapping. SameBoy's two-phase STAT write stays. Where
+gambatte's single write time and our phase 2 disagree
+(`lycstatwirq_trigger_ly00_10_50_1`), it stays open. +20 ROMs, no
+regressions, +438 B.
