@@ -12,23 +12,33 @@
 
 ## Next up
 
-Start M8 (`docs/plan/stage-1.md` "M8") in a fresh session. The first M8
-task, "fix issues found in the real-game checklist", needs the human's
-play-testing on the new front end (Needs human). Until then, take the
-unblocked M8 items: the headless frames/second benchmark, the M6/M7
-review lows, code-size/ITCM planning, unaligned ROM reads.
+Start M8 (`docs/plan/stage-1.md` "M8") in a fresh session. The human is
+playing the real-game checklist on native Windows; their reports feed the
+first M8 task. Meanwhile take the unblocked M8 items, user-visible first:
+the M7 review lows (LCD-off screen should be white; `.gb`/`.gbc` sharing a
+`.sav`; Ctrl+C save), the headless frames/second benchmark, then code
+size/ITCM and unaligned ROM reads.
 
-Desktop front end (`crates/gbc-desktop`, M7): `gbc-desktop <rom>
-[--scale K] [--headless --frames N]`. winit 0.30 + softbuffer (CPU blit,
-integer scale), cpal 0.18 audio with audio-driven pacing (ADR 0024: 20 Hz
-DC blocker, Catmull-Rom resampler, ±0.5% DRC, 50 ms target, falls back to
-clock pacing if no device or the callback stalls 500 ms), gilrs 0.11
-gamepad, `.sav` next to the ROM with the 48-byte BGB/VBA-M RTC footer and
-a 1 s settle / 10 s cap autosave (ADR 0023). Keys: arrows, Z = B, X = A,
-Enter = Start, Right Shift/Backspace = Select, Esc quits. Env:
-`GBC_NO_AUDIO=1` (silent clock pacing), `GBC_AUDIO_STATS=1` (underrun /
-fill stats). The gate now builds it and runs `cpu_instrs.gb` headless for
-600 frames (contract item 8).
+**Safety (read AGENTS.md "Machine resources"):** never open the Linux
+window under WSLg and never use the GPU from WSL. That combination
+blue-screened the host (`docs/reference/incident-2026-11-22-wslg-bsod.md`).
+Window/audio/input smoke tests use `scripts/run-windows.sh <rom> --frames
+N [--out shot.png]`: it cross-builds the native `.exe` (mingw is
+installed) and runs it via interop on a scratch ROM copy. Keep runs short
+and only for front-end changes.
+
+Desktop front end (`crates/gbc-desktop`): `gbc-desktop <rom> [--scale K]
+[--frames N] [--screenshot out.png] [--dmg-palette auto|gray]
+[--headless]`. winit 0.30 + softbuffer (CPU blit, integer scale), cpal 0.18
+audio with audio-driven pacing (ADR 0024: 20 Hz DC blocker, Catmull-Rom
+resampler, ±0.5% DRC, 50 ms target, clock fallback), gilrs 0.11 gamepad,
+`.sav` next to the ROM with the 48-byte BGB/VBA-M RTC footer, 1 s settle /
+10 s cap autosave (ADR 0023), CGB boot-ROM compatibility palettes for DMG
+games (ADR 0025). Keys: arrows, Z = B, X = A, Enter = Start, Right
+Shift/Backspace = Select, Esc quits. Env: `GBC_NO_AUDIO=1`,
+`GBC_AUDIO_STATS=1`. Gate item 8 builds it and runs `cpu_instrs.gb`
+headless for 600 frames. The human builds natively on Windows from a clone
+(`git pull` from this repo).
 
 Perf watch (unchanged in M7; the core was not touched): `synth:worst-case`
 3.908 M x86 Ir/frame, **97.2% of the 4.02 M line** (~110k headroom). APU
@@ -47,14 +57,13 @@ Working rules that matter here:
 - Agents with one theme and a ~15-45 tool-call cap stay on budget.
 
 ## Needs human
-Open (session 09, M7):
-- **Never run the front end window under WSLg** (AGENTS.md; it crashed weston and then blue-screened the host, 2026-11-22). **Interactive play check** (M7 acceptance), on native Windows only: run `cargo run -p
-  gbc-desktop --release -- <rom>` on WSLg and on native Windows (only a
-  `cargo check --target x86_64-pc-windows-gnu` was done here); check
-  picture, keyboard, a gamepad (untested: no pad in WSL), sound, and that
-  a battery game's `.sav` survives a restart. WSLg's weston crashed twice
-  (SIGSEGV) during the agent's early audio runs; not reproduced since.
-  Then the real-game checklist (plan M8).
+Open (session 09):
+- **Real-game checklist** (plan, bottom; M8), on native Windows. Done so
+  far: Pokémon Red/Crystal played briefly with sound, no crash natively.
+  Still unchecked: a gamepad, and whether a battery `.sav` survives a
+  restart.
+- Optional, strongest guard against a repeat of the BSOD: set
+  `guiApplications=false` in `%UserProfile%\.wslconfig` (disables WSLg).
 
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
