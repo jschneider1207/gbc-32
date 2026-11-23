@@ -56,11 +56,17 @@ impl Cpu {
         dispatch_all!(self, bus, op, op)
     }
 
-    /// The CB-prefixed instructions, after the CB byte.
+    /// The CB-prefixed instructions, after the CB byte. The register forms
+    /// run in their own arm; the 32 (HL) forms (all arms `false`, merged
+    /// into one) share the body after the match: inlining a bus read and
+    /// write into each of them cost about 5 KB on thumbv7em. A (HL) form
+    /// costs ~5 more x86 instructions than inline (the second jump table).
     #[inline(never)]
     fn execute_cb<B: Bus>(&mut self, bus: &mut B) {
         let op = self.imm8(bus);
-        dispatch_all!(self, bus, op, cb)
+        if !dispatch_all!(self, bus, op, cb) {
+            self.cb_hl(bus, op);
+        }
     }
 
     // --- Register helpers. ---
@@ -535,21 +541,86 @@ impl Cpu {
 
     /// CB-prefixed opcode `OP`. Register forms: fetch CB, fetch op (2
     /// cycles). (HL) forms: + read + write (4), BIT b,(HL): + read (3).
+    /// Returns false, doing nothing, for an (HL) form ([`Self::cb_hl`]).
     #[inline(always)]
-    fn cb<const OP: u8, B: Bus>(&mut self, bus: &mut B) {
+    fn cb<const OP: u8, B: Bus>(&mut self, bus: &mut B) -> bool {
         let y = (OP >> 3) & 7;
         let z = OP & 7;
+        if z == 6 {
+            return false;
+        }
         let v = self.get_r(bus, z);
         match OP >> 6 {
             0 => {
                 let r = self.shift(y, v);
                 self.set_r(bus, z, r);
             }
-            // BIT: Z = !bit, N clear, H set, C kept.
-            1 => self.regs.f = (self.regs.f & FC) | FH | flag(v & (1 << y) == 0, FZ),
+            1 => self.bit(y, v),
             2 => self.set_r(bus, z, v & !(1 << y)), // RES
             _ => self.set_r(bus, z, v | (1 << y)),  // SET
         }
+        true
+    }
+
+    /// CB opcode `op`, an (HL) form: read (HL), the operation, write back
+    /// (not for BIT), in the same M-cycles as the register-operand path.
+    #[inline(always)]
+    fn cb_hl<B: Bus>(&mut self, bus: &mut B, op: u8) {
+        let hl = self.hl();
+        let v = bus.read(hl);
+        // One jump table on `op >> 3`, each arm folded for its operation.
+        let r = match op >> 3 {
+            0 => self.cb_val::<0>(v),
+            1 => self.cb_val::<1>(v),
+            2 => self.cb_val::<2>(v),
+            3 => self.cb_val::<3>(v),
+            4 => self.cb_val::<4>(v),
+            5 => self.cb_val::<5>(v),
+            6 => self.cb_val::<6>(v),
+            7 => self.cb_val::<7>(v),
+            8 => return self.bit(0, v),
+            9 => return self.bit(1, v),
+            10 => return self.bit(2, v),
+            11 => return self.bit(3, v),
+            12 => return self.bit(4, v),
+            13 => return self.bit(5, v),
+            14 => return self.bit(6, v),
+            15 => return self.bit(7, v),
+            16 => self.cb_val::<16>(v),
+            17 => self.cb_val::<17>(v),
+            18 => self.cb_val::<18>(v),
+            19 => self.cb_val::<19>(v),
+            20 => self.cb_val::<20>(v),
+            21 => self.cb_val::<21>(v),
+            22 => self.cb_val::<22>(v),
+            23 => self.cb_val::<23>(v),
+            24 => self.cb_val::<24>(v),
+            25 => self.cb_val::<25>(v),
+            26 => self.cb_val::<26>(v),
+            27 => self.cb_val::<27>(v),
+            28 => self.cb_val::<28>(v),
+            29 => self.cb_val::<29>(v),
+            30 => self.cb_val::<30>(v),
+            _ => self.cb_val::<31>(v),
+        };
+        bus.write(hl, r);
+    }
+
+    /// The read-modify-write (HL) operation `Q` (`op >> 3`, not BIT) on `v`.
+    #[inline(always)]
+    fn cb_val<const Q: u8>(&mut self, v: u8) -> u8 {
+        let y = Q & 7;
+        match Q >> 3 {
+            0 => self.shift(y, v),
+            2 => v & !(1 << y), // RES
+            _ => v | (1 << y),  // SET
+        }
+    }
+
+    /// BIT `y`: Z = !bit, N clear, H set, C kept.
+    #[inline(always)]
+    fn bit(&mut self, y: u8, v: u8) {
+        self.regs.f = (self.regs.f & FC) | FH | flag(v & (1 << y) == 0, FZ);
     }
 }
 

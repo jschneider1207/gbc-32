@@ -13,8 +13,9 @@
 # Initial budgets are the measured size plus about 5% headroom.
 # Cpu::run / Cpu::execute_cb lowered to measured (25,504 / 12,078) + 5% so their
 # slack cannot eat the ITCM-set margin (scripts/check-itcm-set.sh, docs/perf.md).
+# execute_cb: 6,892 B after the CB (HL) forms were merged (size pass), + 5%.
 26800 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-12700 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+7240 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
 90 <gbc_core::bus::Ctx>::write_high
 930 <gbc_core::bus::Ctx>::write_io
 890 gbc_core::bus::read_high
