@@ -532,3 +532,44 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   moved to `set_stalls`, called only for lines with objects or a window).
   `synth:cgb-raster` 325,984,385 -> 326,052,348 Ir (+0.02%; +2.70% of the
   3% guard), `synth:worst-case` -0.32% vs baseline (as main).
+
+### Window trigger consistency (M8-close review fixes)
+
+- **One decision for timing and pixels.** The renderer no longer starts
+  the window from the live WY condition, LCDC.5 and WX when it reaches
+  x = WX - 7. It follows `Renderer::win_wx` (WX + 1, 0 = none), set with
+  the stalls: at the line start (`start_line`, from `latch`) and by
+  `window_write` whenever it rebuilds them. So a write `window_write`
+  rejects as too late draws no window and counts no window row (before,
+  WY writes up to `WY_LEAD + fine` dots, LCDC.5/WX writes 1 dot, before
+  x = WX - 7 drew the window with no stall and shifted later rows), and a
+  WX or LCDC.5 write during the 6-dot stall can't undo it: the row is
+  counted at the trigger (SameBoy display.c: `window_y++` and
+  `wx_triggered` at the trigger dot), the window starts at the decided x,
+  and LCDC.5 clear at the trigger draws the BG. Approximation: no
+  re-trigger at a later WX match after LCDC.5 was cleared on the same
+  line (SameBoy re-triggers; still group-4 work). Test:
+  `window_pixels_follow_the_timing_decision`.
+- **Leads.** `WINDOW_LEAD`, `WINDOW_ON_LEAD` and `WY_LEAD` stay calibrated
+  approximations; no reference pins them. SameBoy compares the live WX
+  each dot (a lead of 0 fits `WINDOW_LEAD`), with no appear/disappear
+  asymmetry (the extra dot of `WINDOW_ON_LEAD` is calibration; a CGB WX
+  write lands one dot after an LCDC one, `GB_CONFLICT_WRITE_CPU` vs
+  `GB_CONFLICT_LCDC_CGB`, which would fit WX only). A WY write is checked
+  1-8 dots later on an 8-dot grid aligned to LCD-on (`wy_check_scheduled`,
+  `wy_check_modulo`, CGB single speed), then `wy_just_checked` skips one
+  window compare: phase-dependent, which the constant `WY_LEAD` (3-5 give
+  the same manifest) only approximates. Pan Docs and GBCTR give no
+  write-to-effect timing. Details at the constants in `ppu/mod.rs`.
+- **Result.** Full manifest: 0 regressions, no flips (86 / 39 / 3126).
+  `diff-fingerprint.sh main`: 11 runs (6 ROMs), all writing WX or
+  LCDC.5 in mode 3 and failing before and after: Mealybug
+  `m3_wx_{4,5,6}_change`, `m3_lcdc_win_en_change_multiple(_wx)` (and
+  their `#input` runs) and gambatte `weon_wx18_weoff_weon_wx80` (WX moved
+  or the window re-enabled after its start no longer re-trigger it).
+- **Cost.** `.text` 97,058 -> 96,990 B (`window_start` computed from
+  `win_wx`, `LineTiming::wx` dropped; `Hw` stays 864 B). `synth:worst-case`
+  464,590,933 -> 464,700,675 Ir (+0.02%: the per-line `win_wx` store);
+  with the mid-line-SCX worst case (branch `bench-worst-case-midline-scx`)
+  476,334,993 -> 476,467,536 Ir (99.19% -> 99.22% of the 4.02 M Ir/frame
+  line).

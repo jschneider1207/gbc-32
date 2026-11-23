@@ -242,12 +242,18 @@ pub(crate) struct Renderer {
     fine_scx: u8,
     /// The window has been activated on this line and not switched off.
     window_active: bool,
-    /// Screen x where the window was activated.
-    window_start: u8,
-    /// Window map column (pixels) at `window_start`.
-    window_skip: u8,
     /// Window map row (pixels) this line draws.
     window_row: u8,
+    /// WX + 1 for the WX at which the window starts on this line, as the
+    /// line's timing decided it (with the stalls: `Ppu::latch`,
+    /// `Ppu::window_write`); 0: none (so a reset is all zeros). The
+    /// renderer follows that decision, not the live WY condition, LCDC.5
+    /// and WX, so the pixels and the window line counter agree with mode
+    /// 3's length (SameBoy display.c sets `wx_triggered` and `window_y++`
+    /// at the trigger dot; later writes don't undo them).
+    win_wx: u8,
+    /// Window map column (pixels) at [`Renderer::window_start`].
+    window_skip: u8,
     pub(crate) objects: LineObjects,
     /// Slots of `objects` from highest to lowest drawing priority.
     pub(crate) order: [u8; MAX_PER_LINE],
@@ -271,9 +277,9 @@ impl Renderer {
             ly: 0,
             fine_scx: 0,
             window_active: false,
-            window_start: 0,
-            window_skip: 0,
             window_row: 0,
+            win_wx: 0,
+            window_skip: 0,
             objects: LineObjects::EMPTY,
             order: [0; MAX_PER_LINE],
             obj_dirty: false,
@@ -306,57 +312,83 @@ impl Renderer {
         self.wy_triggered
     }
 
+    /// The window starts on the current line at WX `wx` (`None`: it
+    /// doesn't), as the line's timing decided (with its stalls: at the line
+    /// start, [`Renderer::start_line`], and after a window write in mode 3).
+    pub(crate) const fn set_window(&mut self, wx: Option<u8>) {
+        self.win_wx = match wx {
+            Some(wx) => wx.wrapping_add(1),
+            None => 0,
+        };
+    }
+
+    /// WX at which the window starts on the current line, if it does
+    /// ([`Renderer::set_window`]).
+    pub(crate) const fn window_wx(&self) -> Option<u8> {
+        self.win_wx.checked_sub(1)
+    }
+
     /// The window state at the last pixel drawn: active, its start pixel
     /// and the pixels cut from its first tile.
     pub(crate) const fn window(&self) -> (bool, u8, u8) {
-        (self.window_active, self.window_start, self.window_skip)
+        (self.window_active, self.window_start(), self.window_skip)
     }
 
     /// [`Renderer::window`] as it will be once pixels `[x0, x1)` are drawn
-    /// with LCDC `lcdc` and WX `wx` ([`Renderer::render`]'s window steps):
-    /// for a write whose flush is deferred (`Ppu::scroll_write`).
+    /// with LCDC `lcdc` ([`Renderer::render`]'s window steps): for a write
+    /// whose flush is deferred (`Ppu::scroll_write`).
     #[inline]
-    pub(crate) fn window_after(&self, x0: usize, x1: usize, lcdc: u8, wx: u8) -> (bool, u8, u8) {
+    pub(crate) fn window_after(&self, x0: usize, x1: usize, lcdc: u8) -> (bool, u8, u8) {
         let x1 = x1.min(W);
         if x0 >= x1 {
             return self.window();
         }
         let on = lcdc & LCDC_WIN_ON != 0;
-        if !self.window_active && on && self.wy_triggered && wx <= 166 {
-            let start = usize::from(wx.saturating_sub(7));
+        if !self.window_active && self.win_wx != 0 {
+            let start = usize::from(self.window_start());
             if (x0..x1).contains(&start) {
-                return (true, start as u8, self.window_skip_of(wx));
+                return (on, start as u8, self.trigger_skip());
             }
         }
         (
             self.window_active && on,
-            self.window_start,
+            self.window_start(),
             self.window_skip,
         )
     }
 
-    /// Pixels cut from the window's first tile when it starts at WX `wx`.
+    /// Screen x where the window starts (was activated) on this line.
     #[inline(always)]
-    const fn window_skip_of(&self, wx: u8) -> u8 {
-        match wx {
-            0 => 7 + self.fine_scx,
-            1..=6 => 7 - wx,
+    const fn window_start(&self) -> u8 {
+        self.win_wx.saturating_sub(8)
+    }
+
+    /// The pixels cut from the window's first tile when it starts at the
+    /// line's trigger WX (`win_wx`).
+    #[inline(always)]
+    const fn trigger_skip(&self) -> u8 {
+        match self.win_wx {
+            1 => 7 + self.fine_scx,
+            w @ 2..=7 => 8 - w,
             _ => 0,
         }
     }
 
     /// Start of line `ly`'s pixel output, with SCX as of that moment and
-    /// the objects the OAM scan selected.
+    /// the objects the OAM scan selected; the window starts at WX `window`
+    /// ([`Renderer::set_window`]).
     pub(crate) fn start_line(
         &mut self,
         ly: u8,
         scx: u8,
         objects: &LineObjects,
         order: [u8; MAX_PER_LINE],
+        window: Option<u8>,
     ) {
         self.ly = ly;
         self.fine_scx = scx & 7;
         self.window_active = false;
+        self.set_window(window);
         self.objects = *objects;
         self.order = order;
         // The buffer (`Memory::obj_buf`) is all transparent unless an object
@@ -412,29 +444,34 @@ impl Renderer {
 
         // Window (Pan Docs: Window, "Window rendering criteria"; SameBoy
         // FIFO path). The window starts where the pixel counter equals WX
-        // (screen x = WX - 7) while LCDC.5 and the WY condition hold; that
-        // activation reads the next window row. Clearing LCDC.5 switches
-        // back to the BG; the window can only start again at a later WX
-        // match. WX = 0-6 start the window at x = 0 with 7 - WX pixels cut
-        // off; WX = 0 also loses SCX & 7 pixels (Pan Docs: "the Window is
-        // switched to before the initial fine scroll adjustment"). WX = 166
-        // shows one pixel on CGB (the DMG next-line bug is DMG-only, SameBoy
-        // `!GB_is_cgb`); WX >= 167 never matches.
+        // (screen x = WX - 7) while LCDC.5 and the WY condition hold, as the
+        // line's timing decided that (`win_wx`, set with the window's
+        // stall); that activation reads the next window row, even if LCDC.5
+        // was cleared since the decision (SameBoy: `window_y++` at the
+        // trigger, then the fetcher sees LCDC.5 clear and fetches the BG).
+        // Clearing LCDC.5 switches back to the BG; the window doesn't start
+        // again on the line (approximation: SameBoy can re-trigger at a
+        // later WX match). WX = 0-6 start the window at x = 0 with 7 - WX
+        // pixels cut off; WX = 0 also loses SCX & 7 pixels (Pan Docs: "the
+        // Window is switched to before the initial fine scroll
+        // adjustment"). WX = 166 shows one pixel on CGB (the DMG next-line
+        // bug is DMG-only, SameBoy `!GB_is_cgb`); WX >= 167 never matches.
         if self.window_active && lcdc & LCDC_WIN_ON == 0 {
             self.window_active = false;
         }
         let mut win_from = x1;
         if self.window_active {
             win_from = x0;
-        } else if self.wy_triggered && lcdc & LCDC_WIN_ON != 0 && regs.wx <= 166 {
-            let start = usize::from(regs.wx.saturating_sub(7));
+        } else if self.win_wx != 0 {
+            let start = usize::from(self.window_start());
             if (x0..x1).contains(&start) {
-                self.window_active = true;
-                self.window_start = start as u8;
-                self.window_skip = self.window_skip_of(regs.wx);
+                self.window_skip = self.trigger_skip();
                 self.window_row = self.window_line;
                 self.window_line = self.window_line.wrapping_add(1);
-                win_from = start;
+                if lcdc & LCDC_WIN_ON != 0 {
+                    self.window_active = true;
+                    win_from = start;
+                }
             }
         }
 
@@ -538,9 +575,10 @@ impl Renderer {
         } else {
             0
         };
-        let win = self.window_active && x0 >= usize::from(self.window_start);
+        let win = self.window_active && x0 >= usize::from(self.window_start());
         let (map_bit, y, y_next, col) = if win {
-            let col = ((x0 - usize::from(self.window_start)) as u8).wrapping_add(self.window_skip);
+            let col =
+                ((x0 - usize::from(self.window_start())) as u8).wrapping_add(self.window_skip);
             (LCDC_WIN_MAP, self.window_row, self.window_row, col)
         } else {
             (
@@ -637,8 +675,8 @@ impl Renderer {
             fill::<MIX>(bg, obj_bg, src, lcdc, mode, map, y, col);
         }
         if !win.is_empty() {
-            let col =
-                ((win_from - usize::from(self.window_start)) as u8).wrapping_add(self.window_skip);
+            let col = ((win_from - usize::from(self.window_start())) as u8)
+                .wrapping_add(self.window_skip);
             let map = if lcdc & LCDC_WIN_MAP != 0 {
                 0x1C00
             } else {
@@ -1241,8 +1279,12 @@ mod tests {
             self.obj_rank.next = 0;
             self.r.check_wy(ly, &self.regs);
             let objs = LineObjects::scan(&self.oam, ly, self.regs.lcdc & LCDC_OBJ_TALL != 0);
+            // As `Ppu::window_wx` at the line start.
+            let r = &self.regs;
+            let on = r.lcdc & LCDC_WIN_ON != 0 && self.r.wy_triggered && r.wx <= 166;
+            let order = objs.priority_order();
             self.r
-                .start_line(ly, self.regs.scx, &objs, objs.priority_order());
+                .start_line(ly, r.scx, &objs, order, on.then_some(r.wx));
         }
 
         fn span(&mut self, row: &mut [u16; W], x0: usize, x1: usize) {

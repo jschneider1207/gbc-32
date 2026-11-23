@@ -245,8 +245,6 @@ pub(crate) struct LineTiming {
     /// Which stall is the window's (`NO_STALL`: none); the others are the
     /// objects', in fetch order.
     win_stall: u8,
-    /// WX when the stalls were last set (`Ppu::window_write`).
-    wx: u8,
 }
 
 const NO_STALL: u8 = 0xFF;
@@ -286,7 +284,25 @@ const DISCARD_LEAD: i32 = 8;
 
 /// Dots before the window's stall would begin at which its start is
 /// decided: a WX, WY or LCDC.5 write after that doesn't move it
-/// ([`Ppu::window_write`]). Calibrated over the full manifest.
+/// ([`Ppu::window_write`]). Approximations, calibrated over the full
+/// manifest (`docs/design/mid-line-ppu.md`, step E1); no reference pins
+/// the values:
+/// - SameBoy (display.c, mode-3 loop, MIT) compares the live WX with
+///   `position_in_line + 7` each dot while LCDC.5 and `wy_triggered`
+///   hold, and `wx_triggered`/`window_y++` fix the start at that dot. So a
+///   write takes effect at a dot, not with a lead, which fits
+///   `WINDOW_LEAD` = 0. Its compare is the same for a window that appears
+///   or goes; the extra dot of `WINDOW_ON_LEAD` for a new start is
+///   calibrated (CGB single speed, sm83_cpu.c: a WX write lands one dot
+///   after an LCDC write, `GB_CONFLICT_WRITE_CPU` vs `GB_CONFLICT_LCDC_CGB`,
+///   so it fits WX at most, not LCDC.5).
+/// - A WY write is checked later (SameBoy `wy_check_scheduled`): on CGB
+///   single speed at the next dot where `wy_check_modulo & 7 == 0`, 1-8
+///   dots after the write on an 8-dot grid aligned to the LCD-on clock,
+///   then the window compare skips a dot (`wy_just_checked`). `WY_LEAD` = 4
+///   (measured on the line clock, without the fine-scroll discard) stands
+///   for that phase-dependent delay; 3-5 give the same manifest results.
+/// - Pan Docs (Window) and GBCTR give no write-to-effect timing.
 const WINDOW_LEAD: i32 = 0;
 const WINDOW_ON_LEAD: i32 = 1;
 const WY_LEAD: i32 = 4;
@@ -300,7 +316,6 @@ impl LineTiming {
         stalls: [(0, 0); 11],
         n_stalls: 0,
         win_stall: NO_STALL,
-        wx: 0,
     };
 
     /// Pixels output before line position `t` (0-160), under the
@@ -1179,12 +1194,9 @@ impl Ppu {
         // many as the new discard count).
         let pos = if t < first_pixel { t - first_pixel } else { x };
         // As drawn up to `x` (no change after a `flush`).
-        let (active, start, skip) = self.renderer.window_after(
-            usize::from(self.drawn),
-            x as usize,
-            self.lcdc,
-            mem.io[0x4B],
-        );
+        let (active, start, skip) =
+            self.renderer
+                .window_after(usize::from(self.drawn), x as usize, self.lcdc);
         let phase =
             (pos + if active {
                 i32::from(skip) - i32::from(start)
@@ -1219,8 +1231,8 @@ impl Ppu {
             (tile + 8, 0)
         };
         // The window's first tile is fetched after it starts (from WX).
-        let wx = mem.io[0x4B];
-        if !active && self.renderer.wy_triggered() && self.lcdc & 0x20 != 0 && wx <= 166 {
+        let wx = self.renderer.window_wx().filter(|_| self.lcdc & 0x20 != 0);
+        if let Some(wx) = wx.filter(|_| !active) {
             let s = i32::from(wx.saturating_sub(7));
             if s >= x && s < end {
                 // Tile j + 1 cut by the window start: its planes as of
@@ -1421,7 +1433,8 @@ impl Ppu {
         self.drawn = 0;
         mem.obj_rank.hold[1].end = 0;
         mem.obj_rank.next = 0;
-        self.renderer.start_line(l as u8, scx, &objs, order);
+        // The pixels follow the window start the stalls are built with.
+        self.renderer.start_line(l as u8, scx, &objs, order, window);
         if n != 0 || window.is_some() {
             self.set_stalls(scx, window);
         } else {
@@ -1459,7 +1472,6 @@ impl Ppu {
         }
         let t = &mut self.line;
         t.win_stall = NO_STALL;
-        t.wx = window.unwrap_or(t.wx);
         let mut total = 0u16;
         let mut k = 0;
         if n != 0 || window.is_some() {
@@ -1521,7 +1533,10 @@ impl Ppu {
     /// LCDC.5 and `wy_triggered` hold, and clears `wx_triggered` when a
     /// fetch starts with LCDC.5 clear). The decision is made
     /// `WINDOW_LEAD` dots before the stall would begin. Approximation: once
-    /// it has begun, later writes change the pixels only.
+    /// it has begun, later writes don't move it (SameBoy: `wx_triggered`).
+    /// The renderer starts the window and counts its row from the same
+    /// decision (`set_stalls`, `Renderer::set_window`), not from the live
+    /// registers, so the pixels agree with mode 3's length.
     #[cold]
     #[inline(never)]
     pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, wy: bool) {
@@ -1537,16 +1552,21 @@ impl Ppu {
         // (SameBoy: `position_in_line == WX - 7`; WX = 0 at -7).
         let adj = |wx: u8| i32::from(wx.min(7)) - 7;
         let decided = |c: Option<i32>, lead| c.is_some_and(|c| t + lead > c);
-        if decided(self.window_stall_at(), WINDOW_LEAD - adj(self.line.wx)) {
+        // The WX the stalls were built with (the old start for a WX write).
+        let old = self.renderer.window_wx().unwrap_or(0);
+        if decided(self.window_stall_at(), WINDOW_LEAD - adj(old)) {
             return;
         }
         let scx = mem.io[0x43];
-        self.set_stalls(scx, self.window_wx(mem));
+        let window = self.window_wx(mem);
+        self.set_stalls(scx, window);
+        self.renderer.set_window(window);
         // The new start is already past: the window waits for the next line.
         let fine = i32::from(self.line.first_pixel) - i32::from(self.line.mode3) - 12;
         let lead = if wy { WY_LEAD + fine } else { WINDOW_ON_LEAD };
         if decided(self.window_stall_at(), lead - adj(mem.io[0x4B])) {
             self.set_stalls(scx, None);
+            self.renderer.set_window(None);
         }
     }
 
@@ -2592,6 +2612,68 @@ mod tests {
         }
     }
 
+    /// The window's pixels and line counter follow the same start decision
+    /// as mode 3's length (`set_stalls`), not the live WY, LCDC.5 and WX
+    /// (M8-close review): (a) a WY write too late to start the window this
+    /// line, though before the renderer reached WX - 7, draws no window
+    /// and doesn't count a window row; (b) a WX or LCDC.5 write during the
+    /// window's stall doesn't undo it: the row is counted (SameBoy
+    /// `window_y++` at the trigger) and the window starts where decided.
+    #[test]
+    fn window_pixels_follow_the_timing_decision() {
+        // BG (map 9800, tile 0): 1. Window (map 9C00, tile 1) at x = 64
+        // (WX 0x47): row 0 and row 6: 4, other rows: 2.
+        // `(WY, writes on line 5 at dot)` -> (mode-3 end of line 5, line 5
+        // x = 64 and x = 72, line 6 x = 72).
+        let run = |wy: u8, writes: &[(u32, usize, u8)]| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            for row in 0..8 {
+                if row != 0 && row != 6 {
+                    r.mem.vram[17 + 2 * row] = 0;
+                }
+            }
+            r.ppu.lcdc = 0xF1;
+            r.mem.io[0x4A] = wy;
+            r.mem.io[0x4B] = 0x47;
+            let l5 = clock(on, 0, 5 * LINE);
+            for &(t, reg, v) in writes {
+                let now = l5 + u64::from(t);
+                r.sync(now);
+                r.ppu.flush(now, &mut r.mem, &mut r.frame);
+                if reg == 0x40 {
+                    r.ppu.lcdc = v;
+                } else {
+                    r.mem.io[reg] = v;
+                }
+                if reg != 0x4B {
+                    r.ppu.check_wy_at(now, &r.mem);
+                }
+                r.ppu.window_write(now, &r.mem, reg == 0x4A);
+            }
+            r.sync(l5 + 455);
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            r.sync(l5 + 3 * u64::from(LINE));
+            let px = |ly: usize, x: usize| r.frame[ly * SCREEN_WIDTH + x];
+            (end, px(5, 64), px(5, 72), px(6, 72))
+        };
+        // No write: window rows 5 and 6.
+        assert_eq!(run(0, &[]), (Some(256 + 6), 2, 2, 4));
+        // (a) WY = 5 written 2 dots before x = 64's stall (too late, within
+        // WY_LEAD): no window on line 5; line 6 draws row 0.
+        assert_eq!(run(0xFF, &[]), (Some(256), 1, 1, 1));
+        assert_eq!(run(0xFF, &[(158, 0x4A, 5)]), (Some(256), 1, 1, 4));
+        // (b) During the stall (from dot 96 + 64 = 160): LCDC.5 cleared (and
+        // set again in mode 0): the BG on line 5, row 5 counted, so line 6
+        // draws row 6; WX moved to x = 72: the window still starts at 64
+        // (line 6: at 72, row 6).
+        let off = 0xF1 & !0x20;
+        assert_eq!(
+            run(0, &[(162, 0x40, off), (300, 0x40, 0xF1)]),
+            (Some(256 + 6), 1, 1, 4)
+        );
+        assert_eq!(run(0, &[(162, 0x4B, 0x4F)]), (Some(256 + 6), 2, 2, 4));
+    }
     /// A rig in DMG compatibility mode with BG color 0 = 1 and color 3 = 4,
     /// tile 0 color 0 and tile 1 color 3 (LCDC.4 = 1), map 9800 all tile 0
     /// and map 9C00 all tile 1.
