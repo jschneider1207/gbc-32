@@ -287,7 +287,7 @@ mod tests {
     fn long_spans_reduce_exactly() {
         for narrow in [false, true] {
             let cycle = if narrow { 127 } else { 32_767 };
-            for n in [0, 5, 8, 9, 200, cycle + 20, 3 * cycle + 9] {
+            for n in [0, 5, 8, 9, 200, cycle + 3, cycle + 20, 3 * cycle + 9] {
                 let short = reduce(n, narrow);
                 assert!(short < 8 + cycle as u32);
                 for x in [0u16, 0x1234, 0x7FFF, 0x5A5A] {
