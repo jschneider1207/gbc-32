@@ -94,8 +94,9 @@ on `synth:worst-case` is **224.1k Ir/frame** (`Ctx::apu_sync` inclusive),
 **over** ADR 0021's original 200k budget/estimate. The human accepted it and
 set the APU budget to 230k (2026-11-22; ADR 0021 last amendment). It stays
 a recorded optimization target if the M7 measurement needs the room (plan
-M8 task "APU cost is over its original estimate"). worst-case is 3.78 M
-Ir/frame, 94.0% of the 4.02 M line; thumbv7em `.text` 94,492 of 96,000 B.
+M8 task "APU cost is over its original estimate"). worst-case was 3.78 M
+Ir/frame, 94.0% of the 4.02 M line, then; with NR50 writes per line it is
+3.908 M, 97.2% (per-sync fixed cost, below); thumbv7em `.text` 94,754 of 96,000 B.
 The rest of this section is how it got there (the table's earlier columns
 and the 270k statement are history). `synth:worst-case`
 (2 s, 119.455 frames), all with buffers; channel cost = Ir over `@0`
@@ -132,6 +133,40 @@ at every step. What changed:
   loops read the span length through `core::hint::black_box`: LLVM's
   Cortex-M runtime unrolling (x4) otherwise doubles them on thumbv7em
   (`Square::integrate` 836 -> 410 B, `Wave::integrate` 1,304 -> 642 B).
+
+**Per-sync fixed cost (M6 perf review).** Every APU register write syncs
+the APU, so a game writing the APU at PCM rate pays a sync's fixed cost
+(prologue, NR50/NR51 weights, the lane clear, each channel's setup:
+square period and duty, the wave channel's SWAR words and prefix bases,
+the noise `Run::new` fills) once per write, on top of the windows.
+`synth:apu-writes` measures it: 8 kHz PCM through NR50 (a timer IRQ every
+512 clocks, 137.2 writes a frame) with all four channels at their worst
+periods; `synth:apu-writes@hram` is the same program writing FF80 (the
+control, not in the bench list). Ir per APU write = the difference over
+the 16,384 writes in 2 s: **894.2** at b78ed12, of which 811 in
+`Ctx::apu_sync` (per write: noise ~195, both squares ~205, wave ~180,
+`Apu::sync` itself ~195; the control spends ~414 per window, so about
+half of a write's cost is the extra span a write splits off and half is
+fixed setup). Joined to worst-case (b78ed12): its STAT handler (one IRQ
+per line, ~146 a frame) also toggles NR50 for masks 1-F, so the 4.02 M
+bar covers PCM-rate writes. This only makes the check stricter, and PCM
+playback (voice samples) is a pattern real games use; worst-case went
+from 3.780 to 3.911 M Ir/frame (97.3% of 4.02 M). On the M7 the review
+estimated 450-550 cycles a sync, i.e. ~70k cycles/frame at this rate.
+
+Mitigation, exact (`--fingerprint` plain and `--audio-buffer {7,64}
+--hash-samples` identical to b78ed12): the per-batch level lanes are
+`i16` (a lane is one channel's level times clocks over one span, at most
+1,920), so the clear every sync pays is 128 B instead of 256 B (half of
+`__aeabi_memclr4` on thumbv7em). x86 Ir per write 894.2 -> 884.6
+(x86's vector memset hides most of it); worst-case 3.908 M Ir/frame,
+apu-writes 713.0k; `.text` 94,808 -> 94,754 B. Not done: removing the
+clear altogether needs the lanes in `Apu` (store semantics; the `Apu`
+size test caps it at 128 B) or uninitialized memory (`unsafe`); the
+noise and wave setup are already one pass per batch and the noise
+channel steps in every span at r = 0, so laziness would not help the
+worst case. Caching the weights would not help PCM through NR50 (every
+write changes them).
 
 History (state at 4dd75a2, superseded by task 8b below): sample output with every channel silent: `Apu::sync` inclusive on `@0`
 is ~56k Ir/frame (6.67 M per 2 s, ~100 Ir per window; it was ~66k
@@ -524,7 +559,7 @@ wrote into the hash and adds the synthetic programs (`synth:<name>` for
 every bench program, plus `worst-case@1/2/4/8`, all for N seconds), so an
 exact APU optimization can be shown sample-identical: run it before and
 after, at two buffer sizes (e.g. 7 and 64; the hashes do not depend on the
-split), and `diff`. 3,831 runs, about 11 s wall. Without the flag the
+split), and `diff`. 3,832 runs, about 11 s wall. Without the flag the
 output is unchanged.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary

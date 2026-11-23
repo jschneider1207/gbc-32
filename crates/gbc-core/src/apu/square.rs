@@ -130,7 +130,7 @@ impl Square {
     /// (`integrate_matches_a_clock_by_clock_reference`). Out of line: one
     /// copy for both squares (code size).
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i32]) {
+    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i16]) {
         if !self.env.dac() {
             // The DAC off turns the channel off: nothing advances.
             return;
@@ -165,7 +165,7 @@ impl Square {
                 self.countdown = (p.get() - r) as u16;
                 bit * cd + p.get() * ones + r * u32::from(pattern >> m & 1)
             };
-            *o += 15 * dt as i32 - vol2 * high as i32;
+            *o += (15 * dt as i32 - vol2 * high as i32) as i16;
         }
     }
 
@@ -174,7 +174,7 @@ impl Square {
     pub(crate) fn integrate1(&mut self, dt: u32) -> i32 {
         let mut out = [0];
         self.integrate(&[u8::try_from(dt).unwrap()], &mut out);
-        out[0]
+        i32::from(out[0])
     }
 
     /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`

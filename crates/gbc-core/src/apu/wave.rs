@@ -206,7 +206,7 @@ impl Wave {
     /// index. Exact: the same state and integral as stepping
     /// (`integrate_matches_a_clock_by_clock_reference_and_advance`).
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], out: &mut [i32]) {
+    pub(crate) fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], out: &mut [i16]) {
         if !self.dac {
             return;
         }
@@ -250,7 +250,7 @@ impl Wave {
                 self.countdown = (p.get() - r) as u16;
                 now * cd + p.get() * (prefix(to) - prefix(first)) + r * last
             };
-            *o += 15 * dt as i32 - 2 * high as i32;
+            *o += (15 * dt as i32 - 2 * high as i32) as i16;
         }
     }
 
@@ -259,7 +259,7 @@ impl Wave {
     pub(crate) fn integrate1(&mut self, dt: u32, io: &[u8; 0x80]) -> i32 {
         let mut out = [0];
         self.integrate(&[u8::try_from(dt).unwrap()], io, &mut out);
-        out[0]
+        i32::from(out[0])
     }
 
     /// A write to NR30-NR34 (`off` 0-4) with the frame sequencer at `fs`.

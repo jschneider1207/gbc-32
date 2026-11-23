@@ -37,17 +37,21 @@ impl Output {
 
 /// The spans integrated per batch: the channels are called once per batch,
 /// with their per-span setup (period, duty, wave RAM words) done once.
-/// 16 spans: 256 B of level sums on the stack.
+/// 16 spans: 128 B of level sums on the stack, cleared per batch. `i16`:
+/// a lane is one channel's level times clocks over one span, at most
+/// 15 x `SAMPLE_PERIOD` = 1,920 in magnitude (half the clear of `i32`,
+/// paid on every sync: every APU write syncs).
 pub(crate) const BATCH: usize = 16;
+const _: () = assert!(15 * SAMPLE_PERIOD <= i16::MAX as u64);
 
 /// Adds `level` times each span's clocks to `out`: a channel whose DAC is
 /// on while the channel is off (Pan Docs DAC: digital 0 -> +1). One copy
 /// for all channels (code size).
 #[inline(never)]
-pub(crate) fn constant(segs: &[u8], out: &mut [i32], level: i32) {
+pub(crate) fn constant(segs: &[u8], out: &mut [i16], level: i32) {
     for (o, &dt) in out.iter_mut().zip(segs) {
         // Opaque: no unrolling (code size).
-        *o += level * i32::from(core::hint::black_box(dt));
+        *o += (level * i32::from(core::hint::black_box(dt))) as i16;
     }
 }
 
@@ -139,7 +143,7 @@ impl Apu {
             for i in 0..k {
                 // Opaque: no unrolling (code size).
                 let i = core::hint::black_box(i);
-                let sums = mix([lv[0][i], lv[1][i], lv[2][i], lv[3][i]], &w);
+                let sums = mix(core::array::from_fn(|c| i32::from(lv[c][i])), &w);
                 acc_l += sums[0];
                 acc_r += sums[1];
                 if i >= done {

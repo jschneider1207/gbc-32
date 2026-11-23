@@ -262,7 +262,7 @@ impl Apu {
     /// while its DAC is on, else 0) times clocks over span `i`, for
     /// CH1-CH4. `io` holds wave RAM.
     #[inline]
-    fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], lv: &mut [[i32; mix::BATCH]; 4]) {
+    fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], lv: &mut [[i16; mix::BATCH]; 4]) {
         let [l1, l2, l3, l4] = lv;
         let [s1, s2] = &mut self.sq;
         s1.integrate(segs, l1);

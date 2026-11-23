@@ -352,7 +352,7 @@ impl Noise {
     /// DAC is on (Pan Docs DAC), nothing while it is off. A batch per call:
     /// NR43 and the volume are constant over a sync span.
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i32]) {
+    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i16]) {
         if !self.env.dac() {
             return;
         }
@@ -395,7 +395,7 @@ impl Noise {
                 cd = left;
                 h
             };
-            *o += 15 * dt as i32 - vol2 * high as i32;
+            *o += (15 * dt as i32 - vol2 * high as i32) as i16;
         }
         self.countdown = cd;
         self.lfsr = run.lfsr();
@@ -407,7 +407,7 @@ impl Noise {
     pub(crate) fn integrate1(&mut self, dt: u32) -> i32 {
         let mut out = [0];
         self.integrate(&[u8::try_from(dt).unwrap()], &mut out);
-        out[0]
+        i32::from(out[0])
     }
 
     /// A write to NR41-NR44 (`off` 1-4; others are ignored) with the frame
@@ -545,7 +545,7 @@ mod tests {
             for _ in 0..50 {
                 let k = 1 + xorshift(&mut seed) as usize % 16;
                 let mut segs = [0u8; 16];
-                let mut got = [0i32; 16];
+                let mut got = [0i16; 16];
                 for s in &mut segs[..k] {
                     *s = (xorshift(&mut seed) % 129) as u8;
                 }
@@ -556,7 +556,7 @@ mod tests {
                         want += 15 - 2 * i32::from(b.digital());
                         b.advance(1);
                     }
-                    assert_eq!(got[i], want, "nr43={nr43:#x}");
+                    assert_eq!(i32::from(got[i]), want, "nr43={nr43:#x}");
                 }
                 assert_eq!(a, b, "nr43={nr43:#x}");
             }
