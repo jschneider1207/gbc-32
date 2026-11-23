@@ -77,11 +77,25 @@ Working rules that matter here:
 - Branch `hdma-trigger` (1a110de + 73ce532 docs, on fa2f8f1): HDMA trigger
   2 dots after mode-0 STAT, block before IRQ dispatch, HBlank period,
   lost triggers. +30 ROMs but swaps `hdma_late_m0halt_ds_lcdoffset1_{1,2}`
-  (1 regression) -> not merged. Branch `lcd-offset-phase` (group 6) builds
-  on it; both land together at 0 regressions.
+  (1 regression) -> not merged.
+- Branch `lcd-offset-phase` (dfb1c67, WIP on `hdma-trigger`): data-fit LYC
+  compare IRQ at t = 5 (lines 1-152, single speed), no reference (SameBoy
+  doesn't model the odd CPU phase). +36 vs main, 3 regressions
+  (`hdma_late_m0halt_ds_lcdoffset1_2`, `m2enable/late_enable_lcdoffset3_1`,
+  `dma/hdma_late_enable_lcdoffset3_1`). Agent's conclusion: group 6 needs a
+  half-dot-resolution PPU edge model (constraints listed in m9-triage.md
+  group 6), a design step. Not merged; helper scripts in the session
+  scratchpad `lo/` (ephemeral).
 
 ## Needs human
 Open (session 11):
+- **Merge `hdma-trigger` with a 1-ROM swap?** +30 ROMs (17 of the 19
+  trigger/IRQ-order sub-group, 13 HALT/speed-switch), but
+  `dma/hdma_late_m0halt_ds_lcdoffset1_2` goes pass -> fail while its pair
+  `_1` goes fail -> pass. No single threshold passes both at our current
+  CPU/PPU phase (group 6); both should pass once the lcd_offset model
+  lands. Merging needs a baseline update that records a regression, so
+  it's the human's call. Alternative: hold the branch until group 6.
 - **APU double-speed trigger rule vs SameSuite (M9 group 7).** gambatte's
   linear CGB rule (first duty step at `+6+2*lf_div` base clocks from off,
   `+2+2*lf_div` from on, both speeds) flips 6 gambatte cgb04c captures
