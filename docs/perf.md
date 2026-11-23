@@ -483,6 +483,170 @@ Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the
 measured size plus about 5%.
 
+## ITCM placement plan (M8)
+
+Measured 2026-11-22 at 5e65f6f, same build as `check-code-size.sh`
+(thumbv7em-none-eabihf, release, `-C target-cpu=cortex-m7`, 6 CGUs, no
+LTO), section sizes from `readelf -S` on the rlib objects. The decision and
+its reasons are ADR 0026 (Proposed). Memory facts: RM0433 (H753) ITCM 64 KB
+at 0x0000_0000 and DTCM 128 KB at 0x2000_0000, both zero-wait and not
+cached; flash at 240 MHz AXI needs 4 wait states (5 flash clocks per
+256-bit flash word, RM0433 Table 17), so an I-cache miss to flash costs
+about 10+ CPU cycles at 480 MHz before bus latency. The H753 L1 I-cache is
+16 KiB. H735: ITCM configurable to 128/192/256 KB (`TCM_AXI_SHARED`, RM0468).
+
+**Totals.** gbc-core `.text` 94,770 B (all `.text*` sections, 190 functions;
+budget 96,000), `.rodata` 4,078 B. `run` + `execute_cb` = 25,568 + 12,078 =
+37,646 B.
+
+**Hot set** (runs every frame in a typical game), by tier:
+
+| Tier | Contents | Size (B) |
+|---|---|---|
+| A: per instruction/access | `Cpu::run`, `execute_cb`, `step_not_running`, `fetches_next`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`; `vram_blocked`, `oam_blocked`; `halt_begin/end`, `idle_halted`; `Schedule::set` | 43,210 |
+| B: PPU, per line | `Ppu::{sync, latch, scan_to, next_event, point_irq, draw, flush, stat, ly, check_wy_at, scan_line}`, `Renderer::{render, fetch_objects, last_fetched}`, `fill_{plain, mixed, partial<_>}`, `partial_tile<_>`, `LineObjects::scan`, `frame_row`, `cgb_color`, `Ctx::write_ppu` | 15,844 |
+| C: APU, per sync | `Apu::{sync, step, write}`, the three `integrate`s and `advance`s, `frame_step` x2, `Sweep::clock`, `mix::constant`, `div_apu_event`, `apu_sync`, `set_div_apu_deadline`, `start_audio`, `finish`, `audio_buffer_event`, `write_apu` | 5,722 |
+| D: frame driver | `Emulator::{run, run_frame, run_until, run_cycles}` | 602 |
+| W: warm (most games, not every frame) | OAM DMA (`oam_dma`, `dma_sync`, `read/write_during_dma`, `ppu_read`), `Cart::{write_rom, update_banks, read_ram}`, `Timer::read`, `vram_dma`, `write_palette_data`, `Noise::clock` | 4,414 |
+
+A+B+C+D = 65,378 B, more than the H753's whole ITCM; with W 69,792 B. The
+other 25,052 B (load, reset, register decode, RTC, serial, STOP, Debug
+impls) are cold.
+
+Top 10 hot functions: `Cpu::run` 25,568; `execute_cb` 12,078;
+`Ppu::latch` 4,240; `Ppu::scan_to` 2,190; `Ctx::boundary` 1,250;
+`Noise::integrate` 1,142; `fill_mixed` 1,036; `Renderer::render` 1,018;
+`Ppu::sync` 914; `Ctx::write_ppu` 862 (`read_high` 854 next).
+
+**H753 placement.** Assumed ITCM reserve for the front end: 8 KiB (ISRs for
+audio/LCD DMA and SysTick, the line/frame blit, the `compiler_builtins` the
+hot set calls: `__aeabi_memcpy*`, `__aeabi_memclr*`, `__aeabi_memset8`,
+`__aeabi_uldivmod`, plus linker veneers). The vector table stays in flash
+(VTOR). That leaves **56 KiB (57,344 B) for gbc-core**, filled in this order:
+
+1. ITCM, 55,806 B (1,538 B margin): all of tier A and D; tier C (the M6
+   review's APU integrate set); from tier B the cheap per-event PPU
+   functions (`Ppu::{sync, next_event, point_irq, draw, flush, stat, ly,
+   check_wy_at, scan_line}`, `write_ppu`, `frame_row`, `cgb_color`) and the
+   plain tile path (`render`, `fill_plain`, `fill_partial::<false>`,
+   `partial_tile::<false>`).
+2. Flash behind the I-cache, 13,986 B (85% of 16 KiB): the per-line heavy
+   PPU set (`latch` 4,240, `scan_to` 2,190, `fill_mixed` 1,036,
+   `fetch_objects` 776, `LineObjects::scan` 482, `fill_partial::<true>` 450,
+   `last_fetched` 216, `partial_tile::<true>` 182 = 9,572) and tier W. These
+   run in loop-heavy bursts once per line. With the interpreter in ITCM it no
+   longer evicts them, so they should stay mostly resident.
+3. Flash, cold: everything else.
+
+If the firmware build (LTO, `codegen-units = 1`) makes the ITCM set larger
+than 56 KiB, take things out in reverse order: the plain tile path, then
+`write_ppu`, then the APU set. Measure the firmware ELF, not the rlib,
+because LTO changes inlining.
+
+**DTCM** (128 KB, zero wait states, reachable by the CPU and MDMA only, not
+DMA1/2): the stack, `Hw`/`Emulator` (< 880 B), `Memory` (> 48 KB: WRAM,
+VRAM, OAM) and the read-only tables `SPREAD` 1,024 B, `ATTR_FETCH` 1,024 B
+and `POP8` 256 B (2,304 B, copied from flash at boot like `.itcm`). Frame
+and audio buffers go in AXI SRAM, because the LCD and SAI DMA must reach
+them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5). The
+Stage 2 front end confirms these sizes with `size_of`.
+
+**H735 (Stage 3).** Configure 128 KB of ITCM. Tiers A to D plus W (~70 KB)
+plus the front end fit with room to spare; 192 KB would hold all of
+gbc-core. The I-cache (32 KiB) then only serves cold code.
+
+**Mechanism.** gbc-core cannot name its own sections. In edition 2024
+`link_section` is an unsafe attribute (`#[unsafe(link_section = "...")]`),
+and `#![forbid(unsafe_code)]` also rejects it. So placement happens only at
+link time in the front end. rustc emits one section per function
+(`.text.<v0-mangled symbol>`, e.g.
+`.text._RINvMs0_NtCsdUUKRCLjrj6_8gbc_core3cpuNtB6_3Cpu3runNtNtB8_3bus3CtxEB8_`).
+The crate hash (`CsdUUKRCLjrj6_`) changes with the compiler and the build,
+so the patterns match on the length-prefixed path segments only. A sample
+fragment for the front end's `memory.x` (cortex-m-rt):
+
+```ld
+MEMORY {
+  FLASH : ORIGIN = 0x08000000, LENGTH = 2M
+  RAM   : ORIGIN = 0x20000000, LENGTH = 128K   /* DTCM */
+  ITCM  : ORIGIN = 0x00000000, LENGTH = 64K
+  AXI   : ORIGIN = 0x24000000, LENGTH = 512K
+}
+SECTIONS {
+  .itcm : ALIGN(8) {
+    __sitcm = .;
+    *(.text.itcm.*)                                /* front-end ISRs, blit */
+    *(.text.__aeabi_memcpy* .text.__aeabi_memclr* .text.__aeabi_uldivmod*)
+    /* gbc-core tier A (generated from perf/itcm-sections.txt) */
+    *(.text._R*8gbc_core3cpu*3Cpu3run*)
+    *(.text._R*8gbc_core3cpu*3Cpu10execute_cb*)
+    *(.text._R*8gbc_core3bus9read_high*)
+    *(.text._R*8gbc_core3bus*3Ctx12write_mapped*)
+    *(.text._R*8gbc_core3apu*9integrate*)          /* 3 channels */
+    *(.text._R*8gbc_core3ppu6render12fill_partial*Kb0_*)  /* ::<false> */
+    /* ... one line per entry, 56 in all at 5e65f6f ... */
+    . = ALIGN(8);
+    __eitcm = .;
+  } > ITCM AT > FLASH
+  __siitcm = LOADADDR(.itcm);
+
+  .dtcm_rodata : ALIGN(4) {
+    __sdtcm_ro = .;
+    *(.rodata._R*8gbc_core3ppu6render6SPREAD*)
+    *(.rodata._R*8gbc_core3ppu6render10ATTR_FETCH*)
+    *(.rodata._R*8gbc_core3apu5noise4POP8*)
+    . = ALIGN(4);
+    __edtcm_ro = .;
+  } > RAM AT > FLASH
+  __sidtcm_ro = LOADADDR(.dtcm_rodata);
+} INSERT BEFORE .text;
+```
+
+`INSERT BEFORE .text` puts these input-section rules ahead of
+cortex-m-rt's `*(.text .text.*)`. Both GNU ld and lld assign an input
+section to the first rule that matches. Check this in the Stage 2 map file
+for the linker actually used. No `KEEP`: unused functions should still be
+garbage-collected. The front end copies `.itcm` and `.dtcm_rodata` from
+flash before `main` calls into the core (front-end `unsafe` with a
+`// SAFETY:` comment, allowed for hardware access). Calls from ITCM to flash
+(and back) are beyond Thumb `BL` range (±16 MB), so the linker inserts
+veneers. That is fine on cold edges, and the post-link check counts them.
+
+**Check, so renames and inlining can't silently drop a function from ITCM.**
+There is one source of truth, `perf/itcm-sections.txt`, with
+`<glob>  # <demangled name>` per line. The front end's `build.rs` generates
+the `.itcm` rule list from it, so the script and the check cannot drift.
+Then two checks:
+- *Pre-link (rlib, possible now, extends `check-code-size.sh`):* every
+  glob must match at least one `.text.*` section of the rlib, otherwise it
+  fails as MISSING, like the budgets. Multi-match globs list the expected
+  count. The matched total must be within the 56 KiB core budget. Each
+  glob is tested with the shell's `case` pattern, which has the same `*`
+  semantics as the linker's. A prototype did this for the 56 globs above:
+  all matched (55,806 B), and the one typo (`12div_apu_event`, really
+  `13div_apu_event`) was caught as 0 matches.
+- *Post-link (firmware ELF, Stage 2):* every demangled name in the file must
+  exist in `nm -C` of the ELF and have an address in
+  `[0x0000_0000, 0x0001_0000)`. A name inlined away under LTO fails, so
+  update the file. The check also reports `.itcm` size against 64 KiB and the
+  number of long-branch thunks (`__*_veneer` with GNU ld,
+  `__Thumbv7ABSLongThunk_*` with lld), and fails if `.itcm` overflows (the linker
+  also does this).
+
+**Is a <= 40 KB target for `execute`/`execute_cb` still needed?** No, as a
+separate goal. They are 37,646 B now, already under it. With the
+interpreter in ITCM, its I-cache footprint (the M2 "2.6x the I-cache"
+concern) no longer matters, because TCM fetches bypass the cache. The
+binding constraint is the H753 ITCM total: 55.8 of 56 KiB. Two stricter
+follow-ups replace the target:
+1. Lower the `run`/`execute_cb` budgets to measured + 5% (26,850 / 12,700
+   from 29,150 / 13,250), so their ~4.7 KB of headroom can't silently eat
+   the 1.5 KB ITCM margin.
+2. Add the ITCM-set total (56 KiB) to `check-code-size.sh`, read from
+   `perf/itcm-sections.txt`.
+
+On the H735 with 128 KB ITCM the question goes away.
+
 ## Instruction-count benchmark
 
 `scripts/check-bench.sh` runs `tools/bench` (release build) under
