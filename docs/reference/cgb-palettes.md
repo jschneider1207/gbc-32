@@ -1,7 +1,7 @@
 # CGB palette RAM (BCPS/BCPD, OCPS/OCPD)
 
-Implemented in `crates/gbc-core/src/bus.rs` (`palette_data_write`,
-`read_io`, `Sys::reset`) and `ppu/mod.rs` (`Ppu::write_bcpd`,
+Implemented in `crates/gbc-core/src/bus.rs` (`palette_index_step`,
+`write_palette_data`, `read_io_other`, `Sys::reset`) and `ppu/mod.rs` (`Ppu::write_bcpd`,
 `resolve_palettes`). The only model is CGB C (ADR 0003).
 
 ## Layout
@@ -29,9 +29,17 @@ Source: SameBoy `BootROMs/cgb_boot.asm`, `Preboot` (32 brightening steps
 over all 64 bytes of `hBgPalettes`, then `LoadPalettesFromHRAM`). Without
 this, CGB games that never write BCPD would show a black BG.
 
+## Blocked around mode 3
+BCPD/OCPD reads give FF and writes are dropped while the PPU reads
+palettes, but a write still steps the index (Pan Docs: LCD Color
+Palettes; SameBoy `cgb_palettes_blocked`). Window (`Ppu::palette_blocked`):
+from line position 87 (first line after LCD enable: 88) to 4 dots after
+the mode-3 end (double speed: 2 after its one-dot-later end). Calibrated
+by gambatte `cgbpal_m3/*`, `enable_display/ly{0,1}_late_cgbp*`; the two
+`*_ds_lcdoffset1_2` variants still fail (CPU/PPU phase in double speed,
+as the other `ds_lcdoffset1` groups).
+
 ## Not yet (M5)
-Palette access blocked while the PPU reads palettes (mode 3: writes
-ignored but the index still increments, reads FF; same-suite
-`blocking_bgpi_increase`), per-tile palettes from BG attributes, OBJ colors
+Per-tile palettes from BG attributes, OBJ colors
 from OCPD with the CGB OAM palette number (CGB-mode objects still use
 OBP0/OBP1 and the compatibility colors).

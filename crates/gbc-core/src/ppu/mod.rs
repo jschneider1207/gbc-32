@@ -618,19 +618,48 @@ impl Ppu {
     /// (first line after LCD enable: the pipeline start, or the STAT change
     /// in double speed) to the mode-3 end (one dot later in double speed).
     pub(crate) fn vram_blocked(&self, now: u64, double: bool) -> bool {
+        let first = if double { 86 } else { 91 };
+        self.cpu_blocked(now, double, [84, first], 0)
+    }
+
+    /// The CPU access windows ([`Self::vram_blocked`],
+    /// [`Self::palette_blocked`], [`Self::oam_blocked`]): on a visible line
+    /// with the LCD on, from `from[0]` (`from[1]` on the first line after
+    /// LCD enable) to `end_extra` dots after the mode-3 end. Out of line:
+    /// one copy for the three (code size).
+    #[inline(never)]
+    fn cpu_blocked(&self, now: u64, double: bool, from: [u32; 2], end_extra: u32) -> bool {
         if !self.lcd_enabled() {
             return false;
         }
         let a = self.at(now);
-        if a.line >= LINES {
-            return false;
+        a.line < LINES
+            && a.t >= from[usize::from(a.first)]
+            && a.t < self.mode3_end(now, a, double) + end_extra
+    }
+
+    /// CPU access to CGB palette RAM (BCPD/OCPD) is blocked at clock `now`:
+    /// reads give FF and writes are dropped while the PPU reads palettes
+    /// (Pan Docs: LCD Color Palettes, "inaccessible ... during Mode 3").
+    /// SameBoy (`display.c`, `cgb_palettes_blocked`, MIT): from 3 dots
+    /// after the VRAM block starts (first line after LCD enable: dot 88,
+    /// 3 dots before it) to 4 dots after the mode-3 end, 2 in double speed
+    /// (where `mode3_end` is already one dot later). Gambatte
+    /// `cgbpal_m3/*` and `enable_display/ly{0,1}_late_cgbp*` (CGB04C)
+    /// pass with these edges; DMG compatibility mode never gets here
+    /// (BCPD/OCPD are closed there).
+    #[inline(never)]
+    pub(crate) fn palette_blocked(&self, now: u64, double: bool) -> bool {
+        let extra = if double { 2 } else { 4 };
+        // Fast path (hi-color raster writes, synth:cgb-raster): a latched
+        // line (`mode3` set) is latched past position 89, at or before
+        // `now`. So `now` is on it, past the window start, or on the next
+        // line before position 87, where `t` is past the window end.
+        let t = now.wrapping_sub(self.line.start);
+        if t < u64::from(LINE + 87) && self.line.mode3 != 0 && self.lcd_enabled() {
+            return t < u64::from(self.line.end + u16::from(double) + extra);
         }
-        let from = match (a.first, double) {
-            (false, _) => 84,
-            (true, false) => 91,
-            (true, true) => 86,
-        };
-        a.t >= from && a.t < self.mode3_end(now, a, double)
+        self.cpu_blocked(now, double, [87, 88], u32::from(extra))
     }
 
     /// CPU access to OAM (FE00-FEFF) is blocked at clock `now`: reads give
@@ -641,22 +670,13 @@ impl Ppu {
     /// both to the mode-3 end; on the first line after LCD enable, writes
     /// from SameBoy's nominal 76 and reads from 78 (no OAM scan).
     pub(crate) fn oam_blocked(&self, now: u64, double: bool, write: bool) -> bool {
-        if !self.lcd_enabled() {
-            return false;
-        }
-        let a = self.at(now);
-        if a.line >= LINES {
-            return false;
-        }
-        let from = match (a.first, write, double) {
-            (true, true, _) => 84,
-            (true, false, _) => 86,
-            (false, true, false) => 0,
-            (false, true, true) => 2,
-            (false, false, false) => 3,
-            (false, false, true) => 4,
+        let from = match (write, double) {
+            (true, false) => [0, 84],
+            (true, true) => [2, 84],
+            (false, false) => [3, 86],
+            (false, true) => [4, 86],
         };
-        a.t >= from && a.t < self.mode3_end(now, a, double)
+        self.cpu_blocked(now, double, from, 0)
     }
 
     /// `mode_for_interrupt` at `a` (SameBoy): the mode source a STAT
@@ -2171,10 +2191,43 @@ mod tests {
             ],
             [true, false]
         );
+        // CGB palette RAM: 3 dots after VRAM, to 4 dots after the mode-3
+        // end (2 in double speed, from its later end). Asked synced, as
+        // the bus does (the fast path needs `now` at or past the sync).
+        let mut r2 = Rig::on_at(on, 0, 0xFF);
+        let mut pal = |t: u64, double| {
+            r2.sync(l5 + t);
+            r2.ppu.palette_blocked(l5 + t, double)
+        };
+        assert_eq!(
+            [
+                pal(86, false),
+                pal(87, false),
+                pal(259, false),
+                pal(260, false)
+            ],
+            [false, true, true, false]
+        );
+        let mut r2 = Rig::on_at(on, 0, 0xFF);
+        let mut pal = |t: u64, double| {
+            r2.sync(l5 + t);
+            r2.ppu.palette_blocked(l5 + t, double)
+        };
+        assert_eq!(
+            [pal(86, true), pal(87, true), pal(258, true), pal(259, true)],
+            [false, true, true, false]
+        );
+        // Synced to the line start (line 4 latched): 86 on the fast path,
+        // 87 on the slow one.
+        let mut r2 = Rig::on_at(on, 0, 0xFF);
+        r2.sync(l5);
+        let pal = |t: u64| r2.ppu.palette_blocked(l5 + t, false);
+        assert_eq!([pal(86), pal(87)], [false, true]);
         // VBlank: free.
         let l150 = clock(on, 0, 150 * LINE + 100);
         r.sync(l150);
         assert!(!r.ppu.vram_blocked(l150, false) && !r.ppu.oam_blocked(l150, false, true));
+        assert!(!r.ppu.palette_blocked(l150, false));
         // The first line after LCD enable: OAM writes from SameBoy's 76,
         // reads from 78 (mode 3), VRAM from the pipeline start.
         let r = Rig::on_at(on, 0, 0xFF);
@@ -2200,6 +2253,16 @@ mod tests {
                 p.vram_blocked(first(91), false)
             ],
             [false, true]
+        );
+        // Palette RAM: from dot 88 in both speeds.
+        assert_eq!(
+            [
+                p.palette_blocked(first(87), false),
+                p.palette_blocked(first(88), false),
+                p.palette_blocked(first(87), true),
+                p.palette_blocked(first(88), true)
+            ],
+            [false, true, false, true]
         );
     }
 

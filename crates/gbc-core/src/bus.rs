@@ -211,14 +211,15 @@ impl Sys<'_> {
     }
 }
 
-/// A BCPD/OCPD write in CGB mode: stores `value` at the palette RAM byte the
-/// index register (BCPS/OCPS) selects in bits 0-5, then, if its bit 7
-/// (auto-increment) is set, increments bits 0-5, wrapping 3F to 00 and
-/// keeping bit 7 (Pan Docs: LCD Color Palettes, FF68 BCPS; SameBoy
-/// `write_high_memory`, GB_IO_BGPD). Returns the byte written.
-fn palette_data_write(index: &mut u8, ram: &mut [u8; 64], value: u8) -> usize {
+/// The index step of a BCPD/OCPD write in CGB mode: returns the palette RAM
+/// byte the index register (BCPS/OCPS) selects in bits 0-5, then, if its
+/// bit 7 (auto-increment) is set, increments bits 0-5, wrapping 3F to 00
+/// and keeping bit 7 (Pan Docs: LCD Color Palettes, FF68 BCPS; SameBoy
+/// `write_high_memory`, GB_IO_BGPD). It happens even when the PPU blocks
+/// the write (Pan Docs: "even if the write fails due to CRAM being
+/// inaccessible"; SameBoy `cgb_palettes_blocked`).
+fn palette_index_step(index: &mut u8) -> usize {
     let i = usize::from(*index & 0x3F);
-    ram[i] = value;
     if *index & 0x80 != 0 {
         *index = (*index & 0x80) | (index.wrapping_add(1) & 0x3F);
     }
@@ -971,24 +972,29 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// A BCPD (`obj` false) or OCPD (`obj` true) write in CGB mode: draws
-    /// the pixels output so far with the old colors, stores the byte at
-    /// BCPS/OCPS and re-resolves the color. Out of line: rare next to the
-    /// other I/O writes (hi-color raster effects do it a few times a line).
+    /// A BCPD (`obj` false) or OCPD (`obj` true) write in CGB mode: steps
+    /// the index; unless the PPU blocks palette RAM
+    /// ([`Ppu::palette_blocked`]), stores the byte at BCPS/OCPS and
+    /// re-resolves the color.
+    /// Out of line: rare next to the other I/O writes (hi-color raster
+    /// effects do it a few times a line).
     #[inline(never)]
     fn write_palette_data(&mut self, obj: bool, value: u8) {
         let now = self.clock();
         self.run_ppu_to(now);
         let s = &mut *self.sys;
-        // Synced to `now`: outside mode 3 there is nothing to draw.
-        if s.ppu.drawing() {
-            s.ppu.flush(now, self.mem, self.frame);
+        let i = palette_index_step(&mut self.mem.io[if obj { 0x6A } else { 0x68 }]);
+        // Synced to `now`: drawing (latched, so past the window start, and
+        // before the mode-3 end) means blocked, and when not drawing there
+        // are no pixels to flush with the old colors.
+        if s.ppu.drawing() || s.ppu.palette_blocked(now, self.hot.mcycle == 2) {
+            return;
         }
         if obj {
-            let i = palette_data_write(&mut self.mem.io[0x6A], &mut self.mem.obj_pal, value);
+            self.mem.obj_pal[i] = value;
             s.ppu.write_ocpd(i, self.mem);
         } else {
-            let i = palette_data_write(&mut self.mem.io[0x68], &mut self.mem.bg_pal, value);
+            self.mem.bg_pal[i] = value;
             s.ppu.write_bcpd(i, self.mem);
         }
     }
@@ -1014,7 +1020,8 @@ impl Ctx<'_, '_> {
             }
             // CGB palettes. BCPS/OCPS (the index registers) are writable on
             // a CGB in either mode, BCPD/OCPD only in CGB mode (SameBoy
-            // `write_high_memory`). TODO(M5): access blocked in mode 3.
+            // `write_high_memory`); blocked around mode 3
+            // ([`Ppu::palette_blocked`]).
             0x68 | 0x6A => self.mem.io[reg] = value,
             0x69 | 0x6B if cgb => self.write_palette_data(reg == 0x6B, value),
             // OPRI: writable in CGB mode only (after the boot ROM), and only
@@ -1747,6 +1754,36 @@ fn extra_oam_index(a: usize) -> usize {
     ((a & 0xFF) & !0x18) - 0xA0
 }
 
+/// The palette RAM byte BCPD (`reg` 0x69) or OCPD (0x6B) reads, at the
+/// BCPS/OCPS index.
+fn palette_byte(mem: &Memory, reg: usize) -> u8 {
+    let ram = if reg == 0x6B {
+        &mem.obj_pal
+    } else {
+        &mem.bg_pal
+    };
+    ram[usize::from(mem.io[reg - 1] & 0x3F)]
+}
+
+/// The rare I/O reads (`read_io`'s `_` arm), `reg` the low 7 address bits;
+/// FF unless listed. Out of line, for `read_high`'s code-size budget.
+#[inline(never)]
+fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
+    let cgb = sys.cgb_mode;
+    match reg {
+        // BCPD/OCPD (CGB mode) read the palette RAM byte at the index,
+        // without incrementing it (SameBoy `read_high_memory`; Pan Docs:
+        // FF69), and FF while the PPU blocks palette RAM
+        // ([`Ppu::palette_blocked`]; Pan Docs: LCD Color Palettes).
+        0x69 | 0x6B if cgb && !sys.ppu.palette_blocked(hot.clock(), hot.mcycle == 2) => {
+            palette_byte(mem, reg)
+        }
+        // FF74 (GB_IO_PSW): R/W in CGB mode only (see `read_io`).
+        0x74 if cgb => mem.io[reg],
+        _ => 0xFF,
+    }
+}
+
 /// A CPU read of VRAM: FF while the PPU blocks it ([`Ppu::vram_blocked`]).
 /// Out of line: the check needs the PPU's position.
 #[inline(never)]
@@ -1828,11 +1865,7 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // BCPS/OCPS: bit 6 reads 1, in either mode (SameBoy
         // `read_high_memory`; Mooneye `misc/bits/unused_hwio-C`).
         0x68 | 0x6A => 0x40 | mem.io[reg],
-        // BCPD/OCPD read the palette RAM byte at the index, without
-        // incrementing it (SameBoy `read_high_memory`; Pan Docs: FF69).
-        // TODO(M5): FF while the PPU reads palettes (mode 3).
-        0x69 if cgb => mem.bg_pal[usize::from(mem.io[0x68] & 0x3F)],
-        0x6B if cgb => mem.obj_pal[usize::from(mem.io[0x6A] & 0x3F)],
+        // BCPD/OCPD: `read_io_other`.
         0x70 if cgb => 0xF8 | sys.svbk,
         // Undocumented CGB registers, as in SameBoy (Core/memory.c,
         // `read_high_memory`, the I/O part of `GB_read_memory`): OPRI
@@ -1843,11 +1876,11 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // (ADR 0003), so "on CGB" needs no check.
         0x6C => 0xFE | mem.io[reg],
         0x72 | 0x73 => mem.io[reg],
-        0x74 if cgb => mem.io[reg],
+        // FF74: `read_io_other`.
         0x75 => 0x8F | mem.io[reg],
         // FF76/FF77 PCM12/PCM34 (read only, on CGB in either mode; Mooneye
         // `misc/bits/unused_hwio-C` reads 00 with the APU silent): above.
-        _ => 0xFF,
+        _ => read_io_other(mem, sys, hot, reg),
     }
 }
 
@@ -1863,6 +1896,10 @@ impl Emulator<'_> {
         // and VRAM/OAM whatever the PPU mode.
         if (0xFE00..0xFF00).contains(&addr) {
             return raw_oam(self.mem, addr);
+        }
+        // Palette RAM whatever the PPU mode, too.
+        if matches!(addr, 0xFF69 | 0xFF6B) && sys.cgb_mode {
+            return palette_byte(self.mem, usize::from(addr & 0x7F));
         }
         read::<false>(self.mem, sys, &sys.hot.without_dma(), addr)
     }
@@ -2180,6 +2217,37 @@ mod tests {
         write(emu, 0xFF6A, 0x00);
         assert_eq!(emu.peek(0xFF6B), 0x66);
         assert_eq!(emu.mem.bg_pal[0x3F], 0x44);
+    }
+
+    /// Mode 3 (CGB mode): a BCPD/OCPD read gives FF and a write is dropped
+    /// but still steps the index; after mode 3 both work again (Pan Docs:
+    /// LCD Color Palettes; SameBoy `cgb_palettes_blocked`).
+    #[test]
+    fn cgb_palette_data_is_blocked_in_mode3() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let line = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 456 * 5;
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(line + 150, &mut fb, &mut []);
+        emu.mem.bg_pal[0] = 0x5A;
+        emu.mem.obj_pal[1] = 0xA5;
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        ctx.write(0xFF68, 0x80);
+        ctx.write(0xFF6A, 0x01);
+        let reads = [ctx.read(0xFF69), ctx.read(0xFF6B)];
+        ctx.write(0xFF69, 0x12);
+        ctx.write(0xFF6B, 0x34);
+        while ctx.clock() < line + 400 {
+            ctx.idle();
+        }
+        let after = [ctx.read(0xFF69), ctx.read(0xFF6B)];
+        drop(ctx);
+        assert_eq!(reads, [0xFF, 0xFF]);
+        // Not stored; BCPS stepped (auto-increment), OCPS not.
+        assert_eq!((emu.mem.bg_pal[0], emu.mem.obj_pal[1]), (0x5A, 0xA5));
+        assert_eq!((emu.mem.io[0x68], emu.mem.io[0x6A]), (0x81, 0x01));
+        // HBlank: readable again (BCPS now at byte 1).
+        assert_eq!(after, [emu.mem.bg_pal[1], 0xA5]);
     }
 
     /// An OCPD write resolves its OBJ color right away (bit 15 is not a
