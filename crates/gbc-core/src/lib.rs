@@ -282,7 +282,9 @@ struct Hw<'a> {
 }
 
 impl Hw<'_> {
-    const fn new() -> Self {
+    // Out of line (code size): `Emulator::new` and `eject` share it.
+    #[inline(never)]
+    fn new() -> Self {
         Self {
             cpu: Cpu::powered_off(),
             sys: Sys::new(),
