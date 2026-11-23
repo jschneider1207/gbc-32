@@ -87,11 +87,14 @@ Working rules that matter here:
 ## In flight
 - Session 13 (2026-11-23): merged to main, bench/gate/baseline NOT yet run:
   c274be8 (HDMA across a speed switch, +21; ADR 0017/0020 amendments) and
-  8e30952..046958f (STAT edges at lines 144/0, +23; ADR 0029). Combined
-  tree: must 86, should 40, stretch 3,345/3,461, 0 regressions, tests clean.
-- Agents: `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT
-  leftovers ~11) and `m9-stat153` (worktree `../gbc-32-stat153`, STAT edges
-  at lines 153/0: m2enable, lycEnable, ly0/lyc153 ds retrigger).
+  8e30952..046958f (STAT edges at lines 144/0, +23; ADR 0029), b05f1b3..ced776f
+  (STAT/LYC windows, +20; ADR 0029 amendment). At ced776f: must 86, should
+  40, stretch 3,365/3,461, 0 regressions, tests clean, .text 93,084 B.
+- Agent: `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT leftovers ~11).
+- STAT leftovers (agent hypotheses): `lyc_ff45_trigger_delay_2` needs a delayed
+  IF request 5 cycles after an LYC write (gambatte CGB single speed);
+  `lycstatwirq_trigger_ly00_10_50_1` is phase 2 vs the walk at line 0 (open);
+  the two ds retrigger ROMs need a double-speed-only line-0 walk point (t = 5).
 
 ## Needs human
 Open:
