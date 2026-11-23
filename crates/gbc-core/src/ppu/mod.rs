@@ -306,6 +306,9 @@ const DISCARD_LEAD: i32 = 8;
 const WINDOW_LEAD: i32 = 0;
 const WINDOW_ON_LEAD: i32 = 1;
 const WY_LEAD: i32 = 4;
+/// Stall dots kept by an LCDC.5 clear during the window stall: those
+/// before the write's clock plus this (calibrated, step E2).
+const WINDOW_OFF_LEAD: i32 = 0;
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -1554,7 +1557,18 @@ impl Ppu {
         let decided = |c: Option<i32>, lead| c.is_some_and(|c| t + lead > c);
         // The WX the stalls were built with (the old start for a WX write).
         let old = self.renderer.window_wx().unwrap_or(0);
-        if decided(self.window_stall_at(), WINDOW_LEAD - adj(old)) {
+        let at = self.window_stall_at();
+        if decided(at, WINDOW_LEAD - adj(old)) {
+            // CGB: LCDC.5 clear during the stall ends it; its remaining
+            // dots output pixels (gambatte ppu.cpp `StartWindowDraw::inc`,
+            // CGB only; `window/late_disable*_1` cgb04c out0, dmg08 out3).
+            if let (Some(c), 0) = (at, self.lcdc & 0x20) {
+                let lt = &mut self.line;
+                let d = &mut lt.stalls[usize::from(lt.win_stall) % 11].1;
+                let keep = (t + WINDOW_OFF_LEAD - c).clamp(0, i32::from(*d)) as u8;
+                lt.end -= u16::from(*d - keep);
+                *d = keep;
+            }
             return;
         }
         let scx = mem.io[0x43];
@@ -2219,6 +2233,14 @@ mod tests {
         assert_eq!(end(None), Some(256 + 6));
         assert_eq!(end(Some((0x40, off, 100))), Some(256));
         assert_eq!(end(Some((0x40, off, 200))), Some(256 + 6));
+        // CGB: LCDC.5 clear during the stall (dots 160-165) keeps only the
+        // stall dots before the write (gambatte `StartWindowDraw::inc`);
+        // a WX or WY write there doesn't.
+        assert_eq!(end(Some((0x40, off, 160))), Some(256));
+        assert_eq!(end(Some((0x40, off, 162))), Some(256 + 2));
+        assert_eq!(end(Some((0x40, off, 165))), Some(256 + 5));
+        assert_eq!(end(Some((0x40, off, 166))), Some(256 + 6));
+        assert_eq!(end(Some((0x4B, 0xFF, 162))), Some(256 + 6));
         assert_eq!(end(Some((0x4A, 5, 100))), Some(256 + 6));
         assert_eq!(end(Some((0x4A, 5, 200))), Some(256));
         assert_eq!(end(Some((0x4B, 0xA0, 100))), Some(256 + 6));
@@ -2666,12 +2688,13 @@ mod tests {
         assert_eq!(run(0xFF, &[(158, 0x4A, 5)]), (Some(256), 1, 1, 4));
         // (b) During the stall (from dot 96 + 64 = 160): LCDC.5 cleared (and
         // set again in mode 0): the BG on line 5, row 5 counted, so line 6
-        // draws row 6; WX moved to x = 72: the window still starts at 64
+        // draws row 6, and the stall keeps its 2 dots before the write
+        // (CGB, step E2); WX moved to x = 72: the window still starts at 64
         // (line 6: at 72, row 6).
         let off = 0xF1 & !0x20;
         assert_eq!(
             run(0, &[(162, 0x40, off), (300, 0x40, 0xF1)]),
-            (Some(256 + 6), 1, 1, 4)
+            (Some(256 + 2), 1, 1, 4)
         );
         assert_eq!(run(0, &[(162, 0x4B, 0x4F)]), (Some(256 + 6), 2, 2, 4));
     }
