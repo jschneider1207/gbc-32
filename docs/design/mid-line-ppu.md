@@ -1,0 +1,338 @@
+# Design: mid-line PPU fidelity (fetch-accurate mode-3 writes)
+
+- Status: Proposed (design only; no code yet). Plan bullets: stage-1 M8
+  "Mid-line PPU fidelity (Mealybug, stretch)" and parts of "PPU edge cases
+  from the M3 hardware review".
+- Date: 2026-11-23. Written against 01bca59 without building anything
+  (a gate run was in progress). Every Ir and byte figure below is an
+  estimate from reading the code. Each increment must measure it.
+- Model: CGB C, single speed first (the Mealybug manifest compares
+  against `*_cgb_c.png`; the gambatte ROMs are `cgb04c`).
+
+## 1. Hardware behavior to model
+
+**The fetcher (SameBoy `Core/display.c`, MIT, `advance_fetcher_state_machine`;
+Pan Docs "Pixel FIFO"; Mealybug "Comprehensive PPU documentation").**
+A BG/window tile fetch takes 6 dots in 3 steps of 2 dots (T1 computes an
+address from registers, T2 reads VRAM), then waits in PUSH until the BG
+FIFO is empty:
+
+| Step | Registers sampled at T1 | VRAM read at T2 |
+|---|---|---|
+| GET_TILE | LCDC.3 (BG map) or LCDC.6 (window map), LCDC.5 (clears `wx_triggered`), SCX (all 8 bits), SCY (`fetcher_y` = LY + SCY), window state | map index; CGB: attribute byte in the same dot |
+| DATA_LOW | LCDC.4 (tile data select), SCY again (CGB <= C; D+ caches the GET_TILE y) | bitplane 0 |
+| DATA_HIGH | LCDC.4 again, SCY again | bitplane 1 |
+| PUSH | (when the FIFO is empty) | 8 pixels into the FIFO |
+
+The tile column is `x = (SCX + position_in_line + 8 - is_cgb) / 8 & 31`.
+It uses the **whole** SCX as of T1 and the current output position. The
+fine scroll (SCX & 7 discard) happens once, at line start (Pan Docs:
+Scrolling). So a mid-line change to the low bits still moves the *tile
+column* through a carry or borrow. This is the `m3_scx_low_3_bits`
+pixels 152-159 that are still open. Mealybug: "SCY is read during the
+background tile fetch B, 0 and 1 stages [up to CGB C] ... allows for
+mixing tile bitplane data from different rows". It also says TILE_SEL "is
+read during the 0 and 1 stages ... allows for mixing tile bitplane data
+from two different tile patterns". On CGB, *clearing* TILE_SEL on the
+same dot as a bitplane read makes the tile index serve as the data (CGB
+<= C). Setting it uses glitched data: SameBoy `data_for_tile_sel_glitch`,
+`GB_CONFLICT_LCDC_CGB` holds `tile_sel_glitch` for 1 dot.
+
+**Fetch vs output in steady state.** SameBoy pops a pixel, then advances
+the fetcher, in the same dot. Tile k+1 is pushed in the dot that pops
+tile k's last pixel. Tile k+2's GET_TILE T1 runs in the dot that outputs
+tile k+1's first pixel. So when output is inside tile j (screen pixels
+`[X_j, X_j + 8)`, `X_j = 8j - SCX%8`, clipped at 0), tile j is in the FIFO
+and tile j+1 is being fetched. Its fetch progress is `p = t - out(X_j)`
+dots (0-6+). A write that lands at dot `t` therefore affects:
+- GET_TILE registers: from tile j+1 if `p == 0`, otherwise from tile j+2;
+- the data registers: tile j+1's low plane if `p <= 2`, its high plane if
+  `p <= 4`, otherwise from tile j+2;
+- the output-side registers (below): from pixel `pixels_before(t)`, as
+  today.
+
+During an object stall SameBoy first finishes the BG fetch in progress
+(`while (fetcher_state < GET_TILE_DATA_HIGH_T2 || fifo empty)`). Inside a
+stall, tile j+1 counts as fully fetched (`p = 6`). The exact `p` origin
+(0 or 1 dot) and the write landing dots are **calibration constants**,
+fixed by the ROMs below. The current pixel model, `LineTiming::pixels_before`
+(`ppu/mod.rs:265`), stays the reference for `out()`. The gambatte `scy`
+ROMs that "fail by the same 2,112 pixels" (16 px x 132 lines) fit a
+renderer that applies the write 8-16 pixels earlier than this fetch
+frontier.
+
+**Per register** (where each one is sampled; the write landing dot is
+from SameBoy `cgb_conflict_map`, already used in `bus.rs:817-833`):
+
+| Register | Sampled by | Landing (single speed) |
+|---|---|---|
+| LCDC.3 / LCDC.6 map select | GET_TILE T1 | at access; double speed: `GB_CONFLICT_LCDC_CGB_DOUBLE`, two phases 2 dots apart |
+| LCDC.4 tile data | DATA_LOW T1 and DATA_HIGH T1 (mixed planes); CGB glitch on the read dot | clear: glitch dot, then +1 (`GB_CONFLICT_LCDC_CGB`) |
+| LCDC.5 window enable | GET_TILE T1 (switch back to BG at the next fetch, Mealybug WIN_EN notes); also whether the window stall happens at all | at access |
+| LCDC.0 (BG/master priority), LCDC.1 (obj enable) | pixel output (`render_pixel_if_possible`) | at access |
+| LCDC.2 obj size | object fetch (`get_object_line_address`) and the OAM scan (mode 2, out of scope) | at access |
+| SCX | GET_TILE T1 (column, 8 bits); low 3 bits also once at line start (discard) | at access (`READ_OLD`); double speed `SCX_DMG_AND_CGB_DOUBLE` |
+| SCY | GET_TILE, DATA_LOW, DATA_HIGH T1 (CGB C) | Mealybug: "on CGB ... 2 T-cycles later" |
+| BGP / OBP0 / OBP1 (compat. mode) | pixel output | 1 dot early (`GB_CONFLICT_PALETTE_CGB`), modelled |
+| BCPD / OCPD (CGB) | pixel output; CPU-blocked in mode 3 | only the mode-3 edges matter: `cgbpal_m3` access timing, not this design |
+| WX | window start: compared with the pixel counter at fetch time (`GB_update_wx_glitch` at every T1; WX=0 CGB glitch) | +1 dot (`WRITE_CPU`), modelled |
+| WY | WY==LY condition (mode 2, `wy_check`), outside mode 3 | at access (`READ_OLD`) |
+
+WX, WY and LCDC.5 also change the **mode-3 length**: the 6-dot window
+stall happens only if the window really starts. Today it is latched at
+`t = 89` (`ppu/mod.rs:1132`).
+
+## 2. Which failing manifest ROMs each sub-behavior should fix
+
+Estimated from the names in `acceptance/results/stage1.json`
+(`"fail"` entries grouped by directory and stem; `_ds` = double speed),
+not by running anything. "Upper" counts the whole group. "Likely" leaves
+out variants that also depend on another sub-behavior (double-speed
+landing, CGB glitches, objects).
+
+| Sub-behavior | Failing ROMs it targets | Upper | Likely |
+|---|---|---|---|
+| A. GET_TILE frontier (map select, SCX high bits) | gambatte `bgtilemap` 24 (8 ds); `scx_during_m3` 95 (52 ds; png group 93); Mealybug `m3_lcdc_bg_map_change{,2}`, `m3_lcdc_win_map_change{,2}`, `m3_scx_high_5_bits{,_change2}`; AGE `m3-bg-scx{,-ds}`, `m3-bg-lcdc{,-ds}` | ~131 | 40-60 (single speed) |
+| B. SCX low-bit carry in the column | `m3_scx_low_3_bits`; the low-bit `scx_during_m3` variants (`scx1_scx0`, `scx2_scx1`, ...) | in A | +5-15 |
+| C. Per-plane DATA steps (SCY, LCDC.4) | gambatte `scy` 43 (15 ds), `bgtiledata` 18 (6 ds); Mealybug `m3_scy_change{,2}`, `m3_lcdc_tile_sel_change`, `m3_lcdc_tile_sel_win_change` | 65 | 30-40 |
+| D. Double-speed landing of SCX/SCY/LCDC | the `_ds` variants of A and C | 81 | 40-60 (after A-C) |
+| E. Dynamic window stall and start (WX/WY/LCDC.5 in mode 3) | gambatte `window` 86 (84 are `out` timing ROMs: `late_disable*`, `late_wx*`, `late_wy*`, `late_reenable*`; 21 ds); AGE `stat-mode-window` 3; Mealybug `m3_lcdc_win_en_change_multiple`, `m3_window_timing_wx_0`; plan "mode-3 window stall latched at t=89" | ~91 | 40-65 |
+| F. Object fetch on the dot (LCDC.2 at fetch, LCDC.1/OBP inside a stall) | Mealybug `m3_lcdc_obj_size_change{,_scx}`, `m3_lcdc_obj_en_change{,_variant}`, `m3_obp0_change`, `m3_bgp_change_sprites`, `m3_wx_4_change_sprites` | 7 | 3-5 |
+| G. CGB TILE_SEL glitch | `m3_lcdc_tile_sel_change2`, `m3_lcdc_tile_sel_win_change2` | 2 | 1-2 |
+
+Not covered: `cgbpal_m3` (28, palette-RAM access edges), `gambatte/sprites`
+(22, object timing), `oamdma`/`dma`/`speedchange` and the STAT-timing
+groups. Realistic total for A-G: **~160-250 of the 703 failing ROMs**,
+all stretch tier.
+
+## 3. Current architecture (01bca59)
+
+- **One draw per line, at the mode-3 end.** `Pt::Latch` (t = 89) calls
+  `Ppu::latch` (`ppu/mod.rs:1123`). Latch runs the OAM scan, fixes
+  `LineTiming` (`first_pixel = mode3 + 12 + SCX%8`, `:1166`; window stall
+  only if LCDC.5, WY condition and WX <= 166 hold *at latch*, `:1132`;
+  `end`, `:1203`) and calls `Renderer::start_line` (latches `fine_scx`,
+  `render.rs:294`). `Pt::End` draws whatever is left to pixel 160
+  (`mod.rs:914`). VRAM and OAM are CPU-blocked in mode 3, so drawing late
+  is exact for them.
+- **Mid-line writes are synchronous catch-up, not queued.**
+  `Ctx::write_ppu` (`bus.rs:776`; LCDC `:780-792`; SCY/SCX/palettes/WY/WX
+  `:827-848`) runs the PPU to the write and calls `Ppu::flush(at)`
+  (`mod.rs:1013`). That draws pixels `drawn..mode3_pixel(at)`
+  (`mod.rs:1546`, `pixels_before`) with the *old* registers through
+  `Ppu::draw` (`:982`, registers from `Ppu::regs`, `:968`). Then the write
+  lands. So the write's dot timestamp is already exact. What is wrong is
+  that every later pixel uses the new value, which is right for output-side
+  registers (palettes, LCDC.0/1) and **wrong for fetch-side ones**.
+- **The renderer is span-based.** `Renderer::render` (`render.rs:320`):
+  window activation by pixel (`:355-372`), objects fetched when the span
+  reaches them (`:377`, `fetch_objects` with the span's LCDC), then
+  `bg_span` (`:407`). The BG column is
+  `(SCX & 0xF8) + fine_scx + x0` (`:445`, so no carry) and the row is
+  `ly + SCY` (`:453`), both from the span's registers. `fill_tiles`
+  (`:747`) runs `Fetch::row` (`:688`, index, attr and both planes in one
+  go) per tile. Partial tiles at span edges go through `partial_tile` →
+  `fill_partial` (`:875`, `:884`); `fill_partial` already takes a decoded
+  row `w` and an `attr`.
+
+## 4. Proposed design
+
+### Options
+
+1. **FIFO snapshot at the write (recommended).** Keep the synchronous
+   flush. When a fetch-side register is written during mode 3, `flush`
+   also materializes the part of the fetcher the old registers already
+   decided: the rest of tile j (in the FIFO) and tile j+1's completed
+   steps. That goes into a tiny `Prefetch` buffer. The next `render` span
+   drains it first through the existing `fill_partial`, then continues
+   with the normal tile loop from tile j+2. With no write, the buffer is
+   empty and the only cost is one test per span.
+2. **Per-line write log, replayed at the mode-3 end.** Queue
+   `(dot: u16, reg: u8, val: u8)` in a fixed `[_; 16]` during mode 3 and
+   draw the whole line at `End` with a per-tile slow loop. For each tile it
+   computes the dots of its fetch steps (the inverse of `pixels_before`,
+   including object stalls) and looks up each register's value then.
+   Most faithful for many writes per tile. But it needs a second tile loop
+   and an inverse-timing walk (~1.5-2 KB, over the 740 B left), an
+   overflow fallback, and a bypass of today's flush for the fetch
+   registers.
+3. **SameBoy-style per-dot mode 3 for "dirty" lines** (SameBoy's own
+   `mode3_batching_length` fast path falls back to this on a write). It
+   is exact for everything, including F and G, but it is a new pixel
+   pipeline (~3-5 KB) and ~5k+ Ir per slow line. Rejected for the budgets.
+
+**Recommendation: option 1.** The flush already gives the exact landing
+dot for each write, one at a time, in order. The only state the hardware
+carries past a write is what the fetcher holds, at most 2 tiles. So a
+"queue" of length 1 (the write being handled) plus a 2-tile snapshot is
+enough, and nothing needs replaying.
+
+### Data structures (fixed size, no alloc, in `Renderer`)
+
+```rust
+struct Prefetch {            // ~12 B; Renderer stays under the Hw size assert
+    n: u8,                   // tiles held: 0 = fast path
+    tiles: [PTile; 2],       // [0] = rest of tile j (complete), [1] = tile j+1
+}
+struct PTile {
+    px: u8,                  // pixels of this tile still to output (<= 8)
+    done: u8,                // fetch steps done: 0..=3 (GET_TILE, LOW, HIGH)
+    win: bool,               // fetched as window (row/column source)
+    idx: u8, attr: u8,       // valid if done >= 1
+    lo: u8, hi: u8,          // valid if done >= 2 / 3
+}
+```
+
+`Renderer` lives in `Hw`, which is size-asserted at 864 B (ADR 0019). +12 B must be
+checked. If it doesn't fit, put it in `Memory` beside `obj_buf` (ADR 0019
+did the same).
+
+### Write path (slow, out of line, flash tier)
+
+`Ppu::flush(at)` already computes `(ly, x)`. New: for writes to LCDC (only
+if bits 3/4/5/6 change), SCX or SCY, `bus.rs` calls
+`flush_fetch(at, old_regs)` instead:
+1. `draw(ly, x)` as today (drains any existing `Prefetch` first).
+2. `fetch_progress(at) -> (j, p)`. It reuses `LineTiming`: the tile index
+   from `x` and the fine scroll, and `p = t - out(X_j)` from the same walk
+   as `pixels_before`, with `p = 6` inside a stall. It is one function
+   beside `pixels_before`, sharing its loop (~60 B).
+3. Snapshot: if `n == 0`, push tile j (all steps, old registers) with
+   `px = X_j + 8 - x` and tile j+1 with `done = step(p)`. If a snapshot
+   already exists (a second write before it drains), only *advance* tile
+   j+1 to `step(p)` with the current (pre-write) registers. That is how
+   several writes in one tile compose.
+4. The write lands; `render` will run any steps not yet done with the new
+   registers.
+
+The step reads reuse the address logic of `Fetch::row`. Split it into
+`map_entry(col) -> (idx, attr)` and `plane(idx, attr, row, hi) -> u8`, both
+`#[inline(always)]`, so `Fetch::row` (the hot loop) compiles to the same
+code (check with `check-code-size.sh`: `fill_plain`/`fill_mixed` unchanged).
+
+### Render path
+
+At the top of `bg_span` (hot, ITCM): `if self.pf.n != 0 { self.drain(...) }`.
+`drain` is out of line in flash. It finishes each held tile's missing steps
+with the span's registers, then outputs `min(px, span)` pixels with
+`fill_partial::<MIX>(out, obj, w << 2*skip, attr, master, colors)`, the
+existing function (`w` from `decode(lo, hi)`), and advances `x0`. Then the
+normal path runs from the first tile boundary after the held tiles. The
+column of the first tile and of every later one comes from the fetch rule
+`(SCX + X_t + K) >> 3` instead of `(SCX & 0xF8) + fine_scx + x`. `K` is
+chosen so that with constant SCX the two are identical (sub-behavior B).
+That is a span-setup change of a few instructions, not per pixel.
+
+Window (sub-behavior E, also at the write): on a WX/WY/LCDC.5 write in mode
+3 before the window has started (`win_stall` not yet reached), recompute
+the window stall in `LineTiming` with the stall-building loop factored out
+of `latch` (`mod.rs:1175-1202`, reused, not duplicated). Then reschedule
+the `End` event (`next_event` already supports moving it; see the
+latch-time `End` move in ADR 0014). Clearing LCDC.5 after the start goes
+back to the BG at the next GET_TILE, which is a `Prefetch` boundary, not a
+pixel boundary.
+
+Objects (F): pass `p` (dots into the stall) from `fetch_progress` to the
+renderer, so an object whose fetch at `x` is past its tile-address step
+uses the old LCDC.2. Only on writes.
+
+### Cost estimate (reasoned, to be measured per increment)
+
+- **Fast path (no mid-line fetch-register write; this is `synth:worst-case`,
+  which writes no PPU register in mode 3):** one byte test per `bg_span`
+  call plus the K-term in the column setup. That is ~5 x86 Ir per span, at
+  1-2 spans per line, so **~0.7-1.5k Ir/frame** (<= 1.5% of the ~100k
+  headroom). The pixel loops are unchanged.
+- **Slow path, per fetch-register write:** `fetch_progress` ~40 Ir,
+  snapshot (2 map reads + up to 4 plane reads) ~80 Ir, drain (2 x
+  `fill_partial`, <= 16 px) ~100-150 Ir, so **~250-350 Ir**.
+  `synth:cgb-raster` (one SCX write per line) goes from ~2.66 M to
+  ~2.70-2.71 M Ir/frame (67% of the line). A game with ~10 such writes per
+  line would add ~0.4-0.5 M/frame. That is fine alone but would exceed the
+  line if combined with everything in `worst-case` (see section 6).
+- **Code (thumbv7em):** A+B scaffolding (`Prefetch`, `flush_fetch`,
+  `fetch_progress`, `drain`) ~450-550 B, of which ~40-60 B goes in ITCM
+  (`bg_span` test, column term); C +~80 B; E ~100-150 B (mostly a call to
+  the factored stall loop plus the reschedule); F ~100-150 B; G ~150 B.
+  **A-C fit in the 740 B left. E-G do not without a budget raise** (total
+  ~0.9-1.2 KB). ITCM: +40-60 B against the 1,538 B margin, fine. The new
+  out-of-line functions go in the flash tier (cold).
+
+## 5. Step plan
+
+Each step: one behavior, its own commit, `check-bench.sh` and
+`check-code-size.sh` (run alone). Use `diff-fingerprint.sh` to prove that
+ROMs without mid-line writes are bit-identical, and list and explain every
+differing ROM. A unit test in the `render.rs` test harness (`begin`/`span`/
+`line`, `render.rs:1000+`) is mutation-checked in a scratch worktree.
+
+1. **A: GET_TILE frontier for LCDC.3/6 and SCX high bits** (scaffolding +
+   snapshot of complete tiles and `done = 1` tiles). Flips: `bgtilemap`
+   (single speed), `m3_lcdc_bg_map_change{,2}`, `m3_lcdc_win_map_change{,2}`,
+   `m3_scx_high_5_bits{,_change2}`, `m3-bg-scx`/`m3-bg-lcdc`, much of
+   `scx_during_m3` (single speed). Test: a map-select write at pixel x
+   keeps tiles j and j+1 on the old map. Mutation: make `fetch_progress`
+   return `p = 6` always (or drop the snapshot), and the test and ROMs
+   fail. Calibrate the `p` origin here.
+2. **B: SCX low-bit carry** (the `K` term in the column). Flips
+   `m3_scx_low_3_bits`, the low-bit `scx_during_m3` variants. Test:
+   constant SCX 0-255 equals the old column (equivalence), and a low-bit
+   write mid-line moves the column at the carry. Mutation: revert to
+   `(SCX & 0xF8) + fine`.
+3. **C: per-plane DATA steps** (SCY, LCDC.4 at LOW/HIGH; `done = 2`).
+   Flips `scy` and `bgtiledata` (single speed), `m3_scy_change{,2}`,
+   `m3_lcdc_tile_sel_change`, `m3_lcdc_tile_sel_win_change`. Test: a write
+   between LOW and HIGH gives a mixed-plane tile. Mutation: sample both
+   planes at LOW.
+4. **E: dynamic window stall and start.** Flips the gambatte `window`
+   `out` ROMs, AGE `stat-mode-window`, `m3_lcdc_win_en_change_multiple`.
+   Test: an LCDC.5 clear before the window pixel moves the mode-3 end
+   6 dots earlier (STAT read). Mutation: skip the recompute.
+   **Needs the .text raise** (section 6) unless steps 1-3 came in under
+   the estimate.
+5. **D: double-speed landing** for SCX/SCY/LCDC (SameBoy
+   `cgb_double_conflict_map`, replacing the "at the access" approximation
+   in `bus.rs:829`). Flips the `_ds` variants of 1-4. Mutation: restore
+   `at = now`.
+6. **F: object fetch on the dot** (LCDC.2 at the fetch step, LCDC.1/OBP
+   inside a stall). Flips up to 7 Mealybug object ROMs. Diagnose each
+   first (`m3_obp0_change` may be a landing-dot issue only).
+7. **G: CGB TILE_SEL glitch** (index-as-data on the clear dot). Flips
+   `*_tile_sel*_change2`. Lowest value; do it last or drop it.
+
+Also, as a one-line fix with any of these steps (plan "M3 hardware
+review" bullet): the palette flush when the line end equals `now` misses
+pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
+
+## 6. Risks and what needs the human
+
+- **Code size (needs the human).** A-C ~530-630 B against ~740 B left.
+  E-G add ~350-450 B more. Ask for gbc-core `.text` budget **96,000 →
+  97,000 B** (+1.0%), with the measured sizes, before step 4. The
+  alternative is to stop after C or find equal savings. ITCM is not a
+  problem (+40-60 B of 1,538 B).
+- **Worst-case definition (decision for the human).** `synth:worst-case`
+  has no mid-line PPU writes, so this design costs it ~1k Ir/frame. A
+  raster-effect game on the busiest frame (10 objects per line, window, a
+  fetch-register write every line) would cost ~+40-50k on top of the
+  3.92 M (~99%). With 3+ writes per line it would exceed the 4.02 M
+  line. Should `worst-case` gain one mid-line SCX write per line? That
+  would show the real margin, measured as ~+45k by estimate.
+- **Calibration uncertainty.** The `p` origin, the SCY "2 T-cycles later"
+  on CGB, and the stall-time fetch state come from SameBoy and Mealybug
+  notes, not first principles. Mitigation: fix them in step 1 with ROMs
+  that pin them (`m3_lcdc_bg_map_change2`, `bgtilemap_spx08_*`), and
+  record them in an ADR (renderer fetch model). Expect some single ROMs
+  to need a second sub-behavior before they flip, which is why the
+  "likely" counts are below the upper bounds.
+- **Window interplay.** A snapshot tile that crosses the window start, or
+  WX=0 with fine scroll (`m3_window_timing_wx_0`, the CGB WX glitch in
+  `GB_update_wx_glitch`), can mis-assign BG/window. v1 records `win` per
+  held tile and falls back to today's per-pixel start if a held tile
+  would cross WX. Mutation tests must cover both.
+- **OAM DMA lines** (`attr_on`, `fix_attrs` in `flush`) must keep working
+  with `flush_fetch`. Run the `oamdma` group with `--filter` in every
+  step (no regressions allowed).
+- **Regression guard.** The fast path must stay bit-identical. The
+  fingerprint diff on every step is the proof. Any differing ROM without
+  a mid-line fetch-register write means the step is wrong.
