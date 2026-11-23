@@ -139,8 +139,8 @@ on an SCX write seen before its match; the compare runs 8 dots before the
 pixel's output slot (`DISCARD_LEAD`). 21 fail->pass, 0 regressions
 (`docs/design/mid-line-ppu.md` section 7, "Live fine-scroll discard").
 Residual: `scx_0367c0` `_2`/`_ds_2` (1 px), `_3`/`_ds_3` (143 px),
-`10spritesPrLine_late_scx4_ds` (not diagnosed; suspect: object stalls use the latched
-SCX).
+`10spritesPrLine_late_scx4_ds` (fixed by step F: the stalls now follow a discard
+move).
 
 ### 6. STAT/LY edges at the other CPU clock phase (33)
 `lcd_offset/offset{1,2,3}_*` (17) and the `*lcdoffset*` variants in
@@ -236,6 +236,18 @@ gambatte `scx_during_m3_spx{0,1,2}`, `spx2_ds`,
 `scx_attrib_during_m3_spx{1,2}_ds` (6; 8-72 px) and Mealybug
 `m3_bgp_change_sprites`, `m3_obp0_change`, `m3_lcdc_obj_en_change{,_variant}`,
 `m3_lcdc_obj_size_change{,_scx}` (6). Design step F.
+**Status: SCX part done** (`docs/design/mid-line-ppu.md` section 7, "Step F"):
+5 fail->pass, 0 regressions (`scx_during_m3_spx{0,1}`,
+`scx_attrib_during_m3_spx1_ds`, plus `10spritesPrLine_late_scx4_ds_1` and
+AGE `m3-bg-lcdc-ds`). Left: `scx_during_m3_spx2`, `spx2_ds`,
+`scx_attrib_during_m3_spx2_ds` fail only by the object's color at x 0
+(power-on OBJ palette RAM, not timing; needs a human decision on a
+power-on pattern). The 6 Mealybug ROMs are a different mechanism: palette
+(BGP/OBP0) and LCDC.1/LCDC.2 writes landing inside an object's fetch or
+stall (object enable checked at pixel output on CGB, LCDC.2 read at the
+object's tile fetch, SameBoy `get_object_line_address`), not diagnosed
+further here. `m3_lcdc_tile_sel_change` lines with X = 5-7 objects are a
+new lead (section 7).
 
 ### 12. STAT IRQ edges, single speed (47)
 `miscmstatirq/lycstatwirq_trigger_*` (9, all `outE0`: no IRQ expected

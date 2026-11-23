@@ -622,3 +622,66 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   +120 `wy_write`; folding it into `check_wy_at` as a flag measured +54 B
   more; 94,450 B after rebasing on the cold-code cut 65dc4a9). Bench: all `check-bench.sh` rows +0.00% before the rebase (`synth:worst-case`
   476,467,536 -> 476,467,546 Ir; `cgb-acid2` +4,748).
+
+### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
+
+- **Rule 1, objects left of tile 0.** SameBoy (display.c,
+  `x_for_object_match`) fetches an object when the line position reaches
+  X - 8, the fine-scroll discard counted (tile 0 starts at -(SCX & 7)).
+  An object with X - 8 < -(SCX & 7) (X = 0 included: it matches before
+  the discard) is fetched while the 8 junk pixels before tile 0 are
+  popped, after tile 0's fetch and before tile 1's. Its stall is clamped
+  to pixel 0 in `LineTiming`, where `hold_fetch` counted it as finishing
+  tile 1 (`stalled`), so an SCX/SCY/LCDC write in it held tile 1 with the
+  old value. `hold_fetch` now skips those stalls (the object's X from the
+  renderer's fetch order; cold, looked up only where it decides `end`).
+  Objects at -(SCX & 7) <= X - 8 < 0 stall inside tile 0 and still finish
+  tile 1 there. Not covered by a test: the window stall's index offset
+  when the window starts before such an object (WX <= 7).
+- **Rule 2, stall alignment.** The stalls' tile phase is the discard
+  count, not the live SCX: a discard move in `hold_fetch` rebuilds the
+  stalls with `n & 7` (`10spritesPrLine_late_scx4_ds_1`), and
+  `window_write` rebuilds them with `Renderer::fine`, so a WX/WY/LCDC.5
+  write after a mid-line SCX write no longer re-times objects already
+  drawn (M8 review low).
+- **Rule 3, a second write in one tile.** A write landing after a held
+  tile's planes were read, with the same `end`, was dropped, so
+  `mix_planes` took the planes read between the writes from the live
+  registers. It now pushes an empty part carrying the values they were
+  read with; `ObjRank::hold` grows to three parts so the earlier part
+  survives the next tile's write (Mealybug `m3_scy_change` lines with
+  X = 0..7 objects, AGE `m3-bg-lcdc-ds`).
+- **Calibration.** None: no new constant.
+- **Result.** Full manifest vs main: 5 fail->pass, 0 regressions:
+  gambatte `scx_during_m3_spx{0,1}`, `scx_attrib_during_m3_spx1_ds`,
+  `sprites/space/10spritesPrLine_late_scx4_ds_1`, AGE `m3-bg-lcdc-ds`.
+  `diff-fingerprint.sh main`: 15 runs (11 ROMs): those 5, the three
+  `*spx2*` below, and Mealybug `m3_lcdc_bg_map_change` (466 -> 402 px),
+  `m3_lcdc_tile_sel_change` (846 -> 782), `m3_scy_change` (560 -> 189),
+  failing before and after. In `m3_lcdc_tile_sel_change` the lines with
+  an object at X = 5-7 got worse (192 px; X = 0-4 better, 256 px): an
+  LCDC.4 write 5 dots after pixel 0 hits the high plane under
+  `LCDC_TILES_LATE` = 1 (calibrated on lines without such objects), but
+  hardware shows the old plane there. `LCDC_TILES_LATE` = 0 fixes those
+  lines and regresses 14 gambatte `bgtiledata_spx*`: unresolved
+  (SameBoy has the same fetch-to-pixel phase in both cases).
+- **Still failing.** `scx_during_m3_spx2`, `spx2_ds`,
+  `scx_attrib_during_m3_spx2_ds`: 8 px each, screen x 0 of the object
+  lines, the object's color 2 from OBJ palette 0, which no ROM writes.
+  The cgb04c captures show 0x21926C there (that console's power-on OBJ
+  palette RAM; we start at 0, docs/reference/cgb-palettes.md). The timing
+  part of these ROMs passes. Not fixable by timing; matching it means a
+  power-on OBJ palette RAM pattern (gambatte ships a dump from
+  `cgb_objp_dumper`; GPL, behaviour reference only), a human decision.
+- **Tests** (mutation-checked): `object_left_of_tile_0_stalls_before_tile_1_is_fetched`
+  (rule off; junk test without the fine scroll), `object_stalls_follow_the_discard_not_the_live_scx`
+  (no rebuild on a discard move; live SCX in `window_write`),
+  `second_scy_write_in_a_tile_keeps_the_planes_read_between` (same-end
+  rule off; two parts).
+- **Cost.** `.text` 94,980 -> 95,242 B (+262: `hold_fetch` +~200, the
+  third part). Bench vs main (x86 Ir): `synth:worst-case` 475,843,415 ->
+  476,391,802 (+0.12%; ~99.2% of the 4.02 M line), `synth:cgb-raster`
+  322,710,305 -> 323,084,793 (+0.12%; +0.35% vs the committed baseline),
+  `cgb-acid2` unchanged (673,925,093). A first version that kept a
+  per-stall junk mask in `set_stalls` cost cgb-acid2 +0.46%; the lookup
+  moved to the cold `hold_fetch`.
