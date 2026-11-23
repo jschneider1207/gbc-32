@@ -13,12 +13,17 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use gbc_core::{
-    CLOCK_HZ, Config, DmgPalettes, Emulator, Events, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH,
-    WHITE, cart_ram_size,
+    CLOCK_HZ, Config, DmgPalettes, Emulator, Events, FRAME_CLOCKS, Frame, Memory, SCREEN_HEIGHT,
+    SCREEN_WIDTH, StereoSample, WHITE, cart_ram_size,
 };
 
 mod fingerprint;
 mod synth;
+
+/// Audio buffer slots per call: one frame is 548.6 samples (70,224 / 128
+/// clocks), so a frame-sized call never fills it and `AUDIO_BUFFER_FULL`
+/// never splits a call.
+const AUDIO_SLOTS: usize = 1024;
 
 /// `bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N]`.
 fn fingerprint_main(args: &[String]) -> ExitCode {
@@ -54,11 +59,22 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
 
 /// The measured region: callgrind collects only while this function is on
 /// the stack (`inline(never)` keeps it a real symbol).
+///
+/// Calls are made as the MCU front end will make them: at most one frame
+/// ([`FRAME_CLOCKS`]) per call, each with an [`AUDIO_SLOTS`]-sample audio
+/// buffer whose samples are consumed (`black_box`) after the call.
 #[inline(never)]
-pub fn run_emulation(emu: &mut Emulator<'_>, target: u64, frame: &mut Frame) -> u64 {
+pub fn run_emulation(
+    emu: &mut Emulator<'_>,
+    target: u64,
+    frame: &mut Frame,
+    audio: &mut [StereoSample],
+) -> u64 {
     let mut frames = 0u64;
     while emu.clock() < target {
-        let r = emu.run_until(target, frame, &mut []);
+        let to = target.min(emu.clock() + u64::from(FRAME_CLOCKS));
+        let r = emu.run_until(to, frame, audio);
+        black_box(&audio[..r.audio_samples]);
         if r.events.contains(Events::FRAME_READY) {
             frames += 1;
         }
@@ -124,7 +140,8 @@ fn main() -> ExitCode {
         .try_into()
         .expect("frame size");
     let target = secs * u64::from(CLOCK_HZ);
-    let frames = run_emulation(&mut emu, target, &mut frame);
+    let mut audio = vec![StereoSample::default(); AUDIO_SLOTS];
+    let frames = run_emulation(&mut emu, target, &mut frame, &mut audio);
     println!("{path}: {} clocks, {frames} frames", emu.clock());
     ExitCode::SUCCESS
 }

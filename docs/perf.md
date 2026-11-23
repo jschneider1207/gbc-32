@@ -52,6 +52,16 @@ in git):
   callgrind: `Ctx::boundary` 15.9%, `Renderer::render` 9.1% (inclusive,
   with `fill_mixed`; 9.7% before the fused object mixing), timer 7.0%,
   serial 5.1%.
+  Since M6 task 8 all four sound channels also play, at their worst
+  periods for `Apu::sync`: APU power-cycled, NR50 = 77, NR51 = FF; CH1
+  and CH2 at f = 2047, duty 50%, envelope 15 down pace 7 (steps for
+  1.64 s), CH1's sweep running (pace 1, negate, shift 0: a calculation
+  every 1/128 s that leaves f at 2047); CH3 at f = 2047, 100% volume,
+  wave RAM 30 31 .. 3F; CH4 at r = 0, s = 0, 7-bit, envelope as the
+  squares; lengths off. `synth:worst-case@<hex digit>` builds the same
+  program with only the channels in that mask (bit n = CHn+1) set up; @0
+  is the program without any APU setup (the post-boot CH1 at f = 0 stays
+  on), for measuring the APU's cost. Not in the check-bench list.
 - `synth:cgb-raster` (2 s): a CGB palette raster ("hi-color") effect in
   double speed. BG only (LCDC=91), one tile with all four colors, map
   attributes selecting palette (column & 7) so all 8 BG palettes are on
@@ -71,6 +81,46 @@ in git):
   write and `write_io` itself; the 34k mid-mode-3 writes per 2 s each
   draw a span (~370 Ir).
 
+**Audio buffers (M6 task 8).** `run_emulation` calls the core the way the
+MCU front end will: at most one frame per call (`run_until(min(target,
+clock + FRAME_CLOCKS))`), each with a 1,024-slot audio buffer whose
+samples are consumed (`black_box`) after the call. A frame is 548.6
+samples, so the buffer never fills and `AUDIO_BUFFER_FULL` never splits a
+call. Every bench entry runs this way (before task 8 they passed an empty
+buffer: no samples, the APU only advanced).
+
+**APU cost (M6 task 8, x86 Ir per emulated frame).** Producing samples
+with every channel silent costs about 66k Ir per frame (+66.1-66.2k on
+cgb-acid2, event-storm, dma-storm, halt-irq and cgb-raster when the
+buffers were added; cpu_instrs +52k, cgb_sound +95k as it plays sound):
+about 120 Ir per 128-clock window for `Apu::sync`'s loop, four
+`integrate` calls with the DACs off, the mix and the store.
+`synth:worst-case` (2 s, 119.455 frames), all with buffers:
+
+| Variant | Ir (2 s) | M Ir/frame | APU channels, k Ir/frame |
+|---|---|---|---|
+| Empty buffer (before task 8) | 424,950,275 | 3.557 | |
+| `@0`: buffers, no APU setup | 432,816,563 | 3.623 | 0 |
+| `@1`: CH1 only (sweep) | 441,530,979 | 3.696 | 73.0 |
+| `@2`: CH2 only | 441,543,877 | 3.696 | 73.1 |
+| `@4`: CH3 only (wave) | 481,742,647 | 4.033 | 409.6 |
+| `@8`: CH4 only (noise) | 442,897,819 | 3.708 | 84.4 |
+| `worst-case` (all four) | 514,359,377 | 4.306 | 682.6 |
+
+The four channels cost 682.6k Ir per frame, **3.4x the ADR 0021 budget
+of 200k** (estimate was 160k); with the silent output cost the APU adds
+749k per frame, and worst-case is at 4.306 M per frame, **107% of the
+4.02 M line** (0.29 M over; 88% before). Per 128-clock window (549 per
+frame): square ~133 Ir, noise ~154 Ir (16 LFSR steps), wave ~746 Ir: at
+f = 2047 a sample lasts 2 clocks, the closed form skips one 64-clock
+pass of the 32 samples and up to 31 single steps remain (about 24 Ir
+each). Channels together 42k more than the sum of the one-channel runs
+(mixing panned levels). Options, ADR 0021 order: noise multi-step
+(15-bit mode; this noise is 7-bit), mean level for ultrasonic wave
+periods (changes output), 16,384 Hz (human). Not in the ADR list but
+exact: summing wave samples 8 at a time from the wave RAM words (SWAR)
+instead of stepping, which would attack the 410k.
+
 Call counts from `callgrind_annotate`-style totals of the `calls=` lines in
 the callgrind output of a 1 s run.
 
@@ -78,19 +128,20 @@ Current numbers (Ir) and wall time (valgrind run of all eight, ~35 s):
 
 | ROM | Ir |
 |---|---|
-| cpu_instrs.gb | 1,595,152,445 |
-| cgb_sound.gb | 840,971,582 |
-| cgb-acid2.gbc | 512,284,188 |
-| synth:event-storm (2 s) | 396,076,665 |
-| synth:dma-storm (3 s) | 417,936,928 |
-| synth:halt-irq (10 s) | 222,173,328 |
-| synth:worst-case (2 s) | 436,831,220 |
-| synth:cgb-raster (2 s) | 293,807,294 |
+| cpu_instrs.gb | 1,685,539,389 |
+| cgb_sound.gb | 1,124,821,446 |
+| cgb-acid2.gbc | 671,427,909 |
+| synth:event-storm (2 s) | 402,056,766 |
+| synth:dma-storm (3 s) | 437,926,621 |
+| synth:halt-irq (10 s) | 287,640,279 |
+| synth:worst-case (2 s) | 514,359,377 |
+| synth:cgb-raster (2 s) | 319,140,124 |
 
-At 0dec57e (perf/bench-baseline.txt). worst-case is 3.66 M Ir per
-emulated frame (119.455 frames in 2 s), 91% of the 4.02 M (50% of M7)
-line; cgb-raster 2.46 M. These tables lagged the baseline (worst-case
-472.2 M, event-storm 432.7 M before the event dispatch cuts below).
+At M6 task 8 (perf/bench-baseline.txt: audio buffers, four channels in
+worst-case). worst-case is 4.31 M Ir per emulated frame (119.455 frames
+in 2 s), 107% of the 4.02 M (50% of M7) line; cgb-raster 2.67 M. Before
+task 8 (empty buffers, M6 channels in the core): 1,623.2 / 1,011.0 /
+592.4 / 394.1 / 426.1 / 248.1 / 424.9 / 311.2 M.
 
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M

@@ -89,7 +89,8 @@ const HALT_IRQ: &[u8] = &[
 /// a WRAM counter. Then the event-storm timer and serial loop runs, which
 /// also keeps a CGB HBlank HDMA going: 128 blocks from ROM 0000 to VRAM
 /// 8800 (tiles 128-255, which nothing displays), restarted as soon as one
-/// ends, so every visible line copies a 16-byte block.
+/// ends, so every visible line copies a 16-byte block. All four sound
+/// channels play before this ([`worst_case`]).
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
@@ -166,6 +167,97 @@ const WORST_CASE: &[u8] = &[
     0xE0, 0x55, //             LDH (HDMA5),A
     0x18, 0xE1, //             JR wait
 ];
+
+/// `synth:worst-case` audio: APU off and on (every channel off, including
+/// the post-boot CH1), NR50 = 77 (full volume, both sides),
+/// NR51 = FF (every channel on both sides). Then the channels in
+/// `APU_CHANNELS` the build mask selects, each at its worst period for
+/// `Apu::sync` (ADR 0021 section 9): squares and wave at f = 2047, noise at
+/// r = 0, s = 0, 7-bit. Envelopes run (volume 15, down, pace 7: 1.64 s of
+/// steps); CH1's sweep runs (pace 1, negate, shift 0: a calculation every
+/// 1/128 s that leaves f at 2047). Lengths are off.
+const APU_ON: &[u8] = &[
+    0xAF, //                   XOR A
+    0xE0, 0x26, //             LDH (NR52),A    APU off: all channels off
+    0x3E, 0x80, //             LD A,80
+    0xE0, 0x26, //             LDH (NR52),A    APU on
+    0x3E, 0x77, //             LD A,77
+    0xE0, 0x24, //             LDH (NR50),A    full volume both sides
+    0x3E, 0xFF, //             LD A,FF
+    0xE0, 0x25, //             LDH (NR51),A    every channel both sides
+];
+
+/// CH1-CH4 setup, in mask bit order.
+const APU_CHANNELS: [&[u8]; 4] = [
+    &[
+        0x3E, 0x18, //         LD A,18
+        0xE0, 0x10, //         LDH (NR10),A    sweep pace 1, negate, shift 0
+        0x3E, 0x80, //         LD A,80
+        0xE0, 0x11, //         LDH (NR11),A    duty 50%
+        0x3E, 0xF7, //         LD A,F7
+        0xE0, 0x12, //         LDH (NR12),A    volume 15, down, pace 7
+        0x3E, 0xFF, //         LD A,FF
+        0xE0, 0x13, //         LDH (NR13),A
+        0x3E, 0x87, //         LD A,87
+        0xE0, 0x14, //         LDH (NR14),A    trigger, f = 2047
+    ],
+    &[
+        0x3E, 0x80, //         LD A,80
+        0xE0, 0x16, //         LDH (NR21),A    duty 50%
+        0x3E, 0xF7, //         LD A,F7
+        0xE0, 0x17, //         LDH (NR22),A    volume 15, down, pace 7
+        0x3E, 0xFF, //         LD A,FF
+        0xE0, 0x18, //         LDH (NR23),A
+        0x3E, 0x87, //         LD A,87
+        0xE0, 0x19, //         LDH (NR24),A    trigger, f = 2047
+    ],
+    &[
+        0xAF, //               XOR A
+        0xE0, 0x1A, //         LDH (NR30),A    DAC off: free wave RAM access
+        0x21, 0x30, 0xFF, //   LD HL,FF30
+        // ram:
+        0x7D, //               LD A,L
+        0x22, //               LD (HL+),A      30 31 .. 3F: 32 varied levels
+        0x7D, //               LD A,L
+        0xFE, 0x40, //         CP 40
+        0x20, 0xF9, //         JR NZ,ram
+        0x3E, 0x80, //         LD A,80
+        0xE0, 0x1A, //         LDH (NR30),A    DAC on
+        0x3E, 0x20, //         LD A,20
+        0xE0, 0x1C, //         LDH (NR32),A    100% volume
+        0x3E, 0xFF, //         LD A,FF
+        0xE0, 0x1D, //         LDH (NR33),A
+        0x3E, 0x87, //         LD A,87
+        0xE0, 0x1E, //         LDH (NR34),A    trigger, f = 2047
+    ],
+    &[
+        0x3E, 0xF7, //         LD A,F7
+        0xE0, 0x21, //         LDH (NR42),A    volume 15, down, pace 7
+        0x3E, 0x08, //         LD A,08
+        0xE0, 0x22, //         LDH (NR43),A    s = 0, 7-bit, r = 0
+        0x3E, 0x80, //         LD A,80
+        0xE0, 0x23, //         LDH (NR44),A    trigger
+    ],
+];
+
+/// The `synth:worst-case` code with the channels in `mask` (bit n = CHn+1)
+/// playing: [`APU_ON`] and their [`APU_CHANNELS`] setup (none at all for
+/// mask 0), then [`WORST_CASE`] (its jumps are relative).
+/// `synth:worst-case` is mask F; `synth:worst-case@<hex digit>` builds the
+/// others, to measure the APU's cost per channel (docs/perf.md).
+fn worst_case(mask: u8) -> Vec<u8> {
+    let mut code = Vec::new();
+    if mask != 0 {
+        code.extend_from_slice(APU_ON);
+    }
+    for (ch, setup) in APU_CHANNELS.iter().enumerate() {
+        if mask >> ch & 1 != 0 {
+            code.extend_from_slice(setup);
+        }
+    }
+    code.extend_from_slice(WORST_CASE);
+    code
+}
 
 /// CGB palette raster effect ("hi-color") in double speed: after the speed
 /// switch, with the LCD off, tile 0 gets a pattern using all four colors
@@ -250,11 +342,18 @@ const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0x
 /// The ROM image for `name`, or `None` if there is no such ROM.
 pub fn build(name: &str) -> Option<Vec<u8>> {
     let raster = cgb_raster();
+    // `worst-case@<hex digit>`: the channel mask (`worst_case`).
+    let mask = match name.strip_prefix("worst-case@") {
+        Some(m) if m.len() == 1 => Some(u8::from_str_radix(m, 16).ok()?),
+        Some(_) => return None,
+        None => (name == "worst-case").then_some(0xF),
+    };
+    let worst = mask.map(worst_case).unwrap_or_default();
     let (code, stat_vector, timer_vector): (&[u8], &[u8], &[u8]) = match name {
         "event-storm" => (EVENT_STORM, &[], &[]),
         "dma-storm" => (DMA_STORM, &[], &[]),
         "halt-irq" => (HALT_IRQ, &[], &[0xD9]), // RETI
-        "worst-case" => (WORST_CASE, STAT_HANDLER, &[]),
+        _ if mask.is_some() => (&worst, STAT_HANDLER, &[]),
         "cgb-raster" => (&raster, &[], &[]),
         _ => return None,
     };
@@ -373,6 +472,33 @@ mod tests {
         let r = run("worst-case", u64::from(CLOCK_HZ) / 10, &addrs);
         assert_eq!(&r[..48], &LOGO);
         assert_eq!(r[48] & 0x80, 0, "HDMA active");
+    }
+
+    #[test]
+    fn worst_case_plays_all_four_channels_on_both_sides() {
+        // NR50, NR51, NR52 half a second in: the sweep (negate, shift 0)
+        // has run 64 calculations and left CH1 on.
+        let r = run(
+            "worst-case",
+            u64::from(CLOCK_HZ) / 2,
+            &[0xFF24, 0xFF25, 0xFF26],
+        );
+        assert_eq!(r, [0x77, 0xFF, 0xFF]);
+        // Masks: one channel each, and none at all (the plain program).
+        for ch in 0..4u8 {
+            let r = run(&format!("worst-case@{:X}", 1 << ch), 70_224, &[0xFF26]);
+            assert_eq!(r[0], 0xF0 | 1 << ch, "CH{}", ch + 1);
+        }
+        assert_eq!(
+            build("worst-case@0").unwrap()[0x150..0x150 + WORST_CASE.len()],
+            *WORST_CASE
+        );
+        // Same code (the titles differ).
+        assert_eq!(
+            build("worst-case@F").unwrap()[0x150..],
+            build("worst-case").unwrap()[0x150..]
+        );
+        assert!(build("worst-case@G").is_none() && build("worst-case@10").is_none());
     }
 
     #[test]
