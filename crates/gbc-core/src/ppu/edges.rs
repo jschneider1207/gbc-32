@@ -208,7 +208,7 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 
 // --- Design step 1: the walk's comparison point ---
 
-/// Single speed, lines 1-152: the walk (interrupt dispatch and IF reads)
+/// Lines 1-152: the walk (interrupt dispatch and IF reads)
 /// compares the new LY, and the mode-2 source of lines 1-143 ends, here:
 /// one dot after the STAT bit ([`CMP_ON`]). gambatte (behaviour only) puts
 /// the LYC interrupt 2 dots after the mode-2 interrupt (`lyc_irq.cpp`
@@ -217,21 +217,13 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 /// The default CPU phase (M-cycle boundaries at `t = 3 mod 4`) cannot
 /// tell 4 from 5; offset 3 (boundaries at `t = 0 mod 4`) can. Design doc
 /// `docs/design/lcd-offset-phase.md` 2.1, step 1.
-pub(crate) const CMP_WALK_SS: u32 = t(h(5));
-
-/// The same in double speed (design step 3), where only `ds_lcdoffset1`
-/// (M-cycle boundaries at even `t`) can tell 4 from 5. Its LYC=1 handler
-/// syncs `dma/hdma_late_{enable,m0halt}_ds_lcdoffset1_*`: at 4 the FF55
-/// enables and HALTs land 3 dots off the same tests at the default phase
-/// (the HDMA period seemed phase-dependent); at 5 one HDMA period fits
-/// both phases. Also `lcd_offset/offset1_*_ds_*` and the
-/// `lycEnable/*_ds_lcdoffset1_2` rows. The write views move with it:
-/// [`VRAM_FROM_DS`], [`OAM_WRITE_FROM_DS`], [`LYC_DEFER_UNTIL_DS`] and the
-/// STAT phase-1 mode-2 window (`Ppu::mode_source`).
-pub(crate) const CMP_WALK_DS: u32 = t(h(5));
-
-/// [`CMP_WALK_SS`] or [`CMP_WALK_DS`].
-#[inline]
-pub(crate) const fn cmp_walk(double: bool) -> u32 {
-    if double { CMP_WALK_DS } else { CMP_WALK_SS }
-}
+///
+/// Double speed compares at the same dot (design step 3, which moved it from
+/// 4): only `ds_lcdoffset1` (M-cycle boundaries at even `t`) can tell 4 from
+/// 5 there. Its LYC=1 handler syncs `dma/hdma_late_{enable,m0halt}_ds_lcdoffset1_*`:
+/// at 4 the FF55 enables and HALTs land 3 dots off the same tests at the
+/// default phase; at 5 one HDMA period fits both phases. Also
+/// `lcd_offset/offset1_*_ds_*` and the `lycEnable/*_ds_lcdoffset1_2` rows.
+/// The write views stay per speed: [`VRAM_FROM_DS`], [`OAM_WRITE_FROM_DS`],
+/// [`LYC_DEFER_UNTIL_DS`] and the STAT phase-1 mode-2 window.
+pub(crate) const CMP_WALK: u32 = t(h(5));

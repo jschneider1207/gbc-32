@@ -1349,8 +1349,6 @@ impl Ctx<'_, '_> {
             self.dma_retime(m);
         }
         self.hot.mcycle = m as i32;
-        let s = &mut *self.sys;
-        s.ppu.speed_changed(&mut s.iflags, m == 2);
         let now = self.clock();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
         // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`
