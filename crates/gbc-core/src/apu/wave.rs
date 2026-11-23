@@ -194,36 +194,28 @@ impl Wave {
         self.countdown = (p.get() - rest % p) as u16;
     }
 
-    /// Advances by `dt` clocks (<= one sample window) and returns the
-    /// analog level times clocks: `15 - 2 * digital` while the DAC is on,
-    /// 0 while it is off (Pan Docs DAC). In closed form: after the first
-    /// step the buffer always holds the byte at the index (wave RAM is
-    /// constant over a sync span), so the `n` whole sample periods are a
-    /// run of wave RAM nibbles, a difference of two prefix sums from the
-    /// SWAR words and the cached sum, and the last partial period
-    /// is the nibble at the final index. Exact: the same state and integral
-    /// as stepping (`integrate_matches_a_clock_by_clock_reference_and_advance`).
+    /// Adds to `out[i]` the analog level times clocks over the `i`-th of
+    /// the consecutive spans `segs` (each at most one sample window) and
+    /// advances over them: `15 - 2 * digital` while the DAC is on (Pan
+    /// Docs DAC), nothing while it is off. A batch per call: the period,
+    /// NR32 and wave RAM are constant over a sync span. Each span in closed
+    /// form: after the first step the buffer always holds the byte at the
+    /// index, so the `n` whole sample periods are a run of wave RAM
+    /// nibbles, a difference of two prefix sums from the SWAR words and the
+    /// cached sum, and the last partial period is the nibble at the final
+    /// index. Exact: the same state and integral as stepping
+    /// (`integrate_matches_a_clock_by_clock_reference_and_advance`).
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, dt: u32, io: &[u8; 0x80]) -> i32 {
+    pub(crate) fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], out: &mut [i32]) {
         if !self.dac {
-            return 0;
+            return;
         }
-        let total = 15 * dt as i32;
         if !self.on {
-            return total;
+            return super::mix::constant(segs, out, 15);
         }
-        // Clocks times digital output, up to the first step from the
-        // buffer (right after a trigger, the old one).
-        let cd = u32::from(self.countdown);
-        if dt < cd {
-            self.countdown = (cd - dt) as u16;
-            return total - 2 * (u32::from(self.digital()) * dt) as i32;
-        }
-        let mut high = u32::from(self.digital()) * cd;
+        let spans = out.iter_mut().zip(segs);
         let p = self.period();
-        let rest = dt - cd;
-        let (n, r) = (rest / p, rest % p);
-        let first = u32::from(self.index + 1) & 31;
+        let shift = self.shift();
         let w = self.words(io);
         let (s0, s1, s2) = (nibble_sum(w[0]), nibble_sum(w[1]), nibble_sum(w[2]));
         let before = [0, s0, s0 + s1, s0 + s1 + s2];
@@ -234,17 +226,40 @@ impl Wave {
             let j = (k >> 3 & 3) as usize;
             (k >> 5) * sum + before[j] + nibble_sum(w[j] & !(u32::MAX >> (4 * (k & 7))))
         };
-        // Samples `first..first + n`, a whole period each.
-        let to = first + n;
-        let run = prefix(to) - prefix(first);
-        let end = to & 31;
-        let byte = io[RAM + (end >> 1) as usize];
-        let last = nibble(byte, end as u8) >> self.shift();
-        high += p.get() * run + r * u32::from(last);
-        self.index = end as u8;
-        self.buffer = byte;
-        self.countdown = (p.get() - r) as u16;
-        total - 2 * high as i32
+        for (o, &dt) in spans {
+            let dt = u32::from(dt);
+            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
+            // would double the function's size (docs/perf.md, APU cost).
+            let dt = core::hint::black_box(dt);
+            let cd = u32::from(self.countdown);
+            // Up to the first step: the buffer (after a trigger, the old one).
+            let now = u32::from(nibble(self.buffer, self.index) >> shift);
+            let high = if dt < cd {
+                self.countdown = (cd - dt) as u16;
+                now * dt
+            } else {
+                let rest = dt - cd;
+                let (n, r) = (rest / p, rest % p);
+                // Samples `first..first + n`, a whole period each.
+                let first = u32::from(self.index + 1) & 31;
+                let to = first + n;
+                let end = to & 31;
+                let last = w[(end >> 3 & 3) as usize] >> (28 - 4 * (end & 7)) & 15;
+                self.index = end as u8;
+                self.buffer = io[RAM + (end >> 1) as usize];
+                self.countdown = (p.get() - r) as u16;
+                now * cd + p.get() * (prefix(to) - prefix(first)) + r * last
+            };
+            *o += 15 * dt as i32 - 2 * high as i32;
+        }
+    }
+
+    /// One span through `integrate` (tests).
+    #[cfg(test)]
+    pub(crate) fn integrate1(&mut self, dt: u32, io: &[u8; 0x80]) -> i32 {
+        let mut out = [0];
+        self.integrate(&[u8::try_from(dt).unwrap()], io, &mut out);
+        out[0]
     }
 
     /// A write to NR30-NR34 (`off` 0-4) with the frame sequencer at `fs`.
@@ -391,7 +406,7 @@ mod tests {
         assert!(!w.on);
         w.write(4, 0x80, 0, &io);
         assert!(!w.on);
-        assert_eq!(w.integrate(100, &io), 0, "DAC off: no level");
+        assert_eq!(w.integrate1(100, &io), 0, "DAC off: no level");
     }
 
     #[test]
@@ -427,7 +442,7 @@ mod tests {
                     1, 128, 37, 128, 2, 3, 64, 65, 63, 128, 91, 128, 127, 128, 128,
                 ] {
                     assert_eq!(
-                        a.integrate(dt, &io),
+                        a.integrate1(dt, &io),
                         slow(&mut b, dt, &io),
                         "f {f} vol {vol}"
                     );

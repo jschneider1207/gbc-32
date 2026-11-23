@@ -247,19 +247,18 @@ impl Apu {
         self.noise.advance(dt);
     }
 
-    /// Advances the channels by `dt` clocks (at most one sample window) and
-    /// returns each channel's analog level (-15..15 while its DAC is on,
-    /// else 0) times clocks, summed over the span, for CH1-CH4. `io` holds
-    /// wave RAM.
+    /// Integrates the consecutive spans `segs` (each at most one sample
+    /// window): adds to `lv[c][i]` channel `c`'s analog level (-15..15
+    /// while its DAC is on, else 0) times clocks over span `i`, for
+    /// CH1-CH4. `io` holds wave RAM.
     #[inline]
-    fn integrate(&mut self, dt: u32, io: &[u8; 0x80]) -> [i32; 4] {
-        let mut levels = [0; 4];
-        for (level, sq) in levels.iter_mut().zip(&mut self.sq) {
-            *level = sq.integrate(dt);
-        }
-        levels[2] = self.wave.integrate(dt, io);
-        levels[3] = self.noise.integrate(dt);
-        levels
+    fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], lv: &mut [[i32; mix::BATCH]; 4]) {
+        let [l1, l2, l3, l4] = lv;
+        let [s1, s2] = &mut self.sq;
+        s1.integrate(segs, l1);
+        s2.integrate(segs, l2);
+        self.wave.integrate(segs, io, l3);
+        self.noise.integrate(segs, l4);
     }
 }
 

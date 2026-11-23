@@ -35,22 +35,39 @@ impl Output {
     }
 }
 
-/// The mixed sums of one segment: per side, the integrals of the channels
-/// panned to it (NR51: bits 0-3 CH1-CH4 right, 4-7 left) times its
-/// volume plus 1 (NR50: bits 0-2 right, 4-6 left; VIN ignored, no cartridge audio).
-/// Pan Docs: Audio Registers, FF24/FF25.
+/// The spans integrated per batch: the channels are called once per batch,
+/// with their per-span setup (period, duty, wave RAM words) done once.
+/// 16 spans: 256 B of level sums on the stack.
+pub(crate) const BATCH: usize = 16;
+
+/// Adds `level` times each span's clocks to `out`: a channel whose DAC is
+/// on while the channel is off (Pan Docs DAC: digital 0 -> +1). One copy
+/// for all channels (code size).
+#[inline(never)]
+pub(crate) fn constant(segs: &[u8], out: &mut [i32], level: i32) {
+    for (o, &dt) in out.iter_mut().zip(segs) {
+        // Opaque: no unrolling (code size).
+        *o += level * i32::from(core::hint::black_box(dt));
+    }
+}
+
+/// The mixer's weights per side (left, right) and channel: the volume plus
+/// 1 for the channels panned to that side (NR51: bits 0-3 CH1-CH4 right,
+/// 4-7 left; NR50: bits 0-2 right, 4-6 left; VIN ignored, no cartridge
+/// audio), else 0. Pan Docs: Audio Registers, FF24/FF25.
 #[inline]
-pub(crate) fn mix(levels: [i32; 4], nr50: u8, nr51: u8) -> [i32; 2] {
+pub(crate) fn weights(nr50: u8, nr51: u8) -> [[i32; 4]; 2] {
     let side = |pan: u8, vol: u8| {
-        let mut sum = 0;
-        for (ch, &level) in levels.iter().enumerate() {
-            if pan >> ch & 1 != 0 {
-                sum += level;
-            }
-        }
-        sum * (i32::from(vol & 7) + 1)
+        let vol = i32::from(vol & 7) + 1;
+        core::array::from_fn(|ch| i32::from(pan >> ch & 1) * vol)
     };
     [side(nr51 >> 4, nr50 >> 4), side(nr51, nr50)]
+}
+
+/// The mixed sums of one span from the channel integrals.
+#[inline]
+pub(crate) fn mix(levels: [i32; 4], w: &[[i32; 4]; 2]) -> [i32; 2] {
+    w.map(|side| (0..4).map(|ch| levels[ch] * side[ch]).sum())
 }
 
 /// A completed window's sum as a sample: the average level times 64, so
@@ -90,26 +107,42 @@ impl Apu {
             return;
         }
         self.start_output();
-        let (nr50, nr51) = (io[0x24], io[0x25]);
+        let w = weights(io[0x24], io[0x25]);
         while dt != 0 {
-            let pos = u64::from(self.out.pos);
-            let seg = (SAMPLE_PERIOD - pos).min(dt);
-            let sums = mix(self.integrate(seg as u32, io), nr50, nr51);
-            self.out.acc[0] += sums[0];
-            self.out.acc[1] += sums[1];
-            dt -= seg;
-            if pos + seg < SAMPLE_PERIOD {
-                self.out.pos = (pos + seg) as u8;
-                continue;
+            // A batch: the rest of the current window, then whole windows,
+            // the last one perhaps partial.
+            let mut segs = [0u8; BATCH];
+            let mut k = 0;
+            let mut pos = u64::from(self.out.pos);
+            while k < BATCH && dt != 0 {
+                let seg = (SAMPLE_PERIOD - pos).min(dt);
+                segs[k] = seg as u8;
+                dt -= seg;
+                pos = 0;
+                k += 1;
             }
-            self.out.pos = 0;
-            let [l, r] = core::mem::take(&mut self.out.acc);
-            if let Some(slot) = audio.get_mut(*len) {
-                *slot = StereoSample {
-                    left: sample(l),
-                    right: sample(r),
-                };
-                *len += 1;
+            let mut lv = [[0; BATCH]; 4];
+            self.integrate(&segs[..k], io, &mut lv);
+            for (i, &seg) in segs[..k].iter().enumerate() {
+                // Opaque: no unrolling (code size).
+                let seg = core::hint::black_box(seg);
+                let sums = mix([lv[0][i], lv[1][i], lv[2][i], lv[3][i]], &w);
+                self.out.acc[0] += sums[0];
+                self.out.acc[1] += sums[1];
+                let pos = u64::from(self.out.pos) + u64::from(seg);
+                if pos < SAMPLE_PERIOD {
+                    self.out.pos = pos as u8;
+                    continue;
+                }
+                self.out.pos = 0;
+                let [l, r] = core::mem::take(&mut self.out.acc);
+                if let Some(slot) = audio.get_mut(*len) {
+                    *slot = StereoSample {
+                        left: sample(l),
+                        right: sample(r),
+                    };
+                    *len += 1;
+                }
             }
         }
     }
@@ -144,11 +177,11 @@ mod tests {
     fn mixer_pans_and_scales_each_side() {
         let levels = [1, 2, 4, 8];
         // NR51: CH2 + CH4 left, CH1 + CH3 right; NR50: left 7 (x8), right 0 (x1).
-        assert_eq!(mix(levels, 0x70, 0xA5), [(2 + 8) * 8, 1 + 4]);
-        assert_eq!(mix(levels, 0x03, 0x1F), [1, 15 * 4]);
+        assert_eq!(mix(levels, &weights(0x70, 0xA5)), [(2 + 8) * 8, 1 + 4]);
+        assert_eq!(mix(levels, &weights(0x03, 0x1F)), [1, 15 * 4]);
         // VIN bits (3, 7) don't scale.
-        assert_eq!(mix(levels, 0x88, 0xFF), [15, 15]);
-        assert_eq!(mix(levels, 0x77, 0x00), [0, 0]);
+        assert_eq!(mix(levels, &weights(0x88, 0xFF)), [15, 15]);
+        assert_eq!(mix(levels, &weights(0x77, 0x00)), [0, 0]);
     }
 
     #[test]

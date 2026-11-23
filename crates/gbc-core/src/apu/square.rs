@@ -117,45 +117,64 @@ impl Square {
         self.countdown = (p.get() - rest % p) as u16;
     }
 
-    /// Advances by `dt` clocks (<= one sample window) and returns the
-    /// analog level times clocks: `15 - 2 * digital` while the DAC is on
-    /// (Pan Docs DAC: digital 0 -> +1, 15 -> -1), 0 while it is off. Out
-    /// of line: one copy for both squares (code size).
+    /// Adds to `out[i]` the analog level times clocks over the `i`-th of
+    /// the consecutive spans `segs` (each at most one sample window) and
+    /// advances over them: `15 - 2 * digital` while the DAC is on (Pan Docs
+    /// DAC: digital 0 -> +1, 15 -> -1), nothing while it is off. A batch
+    /// per call: the period and duty are constant over a sync span. Each
+    /// span in closed form: up to the first step at the current bit (0
+    /// before the first step), then the `n` whole periods from the duty
+    /// byte rotated to the first position (whole patterns by its
+    /// popcount), then the final position's bit for the rest. Exact: the
+    /// same state and integral as stepping
+    /// (`integrate_matches_a_clock_by_clock_reference`). Out of line: one
+    /// copy for both squares (code size).
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, dt: u32) -> i32 {
+    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i32]) {
         if !self.env.dac() {
             // The DAC off turns the channel off: nothing advances.
-            return 0;
+            return;
         }
-        let dt_i = dt as i32;
         if !self.on {
-            return 15 * dt_i;
+            return super::mix::constant(segs, out, 15);
         }
-        // Clocks times duty bit: up to the first step at the current bit
-        // (0 before the first step), then the `n` whole periods from the
-        // duty byte rotated to the first position (whole patterns by its
-        // popcount), then the final position's bit for the rest. Exact:
-        // the same state and integral as stepping
-        // (`integrate_matches_a_clock_by_clock_reference`).
+        let spans = out.iter_mut().zip(segs);
         let vol2 = 2 * i32::from(self.env.volume);
-        let cd = u32::from(self.countdown);
-        let bit = u32::from(self.started && self.high());
-        if dt < cd {
-            self.countdown = (cd - dt) as u16;
-            return 15 * dt_i - vol2 * (bit * dt) as i32;
-        }
         let p = self.period();
-        let rest = dt - cd;
-        let (n, r) = (rest / p, rest % p);
-        let first = (self.pos + 1) & 7;
-        let pattern = DUTY[usize::from(self.duty & 3)].rotate_right(u32::from(first));
-        let m = (n & 7) as u8;
-        let ones = (n >> 3) * pattern.count_ones() + (pattern & ((1 << m) - 1)).count_ones();
-        let high = bit * cd + p.get() * ones + r * u32::from(pattern >> m & 1);
-        self.pos = (first + m) & 7;
-        self.started = true;
-        self.countdown = (p.get() - r) as u16;
-        15 * dt_i - vol2 * high as i32
+        let duty = DUTY[usize::from(self.duty & 3)];
+        let whole = duty.count_ones();
+        for (o, &dt) in spans {
+            let dt = u32::from(dt);
+            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
+            // would double the function's size (docs/perf.md, APU cost).
+            let dt = core::hint::black_box(dt);
+            let cd = u32::from(self.countdown);
+            let bit = u32::from(self.started) & u32::from(duty >> self.pos & 1);
+            let high = if dt < cd {
+                self.countdown = (cd - dt) as u16;
+                bit * dt
+            } else {
+                let rest = dt - cd;
+                let (n, r) = (rest / p, rest % p);
+                let first = (self.pos + 1) & 7;
+                let pattern = duty.rotate_right(u32::from(first));
+                let m = (n & 7) as u8;
+                let ones = (n >> 3) * whole + (pattern & ((1 << m) - 1)).count_ones();
+                self.pos = (first + m) & 7;
+                self.started = true;
+                self.countdown = (p.get() - r) as u16;
+                bit * cd + p.get() * ones + r * u32::from(pattern >> m & 1)
+            };
+            *o += 15 * dt as i32 - vol2 * high as i32;
+        }
+    }
+
+    /// One span through `integrate` (tests).
+    #[cfg(test)]
+    pub(crate) fn integrate1(&mut self, dt: u32) -> i32 {
+        let mut out = [0];
+        self.integrate(&[u8::try_from(dt).unwrap()], &mut out);
+        out[0]
     }
 
     /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`
@@ -397,7 +416,7 @@ mod tests {
         assert_eq!(sq.digital(), 0, "first-sample zero");
         assert_eq!(sq.countdown, 1024 + 10);
         let mut a = sq;
-        assert_eq!(a.integrate(100), 15 * 100, "digital 0 -> +15");
+        assert_eq!(a.integrate1(100), 15 * 100, "digital 0 -> +15");
         // Retriggering an active channel keeps the output and uses the
         // short delay; lf_div 1 subtracts 2 clocks.
         sq.started = true;
@@ -420,7 +439,7 @@ mod tests {
         let mut left = 10_000u32;
         while left != 0 {
             let dt = left.min(128);
-            int.integrate(dt);
+            int.integrate1(dt);
             left -= dt;
         }
         assert_eq!(int, one);
@@ -443,7 +462,7 @@ mod tests {
                                 l
                             })
                             .sum();
-                        assert_eq!(a.integrate(dt), want, "duty {duty} f {f}");
+                        assert_eq!(a.integrate1(dt), want, "duty {duty} f {f}");
                         assert_eq!(a, b, "duty {duty} f {f}");
                     }
                 }
@@ -459,7 +478,7 @@ mod tests {
         assert!(sq.on);
         sq.write(2, 0x07, 0, 0); // bits 3-7 all 0: DAC off
         assert!(!sq.on);
-        assert_eq!(sq.integrate(128), 0);
+        assert_eq!(sq.integrate1(128), 0);
         // A trigger with the DAC off leaves it off, but reloads length.
         sq.write(4, 0x80, 0, 0);
         assert!(!sq.on);

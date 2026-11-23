@@ -151,35 +151,52 @@ impl Noise {
         self.clock(reduce(rest / u64::from(p) + 1, self.nr43 & 8 != 0));
     }
 
-    /// Advances by `dt` clocks (<= one sample window, so at most 17 steps)
-    /// and returns the analog level times clocks: `15 - 2 * digital` while
-    /// the DAC is on (Pan Docs DAC), 0 while it is off.
+    /// Adds to `out[i]` the analog level times clocks over the `i`-th of
+    /// the consecutive spans `segs` (each at most one sample window, so at
+    /// most 17 steps) and advances over them: `15 - 2 * digital` while the
+    /// DAC is on (Pan Docs DAC), nothing while it is off. A batch per call:
+    /// NR43 and the volume are constant over a sync span.
     #[inline(never)]
-    pub(crate) fn integrate(&mut self, dt: u32) -> i32 {
+    pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i32]) {
         if !self.env.dac() {
-            return 0;
+            return;
         }
-        let dt_i = dt as i32;
         if !self.on {
-            return 15 * dt_i;
+            return super::mix::constant(segs, out, 15);
         }
-        // Clocks with bit 0 = 1: up to the first step at the old bit, then
-        // `p` per step after which it is 1, minus the unelapsed rest of the
-        // last step's period.
-        let bit = u32::from(self.lfsr & 1);
-        let cd = self.countdown;
-        let high = if dt < cd {
-            self.countdown = cd - dt;
-            bit * dt
-        } else {
-            let p = self.period().get();
-            let rest = dt - cd;
-            let left = p - rest % p;
-            let ones = self.clock(rest / p + 1);
-            self.countdown = left;
-            bit * cd + ones * p - u32::from(self.lfsr & 1) * left
-        };
-        15 * dt_i - 2 * i32::from(self.env.volume) * high as i32
+        let spans = out.iter_mut().zip(segs);
+        let vol2 = 2 * i32::from(self.env.volume);
+        let p = self.period();
+        for (o, &dt) in spans {
+            let dt = u32::from(dt);
+            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
+            // would double the function's size (docs/perf.md, APU cost).
+            let dt = core::hint::black_box(dt);
+            // Clocks with bit 0 = 1: up to the first step at the old bit,
+            // then `p` per step after which it is 1, minus the unelapsed
+            // rest of the last step's period.
+            let bit = u32::from(self.lfsr & 1);
+            let cd = self.countdown;
+            let high = if dt < cd {
+                self.countdown = cd - dt;
+                bit * dt
+            } else {
+                let rest = dt - cd;
+                let left = p.get() - rest % p;
+                let ones = self.clock(rest / p + 1);
+                self.countdown = left;
+                bit * cd + ones * p.get() - u32::from(self.lfsr & 1) * left
+            };
+            *o += 15 * dt as i32 - vol2 * high as i32;
+        }
+    }
+
+    /// One span through `integrate` (tests).
+    #[cfg(test)]
+    pub(crate) fn integrate1(&mut self, dt: u32) -> i32 {
+        let mut out = [0];
+        self.integrate(&[u8::try_from(dt).unwrap()], &mut out);
+        out[0]
     }
 
     /// A write to NR41-NR44 (`off` 1-4; others are ignored) with the frame
@@ -336,7 +353,7 @@ mod tests {
             ch.lfsr = 0x1235;
             ch.advance(1 << 24);
             assert_eq!(ch.lfsr, 0x1235, "nr43={nr43:#x}");
-            assert_eq!(ch.integrate(128), 15 * 128 - 2 * 15 * 128);
+            assert_eq!(ch.integrate1(128), 15 * 128 - 2 * 15 * 128);
         }
         let mut ch = playing(0xD0);
         ch.advance(1 << 24);
@@ -355,7 +372,7 @@ mod tests {
                 want += 15 - 2 * i32::from(b.digital());
                 b.advance(1);
                 if t % 100 == 99 {
-                    got += a.integrate(100);
+                    got += a.integrate1(100);
                     assert_eq!(a, b, "nr43={nr43:#x} t={t}");
                 }
             }
@@ -371,13 +388,13 @@ mod tests {
         assert!(ch.on);
         ch.write(2, 0x00, 0);
         assert!(!ch.on);
-        assert_eq!(ch.integrate(10), 0, "DAC off: 0");
+        assert_eq!(ch.integrate1(10), 0, "DAC off: 0");
         let mut ch = playing(0x00);
         ch.write(1, 0x3F, 0); // length 1
         ch.write(4, 0x40, 0); // enable, no trigger
         ch.frame_step(1);
         assert!(!ch.on);
-        assert_eq!(ch.integrate(10), 150, "DAC on, channel off: +15");
+        assert_eq!(ch.integrate1(10), 150, "DAC on, channel off: +15");
     }
 
     #[test]
