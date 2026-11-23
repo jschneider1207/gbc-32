@@ -43,6 +43,9 @@ struct App<'e, 'a> {
     /// `None` when gilrs could not start: keyboard only.
     pads: Option<Gilrs>,
     pacing: Pacing,
+    /// The core says the screen is blank (LCD off, or the first frame
+    /// after it turned on): show white instead of `shown`.
+    blank: bool,
     /// Frames still to run before the window closes itself (`--frames`).
     frames_left: Option<u64>,
     error: Option<String>,
@@ -53,11 +56,16 @@ impl App<'_, '_> {
     fn run_one_frame(&mut self) -> usize {
         self.emu.set_buttons(self.held.held());
         let r = self.emu.run_frame(&mut self.draw, &mut self.audio);
+        let blank = self.emu.screen_blank();
+        let changed = blank != self.blank;
+        self.blank = blank;
         if r.events.contains(Events::FRAME_READY) {
             std::mem::swap(&mut self.draw, &mut self.shown);
-            if let Some(g) = &self.gfx {
-                g.window.request_redraw();
-            }
+        }
+        if (r.events.contains(Events::FRAME_READY) || changed)
+            && let Some(g) = &self.gfx
+        {
+            g.window.request_redraw();
         }
         self.autosave.after_frame(self.emu);
         r.audio_samples.min(AUDIO_SLOTS)
@@ -93,7 +101,12 @@ impl App<'_, '_> {
             return;
         }
         if let Ok(mut buf) = g.surface.buffer_mut() {
-            video::blit(&self.shown, &mut buf, w.get() as usize, h.get() as usize);
+            video::blit(
+                video::visible(&self.shown, self.blank),
+                &mut buf,
+                w.get() as usize,
+                h.get() as usize,
+            );
             let _ = buf.present();
         }
     }
@@ -205,13 +218,14 @@ pub fn run(
         held: HeldInput::new(),
         pads: pads_init(),
         pacing: Pacing::open(Instant::now()),
+        blank: false,
         frames_left: frames,
         error: None,
     };
     el.run_app(&mut app)
         .map_err(|e| format!("event loop failed: {e}"))?;
     if let Some(p) = screenshot {
-        png::write_frame(p, &app.shown)?;
+        png::write_frame(p, video::visible(&app.shown, app.blank))?;
     }
     app.error.map_or(Ok(()), Err)
 }

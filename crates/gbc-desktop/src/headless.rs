@@ -26,10 +26,10 @@ pub fn run(opts: &Options<'_>, frames: u64, screenshot: Option<&Path>) -> Result
             }
             autosave.after_frame(emu);
         }
-        // The frame buffer holds the last complete frame: run_frame always
-        // finishes one.
+        // The frame buffer holds the last complete frame, unless the screen is
+        // blank (LCD off), when it is unspecified: `visible` gives white.
         if let Some(p) = screenshot {
-            png::write_frame(p, &frame)?;
+            png::write_frame(p, crate::video::visible(&frame, emu.screen_blank()))?;
         }
         Ok(locked)
     })

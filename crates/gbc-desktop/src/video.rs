@@ -1,6 +1,6 @@
 //! Scaling and letterboxing the 160x144 frame into a window buffer.
 
-use gbc_core::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH, rgb555_to_888};
+use gbc_core::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH, WHITE, rgb555_to_888};
 
 /// Where the scaled frame sits in a window.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -20,6 +20,15 @@ pub fn layout(w: usize, h: usize) -> Layout {
         x: w.saturating_sub(SCREEN_WIDTH * scale) / 2,
         y: h.saturating_sub(SCREEN_HEIGHT * scale) / 2,
     }
+}
+
+/// The frame the screen shows: white while the core says the screen is blank
+/// (LCD off, or the first frame after it turns on, which the hardware does
+/// not display; `Emulator::screen_blank`), else the last complete frame.
+/// The buffer behind a blank screen is unspecified, so never show it.
+pub fn visible(shown: &Frame, blank: bool) -> &Frame {
+    static BLANK: Frame = [WHITE; SCREEN_WIDTH * SCREEN_HEIGHT];
+    if blank { &BLANK } else { shown }
 }
 
 /// RGB555 to softbuffer's 0RGB.
@@ -134,6 +143,15 @@ mod tests {
         assert_eq!(buf[6 * w + 7], 0, "next source pixel is black");
         assert_eq!(buf[(6 + 287) * w + 5 + 319], 0x0000FF);
         assert_eq!(buf[(6 + 288) * w + 5], 0, "bottom letterbox");
+    }
+
+    #[test]
+    fn blank_screen_shows_white_not_the_buffer() {
+        let mut f: Box<Frame> = Box::new([0x001F; SCREEN_WIDTH * SCREEN_HEIGHT]);
+        f[5] = 0x7C00;
+        assert!(std::ptr::eq(visible(&f, false), &*f), "shows the frame");
+        let v = visible(&f, true);
+        assert!(v.iter().all(|&p| p == WHITE), "blank is all white");
     }
 
     #[test]
