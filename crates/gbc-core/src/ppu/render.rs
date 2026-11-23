@@ -45,9 +45,10 @@
 //!   passes as is.
 //! - LCDC.0 clear keeps the window activation and line counter, color 0
 //!   through BGP: `m3_lcdc_bg_en_change`, `m3_lcdc_bg_en_change2` pass.
-//! - WX = 0 loses SCX & 7 pixels (Pan Docs). `m3_window_timing_wx_0` is
-//!   one pixel off on lines with SCX & 7 != 0, so the hardware rule has
-//!   one more step; unresolved.
+//! - WX = 0 loses SCX & 7 pixels (Pan Docs). With SCX & 7 != 0 its
+//!   window start also stalls one dot more (`LineTiming`, AGE
+//!   `stat-mode-window`), which places the mid-line register writes of
+//!   `m3_window_timing_wx_0` right: it passes.
 //! - Mid-line SCX writes keep the line-start SCX & 7 (Pan Docs).
 //!   `m3_scx_low_3_bits` differs at pixels 152-159, which this doesn't
 //!   model; unresolved.

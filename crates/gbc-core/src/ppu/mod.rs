@@ -1161,7 +1161,12 @@ impl Ppu {
         if n != 0 || window.is_some() {
             let mut stalls = [(0u8, 0u8); 10];
             let n_obj = sorted_object_stalls(&xs[..n], scx, window, &mut stalls);
-            let mut win = window.map(|wx| (wx.saturating_sub(7), 6u8));
+            // The window start stalls 6 dots; at WX = 0 with SCX & 7 != 0
+            // one more (AGE `stat-mode-window`, verified on CGB B/C/E;
+            // SameBoy display.c has the extra dot, `cycles_for_line += 1`,
+            // for DMG only).
+            let fine = u8::from(scx & 7 != 0);
+            let mut win = window.map(|wx| (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0)));
             for &s in &stalls[..n_obj] {
                 if let Some(w) = win.filter(|w| w.0 <= s.0) {
                     t.win_stall = k as u8;
@@ -1746,6 +1751,28 @@ mod tests {
         assert_eq!((r.ly(line1 + 2), r.ly(line1 + 3)), (0, 1));
         assert_eq!(r.stat(line1 + 4) & 3, 2);
         assert_eq!(line1 - on, 449);
+    }
+
+    /// The window start costs 6 dots, at WX = 0 with SCX & 7 != 0 one
+    /// more (AGE `stat-mode-window`, CGB B/C/E).
+    #[test]
+    fn window_at_wx_0_with_fine_scroll_costs_one_more_dot() {
+        let end = |wx: u8, scx: u8| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, 0, 0xFF);
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = wx;
+            r.mem.io[0x43] = scx;
+            let l5 = clock(on, 0, 5 * LINE);
+            r.sync(l5 + 455);
+            (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
+        };
+        assert_eq!(end(1, 0), Some(256 + 6));
+        assert_eq!(end(0, 0), Some(256 + 6));
+        assert_eq!(end(1, 3), Some(256 + 3 + 6));
+        assert_eq!(end(0, 3), Some(256 + 3 + 7));
+        assert_eq!(end(0, 7), Some(256 + 7 + 7));
     }
 
     #[test]
