@@ -764,7 +764,7 @@ impl<'a> Emulator<'a> {
 /// transfer is pending or stalls the CPU.
 #[inline(never)]
 fn vdma_turn(cpu: &Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
-    if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.fetches_next(ctx) {
+    if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.running() {
         ctx.vram_dma();
     }
     if ctx.sys.vdma.stall == 0 {

@@ -1375,7 +1375,7 @@ impl Ctx<'_, '_> {
         // (`Timer::apu_ds_delay`).
         self.set_apu_deadline(now);
         if !pending && self.sys.vdma.hblank {
-            self.vdma_halt();
+            self.vdma_stop();
         }
         if short != 0 {
             // The halt's odd clocks (`switch_end` below), idled first (the
@@ -1463,13 +1463,15 @@ impl Ctx<'_, '_> {
     /// GDMA stall amendment).
     #[inline(never)]
     pub(crate) fn vdma_stall(&mut self, limit: u64) {
-        // In a local: no event handler touches the stall.
         let mut n = u32::from(self.sys.vdma.stall);
         while n != 0 {
             let k = self.mcycles_to_deadline().min(n);
             self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
             n -= k;
             if self.hot.budget <= 0 {
+                // Left after this deadline's M-cycle, for `vdma_hblank`:
+                // an HBlank trigger before the stall's end is lost.
+                self.sys.vdma.stall = n as u16;
                 self.boundary();
                 if self.events.intersects(self.stop_on) || self.clock() >= limit {
                     break;
@@ -1484,9 +1486,13 @@ impl Ctx<'_, '_> {
         self.mem.io[0x55] = self.sys.vdma.read_hdma5();
     }
 
-    /// STAT mode 0 now (also with the LCD off).
-    fn stat_mode0(&self) -> bool {
-        self.sys.ppu.stat_hw(self.clock(), self.hot.mcycle == 2) & 3 == 0
+    /// HDMA's HBlank period ([`Ppu::hdma_period`]) at clock `at`: from this
+    /// line's trigger ([`hdma::HBLANK_DELAY`] after the mode-0 STAT change)
+    /// to [`hdma::HBLANK_UNTIL`] dots into the next line. Also with the
+    /// LCD off (a transfer started then runs at once).
+    fn hdma_period(&self, at: u64) -> bool {
+        let p = &self.sys.ppu;
+        !p.lcd_enabled() || p.hdma_period(at, hdma::HBLANK_DELAY, hdma::HBLANK_UNTIL)
     }
 
     /// A transfer step is due: the CPU stops after this instruction so
@@ -1496,10 +1502,11 @@ impl Ctx<'_, '_> {
         self.done = true;
     }
 
-    /// FF55 write. An HBlank transfer that starts outside mode 0 waits
-    /// for the next HBlank; one that starts in mode 0 does its first
-    /// block now, and the current line's HBlank (if still ahead) doesn't
-    /// start another.
+    /// FF55 write. An HBlank transfer that starts in HDMA's period as it
+    /// is one M-cycle later (gambatte `enableHdma`: `isHdmaPeriod(cc +
+    /// 4)`) does its first block now; otherwise it waits for the next
+    /// trigger, this line's if still ahead (`dma/hdma_late_enable_*`: an
+    /// enable at the HBlank's end starts none).
     #[inline(never)]
     fn write_hdma5(&mut self, value: u8) {
         let now = self.clock();
@@ -1509,7 +1516,7 @@ impl Ctx<'_, '_> {
             self.run_ppu_to_call(now);
             self.schedule_ppu();
         }
-        let mode0 = self.stat_mode0();
+        let mode0 = self.hdma_period(now + self.hot.mcycle as u64);
         self.sys.vdma.write_hdma5(value, mode0);
         self.vdma_sync_reg();
         if self.sys.vdma.pending {
@@ -1547,10 +1554,13 @@ impl Ctx<'_, '_> {
     }
 
     /// The `VramDma` deadline: an HBlank starts a block, unless the CPU
-    /// is halted (SameBoy: `!gb->halted`) or the transfer was stopped.
+    /// is halted (SameBoy: `!gb->halted`), the transfer was stopped, or a
+    /// block's stall is still running: gambatte acknowledges the request
+    /// at a transfer's end, so a trigger during it is lost (CGB C captures
+    /// `dma/hdma_transition_{,ei_}halt_late_unhalt_scx1_{1,2}`).
     fn vdma_hblank(&mut self) {
         let v = &self.sys.vdma;
-        if v.hblank && !v.halted && self.sys.ppu.lcd_enabled() {
+        if v.hblank && !v.halted && v.stall == 0 && self.sys.ppu.lcd_enabled() {
             self.vdma_request();
         }
     }
@@ -1558,28 +1568,43 @@ impl Ctx<'_, '_> {
     /// HALT begins during an HBlank transfer: HBlanks start no blocks
     /// until the wake-up, and the wake-up may start one (`wake_ok`) if the
     /// HALT began outside the HBlank (SameBoy `allow_hdma_on_wake`: STAT
-    /// mode at the HALT). The HBlank here starts at this line's HDMA
-    /// trigger ([`hdma::HBLANK_DELAY`] after the mode-0 STAT change), not
-    /// at the STAT change: a HALT between the two counts as before it
-    /// (gambatte `dma/hdma_late_m3halt_m0unhalt_scx{1_3,2_2}`, CGB C
+    /// mode at the HALT). The HBlank here is HDMA's period
+    /// ([`Self::hdma_period`]), which starts at this line's trigger, not
+    /// at the mode-0 STAT change: a HALT between the two counts as before
+    /// it (gambatte `dma/hdma_late_m3halt_m0unhalt_scx{1_3,2_2}`, CGB C
     /// captures; `hdma_late_m0halt_*` bound the other side).
     #[cold]
     fn vdma_halt(&mut self) {
-        let now = self.clock();
-        let in_hblank = self.stat_mode0()
-            && (self.sys.ppu.mode0_start())
-                .is_none_or(|s| now < s || now >= s + hdma::HBLANK_DELAY);
+        let in_hblank = self.hdma_period(self.clock());
         let v = &mut self.sys.vdma;
         v.halted = true;
         v.wake_ok = !in_hblank;
     }
 
-    /// The wake-up from a HALT that began outside the HBlank: in mode 0 it
-    /// starts a block (SameBoy `GB_cpu_run`, `allow_hdma_on_wake`).
+    /// The speed-switch halt begins during an HBlank transfer (after the
+    /// speed change: `mcycle` is the new speed's). As [`Self::vdma_halt`],
+    /// and gambatte samples HDMA for a STOP at the start of its last
+    /// M-cycle (`stop(cc - 4)`): a block triggered in that M-cycle falls
+    /// into the halt, which loses it (ADR 0017, trigger amendment; CGB C
+    /// captures `dma/hdma_late_m3speedchange_{ly_scx1_1,tima_scx1_ds_2}`).
+    #[cold]
+    #[inline(never)]
+    fn vdma_stop(&mut self) {
+        let old_mcycle = 6 - self.hot.mcycle as u64;
+        let trigger = self.sys.vdma.line.wrapping_add(hdma::HBLANK_DELAY);
+        if trigger + old_mcycle > self.clock() {
+            self.sys.vdma.pending = false;
+        }
+        self.vdma_halt();
+    }
+
+    /// The wake-up from a HALT that began outside the HBlank: in HDMA's
+    /// period it starts a block (SameBoy `GB_cpu_run`,
+    /// `allow_hdma_on_wake`; gambatte `isHdmaPeriod` at the unhalt).
     #[cold]
     fn vdma_wake(&mut self) {
         self.sys.vdma.wake_ok = false;
-        if self.sys.vdma.hblank && self.stat_mode0() {
+        if self.sys.vdma.hblank && self.hdma_period(self.clock()) {
             self.vdma_request();
         }
     }
@@ -3782,6 +3807,28 @@ mod dma_tests {
             assert_eq!(ctx.hot.dma, 0);
             assert_eq!(ctx.read(0xFF41) & 3, 2);
         });
+    }
+
+    /// An HBlank trigger while a block's CPU stall runs is lost; one at the
+    /// stall's end starts the next block (gambatte acknowledges the
+    /// request at a transfer's end; ADR 0017, trigger amendment).
+    #[test]
+    fn an_hblank_trigger_during_a_block_stall_is_lost() {
+        for (at, kept) in [(8, false), (12, true)] {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                ctx.write(0xFF40, 0x91);
+                ctx.sys.vdma.hblank = true;
+                ctx.sys.vdma.stall = 3;
+                let now = ctx.clock();
+                ctx.sys.sched.set(EventKind::VramDma, now + at);
+                ctx.reschedule();
+                ctx.vdma_stall(u64::MAX);
+                assert_eq!(ctx.clock(), now + 12);
+                assert_eq!(ctx.sys.vdma.stall, 0);
+                assert_eq!(ctx.sys.vdma.pending, kept, "trigger at +{at}");
+            });
+        }
     }
 
     /// CGB B/C read STAT mode 0 at line 0 dot 3 in single speed, but an

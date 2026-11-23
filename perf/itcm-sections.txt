@@ -16,7 +16,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3cpu*3Cpu3run*                               # Cpu::run
 .text._R*8gbc_core3cpu*3Cpu10execute_cb*                       # Cpu::execute_cb
 .text._R*8gbc_core3cpu*3Cpu16step_not_running*                 # Cpu::step_not_running
-.text._R*8gbc_core3cpu*3Cpu12fetches_next*                     # Cpu::fetches_next
 .text._R*8gbc_core3bus9read_high*                              # bus::read_high
 .text._R*8gbc_core3bus9read_vram*                              # bus::read_vram
 .text._R*8gbc_core3bus8read_oam*                               # bus::read_oam

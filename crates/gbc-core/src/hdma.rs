@@ -30,10 +30,19 @@ pub(crate) const fn stall_mcycles(blocks: u32, mcycle: u32) -> u32 {
 
 /// HDMA starts a block this many dots after the line's mode-3 end
 /// ([`Ppu::mode0_start`](crate::ppu::Ppu::mode0_start), where STAT reads
-/// mode 0 at single speed): SameBoy (Core/display.c, `GB_display_run`)
-/// sets `hdma_on` 1 + 2 dots after the single-speed mode-0 STAT write,
-/// in both speeds.
-pub(crate) const HBLANK_DELAY: u64 = 3;
+/// mode 0 at single speed), in both speeds: one dot after the mode-0 STAT
+/// interrupt request. gambatte (read for behaviour) triggers HDMA at its
+/// xpos 167, one dot after its mode-0 interrupt (xpos 166); its CGB C
+/// captures `dma/hdma_start_scx{,2,3,5}*` and `hdma_late_disable_scx*`
+/// (both speeds) allow only 2 here. SameBoy (`GB_display_run`) uses 3.
+pub(crate) const HBLANK_DELAY: u64 = 2;
+
+/// HDMA's HBlank period, in which an FF55 write starts a block at once and
+/// a HALT counts as in the HBlank (no block at its wake-up), ends this
+/// many dots into the next line (where STAT still reads mode 0). gambatte
+/// CGB C captures bracket it (`dma/hdma_late_m0halt_{,ds_}{1,2}`,
+/// `hdma_late_enable_{,ds_}{1,2}`).
+pub(crate) const HBLANK_UNTIL: u64 = 4;
 
 /// The FF51-FF55 state.
 #[derive(Clone, Copy)]
@@ -152,8 +161,8 @@ mod tests {
         let rom = vec![0u8; 0x8000].leak();
         rom[0x143] = cgb_flag;
         // HALT, far enough not to be reached by stepping from 0100, then
-        // LD A,(8000).
-        rom[0x7000..0x7004].copy_from_slice(&[0x76, 0xFA, 0x00, 0x80]);
+        // LD A,(8000); then EI, NOP.
+        rom[0x7000..0x7006].copy_from_slice(&[0x76, 0xFA, 0x00, 0x80, 0xFB, 0x00]);
         let emu = crate::tests::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         for i in 0..0x100 {
@@ -278,7 +287,11 @@ mod tests {
     #[test]
     fn hdma_starts_at_once_in_mode_0_and_can_be_cancelled() {
         let emu = setup(0x91, 0x80);
-        while emu.peek(0xFF41) & 3 != 0 || emu.peek(0xFF44) == 0 {
+        // Mode 0, past the HBlank trigger.
+        while emu.peek(0xFF41) & 3 != 0
+            || emu.peek(0xFF44) == 0
+            || !(8..100).contains(&(emu.clock() - emu.hw.sys.ppu.mode0_start().unwrap()))
+        {
             step(emu);
         }
         write(emu, 0xFF55, 0x83); // 4 blocks, in mode 0: one now
@@ -292,6 +305,47 @@ mod tests {
             assert_eq!(step(emu), 4);
         }
         assert_eq!(emu.mem.vram[16], 0);
+    }
+
+    #[test]
+    fn an_enable_at_the_hblank_end_waits_for_the_next_trigger() {
+        let emu = setup(0x91, 0x80);
+        // The first M-cycle of a line where STAT still reads mode 0.
+        let ly = loop {
+            let ly = emu.peek(0xFF44);
+            step(emu);
+            if ly != 0 && emu.peek(0xFF44) != ly && emu.peek(0xFF41) & 3 == 0 {
+                break emu.peek(0xFF44);
+            }
+        };
+        write(emu, 0xFF55, 0x80);
+        // gambatte `dma/hdma_late_enable_{,ds_}2`: no block now ...
+        assert_eq!(step(emu), 4);
+        assert_eq!(emu.mem.vram[0], 0);
+        assert_eq!(emu.peek(0xFF55), 0x00);
+        // ... but at this line's trigger.
+        step_to_stall(emu);
+        assert_eq!(emu.peek(0xFF44), ly);
+        assert_eq!(emu.mem.vram[..16], block(0));
+    }
+
+    #[test]
+    fn a_block_goes_before_an_interrupt_dispatch_due_with_it() {
+        let emu = setup(0x11, 0x80); // LCD off
+        // EI, NOP: then the timer interrupt is due.
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x7004;
+        emu.hw.cpu.set_registers(r);
+        step(emu);
+        step(emu);
+        emu.hw.sys.ie = 0x04;
+        emu.hw.sys.iflags = 0x04;
+        write(emu, 0xFF55, 0x00); // GDMA, 1 block
+        // gambatte `irq_precedence/*hdma_vs_*`: the block (1 + 8 M-cycles),
+        // then the dispatch (5), in one step.
+        assert_eq!(step(emu), 4 * (9 + 5));
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.hw.cpu.registers().pc, 0x0050);
     }
 
     #[test]

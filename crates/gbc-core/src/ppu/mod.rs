@@ -669,12 +669,6 @@ impl Ppu {
         self.stat_with(now, double, true)
     }
 
-    /// [`Self::stat`] without the CGB B/C line-0 mode-0 read quirk, for
-    /// internal mode checks (HDMA start, LCD-off HBlank block).
-    pub(crate) fn stat_hw(&self, now: u64, double: bool) -> u8 {
-        self.stat_with(now, double, false)
-    }
-
     fn stat_with(&self, now: u64, double: bool, quirk: bool) -> u8 {
         let v = 0x80 | self.stat_select;
         if !self.lcd_enabled() {
@@ -1490,6 +1484,16 @@ impl Ppu {
             return None;
         }
         Some(self.line.start.wrapping_add(u64::from(self.line.end)))
+    }
+
+    /// Whether clock `now` is in HDMA's HBlank period of the latched
+    /// visible line: from `from` dots after its mode-3 end to more than
+    /// `tail` dots before the next line starts (gambatte `isHdmaPeriod`,
+    /// read for behaviour). False with the LCD off or no line latched.
+    #[cold]
+    pub(crate) fn hdma_period(&self, now: u64, from: u64, until: u64) -> bool {
+        self.mode0_start()
+            .is_some_and(|s| now >= s + from && now < self.line.start + u64::from(LINE) + until)
     }
 
     /// Whether the PPU, synced to some clock, is between a visible line's
