@@ -202,8 +202,10 @@ budget); nothing merges to `main` before step 2's human decision.
    a channel copy), no corruption on retrigger, cached waveform sum,
    PCM34 low nibble. Arbiters: cgb_sound 09, 10, 12; gambatte
    `sound/ch3_*ff30*` hex ROMs as a cross-check.
-5. [ ] **CH4 noise**: LFSR (XNOR, 7-bit mode), period `(r ? 16r : 8) << s`,
-   shift 14/15 frozen, shared length/envelope, PCM34 high nibble.
+5. [x] **CH4 noise** (a86cc85, faa717a): LFSR (XNOR, 7-bit mode), period `(r ? 16r : 8) << s`,
+   shift 14/15 frozen, shared length/envelope, PCM34 high nibble. Result:
+   cgb_sound passes whole (must 86/86), gambatte `ch4_*` +3, same-suite
+   `channel_4` +4, no regressions.
 6. [ ] **cgb_sound to pass**: run `--filter 'blargg/cgb_sound/**'`, fix what
    fails in 01/02/03/07/08/11 (registers, length, trigger, frame-sequencer
    sync, power). If more than two subtests fail here, one agent per
