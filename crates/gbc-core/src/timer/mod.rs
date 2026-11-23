@@ -238,12 +238,16 @@ impl Timer {
     }
 
     /// Makes `tima` exact at `now` (not in cycle A).
+    // Out of line (code size): shared by the register writes and STOP,
+    // none of them on a hot path.
+    #[inline(never)]
     fn sync(&mut self, now: u64) {
         self.tima = self.tima(now);
         self.tima_from = self.sc(now);
     }
 
     /// Sets `overflow_at` from the synced `tima`/`tima_from`.
+    #[inline(never)] // See `sync`.
     fn schedule_overflow(&mut self) {
         self.overflow_at = if self.tima_bit == 0 {
             NEVER
