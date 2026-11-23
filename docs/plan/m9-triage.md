@@ -1,0 +1,263 @@
+# M9 triage: failing manifest ROMs by root cause
+
+- Date: 2026-11-23. Input: full-manifest run at f200ab4
+  (`target/acceptance/stage1.{md,json}`, failure images in
+  `target/acceptance/stage1/failed/`). 506 failing: should 1, stretch 505
+  (must 86/86). Analysis only, no code changed.
+- Method: grouped by directory and name stem, then sampled ROMs per group
+  (failure images, the `dmg08`/`cgb04c` expected values in the gambatte
+  names, pass/fail patterns inside a directory). The gambatte `.asm`
+  sources are not in `test-roms/` (only `.gbc` + PNGs). Where a group says
+  "hypothesis", the first fix step is to confirm it against the source.
+- Budgets at HEAD: gbc-core `.text` 95,730 of 96,000 B (**270 B left**);
+  `synth:cgb-raster` +2.60% of a 3% guard; worst case ~97% of the 4.02 M
+  Ir/frame line. Most groups below are cold-path code, so the binding
+  constraint is `.text`, not cycles. Beyond the first one or two small
+  fixes, everything needs the `.text` raise already proposed in
+  `docs/design/mid-line-ppu.md` section 6 (96,000 -> 97,000 B), or equal
+  savings. Bring that to the human before the third fix.
+- Cost: S = one session, a contained rule; M = 2-3 sessions or a
+  calibration sweep; L = a design step or several mechanisms.
+
+## Summary (ordered by ROMs per cost)
+
+| # | Group | ROMs | Subsystem | Cost | .text / perf risk | Design step |
+|---|---|---|---|---|---|---|
+| 1 | CGB palette RAM blocked in mode 3 | 33 | bus (BCPD/OCPD) | S | ~+80 B, cold; none | none (M5 task) |
+| 2 | OAM DMA: CPU write during a conflicting transfer | 58 | `dma.rs` conflict table | S-M | ~+50 B, cold; none | none (**needs human: reference choice**) |
+| 3 | LCDC.2 (object size) sampled per object | 20 | PPU OAM scan (mode 2) + object fetch | S-M | ~+150 B, cold; low | partly F |
+| 4 | Window stall/start in mode 3 (+ WX=A6/obj X=A7 edge) | 97 | PPU mode-3 length, renderer | L | ~+350-450 B; cgb-raster low | **E** |
+| 5 | Live SCX&7 discard at mode-3 start | 19 | renderer line start, mode-3 length | M | ~+100 B; check on the line-start path | new (A/B residual) |
+| 6 | STAT/LY sub-dot edges at the other CPU phase (`lcd_offset`) | 33 | PPU lazy timing (ADR 0014) | M | ~+100 B; medium (STAT event math) | none (existing M5 task) |
+| 7 | APU square trigger/duty phase (gambatte `sound`, `speedchange`) | 27 | APU trigger delay, 1 MHz phase | M | ~+100 B; low (trigger path) | none |
+| 8 | HDMA timing (4 sub-groups) | 75 | `vdma`, CPU HALT/speed switch, IRQ dispatch | L (M each) | ~+100-300 B, cold; low | none |
+| 9 | STAT/LY edges in double speed | 31 | PPU lazy timing | M | as 6 | none |
+| 10 | Line-0 mid-line SCX write | 7 | PPU line 0 start timing | S-M | small | A residual |
+| 11 | Object stall vs mid-line writes | 12 | renderer stall/fetch state | M | ~+150 B; cgb-raster | **F** |
+| 12 | STAT IRQ edges, single speed (late STAT/LYC writes, LY 143/144/153) | 47 | PPU STAT line | L | ~+200 B; medium | none |
+| 13 | OAM DMA: VRAM source vs CPU reads; misc | 10 | `dma.rs`, HDMA interplay | M | small | none |
+| 14 | Mealybug/AGE residuals (A-C, G, acid-hell) | 9 | renderer | M-L (diagnose each) | ~+100-250 B | A-C residual, **G** |
+| 15 | SameSuite APU, applicable to CGB C | 20 | APU (noise, sweep, envelope, NRx2) | L | +300-600 B; medium (integrate hot set) | none |
+| 16 | SameSuite APU for other revisions | 7 | n/a | **sign-off** | none | none |
+| 17 | AGE `spsw-interrupts-cgbBC` (should tier) | 1 | CPU speed switch + IRQ | M | small | none |
+
+Total 506 (group 4 = 93 gambatte + 4 Mealybug).
+
+## Groups
+
+### 1. CGB palette RAM blocked in mode 3 (33)
+`cgbpal_m3/*` (28: `cgbpal_m3end_*`, `cgbpal_m3start_*`,
+`cgbpal_{read,write}_m3start_*`, 11 ds, 4 lcdoffset) and
+`enable_display/ly{0,1}_late_cgbp{r,w}_*` (5). Reads expect FF and writes
+are dropped while the PPU reads palettes (outFF / out00 / out55 names).
+Cause: not implemented, `TODO(M5)` at `bus.rs` FF69/FF6B read and write
+(plan M5 "Palette RAM access blocked in mode 3"). Refs: Pan Docs "CGB
+Palettes" / "Accessing VRAM and OAM" (palette RAM inaccessible in mode
+3); SameBoy `memory.c` BGPD/OBPD access (blocked flag set by `display.c`
+around mode 3; check whether the index still auto-increments on a blocked
+write). The block window's start/end dots are calibrated by the
+`m3start`/`m3end` variants (the `_1` siblings that pass pin one side).
+Fast path untouched: the check sits behind the PPU sync the palette write
+already does.
+
+### 2. OAM DMA: CPU write during a conflicting transfer (58)
+`oamdma_src{0000,7F00,A000,BF00,E000,EF00,F000,FE00,FF00}_busy{push,call,int,rst}*`
+and `srcA000_busywrite4000`. The pass/fail pattern is sharp: for every
+source, **all `busypop*`/`busyread*` pass; the failures are pushes whose
+target is on the conflicting bus** (`push0001`, `8001`, `A001`, `C001`
+write 0000/7FFF/9FFF/BFFF; `E001`/`F001`/`FE01`/`FF01`/`FF81` pass), and
+WRAM sources (C000, DF00) pass everything. Our screens differ in one byte:
+`src0000_busypush0001` shows `0076AA34` (want `5576AA34`),
+`src0000_busypushC001` `65001255` (want `65AA1255`), `srcE000_busypush0001`
+`FFFFAA34` (want `55FFAA34`). The `00` matches our CGB C rule "a write is
+dropped and, if the source is below A000, clears the OAM byte just
+transferred" (`docs/reference/oam-dma.md`, from SameBoy `GB_write_memory`
+model checks); the `FF` matches "E000-FFFF source: open". Hypothesis:
+on CGB C the CPU's write data reaches OAM (DMG-like) instead.
+**Reference conflict:** gambatte `cgb04c` results are hardware captures
+of the target revision (ADR 0003); SameBoy's zeroing is a model check its
+author applies to CGB C. They disagree, and nothing else in the manifest
+pins SameBoy's version (the 350 passing `oamdma` ROMs include every pop
+and read variant). **Recommendation:** gambatte wins for CGB C (behavior
+only, no gambatte code); record the deviation in `oam-dma.md`. This is
+fixable, so it is a *decision* for the human, not an unfixable group.
+Ask before implementing (M9 bullet 3 names this group).
+
+### 3. LCDC.2 sampled per object (20)
+`sprites/late_sizechange_*` (13) and `late_sizechange2_*` (7); `sp00`,
+`sp01`, `sp02`, `sp39` are the OAM index whose scan time the write lands
+on, and most outputs are identical on DMG (`dmg08_cgb04c`). The OAM scan
+checks each object's height with LCDC.2 as of that object's scan dot
+(SameBoy `display.c` `add_object_from_index`; Pan Docs "OAM scan"), so a
+mode-2 write splits the scan. `late_sizechange2` likely also needs the
+object fetch to read LCDC.2 at the fetch (design step F). Cold: rescan only
+when LCDC.2 changes in mode 2.
+
+### 4. Window stall and start in mode 3 (97, step E)
+`window/*` 86 (`late_disable*`, `late_reenable*`, `late_wx*`,
+`arg/late_wy*`, `late_enable_afterVblank*`, `on_screen/*`; 21 ds, 5
+lcdoffset; 44 have the same result on DMG, so no CGB glitch is needed for
+them), plus the WX=A6 / object X=A7 right-edge cases
+`m0enable/enable_wxA6_2x_spxA7_*` (6), `window/m2int_wxA6_*` (3),
+`sprites/10spritesPrLine_10xposA7_m0irq_2` (1). All are `out` ROMs reading
+STAT/IRQ timing, i.e. mode-3 length: the 6-dot window stall and the
+window start are latched at `t = 89` (`ppu/mod.rs`) and not recomputed on a
+WX/WY/LCDC.5 write. Refs: SameBoy `display.c` window activation
+(`wx_triggered`, `GB_update_wx_glitch`), Pan Docs "Mode 3 length". Exactly
+design step E (`docs/design/mid-line-ppu.md` section 5, step 4); Mealybug
+`m3_lcdc_win_en_change_multiple`, `m3_lcdc_win_map_change`,
+`m3_lcdc_tile_sel_win_change`, `m3_wx_4_change_sprites` also depend on it (counted here).
+Needs the `.text` raise.
+
+### 5. Live SCX&7 discard at mode-3 start (19)
+`scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-
+14,900 px: the whole frame is shifted by the fine-scroll difference;
+e.g. `scx_0360c0_3` draws our light columns on the left, the reference on
+the right), `scx_m3_extend_*` (2), `m2int_m3stat/scx/late_scx4_ds`,
+`sprites/space/10spritesPrLine_late_scx4_ds`,
+`enable_display/ly0_late_scx7_m3stat_*` (2). Hypothesis: the discard of
+the first SCX&7 pixels compares against the **live** SCX each dot (SameBoy
+`display.c` line-start discard loop; gambatte behavior agrees), while we
+latch it once at line start (design doc section 1 says "once"). A write
+inside the discard window changes both the image offset and mode-3
+length. Not in steps A-G; a small extension of `hold_fetch` plus the
+mode-3 length recompute.
+
+### 6. STAT/LY edges at the other CPU clock phase (33)
+`lcd_offset/offset{1,2,3}_*` (17) and the `*lcdoffset*` variants in
+`m0enable`, `m2enable`, `m1`, `lycEnable`, `vram_m3`, `oam_access` (16).
+Existing plan task (M5, session 07): thresholds were tuned at one CPU
+phase; after a speed switch to single speed the CPU sits at the other
+phase. Fix the PPU thresholds (LY, LYC, mode 1/2 edges, VRAM/OAM block
+edges) to half-dot resolution, not the halt length. Refs: SameBoy
+`display.c` (8 MHz `cycles` resolution), gambatte `lcd_offset` naming.
+Also flips some `dma` `lcdoffset` ROMs (group 8).
+
+### 7. APU square trigger and duty phase (27)
+`speedchange/speedchange*_ch1_duty0_pos6_to_pos7_timing_*` (17),
+`sound/ch1_duty0_*`, `ch1_init_pos_*`, `ch1_init_reset_sweep_counter_*`,
+`ch2_init_reset_env_counter_*` (10); 23 report silence where sound is
+expected (we are one duty step off). Known deferral
+(`docs/reference/apu.md` "Not modelled": trigger at an odd base clock,
+the extra delay when retriggering an active channel; `lf_div` derived from
+`now >> 1` and the power-on phase, which a speed switch shifts). Refs:
+SameBoy `apu.c` (`lf_div`, square `sample_countdown` on trigger), ADR
+0021 section 12. Trigger path only, not the integrate loop.
+
+### 8. HDMA timing (75)
+`dma/*` 64 + `irq_precedence/{,late_}hdma_vs_*` 11. Sub-groups, each M:
+- **HDMA across a speed switch** (26): `hdma_late_m3speedchange_*`,
+  `hdma_transition_speedchange_*`, `hdma_m0speedchange_*`. 12 of them are
+  the phase-luck ROMs of group 6's plan task.
+- **HDMA vs HALT/wake** (22): `hdma_*halt*unhalt*`, `hdma_transition_*halt*`.
+  ADR 0017 deferral "HALT wake with IME off runs the instruction before
+  the block (SameBoy: block first)".
+- **Trigger vs mode-0 start and IRQ dispatch** (19): `hdma_late_enable*`,
+  `hdma_start_scx5*`, `hdma_late_disable_scx5*`, `irq_precedence` hdma.
+- **GDMA length in double speed** (4): `gdma_cycles_*_ds` (S).
+- **Misc** (4): `hdma_pc_7ffe`, `late_gdma_pc_7ffe`,
+  `hdma_transition_oamdma_{1,2}` (ADR 0017 "OAM DMA during VRAM DMA").
+Refs: SameBoy `memory.c`/`sm83_cpu.c` HDMA, Pan Docs "VRAM DMA". Cold.
+
+### 9. STAT/LY edges in double speed (31)
+The `_ds` variants of `m0enable`, `m1`, `m2enable`, `lycEnable`,
+`lcd_offset`, `ly0` (all 4), `lyc153int_m2irq` (2), `m2int_*`,
+`irq_precedence/late_m0irq_retrigger_ds`. Same mechanism as group 6 at
+half-dot CPU accesses; do after 6 (likely shares the fix).
+
+### 10. Line-0 mid-line SCX write (7)
+`scx_0*c0/scx_during_m3_2` and `_ds_1` (46-104 px): the diff image is
+the first line only. Line 0's mode-3 start (or the fetch frontier origin
+on it) is off by a few dots for the hold model. Refs: SameBoy line-0
+special case in `display.c`. Step A residual.
+
+### 11. Object stall vs mid-line writes (12, step F)
+gambatte `scx_during_m3_spx{0,1,2}`, `spx2_ds`,
+`scx_attrib_during_m3_spx{1,2}_ds` (6; 8-72 px) and Mealybug
+`m3_bgp_change_sprites`, `m3_obp0_change`, `m3_lcdc_obj_en_change{,_variant}`,
+`m3_lcdc_obj_size_change{,_scx}` (6). Design step F.
+
+### 12. STAT IRQ edges, single speed (47)
+`miscmstatirq/lycstatwirq_trigger_*` (9, all `outE0`: no IRQ expected
+when a STAT write switches the source while the line stays high),
+`m0enable/disable_*` and `lycdisable_ff45_*` (8, CGB differs from DMG),
+`m1/*` (10: late mode-0/2 enable at LY 143/144, `m2m1irq_ifw`),
+`m2enable/*` (7: LY 0 and after an LYC IRQ), `lycEnable/*` (8: LY 153,
+`lcdoff_lycirqen`, `lyc_ff45_trigger_delay`), `m2int_*` (3),
+`irq_precedence/if_and_ie_0_vector_4` and `late_m0irq_retrigger_scx1`.
+Many need the CGB-specific landing of STAT/LYC writes against each
+source's edge; `bus.rs` already models `GB_CONFLICT_STAT_CGB`, so these
+are edge-position errors per source (mode 0 start, mode 1 start, LY 153
+-> 0 LYC). Refs: SameBoy `GB_STAT_update` and `display.c` line 153;
+Pan Docs "STAT interrupt" (blocking). Split per source when started.
+`if_and_ie_0_vector_4` is CPU dispatch (IE cleared during the push ->
+vector 0000; SameBoy `sm83_cpu.c`), S.
+
+### 13. OAM DMA: VRAM source vs CPU reads, misc (10)
+`oamdma_src{8000,9F00}_busypop{7FFF,9FFF}*` (6; e.g. `src8000_busypop7FFF`
+shows the DMG answer `65765576`, CGB wants `65005576`) and
+`src8000_srcchange0000_busyinc` (1): our table has VRAM-source vs external
+access "free"; gambatte cgb04c shows a conflict. Same reference question
+as group 2. Plus `oamdma_late_speedchange_stat_1` (group 6),
+`oamdmasrcC000_hdmasrc0000` (HDMA + OAM DMA), `oamdmasrcC0_speedchange_readC000`.
+
+### 14. Mealybug/AGE residuals (9)
+Mealybug `m3_lcdc_bg_map_change` (466 px), `m3_scx_low_3_bits` (540 px,
+pixels 152-159 undiagnosed, design step 2 notes), `m3_scy_change` (560),
+`m3_lcdc_tile_sel_change` (846) after steps 1-3/D; `m3_lcdc_tile_sel_change2`,
+`m3_lcdc_tile_sel_win_change2` (step **G**, CGB TILE_SEL glitch, SameBoy
+`data_for_tile_sel_glitch`); AGE `m3-bg-lcdc{,-ds}` (256/512 px);
+`cgb-acid-hell` (2 px, plan M5 bullet: attribute latch on an LCDC write
+every 8 dots). Diagnose each against the Mealybug `*_cgb_c.png` and
+SameBoy fetcher; some may resolve with E/F.
+
+### 15. SameSuite APU, applicable to CGB C (20)
+ch1/ch2 `duty_delay`, `nrx2_glitch`, `nrx2_speed_change`, `volume`;
+ch1 `sweep`, `sweep_restart{,_2}`, `freq_change_timing-cgb0BC`; ch4
+`align`, `delay`, `equivalent_frequencies`, `freq_change`,
+`frequency_alignment`, `lfsr_7_15`, `lfsr_restart{,_fast}`. All are the
+`apu.md` "Not modelled" list (envelope lock, CGB-C NRx2 glitch, sweep
+calculation delay, noise counter phase and NR43 glitches). Refs: SameBoy
+`apu.c` (MIT; the suite's author). Caveat: the unsuffixed SameSuite APU
+tests were developed against SameBoy's default CGB E, and the suite notes
+"some apu tests only work on CPU CGB E"
+(`test-roms/same-suite/game-boy-test-roms-howto.md`). Any that turns out
+E-only joins group 16. Touches the integrate hot set (`Noise::integrate`
+etc.), so measure `synth:worst-case` APU cost (budget 230k Ir).
+
+### 16. SameSuite APU for other revisions (7) - sign-off candidate
+`channel_{1,2,4}_extra_length_clocking-cgb0B`,
+`channel_3_extra_length_clocking-cgb0`, `-cgbB`,
+`channel_1_freq_change_timing-A`, `-cgbDE`. The suffix names the
+revisions the expected result holds for (0/B, D/E, AGB "A"); CGB C is not
+among them, and `freq_change_timing` ships a separate `-cgb0BC` ROM for
+our revision (group 15). Evidence: file-name convention of SameSuite plus
+the howto note above; ADR 0003 (target CPU CGB C). Passing them would mean
+modelling another revision. **Needs the human:** accept as not
+applicable (or exclude from the manifest, which is the human's call).
+
+### 17. AGE `spsw-interrupts-cgbBC` (1, should tier)
+Registers end as garbage (`B=0 C=107 ...`), so the run goes off the
+rails rather than missing by a cycle. The ROM sits in AGE's
+`speed-switch/caution/`: it ends the post-STOP HALT period early with an
+interrupt, which Nintendo's manual warns against (the author saw his CGB
+E become unstable, the CGB B did not). It is named for CGB B/C, so it
+applies to us. Read the AGE source (Apache-2.0) and AGE's speed-switch
+implementation; ADR 0020 models the halt as uninterruptible except with
+IE&IF already pending. If the hardware behavior is unstable, it becomes
+a sign-off candidate with that evidence.
+
+## Sign-off candidates (M9 bullet 3)
+1. Group 16 (7 ROMs): other revisions. Strong evidence.
+2. Groups 2 and 13 (65 ROMs): reference conflict, gambatte cgb04c vs
+   SameBoy's CGB C model. Recommended resolution is to follow gambatte
+   (hardware on our revision), so this needs a decision, not a waiver.
+3. Possibly group 17 (1) and any group-15 ROM shown to be CGB-E-only,
+   after the source is read.
+
+## Recommended order
+1. Group 1 (33 ROMs, S, fits in the remaining 270 B).
+2. Group 2 (58, S-M) once the human picks the reference; then group 13.
+3. Ask for the `.text` raise, then group 4 (step E, 97) and group 3
+   (20, S-M); group 5 (19, M) next as it shares the mode-3 length
+   recompute with E.
