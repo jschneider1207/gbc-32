@@ -223,20 +223,16 @@ pub struct Group {
     pub input: Vec<InputEntry>,
     pub exit: Exit,
     pub checks: Vec<Check>,
-}
-
-impl Group {
-    /// A CPU lockup on an invalid opcode is not a crash in this group: its
-    /// checks are all `gambatte = true` and its exit is `run_frames`, so
-    /// the run goes on to the exit and the final frame decides, as in
-    /// Gambatte's testrunner and on hardware (the CPU hangs, the LCD keeps
-    /// showing what was drawn). acceptance/README.md; ADR 0018, amendment
-    /// 2026-11-22 (approved by the human).
-    pub fn lockup_runs_on(&self) -> bool {
-        matches!(self.exit, Exit::RunFrames { .. })
-            && !self.checks.is_empty()
-            && self.checks.iter().all(|c| matches!(c, Check::Gambatte))
-    }
+    /// `lockup = "run_on"`: a CPU lockup on an invalid opcode is not a
+    /// crash in this group; the run goes on to the exit and the final frame
+    /// decides, as in Gambatte's testrunner and on hardware (the CPU hangs,
+    /// the LCD keeps showing what was drawn). Only an explicit per-group
+    /// opt-in, and only valid when every check is `gambatte = true` and the
+    /// exit is `run_frames` (acceptance/README.md "Gambatte lockup rule";
+    /// ADR 0018, amendments 2026-11-22, the second narrowing it to this
+    /// opt-in by the human's decision). Default (`"crash"`): a lockup is a
+    /// crash.
+    pub lockup_runs_on: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -279,6 +275,8 @@ struct RawGroup {
     input: Vec<RawInput>,
     exit: RawExit,
     checks: Vec<RawCheck>,
+    #[serde(default)]
+    lockup: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -453,12 +451,30 @@ fn parse_group(g: RawGroup) -> Result<Group, String> {
     if g.checks.is_empty() {
         return Err("checks is empty".into());
     }
-    let checks = g
+    let checks: Vec<Check> = g
         .checks
         .into_iter()
         .enumerate()
         .map(|(i, c)| parse_check(c).map_err(|m| format!("check #{}: {m}", i + 1)))
         .collect::<Result<_, _>>()?;
+
+    let lockup_runs_on = match g.lockup.as_deref() {
+        None | Some("crash") => false,
+        Some("run_on") => {
+            let all_gambatte = checks.iter().all(|c| matches!(c, Check::Gambatte));
+            if !all_gambatte || !matches!(exit, Exit::RunFrames { .. }) {
+                return Err("lockup = \"run_on\" needs every check to be \
+                            `gambatte = true` and a `run_frames` exit"
+                    .into());
+            }
+            true
+        }
+        Some(other) => {
+            return Err(format!(
+                "lockup = {other:?} is not one of \"crash\", \"run_on\""
+            ));
+        }
+    };
 
     Ok(Group {
         id: g.id,
@@ -468,6 +484,7 @@ fn parse_group(g: RawGroup) -> Result<Group, String> {
         input,
         exit,
         checks,
+        lockup_runs_on,
     })
 }
 
@@ -706,7 +723,9 @@ pub fn check_release(manifest: &Manifest, roms_dir: &Path) -> Result<(), String>
 }
 
 /// The ROMs each group matches, sorted, in manifest group order. Errors on a
-/// literal ROM path that doesn't exist and on a group matching nothing.
+/// literal ROM path that doesn't exist, on a group matching nothing, and on
+/// an `exclude` glob that removes nothing (so a stale exclude can't rot
+/// silently, e.g. after a rename it would let ROMs back into the group).
 pub fn resolve(manifest: &Manifest, files: &BTreeSet<String>) -> Result<Vec<Vec<String>>, String> {
     let roms: Vec<&String> = files.iter().filter(|f| is_rom(f)).collect();
     let mut out = Vec::with_capacity(manifest.groups.len());
@@ -726,10 +745,22 @@ pub fn resolve(manifest: &Manifest, files: &BTreeSet<String>) -> Result<Vec<Vec<
                 }
             }
         }
-        // A BTreeMap keeps each ROM once and sorted.
-        let matched: BTreeMap<&str, ()> = roms
+        let included: Vec<&&String> = roms
             .iter()
             .filter(|r| g.roms.iter().any(|glob| glob.matches(r)))
+            .collect();
+        for glob in &g.exclude {
+            if !included.iter().any(|r| glob.matches(r)) {
+                return Err(format!(
+                    "group {:?}: exclude {:?} removes no ROM the group's roms match",
+                    g.id,
+                    glob.as_str()
+                ));
+            }
+        }
+        // A BTreeMap keeps each ROM once and sorted.
+        let matched: BTreeMap<&str, ()> = included
+            .into_iter()
             .filter(|r| !g.exclude.iter().any(|glob| glob.matches(r)))
             .map(|r| (r.as_str(), ()))
             .collect();
@@ -777,25 +808,52 @@ checks = [{ fibonacci = true }]"#;
     }
 
     #[test]
-    fn lockup_runs_on_only_for_all_gambatte_run_frames_groups() {
-        let runs_on = |exit: &str, checks: &str| {
+    fn lockup_run_on_is_an_opt_in_valid_only_on_gambatte_run_frames_groups() {
+        let parsed = |exit: &str, checks: &str, lockup: &str| {
             let body = format!(
                 "id = \"g\"\ntier = \"stretch\"\nroms = [\"a/*.gb\"]\n\
-                 exit = {exit}\nchecks = [{checks}]"
+                 exit = {exit}\nchecks = [{checks}]\n{lockup}"
             );
-            parse(&group(&body)).unwrap().groups[0].lockup_runs_on()
+            parse(&group(&body)).map(|m| m.groups[0].lockup_runs_on)
         };
         let gb = "{ gambatte = true }";
-        assert!(runs_on("{ run_frames = 15 }", gb));
-        assert!(!runs_on("{ run_s = 1 }", gb));
-        assert!(!runs_on("{ ld_b_b = true, timeout_s = 1 }", gb));
+        let frames = "{ run_frames = 15 }";
+        let run_on = "lockup = \"run_on\"";
+        assert_eq!(parsed(frames, gb, run_on), Ok(true));
+        // No opt-in: a lockup is a crash, even in an all-gambatte
+        // run_frames group (the human's decision, 2026-11-22).
+        assert_eq!(parsed(frames, gb, ""), Ok(false));
+        assert_eq!(parsed(frames, gb, "lockup = \"crash\""), Ok(false));
+        // The opt-in anywhere else is a bad manifest.
         let mixed = "{ gambatte = true }, { serial = \"OK\" }";
-        assert!(!runs_on("{ run_frames = 15 }", mixed));
-        assert!(!runs_on("{ run_frames = 15 }", "{ serial = \"OK\" }"));
-        assert!(!runs_on(
-            "{ run_frames = 15 }",
-            "{ screenshot = \"{dir}/{stem}.png\" }"
-        ));
+        for (exit, checks) in [
+            ("{ run_s = 1 }", gb),
+            ("{ ld_b_b = true, timeout_s = 1 }", gb),
+            (frames, mixed),
+            (frames, "{ serial = \"OK\" }"),
+            (frames, "{ screenshot = \"{dir}/{stem}.png\" }"),
+        ] {
+            let e = parsed(exit, checks, run_on).unwrap_err();
+            assert!(
+                e.contains("lockup = \"run_on\" needs"),
+                "{exit} {checks}: {e}"
+            );
+        }
+        let e = parsed(frames, gb, "lockup = \"run-on\"").unwrap_err();
+        assert!(e.contains("is not one of"), "{e}");
+    }
+
+    #[test]
+    fn an_exclude_that_removes_nothing_is_an_error() {
+        let fs = ["a/x.gb", "a/y.gb", "b/z.gb"];
+        // Matches a ROM, but not one the group's roms match.
+        let body = format!("{MIN}\nexclude = [\"a/y.gb\", \"b/*.gb\"]");
+        let e = resolve_one(&body, &fs).unwrap_err();
+        assert!(e.contains("exclude \"b/*.gb\" removes no ROM"), "{e}");
+        let body = format!("{MIN}\nexclude = [\"a/nothing*.gb\"]");
+        assert!(resolve_one(&body, &fs).is_err());
+        let body = format!("{MIN}\nexclude = [\"a/y.gb\"]");
+        assert_eq!(resolve_one(&body, &fs).unwrap(), ["a/x.gb"]);
     }
 
     #[test]

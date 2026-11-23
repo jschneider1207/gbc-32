@@ -1175,11 +1175,12 @@ checks = [{{ serial = "NO" }}]
     }
 }
 
-/// A CPU lockup on an invalid opcode is not a crash in a `gambatte = true`
-/// group with a `run_frames` exit: the run goes on to the exit and the
-/// gambatte check decides on the final frame (ADR 0018, amendment
-/// 2026-11-22). Under any other check kind it is still a crash, and a
-/// panic is a crash under gambatte too.
+/// A CPU lockup on an invalid opcode is not a crash only in a group that
+/// opts in with `lockup = "run_on"` (all `gambatte = true`, `run_frames`
+/// exit): the run goes on to the exit and the gambatte check decides on
+/// the final frame (ADR 0018, amendments 2026-11-22). The same ROM in a
+/// gambatte group without the opt-in, or under any other check kind, is
+/// still a crash, and a panic is a crash under the opt-in too.
 #[test]
 fn gambatte_lockup_runs_on_but_only_there() {
     const LOCK_MANIFEST: &str = r#"
@@ -1190,6 +1191,14 @@ model = "cgb-c"
 id = "gb"
 tier = "stretch"
 roms = ["u/*.gbc"]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
+lockup = "run_on"
+
+[[group]]
+id = "gb-plain"
+tier = "stretch"
+roms = ["u/ok_cgb04c_out01.gbc"]
 exit = { run_frames = 15 }
 checks = [{ gambatte = true }]
 
@@ -1224,6 +1233,7 @@ checks = [{ serial = "OK" }]
             s("gb", "u/bad_cgb04c_out01.gbc", "fail"),
             s("gb", "u/ok_cgb04c_out01.gbc", "pass"),
             s("gb", "u/panic_cgb04c_out01.gbc", "crash"),
+            s("gb-plain", "u/ok_cgb04c_out01.gbc", "crash"),
             s("shot", "v/lock.gb", "crash"),
             s("serial", "v/lock.gb", "crash"),
         ]
@@ -1242,5 +1252,22 @@ checks = [{ serial = "OK" }]
     assert_eq!(results[2]["end"], "panic");
     for r in &results[3..] {
         assert_eq!(r["end"], "cpu_locked");
+    }
+
+    // The opt-in on a group that isn't all-gambatte with a run_frames exit
+    // is a bad manifest.
+    for (exit, check) in [
+        ("{ run_frames = 15 }", "{ serial = \"OK\" }"),
+        ("{ run_s = 1 }", "{ gambatte = true }"),
+    ] {
+        let bad = format!(
+            "roms_release = \"v7.0\"\nmodel = \"cgb-c\"\n[[group]]\nid = \"x\"\n\
+             tier = \"stretch\"\nroms = [\"v/lock.gb\"]\nexit = {exit}\n\
+             checks = [{check}]\nlockup = \"run_on\"\n"
+        );
+        ws.write("acceptance/bad.toml", bad.as_bytes());
+        let (code, out, err) = ws.main(&["--manifest", "ws:acceptance/bad.toml"]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("lockup = \"run_on\" needs"), "{err}");
     }
 }

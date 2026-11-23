@@ -100,9 +100,10 @@ pub struct RunPlan {
     pub input: Vec<(u64, Buttons)>,
     /// A CPU lockup on an invalid opcode doesn't end the run: the machine
     /// keeps running (LCD, timers) to the exit and the checks decide on
-    /// the final frame. Only for `gambatte = true` groups with a
-    /// `run_frames` exit (acceptance/README.md; ADR 0018, amendment
-    /// 2026-11-22). Otherwise a lockup is [`End::Locked`], a crash.
+    /// the final frame. Only for a group with `lockup = "run_on"` (valid
+    /// only on `gambatte = true` groups with a `run_frames` exit;
+    /// acceptance/README.md; ADR 0018, amendments 2026-11-22). Otherwise a
+    /// lockup is [`End::Locked`], a crash.
     pub lockup_runs_on: bool,
 }
 
@@ -630,6 +631,13 @@ mod tests {
 
     #[test]
     fn lockup_runs_on_when_the_plan_says_so() {
+        // Without the flag, the same run_frames plan stops at the lockup.
+        let mut m = FakeMachine::new(vec![(5000, Action::Lock)]);
+        let st = run_fake(&mut m, &plan(Exit::RunFrames { frames: 15 }));
+        assert_eq!(st.end, Some(End::Locked));
+        assert!(st.clock < 6000);
+        assert_eq!(st.lockup, None);
+
         let mut m = FakeMachine::new(vec![(5000, Action::Lock)]);
         m.regs.pc = 0x1234;
         let p = RunPlan {

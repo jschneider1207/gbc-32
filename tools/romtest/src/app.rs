@@ -184,7 +184,7 @@ pub fn run(
         .groups
         .iter()
         .map(|g| RunPlan {
-            lockup_runs_on: g.lockup_runs_on(),
+            lockup_runs_on: g.lockup_runs_on,
             ..RunPlan::new(g.exit, &g.input)
         })
         .collect();
