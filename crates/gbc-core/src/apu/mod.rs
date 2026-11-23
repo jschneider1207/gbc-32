@@ -225,8 +225,8 @@ impl Apu {
     /// A DIV-APU falling edge (after a sync to its clock): the frame
     /// sequencer steps and clocks the units, except during the power-on
     /// skip (`Fs::skip`). Pan Docs "Audio details", DIV-APU; SameBoy
-    /// `GB_apu_div_event`. The sweep step comes `SWEEP_LAG` clocks later:
-    /// this sets `Sweep::due` and the bus runs it.
+    /// `GB_apu_div_event`. A sweep step that ends the sweep timer comes
+    /// `SWEEP_LAG` clocks later (`Sweep::step`).
     #[inline(never)]
     pub(crate) fn step(&mut self) {
         let fs = &mut self.fs;
@@ -248,9 +248,10 @@ impl Apu {
         if step & 1 == 1 {
             self.wave.clock_length();
         }
-        // The sweep, 128 Hz, `SWEEP_LAG` clocks after the edge: the bus
-        // runs it then (`Ctx::div_apu_event`).
-        self.sweep.due |= step & 3 == 3;
+        if step & 3 == 3 {
+            // The sweep, 128 Hz.
+            self.sweep.step();
+        }
     }
 
     /// A trigger at `dist` clocks before the next `DivApu` event falls in
@@ -652,6 +653,16 @@ mod tests {
         apu.sweep.clock(&mut apu.sq[0]);
         assert!(!apu.sweep.due);
         assert_eq!(apu.sq[0].freq, 0x180);
+        // Period 2: the first sweep step only counts down, at once.
+        let mut apu = ch1_playing(0x21, 0x100);
+        for _ in 0..3 {
+            apu.step();
+        }
+        assert_eq!((apu.sweep.due, apu.sweep.timer), (false, 1));
+        for _ in 0..4 {
+            apu.step();
+        }
+        assert_eq!((apu.sweep.due, apu.sweep.timer), (true, 1));
     }
 
     /// The sweep timer after a CH1 trigger (NR10 = 20: period 2) `dist`

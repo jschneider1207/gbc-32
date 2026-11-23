@@ -269,9 +269,9 @@ pub(crate) struct Sweep {
     pub(crate) enabled: bool,
     /// A calculation in negate mode ran since the trigger.
     pub(crate) negate_used: bool,
-    /// A sweep step is pending: the frame sequencer stepped to 3 or 7 less
-    /// than `SWEEP_LAG` clocks ago (`Apu::step`); the bus runs `clock` at
-    /// the lag's end.
+    /// A sweep step that ends the timer is pending: the frame sequencer
+    /// stepped to 3 or 7 less than `SWEEP_LAG` clocks ago (`step`); the
+    /// bus runs `clock` at the lag's end.
     pub(crate) due: bool,
 }
 
@@ -358,12 +358,28 @@ impl Sweep {
         }
     }
 
-    /// A frame-sequencer sweep step (128 Hz). At the timer's end it
-    /// reloads and, if enabled with a non-zero period, calculates; a
-    /// result within range with a non-zero shift is written back to the
-    /// shadow and the channel frequency, and a second calculation runs for
-    /// its overflow check only.
-    /// Clears `due`: the bus calls it `SWEEP_LAG` clocks after the edge.
+    /// A frame-sequencer sweep step (128 Hz) at its DIV-APU edge: the
+    /// timer counts down, but the step that ends it (timer 1) waits
+    /// `SWEEP_LAG` clocks (`due`; the bus then runs `clock`). Steps that
+    /// only count down are the same at either clock: a trigger inside the
+    /// lag reloads the timer either way (`Apu::write_rest`). Deferring
+    /// only those keeps the extra `DivApu` event (a sync) to one per sweep
+    /// period.
+    #[inline]
+    pub(crate) fn step(&mut self) {
+        if self.timer == 1 {
+            self.due = true;
+        } else {
+            self.timer = self.timer.wrapping_sub(1);
+        }
+    }
+
+    /// A sweep step that ends the timer (`due`; the bus calls it
+    /// `SWEEP_LAG` clocks after the edge; any step in tests). At the
+    /// timer's end it reloads and, if enabled with a non-zero period,
+    /// calculates; a result within range with a non-zero shift is written
+    /// back to the shadow and the channel frequency, and a second
+    /// calculation runs for its overflow check only. Clears `due`.
     #[inline(never)]
     pub(crate) fn clock(&mut self, ch: &mut Square) {
         self.due = false;
