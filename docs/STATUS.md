@@ -45,10 +45,11 @@ Working rules that matter here:
 
 ## Needs human
 
-Open (session 07):
-1. Review the drafted manifest group for the PNG-reference Gambatte ROMs
-   (see decision below) before it is committed.
-2. Review the drafted manifest change narrowing the lockup rule (below).
+Open (session 07): none. The human approved both manifest drafts in
+advance ("You have my ok", 2026-11-22): the PNG-reference group and the
+undef_ops lockup opt-in group, to be committed only if validation
+matches what was described (198 ROMs, no runner errors, the 10 undef_ops
+pass, none of them left in `gambatte-cgb`); otherwise back to the human.
 
 Decided in session 07 (2026-11-22), human, after the M5 test-integrity
 review (medium: the lockup rule covered all 3,154 gambatte ROMs, broader
