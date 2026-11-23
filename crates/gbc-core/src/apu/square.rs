@@ -1,5 +1,5 @@
 //! The square channels, CH1 and CH2 (ADR 0021 section 5): one non-generic
-//! implementation for both. CH1's sweep comes with task 3.
+//! implementation for both, and CH1's sweep (task 3).
 
 use core::num::NonZeroU32;
 
@@ -74,6 +74,16 @@ impl Square {
         }
     }
 
+    /// The digital output `dt` clocks after the state (PCM12), from a
+    /// copy: the state is unchanged. Out of line: one copy for both
+    /// squares (code size).
+    #[inline(never)]
+    pub(crate) fn digital_at(&self, dt: u64) -> u8 {
+        let mut sq = *self;
+        sq.advance(dt);
+        sq.digital()
+    }
+
     /// A duty step: the position moves on and the first-sample zero ends.
     #[inline]
     fn tick(&mut self, period: NonZeroU32) {
@@ -83,8 +93,9 @@ impl Square {
     }
 
     /// Advances by `dt` clocks without integrating (ADR 0021 section 9),
-    /// in closed form: positions only matter mod 8.
-    #[inline]
+    /// in closed form: positions only matter mod 8. Out of line: one copy
+    /// for both squares (code size).
+    #[inline(never)]
     pub(crate) fn advance(&mut self, dt: u64) {
         if !self.on {
             return;
@@ -108,8 +119,9 @@ impl Square {
 
     /// Advances by `dt` clocks (<= one sample window) and returns the
     /// analog level times clocks: `15 - 2 * digital` while the DAC is on
-    /// (Pan Docs DAC: digital 0 -> +1, 15 -> -1), 0 while it is off.
-    #[inline]
+    /// (Pan Docs DAC: digital 0 -> +1, 15 -> -1), 0 while it is off. Out
+    /// of line: one copy for both squares (code size).
+    #[inline(never)]
     pub(crate) fn integrate(&mut self, dt: u32) -> i32 {
         if !self.env.dac() {
             // The DAC off turns the channel off: nothing advances.
@@ -158,6 +170,7 @@ impl Square {
 
     /// A write to NRx1-NRx4 (`off` 1-4) with the frame sequencer at `fs`
     /// and SameBoy's 1 MHz phase `lf_div` (0 or 1) at the write.
+    #[inline]
     pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, lf_div: u8) {
         match off {
             1 => {
@@ -203,6 +216,19 @@ impl Square {
         self.on = self.env.dac();
     }
 
+    /// Frame-sequencer step `step` (after the increment): length on odd
+    /// steps (256 Hz), the envelope on step 0 (64 Hz). Out of line: one
+    /// copy for both squares (code size).
+    #[inline(never)]
+    pub(crate) fn frame_step(&mut self, step: u8) {
+        if step & 1 == 1 {
+            self.clock_length();
+        }
+        if step == 0 {
+            self.clock_envelope();
+        }
+    }
+
     /// A frame-sequencer length step.
     #[inline]
     pub(crate) fn clock_length(&mut self) {
@@ -216,6 +242,120 @@ impl Square {
     pub(crate) fn clock_envelope(&mut self) {
         if self.on {
             self.env.clock();
+        }
+    }
+}
+
+/// CH1's frequency sweep (NR10), classic model (ADR 0021 section 5; Pan
+/// Docs "Audio Registers" FF10 and "Audio details", Pulse channel with
+/// sweep; blargg `cgb_sound` 04-06).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(crate) struct Sweep {
+    /// The shadow frequency: copied from the channel on trigger, the base
+    /// of every calculation.
+    pub(crate) shadow: u16,
+    /// NR10 bits 0-6: period (4-6), negate (3), shift (0-2).
+    pub(crate) nr10: u8,
+    /// Sweep steps left before the next calculation.
+    pub(crate) timer: u8,
+    /// The internal enabled flag: period or shift non-zero at the trigger.
+    pub(crate) enabled: bool,
+    /// A calculation in negate mode ran since the trigger.
+    pub(crate) negate_used: bool,
+}
+
+impl Sweep {
+    pub(crate) const ZERO: Self = Self {
+        shadow: 0,
+        nr10: 0,
+        timer: 0,
+        enabled: false,
+        negate_used: false,
+    };
+
+    /// NR10 bits 4-6: steps between calculations (0: none).
+    #[inline]
+    fn period(&self) -> u8 {
+        self.nr10 >> 4 & 7
+    }
+
+    /// The timer reload: a period of 0 counts as 8.
+    #[inline]
+    fn reload(&mut self) {
+        self.timer = match self.period() {
+            0 => 8,
+            p => p,
+        };
+    }
+
+    /// One calculation: `shadow +- (shadow >> shift)`. A result over 2047
+    /// (the overflow check) turns the channel off. A subtraction is
+    /// remembered for the negate quirk.
+    #[inline]
+    fn calc(&mut self, ch: &mut Square) -> u16 {
+        let delta = self.shadow >> (self.nr10 & 7);
+        let new = if self.nr10 & 8 != 0 {
+            self.negate_used = true;
+            self.shadow - delta
+        } else {
+            self.shadow + delta
+        };
+        if new > 2047 {
+            ch.on = false;
+        }
+        new
+    }
+
+    /// An NR10 write. Negate quirk: clearing the negate bit after a
+    /// negate-mode calculation since the trigger turns the channel off
+    /// (Pan Docs NR10; SameBoy `GB_apu_write` NR10, always on CGB C and
+    /// older).
+    #[inline]
+    pub(crate) fn write(&mut self, value: u8, ch: &mut Square) {
+        self.nr10 = value & 0x7F;
+        if self.negate_used && value & 8 == 0 {
+            ch.on = false;
+        }
+    }
+
+    /// A trigger of `ch` (after its own trigger): the frequency is copied
+    /// to the shadow, the timer reloads, the sweep is enabled if the
+    /// period or the shift is non-zero, and with a non-zero shift one
+    /// calculation runs for its overflow check only.
+    #[inline]
+    pub(crate) fn trigger(&mut self, ch: &mut Square) {
+        self.shadow = ch.freq & 0x7FF;
+        self.reload();
+        let shift = self.nr10 & 7;
+        self.enabled = self.period() != 0 || shift != 0;
+        self.negate_used = false;
+        if shift != 0 {
+            self.calc(ch);
+        }
+    }
+
+    /// A frame-sequencer sweep step (128 Hz). At the timer's end it
+    /// reloads and, if enabled with a non-zero period, calculates; a
+    /// result within range with a non-zero shift is written back to the
+    /// shadow and the channel frequency, and a second calculation runs for
+    /// its overflow check only.
+    #[inline(never)]
+    pub(crate) fn clock(&mut self, ch: &mut Square) {
+        self.timer = self.timer.wrapping_sub(1);
+        if self.timer != 0 {
+            return;
+        }
+        self.reload();
+        if !self.enabled || self.period() == 0 {
+            return;
+        }
+        let new = self.calc(ch);
+        if new <= 2047 && self.nr10 & 7 != 0 {
+            self.shadow = new;
+            ch.freq = new;
+            self.calc(ch);
         }
     }
 }
@@ -333,5 +473,121 @@ mod tests {
         assert!(sq.on);
         sq.write(4, 0x40, 1, 0); // enable with fs odd: 1 -> 0
         assert!(!sq.on);
+    }
+
+    /// CH1 with its DAC on and NR10 = `nr10`, triggered at frequency `f`
+    /// (the channel's trigger, then the sweep's, as `Apu::write` does).
+    fn ch1(nr10: u8, f: u16) -> (Sweep, Square) {
+        let mut sw = Sweep::ZERO;
+        let mut sq = Square::ZERO;
+        sq.write(2, 0xF0, 0, 0);
+        sw.write(nr10, &mut sq);
+        sq.write(3, f as u8, 0, 0);
+        sq.write(4, 0x80 | (f >> 8) as u8, 0, 0);
+        sw.trigger(&mut sq);
+        (sw, sq)
+    }
+
+    #[test]
+    fn sweep_trigger_copies_the_frequency_and_sets_the_enabled_flag() {
+        let (sw, sq) = ch1(0x21, 0x123); // period 2, shift 1
+        assert!(sq.on);
+        assert_eq!((sw.shadow, sw.timer, sw.enabled), (0x123, 2, true));
+        // Period 0 and shift 0: disabled, the timer loads 8.
+        let (sw, _) = ch1(0x00, 0x123);
+        assert_eq!((sw.timer, sw.enabled), (8, false));
+        // Shift alone enables it.
+        assert!(ch1(0x01, 0x100).0.enabled);
+    }
+
+    #[test]
+    fn sweep_steps_add_or_subtract_and_write_back() {
+        let (mut sw, mut sq) = ch1(0x11, 0x400); // period 1, up, shift 1
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.shadow), (0x600, 0x600));
+        let (mut sw, mut sq) = ch1(0x19, 0x400); // down
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.shadow), (0x200, 0x200));
+        assert!(sq.on);
+    }
+
+    #[test]
+    fn sweep_period_0_counts_as_8() {
+        let (mut sw, mut sq) = ch1(0x01, 0x100); // period 0, shift 1
+        sw.write(0x11, &mut sq); // period 1 now; the timer still runs 8
+        for _ in 0..7 {
+            sw.clock(&mut sq);
+        }
+        assert_eq!(sq.freq, 0x100);
+        sw.clock(&mut sq);
+        assert_eq!(sq.freq, 0x180);
+    }
+
+    #[test]
+    fn a_disabled_sweep_never_calculates() {
+        let (mut sw, mut sq) = ch1(0x00, 0x700);
+        sw.write(0x11, &mut sq); // period 1, shift 1, but not enabled
+        for _ in 0..16 {
+            sw.clock(&mut sq);
+        }
+        assert_eq!(sq.freq, 0x700);
+        assert!(sq.on);
+    }
+
+    #[test]
+    fn the_second_calculation_checks_overflow_only() {
+        // 1280 + 640 = 1920 is written back; 1920 + 960 overflows: off.
+        let (mut sw, mut sq) = ch1(0x11, 1280);
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.shadow), (1920, 1920));
+        assert!(!sq.on);
+    }
+
+    #[test]
+    fn shift_0_checks_overflow_without_writing_back() {
+        // Period 1, shift 0: 1023 + 1023 = 2046 fits, but isn't stored.
+        let (mut sw, mut sq) = ch1(0x10, 1023);
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.shadow), (1023, 1023));
+        assert!(sq.on);
+        // 1024 + 1024 = 2048 overflows: off.
+        let (mut sw, mut sq) = ch1(0x10, 1024);
+        sw.clock(&mut sq);
+        assert!(!sq.on);
+    }
+
+    #[test]
+    fn overflow_on_trigger_needs_a_non_zero_shift() {
+        // Shift 1: 2047 + 1023 overflows at the trigger.
+        let (_, sq) = ch1(0x01, 0x7FF);
+        assert!(!sq.on);
+        // Shift 0: no calculation at the trigger.
+        let (_, sq) = ch1(0x70, 0x7FF);
+        assert!(sq.on);
+    }
+
+    #[test]
+    fn clearing_negate_after_a_negate_calculation_turns_the_channel_off() {
+        // The trigger's calculation (shift 1) counts.
+        let (mut sw, mut sq) = ch1(0x19, 0x400);
+        sw.write(0x11, &mut sq);
+        assert!(!sq.on);
+        // No calculation yet (shift 0 at the trigger): stays on.
+        let (mut sw, mut sq) = ch1(0x18, 0x400);
+        sw.write(0x10, &mut sq);
+        assert!(sq.on);
+        // A sweep step's calculation in negate mode counts.
+        sw.write(0x18, &mut sq);
+        sw.clock(&mut sq);
+        assert!(sq.on);
+        sw.write(0x10, &mut sq);
+        assert!(!sq.on);
+        // A retrigger forgets it.
+        let (mut sw, mut sq) = ch1(0x19, 0x400);
+        sw.write(0x10, &mut sq); // off
+        sq.write(4, 0x84, 0, 0);
+        sw.trigger(&mut sq); // shift 0 now: no calculation
+        sw.write(0x00, &mut sq);
+        assert!(sq.on);
     }
 }

@@ -2395,12 +2395,14 @@ mod tests {
                 end / 128 - start / 128,
                 "{start}..{end}"
             );
-            // No channels yet: silence.
-            assert!(
-                audio[..r.audio_samples]
-                    .iter()
-                    .all(|s| *s == StereoSample::default())
-            );
+            // Post-boot only CH1 is on: DAC on (NR12 = F3) at volume 0,
+            // panned to both sides (NR51 = F3), NR50 = 77: a constant
+            // +15 x 8 x 64.
+            let dc = StereoSample {
+                left: 7680,
+                right: 7680,
+            };
+            assert!(audio[..r.audio_samples].iter().all(|s| *s == dc));
             assert_eq!(emu.mem.apu.out.synced, end, "synced at the end of the call");
             total += r.audio_samples as u64;
         }

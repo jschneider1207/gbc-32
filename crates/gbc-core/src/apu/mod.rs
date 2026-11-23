@@ -13,7 +13,8 @@
 //!
 //! Task 1(a) is the framework: power, the frame sequencer and the output
 //! pipeline. The channels plug into `Apu::write`, `Apu::integrate`,
-//! `Apu::advance`, [`Apu::step`] and the NR52 active bits. Task 1(b): CH2.
+//! `Apu::advance`, [`Apu::step`] and the NR52 active bits. Task 1(b): CH2;
+//! task 3: CH1 with its sweep.
 
 mod mix;
 mod square;
@@ -22,7 +23,7 @@ mod units;
 pub(crate) use mix::Output;
 
 use crate::memory::Memory;
-use square::Square;
+use square::{Square, Sweep};
 
 /// One stereo output sample, written by the core into the caller's audio
 /// buffer at [`AUDIO_SAMPLE_RATE`](crate::AUDIO_SAMPLE_RATE): the average
@@ -59,8 +60,10 @@ pub(crate) struct Apu {
     /// The output stream: kept across power cycles.
     pub(crate) out: Output,
     pub(crate) fs: Fs,
-    /// CH1 and CH2. CH1 is decoded from task 3 on (sweep).
+    /// CH1 and CH2.
     pub(crate) sq: [Square; 2],
+    /// CH1's sweep.
+    pub(crate) sweep: Sweep,
 }
 
 /// Power and the frame sequencer (ADR 0021 section 4).
@@ -74,8 +77,8 @@ pub(crate) struct Fs {
     pub(crate) step: u8,
     /// The next DIV-APU edge is skipped (power on with the APU bit high).
     pub(crate) skip: bool,
-    /// NR52 bits 0, 2, 3: CH1, CH3 and CH4 until their tasks (3-5) give
-    /// them a channel; CH2's bit is `sq[1].on`.
+    /// NR52 bits 2, 3: CH3 and CH4 until their tasks (4-5) give them a
+    /// channel; CH1's and CH2's bits are `sq[i].on`.
     pub(crate) active: u8,
     /// SameBoy's 1 MHz phase (`lf_div`) at power on, from the clock: the
     /// square trigger delay (ADR 0021 section 5, task 1(b)).
@@ -95,17 +98,25 @@ impl Apu {
                 phase: 0,
             },
             sq: [Square::ZERO; 2],
+            sweep: Sweep::ZERO,
         }
     }
 
     /// The state the CGB boot ROM leaves at clock 0: powered on, NR52 = F1
     /// (CH1 on, its DAC on, volume 0 and the envelope stopped: the boot
     /// chime has decayed by hand-over; ADR 0021 section 7, provisional),
-    /// frame sequencer at step 0.
+    /// frame sequencer at step 0. CH1 matches the post-boot registers
+    /// (NR10 = 80: sweep off; NR11 = BF: duty 2; NR12 = F3); its frequency,
+    /// length and duty position are not observable through them and stay 0
+    /// (provisional).
     pub(crate) fn post_boot(&mut self) {
         *self = Self::new();
         self.fs.power = true;
-        self.fs.active = 0x01;
+        let ch1 = &mut self.sq[0];
+        ch1.on = true;
+        ch1.started = true;
+        ch1.duty = 2;
+        ch1.env.nrx2 = 0xF3;
     }
 
     #[inline]
@@ -116,7 +127,10 @@ impl Apu {
     /// NR52 as read: power, three unused bits as 1, the channel bits
     /// (Pan Docs: FF26 - NR52).
     pub(crate) fn nr52(&self) -> u8 {
-        0x70 | u8::from(self.fs.power) << 7 | self.fs.active | u8::from(self.sq[1].on) << 1
+        0x70 | u8::from(self.fs.power) << 7
+            | self.fs.active
+            | u8::from(self.sq[1].on) << 1
+            | u8::from(self.sq[0].on)
     }
 
     /// NR52 bit 7 from 1 to 0, after a sync: everything but the output
@@ -157,14 +171,14 @@ impl Apu {
         }
         fs.step = (fs.step + 1) & 7;
         let step = fs.step;
-        if step & 1 == 1 {
-            // The length counters, 256 Hz.
-            self.sq[1].clock_length();
+        // Length (odd steps, 256 Hz) before the sweep (SameBoy
+        // `GB_apu_div_event`); the envelopes on step 0 (64 Hz).
+        for sq in &mut self.sq {
+            sq.frame_step(step);
         }
-        // `step & 3 == 3`: the sweep (128 Hz, task 3).
-        if step == 0 {
-            // The envelopes, 64 Hz.
-            self.sq[1].clock_envelope();
+        if step & 3 == 3 {
+            // The sweep, 128 Hz.
+            self.sweep.clock(&mut self.sq[0]);
         }
     }
 
@@ -179,10 +193,34 @@ impl Apu {
     /// A write to a channel register FF10-FF25 (by the low 7 address bits)
     /// at clock `now`, after a sync, with the APU on. The byte is already
     /// stored in `Memory::io`.
+    #[inline(never)]
     pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64) {
-        if let 0x16..=0x19 = reg {
-            let (fs, lf) = (self.fs.step, self.lf_div(now));
-            self.sq[1].write(reg - 0x15, value, fs, lf);
+        // FF10-FF14 are CH1's NR10-NR14 and FF15-FF19 CH2's (FF15 unused)
+        // NR21-NR24: one call site for both squares keeps a single inlined
+        // copy. NR10 and FF15 (offset 0) are no-ops in `Square::write`.
+        let i = reg.wrapping_sub(0x10);
+        if i >= 10 {
+            return;
+        }
+        let ch = usize::from(i >= 5);
+        let (fs, lf) = (self.fs.step, self.lf_div(now));
+        self.sq[ch].write(i - 5 * ch, value, fs, lf);
+        // NR10, or CH1's trigger after the channel's own. Unconditional:
+        // one tail call instead of a test on every exit (code size).
+        self.write_sweep(reg, value);
+    }
+
+    /// The sweep's part of a write to FF10-FF19 (`reg`), after
+    /// `Square::write`: NR10, or CH1's trigger (NR14 bit 7) after the
+    /// channel's own; nothing for the others. Out of line, off
+    /// `Apu::write`'s common path.
+    #[inline(never)]
+    fn write_sweep(&mut self, reg: usize, value: u8) {
+        let ch1 = &mut self.sq[0];
+        match reg {
+            0x10 => self.sweep.write(value, ch1),
+            0x14 if value & 0x80 != 0 => self.sweep.trigger(ch1),
+            _ => {}
         }
     }
 
@@ -190,16 +228,22 @@ impl Apu {
     /// empty-buffer path, ADR 0021 section 9).
     #[inline]
     fn advance(&mut self, dt: u64) {
-        self.sq[1].advance(dt);
+        for sq in &mut self.sq {
+            sq.advance(dt);
+        }
     }
 
     /// Advances the channels by `dt` clocks (at most one sample window) and
     /// returns each channel's analog level (-15..15 while its DAC is on,
-    /// else 0) times clocks, summed over the span, for CH1-CH4. CH1, CH3
-    /// and CH4 are silent (DAC off) until their tasks.
+    /// else 0) times clocks, summed over the span, for CH1-CH4. CH3 and
+    /// CH4 are silent (DAC off) until their tasks.
     #[inline]
     fn integrate(&mut self, dt: u32) -> [i32; 4] {
-        [0, self.sq[1].integrate(dt), 0, 0]
+        let mut levels = [0; 4];
+        for (level, sq) in levels.iter_mut().zip(&mut self.sq) {
+            *level = sq.integrate(dt);
+        }
+        levels
     }
 }
 
@@ -213,11 +257,11 @@ pub(crate) fn read_apu(mem: &Memory, now: u64, reg: usize) -> u8 {
         0x26 => mem.apu.nr52(),
         // PCM12/PCM34: each channel's digital output (0-15) if it is on,
         // else 0 (SameBoy `GB_IO_PCM12`/`PCM34`), at `now`: a copy of the
-        // channel is advanced. CH1, CH3, CH4: tasks 3-5.
+        // channel is advanced. CH3, CH4: tasks 4-5.
         0x76 => {
-            let mut ch2 = mem.apu.sq[1];
-            ch2.advance(now.saturating_sub(mem.apu.out.synced));
-            ch2.digital() << 4
+            let [ch1, ch2] = &mem.apu.sq;
+            let dt = now.saturating_sub(mem.apu.out.synced);
+            ch1.digital_at(dt) | ch2.digital_at(dt) << 4
         }
         0x77 => 0x00,
         // Wave RAM as stored. CH3 playing: the byte it reads (task 4).
@@ -283,5 +327,94 @@ mod tests {
             apu.step();
         }
         assert_eq!(apu.fs.step, 0, "wraps mod 8");
+    }
+
+    /// A powered APU at step 0 with CH1 (DAC on, volume 15, duty 50%)
+    /// triggered at frequency `f` with NR10 = `nr10`, through `Apu::write`.
+    fn ch1_playing(nr10: u8, f: u16) -> Apu {
+        let mut apu = Apu::new();
+        apu.power_on(0, false);
+        apu.write(0x10, nr10, 0);
+        apu.write(0x11, 0x80, 0);
+        apu.write(0x12, 0xF0, 0);
+        apu.write(0x13, f as u8, 0);
+        apu.write(0x14, 0x80 | (f >> 8) as u8, 0);
+        apu
+    }
+
+    #[test]
+    fn nr52_bit_0_follows_ch1() {
+        let mut apu = Apu::new();
+        apu.post_boot();
+        assert_eq!(apu.nr52(), 0xF1);
+        // Sweep overflow on the trigger turns CH1 off.
+        let apu = ch1_playing(0x01, 0x7FF);
+        assert_eq!(apu.nr52() & 1, 0);
+        let apu = ch1_playing(0x00, 0x7FF);
+        assert_eq!(apu.nr52() & 1, 1);
+    }
+
+    #[test]
+    fn the_sweep_runs_on_frame_sequencer_steps_3_and_7() {
+        let mut apu = ch1_playing(0x11, 0x100);
+        let mut seen = [0; 8];
+        for _ in 0..8 {
+            apu.step();
+            seen[usize::from(apu.fs.step)] = apu.sq[0].freq;
+        }
+        assert_eq!(
+            seen,
+            [0x240, 0x100, 0x100, 0x180, 0x180, 0x180, 0x180, 0x240]
+        );
+        // A sweep step that overflows turns CH1 off: NR52 bit 0.
+        let mut apu = ch1_playing(0x11, 1280);
+        for _ in 0..3 {
+            apu.step();
+        }
+        assert_eq!(apu.nr52() & 1, 0);
+    }
+
+    #[test]
+    fn nr10_writes_go_to_the_sweep_and_ff15_is_ignored() {
+        let mut apu = ch1_playing(0x19, 0x400);
+        let before = apu;
+        apu.write(0x15, 0xFF, 0);
+        assert_eq!(apu, before, "FF15 unused");
+        apu.write(0x10, 0x11, 0); // clears negate after a negate calculation
+        assert!(!apu.sq[0].on);
+    }
+
+    #[test]
+    fn pcm12_low_nibble_is_ch1() {
+        extern crate std;
+        let mut mem = std::boxed::Box::new(Memory::new());
+        mem.apu = ch1_playing(0x00, 0x400); // 4096 clocks per step
+        let first = u64::from(mem.apu.sq[0].countdown);
+        assert_eq!(read_apu(&mem, 0, 0x76), 0x00, "not started");
+        // Duty 50%: positions 0 and 5-7 high; position 1 after the first step.
+        assert_eq!(read_apu(&mem, first, 0x76), 0x00);
+        assert_eq!(read_apu(&mem, first + 4 * 4096, 0x76), 0x0F, "position 5");
+        // CH2 in the high nibble at the same time.
+        mem.apu.write(0x17, 0xA0, 0);
+        mem.apu.write(0x19, 0x87, 0);
+        let t = first + 4 * 4096;
+        assert_eq!(read_apu(&mem, t, 0x76) & 0x0F, 0x0F);
+    }
+
+    #[test]
+    fn ch1_is_audible_in_the_mix() {
+        // f = 0: 8192 clocks per step, so whole windows sit at one level.
+        let mut apu = ch1_playing(0x00, 0x000);
+        let mut io = [0u8; 0x80];
+        io[0x24] = 0x77;
+        io[0x25] = 0x11; // CH1 only, both sides
+        let mut buf = [StereoSample::default(); 600];
+        let mut len = 0;
+        apu.sync(600 * SAMPLE_PERIOD, &io, &mut buf, &mut len);
+        assert_eq!(len, 600);
+        // Digital 15 -> analog -15, times volume 8, times 64.
+        let low = -15 * 8 * 64;
+        assert!(buf.iter().any(|s| s.left == low && s.right == low));
+        assert_eq!(buf[0].left, 15 * 8 * 64, "first-sample zero: +15");
     }
 }
