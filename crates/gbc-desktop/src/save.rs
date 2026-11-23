@@ -14,9 +14,22 @@ pub const FOOTER_LEN: usize = 48;
 /// The older VBA footer, with a u32 timestamp, accepted on load.
 const FOOTER_LEN_32: usize = 44;
 
-/// The save path for a ROM: `<stem>.sav` in the ROM's directory.
+/// The save path for a ROM: `<stem>.sav` in the ROM's directory, or
+/// `<file name>.sav` (`game.gbc.sav`) when a sibling ROM with the same stem
+/// and the other Game Boy extension exists, so `game.gb` and `game.gbc`
+/// side by side don't share a save (ADR 0023 amendment).
 pub fn save_path(rom: &Path) -> PathBuf {
-    rom.with_extension("sav")
+    let own = rom.extension();
+    let sibling = ["gb", "gbc", "GB", "GBC"]
+        .iter()
+        .any(|e| Some(std::ffi::OsStr::new(e)) != own && rom.with_extension(e).is_file());
+    if sibling {
+        let mut name = rom.as_os_str().to_owned();
+        name.push(".sav");
+        PathBuf::from(name)
+    } else {
+        rom.with_extension("sav")
+    }
 }
 
 fn put_time(out: &mut Vec<u8>, t: &RtcTime) {
@@ -403,6 +416,30 @@ mod tests {
         write_atomic(&p, b"two").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_roms_with_the_same_stem_get_separate_saves() {
+        let dir = std::env::temp_dir().join(format!("gbc-savepath-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let gb = dir.join("game.gb");
+        let gbc = dir.join("game.gbc");
+        fs::write(&gb, b"").unwrap();
+        assert_eq!(save_path(&gb), dir.join("game.sav"), "alone: stem.sav");
+        fs::write(&gbc, b"").unwrap();
+        assert_eq!(save_path(&gb), dir.join("game.gb.sav"));
+        assert_eq!(save_path(&gbc), dir.join("game.gbc.sav"));
+        // An unrelated file with the same stem doesn't count.
+        let other = dir.join("zelda.gbc");
+        fs::write(&other, b"").unwrap();
+        fs::write(dir.join("zelda.txt"), b"").unwrap();
+        assert_eq!(save_path(&other), dir.join("zelda.sav"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

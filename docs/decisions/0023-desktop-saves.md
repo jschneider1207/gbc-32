@@ -57,3 +57,12 @@ I/O errors exit 1. A locked CPU warns once and the run still exits 0.
 - Not covered: MBC7/TAMA5/HuC3 state (ADR 0015), a per-title DMG palette
   (the core default is used), saving on a crash or kill (only the
   periodic write protects against those).
+
+## Amendment (after M7 review): sibling ROMs
+
+`game.gb` and `game.gbc` side by side would both use `game.sav`. The save
+path is now `<stem>.sav` as before, unless a sibling ROM with the same
+stem and the other Game Boy extension (`gb`/`gbc`, either case) exists;
+then it is `<file name>.sav` (`game.gbc.sav`). Common-case saves are
+untouched; only someone who later adds the other-extension file next to an
+existing `game.sav` has to rename it. Deterministic, no config.
