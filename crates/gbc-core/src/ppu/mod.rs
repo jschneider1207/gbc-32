@@ -260,19 +260,24 @@ pub(crate) struct LineTiming {
     /// none).
     start: u64,
     /// STAT reads mode 3 from here.
-    mode3: u16,
+    mode3: u8,
     /// The first pixel is output at this position (no stall before it).
     first_pixel: u16,
     /// Mode 3 ends for the HBlank interrupt (the walk's `End`); STAT reads
     /// mode 0 (single speed) from `end + edge` ([`Self::stat_end`]).
     end: u16,
     /// Pipeline stalls `(pixel x, dots)` in x order: objects and the
-    /// window start.
+    /// window start (two after a re-trigger, [`Ppu::retrigger`]).
     stalls: [(u8, u8); 11],
     n_stalls: u8,
     /// Which stall is the window's (`NO_STALL`: none); the others are the
     /// objects', in fetch order.
     win_stall: u8,
+    /// WX + 1 of the line's earlier window start after a re-trigger (0:
+    /// none; [`Ppu::retrigger`]). Its stall stays the first one at its x
+    /// ([`LineTiming::prev_stall`]), and objects between it and the new
+    /// start keep its tile grid.
+    prev_wx: u8,
     /// Stall dots at the last pixel (x = 159: the window at WX = 166,
     /// objects at X = 167). They delay the STAT mode-0 change but not the
     /// HBlank interrupt. gambatte (behaviour only) requests it when the
@@ -386,6 +391,7 @@ impl LineTiming {
         stalls: [(0, 0); 11],
         n_stalls: 0,
         win_stall: NO_STALL,
+        prev_wx: 0,
         edge: 0,
         wy_late: 0,
     };
@@ -395,6 +401,30 @@ impl LineTiming {
     #[inline]
     fn stat_end(&self) -> u16 {
         self.end + u16::from(self.edge)
+    }
+
+    /// The line's fine scroll (the discard count & 7, from `latch` or an
+    /// SCX write in the discard, [`Ppu::hold_fetch`]): the tile alignment
+    /// its stalls are built with.
+    fn fine(&self) -> u8 {
+        (self.first_pixel.wrapping_sub(u16::from(self.mode3) + 12)) as u8 & 7
+    }
+
+    /// Index in `stalls` of the earlier window start after a re-trigger
+    /// (`NO_STALL`: none): the first stall at its x (a window stalls before
+    /// the objects at its x).
+    #[cold]
+    #[inline(never)]
+    fn prev_stall(&self) -> u8 {
+        if self.prev_wx == 0 {
+            return NO_STALL;
+        }
+        let x = (self.prev_wx - 1).saturating_sub(7);
+        let n = usize::from(self.n_stalls) % 12;
+        self.stalls[..n]
+            .iter()
+            .position(|s| s.0 == x)
+            .map_or(NO_STALL, |i| i as u8)
     }
 
     /// Pixels output before line position `t` (0-160), under the
@@ -1286,7 +1316,7 @@ impl Ppu {
         let a = self.at(now);
         let t = a.t as i32;
         let changed = if reg == 0x40 {
-            (value ^ self.lcdc) & 0x58 != 0
+            (value ^ self.lcdc) & 0x78 != 0
         } else {
             value != mem.io[reg]
         };
@@ -1344,7 +1374,7 @@ impl Ppu {
             (pos + if active {
                 i32::from(skip) - i32::from(start)
             } else {
-                first_pixel - i32::from(lt.mode3) - 12
+                i32::from(self.renderer.bg_fine())
             }) & 7;
         // Screen x of the first pixel of the tile being output.
         let tile = pos - phase;
@@ -1354,10 +1384,10 @@ impl Ppu {
         // -(SCX & 7)) is fetched while the junk pixels before tile 0 are
         // popped, before tile 1's fetch begins: its stall, clamped to pixel
         // 0 here, doesn't finish tile 1 (gambatte `scx_during_m3_spx*_ds`).
-        // Object stall `i` is the line's object `i` in fetch order (`i - 1`
-        // after the window's).
+        // Object stall `i` is the line's object `i` in fetch order, less
+        // the window stalls before it.
         let r = &self.renderer;
-        let win = usize::from(lt.win_stall);
+        let (win, prev) = (usize::from(lt.win_stall), usize::from(lt.prev_stall()));
         // Only looked up where it decides `end` (not for most SCX writes).
         let stalled = || {
             t >= first_pixel
@@ -1365,9 +1395,10 @@ impl Ppu {
                     .iter()
                     .enumerate()
                     .any(|(i, &(sx, _))| {
-                        let slot = r.order[(i - usize::from(i > win)) % objects::MAX_PER_LINE];
+                        let obj = i - usize::from(i > win) - usize::from(i > prev);
+                        let slot = r.order[obj % objects::MAX_PER_LINE];
                         let obj_x = i32::from(r.objects.get(usize::from(slot)).2);
-                        (i == win || obj_x >= 8 - i32::from(r.fine()))
+                        (i == win || i == prev || obj_x >= 8 - i32::from(lt.fine()))
                             && (tile..=x).contains(&i32::from(sx))
                     })
         };
@@ -1587,7 +1618,7 @@ impl Ppu {
     /// exist (`latch`, `LineTiming::wy_late`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, double: bool) {
+    pub(crate) fn wy_written(&mut self, now: u64, mem: &mut Memory, double: bool) {
         if self.lcd_enabled() {
             let a = self.at(now);
             if a.line < LINES {
@@ -1607,7 +1638,7 @@ impl Ppu {
     /// after it.
     #[cold]
     #[inline(never)]
-    fn wy_late_latched(&mut self, mem: &Memory, double: bool) {
+    fn wy_late_latched(&mut self, mem: &mut Memory, double: bool) {
         let t = core::mem::take(&mut self.line.wy_late);
         let at = self.line.start.wrapping_add(u64::from(t));
         self.window_write(at, mem, Some(wy_lead(double)));
@@ -1662,8 +1693,10 @@ impl Ppu {
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
         let t = &mut self.line;
         t.start = start;
-        t.mode3 = mode3;
+        t.mode3 = mode3 as u8;
         t.first_pixel = mode3 + 12 + u16::from(scx & 7);
+        // One window start so far ([`Self::retrigger`]).
+        t.prev_wx = 0;
         self.drawn = 0;
         mem.obj_rank.hold[2].end = 0;
         mem.obj_rank.next = 0;
@@ -1702,6 +1735,9 @@ impl Ppu {
     /// and the window start at WX `window`.
     #[inline(never)]
     fn set_stalls(&mut self, scx: u8, window: Option<u8>) {
+        if self.line.prev_wx != 0 {
+            return self.set_stalls_retriggered(scx, window);
+        }
         let r = &self.renderer;
         let n = r.objects.len();
         let mut xs = [0u8; objects::MAX_PER_LINE];
@@ -1750,6 +1786,45 @@ impl Ppu {
         t.end = t.first_pixel + 160 + total - u16::from(t.edge);
     }
 
+    /// [`Self::set_stalls`] after a re-trigger ([`Self::retrigger`]): the
+    /// earlier window start keeps its stall as it ran
+    /// ([`LineTiming::prev_stall`]), the objects before the new start at
+    /// WX `window` keep the earlier start's tile grid (the BG after it
+    /// continues that grid, `Renderer::bg_fine`), the others take the new
+    /// start's: two plain `set_stalls`, one per start, spliced at the new
+    /// start (the objects before it come first in both).
+    #[cold]
+    #[inline(never)]
+    fn set_stalls_retriggered(&mut self, scx: u8, window: Option<u8>) {
+        let prev = self.line.stalls[usize::from(self.line.prev_stall()) % 11];
+        let pwx = core::mem::take(&mut self.line.prev_wx);
+        self.set_stalls(scx, Some(pwx - 1));
+        let t = &mut self.line;
+        t.stalls[usize::from(t.win_stall) % 11] = prev;
+        t.win_stall = NO_STALL;
+        if window.is_some() {
+            // The earlier start's stalls before the new start (`j` objects
+            // and its own), then the new start's from there.
+            let a = t.stalls;
+            self.set_stalls(scx, window);
+            let t = &mut self.line;
+            let (j, n) = (usize::from(t.win_stall) % 10, usize::from(t.n_stalls) % 11);
+            t.stalls.copy_within(j..n, j + 1);
+            t.stalls[..=j].copy_from_slice(&a[..=j]);
+            t.n_stalls += 1;
+            t.win_stall += 1;
+        }
+        let t = &mut self.line;
+        t.prev_wx = pwx;
+        let k = usize::from(t.n_stalls) % 12;
+        let total: u16 = t.stalls[..k].iter().map(|s| u16::from(s.1)).sum();
+        t.edge = 0;
+        if k != 0 && t.stalls[(k - 1) % 11].0 >= 159 {
+            t.edge = edge_dots(&t.stalls[..k]);
+        }
+        t.end = t.first_pixel + 160 + total - u16::from(t.edge);
+    }
+
     /// Clock (line position) at which the window's stall begins, under the
     /// current stalls (`None`: no window stall).
     fn window_stall_at(&self) -> Option<i32> {
@@ -1783,7 +1858,7 @@ impl Ppu {
     /// registers, so the pixels agree with mode 3's length.
     #[cold]
     #[inline(never)]
-    pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, wy_lead: Option<i32>) {
+    pub(crate) fn window_write(&mut self, now: u64, mem: &mut Memory, wy_lead: Option<i32>) {
         let lt = &self.line;
         let a = self.at(now);
         let t = a.t as i32;
@@ -1814,13 +1889,15 @@ impl Ppu {
                 }
                 *d = keep;
                 self.end_moved();
+            } else if self.line.prev_wx == 0 {
+                self.retrigger(t, mem);
             }
             return;
         }
         // The tile alignment the line's stalls were built with (the
         // discard count, `latch` or `hold_fetch`), not the live SCX: an SCX
         // write after the discard doesn't move the fetcher's tile phase.
-        let scx = self.renderer.fine();
+        let scx = self.line.fine();
         let window = self.window_wx(mem);
         self.set_stalls(scx, window);
         self.renderer.set_window(window);
@@ -1830,7 +1907,65 @@ impl Ppu {
             self.set_stalls(scx, None);
             self.renderer.set_window(None);
         }
+        self.window_cuts_holds(mem);
         self.end_moved();
+    }
+
+    /// The window starts again on the line (SameBoy display.c: once a
+    /// fetch has seen LCDC.5 clear, `wx_triggered` is clear and the window
+    /// activates at the next dot where LCDC.5, `wy_triggered` and
+    /// `WX == position_in_line + 7` hold): at the live WX, if its stall
+    /// begins more than `WINDOW_ON_LEAD` dots after the write at line dot
+    /// `t`. Each activation reads the next window row (`window_y++`; Mealybug
+    /// `m3_lcdc_win_en_change_multiple`: "the second time the window is
+    /// activated on the row, the next row of window pixels are displayed"),
+    /// from map column 0 (`window_tile_x = 0`), and stalls like the first
+    /// (the BG FIFO is cleared and the fetch restarts). Approximations: one
+    /// re-trigger per line, and none with 10 objects on it (the stalls hold
+    /// two window starts and up to 9 objects then).
+    #[cold]
+    #[inline(never)]
+    fn retrigger(&mut self, t: i32, mem: &mut Memory) {
+        // The window has started and gone back to the BG: a fetch after the
+        // start saw LCDC.5 clear (`hold_fetch`, LCDC.5 held), so SameBoy's
+        // `wx_triggered` is clear. Approximation: only once the pixels have
+        // switched (a set before them, after that fetch, doesn't re-trigger
+        // yet; a later WX write can), and with room for the stall.
+        let (active, start, _) = self.renderer.window();
+        let lt = &self.line;
+        let Some(wx) = self.window_wx(mem).filter(|&wx| wx >= 7) else {
+            return;
+        };
+        if active || start >= self.drawn || usize::from(lt.n_stalls) >= lt.stalls.len() {
+            return;
+        }
+        let saved = self.line;
+        self.line.prev_wx = self.renderer.window_wx().unwrap_or(0).wrapping_add(1);
+        self.set_stalls(self.line.fine(), Some(wx));
+        if self
+            .window_stall_at()
+            .is_none_or(|c| t + WINDOW_ON_LEAD > c)
+        {
+            self.line = saved;
+            return;
+        }
+        self.renderer.set_window(Some(wx));
+        self.window_cuts_holds(mem);
+        self.end_moved();
+    }
+
+    /// The window's first tile is fetched after it starts: no held part
+    /// ([`Self::hold_fetch`]) reaches past a start decided after it.
+    fn window_cuts_holds(&self, mem: &mut Memory) {
+        if let Some(wx) = self.renderer.window_wx() {
+            let s = wx.saturating_sub(7);
+            for h in &mut mem.obj_rank.hold {
+                if h.end > s {
+                    h.end = s;
+                    h.planes = 0;
+                }
+            }
+        }
     }
 
     /// After a mode-3 write moved `line.end` ([`Self::window_write`], the
@@ -1971,13 +2106,14 @@ impl Ppu {
             .iter()
             .map(|&s| usize::from(s) % 10)
             .filter(|&s| r.objects.get(s).2 < 168);
+        let prev = t.prev_stall();
         let (mut clock, mut x) = (u32::from(t.first_pixel), 0u32);
         for (j, &(sx, d)) in t.stalls[..usize::from(t.n_stalls) % 12].iter().enumerate() {
             clock += u32::from(sx).saturating_sub(x);
             x = x.max(u32::from(sx));
             let begin = clock;
             clock += u32::from(d);
-            if j == usize::from(t.win_stall) {
+            if j == usize::from(t.win_stall) || j == usize::from(prev) {
                 continue;
             }
             let Some(slot) = slots.next() else { break };
@@ -2545,15 +2681,15 @@ mod tests {
                 match reg {
                     0x40 => {
                         r.ppu.lcdc = v;
-                        r.ppu.window_write(now, &r.mem, None);
+                        r.ppu.window_write(now, &mut r.mem, None);
                     }
                     0x4A => {
                         r.mem.io[0x4A] = v;
-                        r.ppu.wy_written(now, &r.mem, false);
+                        r.ppu.wy_written(now, &mut r.mem, false);
                     }
                     _ => {
                         r.mem.io[0x4B] = v;
-                        r.ppu.window_write(now, &r.mem, None);
+                        r.ppu.window_write(now, &mut r.mem, None);
                     }
                 }
             }
@@ -3087,7 +3223,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.ppu.lcdc &= !0x20;
-                r.ppu.window_write(now, &r.mem, None);
+                r.ppu.window_write(now, &mut r.mem, None);
             }
             let irq = r
                 .irqs(l5 + 455)
@@ -3156,7 +3292,7 @@ mod tests {
                 } else {
                     r.mem.io[reg] = v;
                 }
-                r.ppu.window_write(now, &r.mem, None);
+                r.ppu.window_write(now, &mut r.mem, None);
             }
             let mut irqs = r.irqs(l5 + u64::from(mid));
             irqs.extend(r.irqs(l5 + 455));
@@ -3227,7 +3363,7 @@ mod tests {
             r.sync(now);
             r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = 0xFF;
-            r.ppu.wy_written(now, &r.mem, ds);
+            r.ppu.wy_written(now, &mut r.mem, ds);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
@@ -3269,7 +3405,7 @@ mod tests {
             r.sync(now);
             r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = line as u8;
-            r.ppu.wy_written(now, &r.mem, ds);
+            r.ppu.wy_written(now, &mut r.mem, ds);
             let l = clock(on, 1, (line + next) * LINE);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
@@ -3336,12 +3472,12 @@ mod tests {
                     r.mem.io[reg] = v;
                 }
                 match reg {
-                    0x4A => r.ppu.wy_written(now, &r.mem, false),
+                    0x4A => r.ppu.wy_written(now, &mut r.mem, false),
                     0x40 => {
                         r.ppu.check_wy_at(now, &r.mem);
-                        r.ppu.window_write(now, &r.mem, None);
+                        r.ppu.window_write(now, &mut r.mem, None);
                     }
-                    _ => r.ppu.window_write(now, &r.mem, None),
+                    _ => r.ppu.window_write(now, &mut r.mem, None),
                 }
             }
             r.sync(l5 + 455);
@@ -3368,6 +3504,154 @@ mod tests {
         );
         assert_eq!(run(0, &[(162, 0x4B, 0x4F)]), (Some(256 + 6), 2, 2, 4));
     }
+
+    /// LCDC.5 cleared while the window is drawn switches to the BG at the
+    /// first tile the fetcher fetches after it, on the window's tile grid
+    /// (the BG tiles continue it); set again after that, the window starts
+    /// again at the live WX with map column 0, the next window row and
+    /// another 6-dot stall (SameBoy `wx_triggered`, `window_y++`; Mealybug
+    /// `m3_lcdc_win_en_change_multiple`). Set again before that fetch, the
+    /// window just goes on.
+    #[test]
+    fn window_off_at_a_tile_then_retriggered() {
+        // Window at x = 4 (WX 0x0B): map 9C00 column 0 tile 1 (row 6: 4,
+        // other rows: 2), other columns tile 2 (3). BG map 9800: even
+        // columns tile 0 (1), odd columns tile 3 (4). Line 5 (first pixel at
+        // dot 96, pixel x >= 4 at dot 102 + x): WX = 0x67 (x = 96) at
+        // x = 20, which doesn't move the started window; LCDC.5 cleared at
+        // x = 30 (window tile 28-35 out, 36-43 fetched: the BG from 44) and
+        // set again at dot `on`.
+        // -> (mode-3 end, line 5 x = 43, 44, 48, 96, 104, line 6 x = 4).
+        let run = |on: u32| {
+            let lcd_on = 1000;
+            let mut r = fetch_rig(lcd_on);
+            for row in 0..8 {
+                r.mem.vram[17 + 2 * row] = if row == 6 { 0xFF } else { 0 };
+                r.mem.vram[32 + 2 * row] = 0;
+                r.mem.vram[33 + 2 * row] = 0xFF;
+                r.mem.vram[48 + 2 * row] = 0xFF;
+                r.mem.vram[49 + 2 * row] = 0xFF;
+            }
+            for (i, b) in r.mem.vram[0x1800..0x1C00].iter_mut().enumerate() {
+                *b = if i & 1 == 0 { 0 } else { 3 };
+            }
+            for (i, b) in r.mem.vram[0x1C00..0x2000].iter_mut().enumerate() {
+                *b = if i & 31 == 0 { 1 } else { 2 };
+            }
+            r.ppu.lcdc = 0xF1;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = 0x0B;
+            let l5 = clock(lcd_on, 0, 5 * LINE);
+            let lcdc = |r: &mut Rig, t: u32, v: u8| {
+                let now = l5 + u64::from(t);
+                write_fetch_reg(r, now, 0x40, v);
+                r.ppu.check_wy_at(now, &r.mem);
+                r.ppu.window_write(now, &mut r.mem, None);
+            };
+            let now = l5 + 122;
+            r.sync(now);
+            r.ppu.flush(now, &mut r.mem, &mut r.frame);
+            r.mem.io[0x4B] = 0x67;
+            r.ppu.window_write(now, &mut r.mem, None);
+            lcdc(&mut r, 132, 0xF1 & !0x20);
+            lcdc(&mut r, on, 0xF1);
+            r.sync(l5 + 300);
+            r.mem.io[0x4B] = 0x0B;
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            r.sync(l5 + 3 * u64::from(LINE));
+            let px = |ly: usize, x: usize| r.frame[ly * SCREEN_WIDTH + x];
+            (
+                end,
+                [px(5, 43), px(5, 44), px(5, 48), px(5, 96), px(5, 104)],
+                px(6, 4),
+            )
+        };
+        // Set at x = 60: the BG from 44 (map column 5, tile 3, from its
+        // first pixel), the window again at 96 (column 0, row 6) and
+        // line 6 draws row 7.
+        assert_eq!(run(162), (Some(256 + 12), [3, 4, 4, 4, 3], 2));
+        // Set at x = 33, before the fetch of 44: the window goes on.
+        assert_eq!(run(135), (Some(256 + 6), [3, 3, 3, 3, 3], 4));
+    }
+
+    /// After a re-trigger the earlier start keeps its stall as it ran
+    /// (cut by an LCDC.5 clear during it, CGB), the objects before the new
+    /// start keep the earlier start's tile grid and the ones after it take
+    /// the new start's (`set_stalls_retriggered`).
+    #[test]
+    fn retrigger_keeps_the_earlier_start_s_stalls() {
+        // Window at x = 4 (WX 0x0B), WX = 0x67 (x = 96) written at dot 122;
+        // `(LCDC writes (dot, value), object X)` -> line 5's mode-3 end.
+        let run = |writes: &[(u32, u8)], objs: &[u8]| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            for (i, &x) in objs.iter().enumerate() {
+                r.mem.oam[i * 4..i * 4 + 4].copy_from_slice(&[16 + 5, x, 0, 0]);
+            }
+            r.ppu.objects.valid = false;
+            r.ppu.lcdc = 0xF3;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = 0x0B;
+            let l5 = clock(on, 0, 5 * LINE);
+            let now = l5 + 122;
+            r.sync(now);
+            r.ppu.flush(now, &mut r.mem, &mut r.frame);
+            r.mem.io[0x4B] = 0x67;
+            r.ppu.window_write(now, &mut r.mem, None);
+            for &(t, v) in writes {
+                let now = l5 + u64::from(t);
+                write_fetch_reg(&mut r, now, 0x40, v);
+                r.ppu.check_wy_at(now, &r.mem);
+                r.ppu.window_write(now, &mut r.mem, None);
+            }
+            (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
+        };
+        let (off, on) = (0xF3 & !0x20, 0xF3);
+        // Off at x = 30, on at x = 60: object at x = 72 (on x = 4's grid:
+        // 7 dots, the BG's would give 11), object at x = 120 (on x = 96's
+        // grid: 11, x = 4's would give 7).
+        assert_eq!(run(&[(132, off), (162, on)], &[]), Some(256 + 12));
+        assert_eq!(run(&[(132, off), (162, on)], &[80]), Some(256 + 12 + 7));
+        assert_eq!(
+            run(&[(132, off), (162, on)], &[80, 128]),
+            Some(256 + 12 + 7 + 11)
+        );
+        // Off 2 dots into the first start's stall (from dot 100): the BG
+        // from x = 4 and 2 stall dots; on again at x = 64: 6 more at 96.
+        assert_eq!(run(&[(102, off), (162, on)], &[]), Some(256 + 2 + 6));
+    }
+
+    /// LCDC.5 set in mode 3 holds the clear bit for the tiles already
+    /// fetched (`hold_fetch`), but a window start decided by the write
+    /// inside them still starts there: its first tile is fetched after it.
+    #[test]
+    fn window_enabled_in_mode_3_starts_inside_held_tiles() {
+        // Window at x = 64 (WX 0x47), LCDC.5 cleared before line 5 and
+        // set at dot `t` (pixel t - 96; at x = 58, tiles to 71 fetched).
+        // -> (line 5 x = 63, 64, 71).
+        let run = |t: u32| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            r.ppu.lcdc = 0xF1;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = 0x47;
+            let l5 = clock(on, 0, 5 * LINE);
+            r.sync(l5 - 10);
+            r.ppu.lcdc = 0xD1;
+            let now = l5 + u64::from(t);
+            write_fetch_reg(&mut r, now, 0x40, 0xF1);
+            r.ppu.check_wy_at(now, &r.mem);
+            r.ppu.window_write(now, &mut r.mem, None);
+            r.sync(l5 + 2 * u64::from(LINE));
+            let px = |x: usize| r.frame[5 * SCREEN_WIDTH + x];
+            (px(63), px(64), px(71))
+        };
+        assert_eq!(run(150), (1, 4, 4));
+        assert_eq!(run(154), (1, 4, 4));
+        // Too late (`WINDOW_ON_LEAD`: the stall would begin at dot 160).
+        assert_eq!(run(160), (1, 1, 1));
+    }
+
     /// A rig in DMG compatibility mode with BG color 0 = 1 and color 3 = 4,
     /// tile 0 color 0 and tile 1 color 3 (LCDC.4 = 1), map 9800 all tile 0
     /// and map 9C00 all tile 1.
@@ -3572,7 +3856,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.mem.io[0x4B] = 0x77;
-                r.ppu.window_write(now, &r.mem, None);
+                r.ppu.window_write(now, &mut r.mem, None);
             }
             r.sync(l5 + 455);
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)

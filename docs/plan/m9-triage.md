@@ -135,6 +135,15 @@ not a WY rule. Group 4 now has 16 left.
 **Status (`m9-ly153-ds`):** the 5 double-speed rows fixed (LYC=153 sync
 one M-cycle late, then double-speed WY checks half a dot later and
 `WY_LEAD_DS` = 1; lcd-offset step 5). Group 4: 11 left.
+**Status (`m9-win-retrigger`):** 3 fixed: `on_screen/weon_wx18_weoff_weon_wx80`,
+`on_screen/wx17_weoff_wxA5_weon`, Mealybug `m3_lcdc_win_en_change_multiple`
+(LCDC.5 clear switches to the BG at the next fetched tile; the window
+re-triggers at a later WX with the next row; mid-line-ppu.md "Window off
+and re-trigger"). Group 4: 8 left: `late_enable_afterVblank*` (3),
+`late_wx_ff_*` (2), Mealybug `m3_lcdc_win_map_change`,
+`m3_lcdc_tile_sel_win_change`, `m3_wx_4_change_sprites` (not re-trigger:
+window map/tile-data writes against object stalls, and the CGB WX-match
+glitch, SameBoy `cgb_wx_glitch`).
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-

@@ -236,10 +236,15 @@ pub(crate) struct Renderer {
 
     // Per line.
     ly: u8,
-    /// The fine scroll: pixels discarded at the start of mode 3, mod 8.
-    /// SCX & 7 at the line start, or as an SCX write inside the discard
-    /// moved it (`set_fine`); later writes keep it (Pan Docs: Scrolling).
-    fine_scx: u8,
+    /// The BG tiles' screen phase: they start at x = 8k - `bg_fine`. The
+    /// fine scroll (pixels discarded at the start of mode 3, mod 8: SCX & 7
+    /// at the line start, or as an SCX write inside the discard moved it,
+    /// `set_fine`; later writes keep it, Pan Docs: Scrolling) until the
+    /// window ends on the line: the fetcher then fetches BG tiles from
+    /// where it is, so they continue the window's tile grid (Mealybug
+    /// `m3_lcdc_win_en_change_multiple`; the tile column is still
+    /// `(SCX + x) / 8`, SameBoy `advance_fetcher_state_machine`).
+    bg_fine: u8,
     /// The window has been activated on this line and not switched off.
     window_active: bool,
     /// Window map row (pixels) this line draws.
@@ -275,7 +280,7 @@ impl Renderer {
             window_line: 0,
             wy_triggered: false,
             ly: 0,
-            fine_scx: 0,
+            bg_fine: 0,
             window_active: false,
             window_row: 0,
             win_wx: 0,
@@ -368,7 +373,8 @@ impl Renderer {
     #[inline(always)]
     const fn trigger_skip(&self) -> u8 {
         match self.win_wx {
-            1 => 7 + self.fine_scx,
+            // The line's fine scroll: no window has ended before x = 0.
+            1 => 7 + self.bg_fine,
             w @ 2..=7 => 8 - w,
             _ => 0,
         }
@@ -386,7 +392,7 @@ impl Renderer {
         window: Option<u8>,
     ) {
         self.ly = ly;
-        self.fine_scx = scx & 7;
+        self.bg_fine = scx & 7;
         self.window_active = false;
         self.set_window(window);
         self.objects = *objects;
@@ -400,12 +406,13 @@ impl Renderer {
     /// An SCX write moved the line's fine-scroll discard to `n` pixels
     /// (`Ppu::hold_fetch`); `n` and `n + 8` give the same columns.
     pub(crate) const fn set_fine(&mut self, n: u8) {
-        self.fine_scx = n & 7;
+        self.bg_fine = n & 7;
     }
 
-    /// The line's fine scroll (the discard count & 7).
-    pub(crate) const fn fine(&self) -> u8 {
-        self.fine_scx
+    /// The BG tiles' screen phase (`bg_fine`): the fine scroll, or the
+    /// window's grid once the window ended on the line.
+    pub(crate) const fn bg_fine(&self) -> u8 {
+        self.bg_fine
     }
 
     /// The slot of the line's last object fetch: the last object in
@@ -454,15 +461,20 @@ impl Renderer {
         // stall); that activation reads the next window row, even if LCDC.5
         // was cleared since the decision (SameBoy: `window_y++` at the
         // trigger, then the fetcher sees LCDC.5 clear and fetches the BG).
-        // Clearing LCDC.5 switches back to the BG; the window doesn't start
-        // again on the line (approximation: SameBoy can re-trigger at a
-        // later WX match). WX = 0-6 start the window at x = 0 with 7 - WX
+        // Clearing LCDC.5 switches back to the BG at the first tile the
+        // fetcher fetches after it (the held parts keep LCDC.5 until then,
+        // `Ppu::hold_fetch`; Mealybug `m3_lcdc_win_en_change_multiple`:
+        // "always display a multiple of 8 pixels"), so `x0` is on the
+        // window's tile grid and the BG tiles continue it (`bg_fine`). The
+        // window can start again later on the line at a new decision
+        // (`Ppu::retrigger`). WX = 0-6 start the window at x = 0 with 7 - WX
         // pixels cut off; WX = 0 also loses SCX & 7 pixels (Pan Docs: "the
         // Window is switched to before the initial fine scroll
         // adjustment"). WX = 166 shows one pixel on CGB (the DMG next-line
         // bug is DMG-only, SameBoy `!GB_is_cgb`); WX >= 167 never matches.
         if self.window_active && lcdc & LCDC_WIN_ON == 0 {
             self.window_active = false;
+            self.bg_fine = (x0 as u8).wrapping_neg() & 7;
         }
         let mut win_from = x1;
         if self.window_active {
@@ -504,9 +516,10 @@ impl Renderer {
 
     /// [`Renderer::render`] while pixels the fetcher fetched before a
     /// map-select, tile-data, SCX or SCY write in mode 3 are still to be
-    /// drawn (`Ppu::hold_fetch`): each held part with the LCDC bits 3, 4
-    /// and 6, the SCX and the SCY its tiles were fetched with (and the
-    /// planes of its last tile read after the write redrawn, see
+    /// drawn (`Ppu::hold_fetch`): each held part with the LCDC bits 3-6
+    /// (LCDC.5 too: the fetcher checks it at each tile), the SCX and the
+    /// SCY its tiles were fetched with (and the planes of its last tile
+    /// read after the write redrawn, see
     /// [`Renderer::mix_planes`]), then the rest with `regs`. Out of line
     /// and cold: only after such a write.
     #[cold]
@@ -522,7 +535,7 @@ impl Renderer {
         obj_buf: &mut [u8; OBJ_BUF_LEN],
         obj_rank: &mut ObjRank,
     ) {
-        const FETCHED: u8 = LCDC_BG_MAP | LCDC_TILES_8000 | LCDC_WIN_MAP;
+        const FETCHED: u8 = LCDC_BG_MAP | LCDC_TILES_8000 | LCDC_WIN_MAP | LCDC_WIN_ON;
         let regs_of = |h: &Held| Regs {
             lcdc: (regs.lcdc & !FETCHED) | (h.lcdc & FETCHED),
             scx: h.scx,
@@ -590,7 +603,7 @@ impl Renderer {
                 LCDC_BG_MAP,
                 self.ly.wrapping_add(held.scy),
                 self.ly.wrapping_add(next.scy),
-                bg_column(held.scx, self.fine_scx, x0 as u8),
+                bg_column(held.scx, self.bg_fine, x0 as u8),
             )
         };
         let map = if lcdc & map_bit != 0 { 0x1C00 } else { 0x1800 };
@@ -670,7 +683,7 @@ impl Renderer {
             (&[][..], &[][..])
         };
         if !bg.is_empty() {
-            let col = bg_column(regs.scx, self.fine_scx, x0 as u8);
+            let col = bg_column(regs.scx, self.bg_fine, x0 as u8);
             let map = if lcdc & LCDC_BG_MAP != 0 {
                 0x1C00
             } else {

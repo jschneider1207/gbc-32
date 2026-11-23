@@ -721,6 +721,73 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   writes at stall - 1, window; `_scx5_ds_2` at the stall, none). All 5
   pass, their siblings keep passing.
 
+### Window off and re-trigger (branch `m9-win-retrigger`)
+
+- **Rule 1, LCDC.5 clear while the window is drawn.** The fetcher checks
+  LCDC.5 at each tile's GET_TILE step (SameBoy display.c,
+  `advance_fetcher_state_machine`: `wx_triggered = false` when LCDC.5 is
+  clear), so the window tiles already fetched are still drawn and the BG
+  starts at the next one: always a multiple of 8 window pixels (Mealybug
+  `m3_lcdc_win_en_change_multiple` README). `hold_fetch` now holds LCDC.5
+  with the map/tile bits (`render_held`), so the switch lands at the held
+  part's end. The BG tiles fetched from there continue the window's tile
+  grid (the fetcher pushes them where it is), column `(SCX + x) / 8` as
+  SameBoy computes it: `Renderer::bg_fine` (the line's fine scroll until
+  then; it replaces `fine_scx`, and the timing's fine scroll is now
+  derived from `first_pixel`, `LineTiming::fine`, so `Hw` stays 864 B).
+  Set again before that fetch, the window goes on.
+- **Rule 2, re-trigger.** Once a fetch has seen LCDC.5 clear,
+  `wx_triggered` is clear and SameBoy activates the window again at the
+  next dot where LCDC.5, `wy_triggered` and `WX == position + 7` hold:
+  `window_y++` (the next window row: Mealybug "the second time the window
+  is activated on the row, the next row of window pixels are displayed";
+  gambatte `weon_wx18_weoff_weon_wx80` cgb04c shows the window rows
+  advancing two per line), `window_tile_x = 0`, the BG FIFO cleared and a
+  fresh window fetch (another 6-dot stall). `Ppu::retrigger` (cold, from
+  `window_write`'s decided branch: an LCDC.5 set or WX/WY write) adds the
+  start at the live WX if its stall begins more than `WINDOW_ON_LEAD`
+  dots later; the renderer starts the window there as for the first start
+  (`set_window`). The stalls keep the earlier start's as it ran (cut by
+  E2 rule 1 if so; `LineTiming::prev_wx`, `prev_stall`), objects before the
+  new start on the earlier start's grid, those after it on the new
+  start's (`set_stalls_retriggered`: two plain `set_stalls` spliced).
+- **Held parts vs a new start.** A window start decided after held parts
+  were made (`window_write`, `retrigger`) cuts them at its x
+  (`window_cuts_holds`): the window's first tile is fetched after it
+  starts. Needed now that an LCDC.5 set holds the clear bit.
+- **Approximations.** One re-trigger per line; none with 10 objects on the
+  line (the 11 stall slots); none while the renderer still draws the
+  window (a set after the switching fetch but before its pixels are out
+  waits for a later WX write); WX < 7 never re-triggers (its x is past).
+  `wx17_weoff_wxA5_weon` (WX changed to A5 while the window is drawn, then
+  off): no re-trigger, as SameBoy (`wx_triggered` still set at the WX
+  write; the off comes after).
+- **Result.** Full manifest: 3 fail->pass, 0 regressions: gambatte
+  `window/on_screen/weon_wx18_weoff_weon_wx80`, `wx17_weoff_wxA5_weon`,
+  Mealybug `m3_lcdc_win_en_change_multiple`. `diff-fingerprint.sh main`:
+  those 3 (+ the Mealybug `#input` run) and Mealybug
+  `m3_lcdc_win_en_change_multiple_wx` (+ `#input`; no CGB C reference in
+  the pinned set; it toggles LCDC.5 and WX in mode 3). Tests:
+  `window_off_at_a_tile_then_retriggered`,
+  `retrigger_keeps_the_earlier_start_s_stalls`,
+  `window_enabled_in_mode_3_starts_inside_held_tiles`, each seen failing
+  under mutations (no LCDC.5 hold, mask 0x58, no `bg_fine` update, no
+  re-trigger, re-trigger while active, earlier stall reset, no prefix
+  splice, prefix on the BG grid, no hold cut).
+- **Cost.** `.text` 95,134 -> 96,824 B (cold: `retrigger` 472,
+  `set_stalls_retriggered` 566, `prev_stall` 156, `window_write` +162,
+  `hold_fetch` and its outlined parts +90, `fix_attrs` +40; hot: `render`
+  +24, `set_stalls` +24, `latch` +16). ITCM set 53,854 -> 53,878 B.
+  `check-bench.sh` vs main (4fafa44): `cgb-acid2` 677,371,979 ->
+  677,627,293 (+0.04%; +2.66% of the 3% guard), `synth:worst-case`
+  476,327,282 -> 477,323,659 (+0.21%, ~3.996 M Ir/frame of the 4.02 M
+  line), `synth:cgb-raster` +0.23%, the others within +-0.01% (dma-storm
+  +0.01%).
+- **Not done (group 4).** `late_enable_afterVblank*` (3), `late_wx_ff_*`
+  (2), Mealybug `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change`
+  (window map/tile-data writes vs object stalls), `m3_wx_4_change_sprites`
+  (the CGB WX-match glitch, SameBoy `cgb_wx_glitch`, not a re-trigger).
+
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
 - **Rule 1, objects left of tile 0.** SameBoy (display.c,
