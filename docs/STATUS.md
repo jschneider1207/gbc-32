@@ -27,8 +27,7 @@
    by ROMs per cost: step E window stall (97, needs .text), OAM DMA write
    conflicts (58, needs the human's reference pick), HDMA timing (75, L),
    STAT IRQ edges (47, L).
-3. Remaining M8 items:
- `spsw-interrupts-cgbBC` (AGE `caution/`, low);
+3. Remaining M8 items: `spsw-interrupts-cgbBC` (AGE `caution/`, low);
    M6 hardware lows; PPU edge cases from the M3 review; APU cost
    (optional); event-storm and ROM placement need Stage 2 hardware.
 4. M8 close: gate passes now; then the milestone review (hardware
