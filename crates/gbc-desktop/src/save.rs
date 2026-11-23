@@ -105,7 +105,7 @@ pub fn decode(bytes: &[u8], ram_size: usize, has_rtc: bool) -> Decoded {
                 subsecond_clocks: 0,
             };
             rtc = Some((state, unix));
-        } else if bytes.len() >= ram_size {
+        } else if bytes.len() > ram_size {
             warnings.push(format!(
                 "save file is {} bytes, expected {} (RAM) + {FOOTER_LEN} (RTC): clock not restored",
                 bytes.len(),
@@ -331,7 +331,11 @@ mod tests {
         let d = decode(&[4; 8], 8, true);
         assert_eq!(d.ram, [4; 8]);
         assert_eq!(d.rtc, None);
-        assert_eq!(d.warnings.len(), 1, "says the clock is missing");
+        assert!(
+            d.warnings.is_empty(),
+            "plain RAM dump: no warning, {:?}",
+            d.warnings
+        );
     }
 
     #[test]
@@ -416,6 +420,12 @@ mod tests {
         write_atomic(&p, b"two").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+
+        // A plain `fs::write` would clobber the target; the temp-file path
+        // fails before touching it. Block the temp name with a directory.
+        fs::create_dir(dir.join("a.sav.tmp")).unwrap();
+        assert!(write_atomic(&p, b"three").is_err());
+        assert_eq!(fs::read(&p).unwrap(), b"two", "old save intact on failure");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
