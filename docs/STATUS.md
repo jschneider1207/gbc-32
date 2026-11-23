@@ -14,15 +14,13 @@
 1. **Real-game checklist results from the human** (plan, bottom) feed the
    first M8 task. Headless smoke of all 6 games (scratch copies, 3600
    frames) is clean after this session's core changes.
-2. **Mid-line PPU fidelity** (`docs/design/mid-line-ppu.md`): increment 1 is
-   done on branch `ppu-midline-1` (dfaf2ae, 57842c4; based on ebf3f45, needs
-   a rebase onto main): +35 ROMs, 0 regressions, but +864 B `.text` (over the
-   96,000 B total and `Ppu::draw` 158 > 155). Not merged. Either the
-   human raises the budgets (Needs human) or cold-code cuts free the room
-   (a size-cut pass was running at the end of session 10, see the log), or
-   the cheaper "draw-ahead" variant (design section 7). check-bench,
-   check-itcm-set, check-rom-loads and diff-fingerprint still have to run on
-   the branch.
+2. **Mid-line PPU fidelity** (`docs/design/mid-line-ppu.md`, section 7 has
+   per-step notes): steps 1 (map select/SCX fetch hold), 2 (SCX low-bit
+   carry), 3 (per-plane SCY/LCDC.4) and D (double-speed write dot) are on
+   main: +159 ROMs, 0 regressions. Steps E (window stall), F (objects), G
+   (CGB tile-select glitch) are blocked on code size (270 B left; Needs
+   human). Mealybug `m3_scx_low_3_bits` (pixels 152-159) is not the column
+   carry: separate diagnosis.
 3. Remaining M8 items: `spsw-interrupts-cgbBC` (AGE `caution/`, low);
    M6 hardware lows; PPU edge cases from the M3 review; APU cost
    (optional); event-storm and ROM placement need Stage 2 hardware.
@@ -49,13 +47,17 @@ device reopen with 2-16 s backoff after a stream loss (amendment; real
 device loss untested: manual check below). Keys: arrows, Z = B, X = A,
 Enter = Start, Right Shift/Backspace = Select, Esc quits.
 
-Perf watch: `check-bench.sh` OK (all within +-0.6% of the baseline; the
-worst case was 97.2% of the 4.02 M x86 Ir/frame line at M7 and has moved
-+~0.3% since). APU: 883.4 x86 Ir per APU write (budget <= 950).
-`.text` 95,602 of 96,000 B (398 B left) at eb019ba. ITCM set 55.7 KB of a
-56 KiB core budget (`scripts/check-itcm-set.sh`, ADR 0026 Proposed). New
-gate checks this session: `check-rom-loads.sh` (ADR 0027),
-`check-itcm-set.sh`. Wall-clock baseline: `bench --wall` (docs/perf.md).
+Perf watch: `check-bench.sh` OK vs the committed baseline: `synth:worst-case`
+-0.32% (cold-code cuts), `synth:cgb-raster` **+2.60% of the 3% guard** (one
+mid-line SCX write per line now takes the held-fetch slow path, ~500-565 x86
+Ir per write; reset at the M8 baseline update). APU: 883.4 x86 Ir per APU
+write (budget <= 950). `.text` 95,730 of 96,000 B (270 B left) after two
+cold-code cuts freed 1,530 B. ITCM set 55,716 B of a 57,344 B core budget
+(`scripts/check-itcm-set.sh`, ADR 0026 Proposed). New gate checks this
+session: `check-rom-loads.sh` (ADR 0027), `check-itcm-set.sh`. Fingerprint
+corpus now includes the 198 PNG-reference gambatte ROMs (4,020 runs) and
+fails on a corpus mismatch (`--allow-corpus-change` for the first run
+against an older rev). Wall-clock baseline: `bench --wall` (docs/perf.md).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
@@ -67,12 +69,12 @@ Working rules that matter here:
 
 ## Needs human
 Open (session 10):
-- **Code-size budget for mid-line PPU fidelity.** Increment 1 (+35 ROMs)
-  needs +864 B; the design's 7 increments need ~0.9-1.2 KB more in total
-  (estimate). Ask: raise gbc-core `.text` 96,000 -> ~97,500 B and
-  `Ppu::draw` 155 -> ~175 B, or keep 96,000 and take the cheaper
-  draw-ahead variant (palette/LCDC.0/1/WX writes within 16 pixels after a
-  map/SCX write apply late). Numbers: `docs/design/mid-line-ppu.md` sec. 6-7.
+- **Code-size budget for mid-line PPU fidelity.** Steps 1-3 and D landed
+  within 96,000 B (+159 ROMs) after cold-code cuts freed 1,530 B; 270 B
+  are left. Steps E/F/G (window stall, objects, CGB glitch) need roughly
+  0.5-1 KB more (design estimates ran ~2-3x low in practice: step 1 was
+  930 B vs ~300 B estimated). Ask: raise gbc-core `.text` 96,000 ->
+  ~97,500 B, or stop the PPU work here. Numbers: design doc sec. 6-7.
 - **Benchmark coverage:** should `synth:worst-case` gain one mid-line SCX
   write per line so the new slow path is measured (~+45k Ir/frame,
   estimate)? It makes the perf check stricter but moves the baseline.
@@ -202,16 +204,17 @@ None.
 
 ## Acceptance snapshot
 
-Current HEAD (eb019ba), not yet the committed baseline (`stage1-m7`
-baseline is older; update at M8 close). `scripts/gate-stage1.sh` passed at
-01bca59.
+Current HEAD (f200ab4), not yet the committed baseline (`stage1-m7`
+baseline is older; update at M8 close). `scripts/gate-stage1.sh` passes at
+f200ab4.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 39 | 40 | only age `spsw-interrupts-cgbBC` (AGE caution/) fails |
-| stretch | 2,797 | 3,466 | 5 no-reference |
+| stretch | 2,956 | 3,466 | 5 no-reference; M7 baseline was 2,765 |
 
 Session 10 gains (vs the M7 baseline): WX=0 stall (8ba9c4c), line-0 mode 0
 + post-boot position 171 (740154c), frame-sequencer double-speed delay
-(0a83ae5), LY read timing (d2b6e56), STOP DIV-reset TIMA edge (eb019ba).
+(0a83ae5), LY read timing (d2b6e56), STOP DIV-reset TIMA edge (eb019ba),
+mid-line PPU steps 1-3 + D (6cfe52b..f507248).
