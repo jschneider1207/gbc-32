@@ -4123,4 +4123,32 @@ mod dma_tests {
             0
         );
     }
+
+    /// Single speed: before `t = 3` (the mode-2 interrupt) a STAT write
+    /// sees the previous line's mode 0, not mode 2: dropping the LYC
+    /// select at line 2 dot 0 with only mode 2 left lowers the line, and
+    /// line 2's mode-2 interrupt follows (gambatte
+    /// `m2enable/lyc1_m2irq_late_lycdisable_1`, CGB04C).
+    #[test]
+    fn stat_write_before_dot_3_sees_mode_0() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        assert_eq!(
+            stat_irq_after_write_with(1, 0x60, 456 + 455, 0x20, 2, false),
+            STAT
+        );
+    }
+
+    /// Double speed: a STAT write's first phase enabling mode 2 at t = 5
+    /// still requests the mode-2 interrupt, at t = 7 not (gambatte
+    /// `m2enable/late_enable_ds_{1,2}`, CGB04C); on line 0 the same
+    /// (`late_enable_ly0_ds_{1,2}`).
+    #[test]
+    fn double_speed_mode_2_enable_window() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let w = |pos| stat_irq_after_write_with(0xFF, 0, pos, 0x20, 1, true);
+        assert_eq!(w(136 * 456 + 5), STAT);
+        assert_eq!(w(136 * 456 + 7), 0);
+        assert_eq!(w(154 * 456 + 5), STAT);
+        assert_eq!(w(154 * 456 + 7), 0);
+    }
 }

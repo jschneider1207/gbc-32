@@ -150,7 +150,7 @@ const MODE_HOLD: u8 = 5;
 /// - `StatPhase1`, the first phase of a STAT write (at the access): the
 ///   mode-2 source still live, as gambatte's `statChangeTriggersM2IrqCgb`
 ///   window (behaviour only, GPL) and `m2enable/late_enable_lcdoffset3_1`
-///   (CGB04C) need;
+///   (CGB04C) need (double speed: one dot longer, see `mode_source`);
 /// - `StatPhase2` and `LycWrite` (one T-cycle in): the mode-2 source
 ///   gone and the comparison done, as before the walk's point moved:
 ///   gambatte never lets the mode-2 source block a LYC-write trigger
@@ -906,15 +906,24 @@ impl Ppu {
         if a.first {
             return if t >= end { 0 } else { NO_MODE };
         }
-        let m2_end = if view == View::StatPhase1 && l != 0 {
-            edges::CMP_WALK
-        } else {
-            edges::MODE2_SOURCE_END
+        // A first phase sees the mode-2 source to the walk's comparison
+        // point; in double speed one dot more: gambatte (behaviour only,
+        // `statChangeTriggersM2IrqCgb`) triggers while `2 < T <= 4(1 + ds)`,
+        // our t < 5 single speed, t < 6 double speed (T in half-dots).
+        // CGB04C `m2enable/late_enable_ds_1`, `late_enable_m0disable_ds_1`.
+        let m2_end = match view {
+            View::StatPhase1 if l != 0 => edges::CMP_WALK + u32::from(double),
+            _ => edges::MODE2_SOURCE_END,
         };
         if t < m2_end {
             match l {
                 0 if hold && t >= edges::MODE_HOLD_SS => MODE_HOLD,
                 0 => 1,
+                // Before the mode-2 interrupt (`Ly3`) the previous line's
+                // mode 0 (gambatte: a mode-0 enable triggers there while
+                // `T > 4`; CGB04C `m2enable/lyc1_m2irq_late_lycdisable_1`,
+                // `late_enable_after_lycint_disable_1`).
+                _ if t < edges::PT_LY => 0,
                 _ => 2,
             }
         } else if t < end {
@@ -2360,6 +2369,7 @@ impl Ppu {
     ) {
         self.early_cmp(now, iflags, double, view);
         let was_quiet = self.quiet();
+        let added = value & !self.stat_select;
         self.stat_select = value & 0x78;
         if !self.lcd_enabled() {
             return;
@@ -2379,7 +2389,27 @@ impl Ppu {
             };
             self.line_irq = IrqLine(if lyc { IrqLine::LYC } else { 0 });
         }
+        let low = self.line_irq.0 & IrqLine::STAT == 0;
         self.update_at(now, iflags, double, view);
+        // Double speed, line 0: a first phase at t = 4-5 that newly selects
+        // mode 2 (mode 0 not selected) requests the line-0 mode-2
+        // interrupt while the line was low. gambatte (behaviour only,
+        // `statChangeTriggersM2IrqCgb`, `ly == 153` branch): `2 < T <= 4`
+        // half-dots, our t = 5 to 5.5, the walk's pulse ([`Pt::Ly4`]) being
+        // at 4; a write at 4 is before gambatte's event at 5. CGB04C
+        // `m2enable/late_enable_ly0_ds_{1,lcdoffset1_1}` (t = 5, 4: IRQ),
+        // `_ds_2`, `_ds_lcdoffset1_2` (t = 7, 6: none).
+        if double
+            && view == View::StatPhase1
+            && added & SEL_MODE2 != 0
+            && self.stat_select & SEL_MODE0 == 0
+            && low
+        {
+            let a = self.at(now);
+            if a.line == 0 && !a.first && (edges::CMP_ON..edges::CMP_ON + 2).contains(&a.t) {
+                *iflags |= INT_STAT;
+            }
+        }
     }
 
     /// The STAT selects as written (bits 3-6).

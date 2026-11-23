@@ -68,6 +68,23 @@ VBlank at t = 5; its mode-2 interrupt at T = 4 is our `Ly3`, t = 3).
   of the dot before its whole-dot position (it lands half a dot after
   the first phase; `m1/lyc143_late_m0enable_lycdisable_ds_1`).
 
+## Mode-2 write windows (lines 0-143)
+
+From gambatte `statChangeTriggersM2IrqCgb` and `statChangeTriggersM0LycOrM1StatIrqCgb` (behavior only), same T mapping:
+
+- Before a line's `t = 3` (its mode-2 interrupt) a STAT write sees the
+  previous line's mode 0, not mode 2 (a mode-0 enable triggers while
+  `T > 4`). CGB04C `m2enable/lyc1_m2irq_late_lycdisable_1`,
+  `late_enable_after_lycint_disable_1`.
+- A first phase sees the mode-2 source while `2 < T <= 4(1 + ds)`: to
+  t = 5 in single speed (the walk's `CMP_WALK`), to t = 6 in double speed.
+  CGB04C `m2enable/late_enable_ds_1`.
+- Line 0, double speed: a first phase at t = 4-5 newly selecting mode 2
+  (mode 0 not selected) requests the interrupt if the line was low
+  (`ly == 153` branch, `2 < T <= 4` half-dots, t = 5 to 5.5; a write at
+  t = 4 is before gambatte's event, after our walk's pulse). CGB04C
+  `m2enable/late_enable_ly0_ds_1`, `_ds_lcdoffset1_1`.
+
 ## Open
 
 - `lycstatwirq_trigger_ly00_10_50_1` and `_ds_1` (want `E0`): the write
