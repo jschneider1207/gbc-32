@@ -312,6 +312,39 @@ impl Renderer {
         (self.window_active, self.window_start, self.window_skip)
     }
 
+    /// [`Renderer::window`] as it will be once pixels `[x0, x1)` are drawn
+    /// with LCDC `lcdc` and WX `wx` ([`Renderer::render`]'s window steps):
+    /// for a write whose flush is deferred (`Ppu::scroll_write`).
+    #[inline]
+    pub(crate) fn window_after(&self, x0: usize, x1: usize, lcdc: u8, wx: u8) -> (bool, u8, u8) {
+        let x1 = x1.min(W);
+        if x0 >= x1 {
+            return self.window();
+        }
+        let on = lcdc & LCDC_WIN_ON != 0;
+        if !self.window_active && on && self.wy_triggered && wx <= 166 {
+            let start = usize::from(wx.saturating_sub(7));
+            if (x0..x1).contains(&start) {
+                return (true, start as u8, self.window_skip_of(wx));
+            }
+        }
+        (
+            self.window_active && on,
+            self.window_start,
+            self.window_skip,
+        )
+    }
+
+    /// Pixels cut from the window's first tile when it starts at WX `wx`.
+    #[inline(always)]
+    const fn window_skip_of(&self, wx: u8) -> u8 {
+        match wx {
+            0 => 7 + self.fine_scx,
+            1..=6 => 7 - wx,
+            _ => 0,
+        }
+    }
+
     /// Start of line `ly`'s pixel output, with SCX as of that moment and
     /// the objects the OAM scan selected.
     pub(crate) fn start_line(
@@ -398,11 +431,7 @@ impl Renderer {
             if (x0..x1).contains(&start) {
                 self.window_active = true;
                 self.window_start = start as u8;
-                self.window_skip = match regs.wx {
-                    0 => 7 + self.fine_scx,
-                    1..=6 => 7 - regs.wx,
-                    _ => 0,
-                };
+                self.window_skip = self.window_skip_of(regs.wx);
                 self.window_row = self.window_line;
                 self.window_line = self.window_line.wrapping_add(1);
                 win_from = start;
@@ -413,8 +442,8 @@ impl Renderer {
         // pixel, in priority order; a pixel keeps the first opaque object
         // written to it. Fetching per span (not per line) keeps split and
         // whole-line rendering identical.
-        if self.objects.len() != 0 {
-            self.fetch_objects(obj_buf, &mut obj_rank.rank, src, lcdc, x0, x1);
+        if usize::from(obj_rank.next) < self.objects.len() {
+            self.fetch_objects(obj_buf, obj_rank, src, lcdc, x1);
         }
 
         // LCDC.1 is checked when pixels are output, not at the scan (CGB;
@@ -620,30 +649,35 @@ impl Renderer {
     }
 
     /// Fetches the objects whose first visible pixel is in `[x0, x1)`, in
-    /// fetch order. Out of line: once per span with objects, and inlined
-    /// it would grow `render` past its size budget.
+    /// fetch order. `order` is ascending X and the spans of a line are
+    /// consecutive from pixel 0, so the objects of a span are the next ones
+    /// in `order` from `ObjRank::next`: each object is looked at once per line,
+    /// not once per span. Out of line: once per span with objects, and
+    /// inlined it would grow `render` past its size budget.
     #[inline(never)]
     fn fetch_objects(
         &mut self,
         obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut ObjRank,
         src: &Sources,
         lcdc: u8,
-        x0: usize,
         x1: usize,
     ) {
-        for k in 0..self.objects.len() {
+        let mut k = usize::from(obj_rank.next);
+        while k < self.objects.len() {
             let slot = usize::from(self.order[k % MAX_PER_LINE]);
             let (index, y, x) = self.objects.get(slot);
-            // X = 0 and X >= 168 are off-screen (Pan Docs: OAM byte 1).
-            if x == 0 || x >= 168 {
-                continue;
+            // X = 0 and X >= 168 are off-screen (Pan Docs: OAM byte 1); X
+            // >= 168 ends the line's fetches (ascending X).
+            if x >= 168 || usize::from(x.saturating_sub(8)) >= x1 {
+                break;
             }
-            let first = usize::from(x.saturating_sub(8));
-            if (x0..x1).contains(&first) {
-                self.fetch_object(obj_buf, obj_rank, src, lcdc, slot, index, y, x);
+            if x != 0 {
+                self.fetch_object(obj_buf, &mut obj_rank.rank, src, lcdc, slot, index, y, x);
             }
+            k += 1;
         }
+        obj_rank.next = k as u8;
     }
 
     /// Decodes one object's row into the object buffer.
@@ -664,7 +698,8 @@ impl Renderer {
         let (tile, flags) = match src.attrs {
             Some(a) => a[slot % MAX_PER_LINE],
             None => {
-                let base = usize::from(index) % 40 * 4;
+                // `index` < 40 (an OAM entry): `min` only keeps it in bounds.
+                let base = usize::from(index.min(39)) * 4;
                 (src.oam[base + 2], src.oam[base + 3])
             }
         };
@@ -1174,6 +1209,7 @@ mod tests {
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
                     hold: [Held::default(); 2],
+                    next: 0,
                 },
             }
         }
@@ -1202,6 +1238,7 @@ mod tests {
 
         /// Starts line `ly` (WY check, OAM scan) without drawing.
         fn begin(&mut self, ly: u8) {
+            self.obj_rank.next = 0;
             self.r.check_wy(ly, &self.regs);
             let objs = LineObjects::scan(&self.oam, ly, self.regs.lcdc & LCDC_OBJ_TALL != 0);
             self.r
@@ -1935,6 +1972,7 @@ mod tests {
                 obj_rank: ObjRank {
                     rank: [0; OBJ_BUF_LEN],
                     hold: [Held::default(); 2],
+                    next: 0,
                 },
             };
             split.r.start_frame();

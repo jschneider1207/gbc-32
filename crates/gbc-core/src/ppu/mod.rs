@@ -1121,7 +1121,14 @@ impl Ppu {
     /// fetching an object). `docs/design/mid-line-ppu.md` step 1.
     #[cold]
     #[inline(never)]
-    pub(crate) fn hold_fetch(&mut self, now: u64, mem: &mut Memory, reg: usize, value: u8) {
+    pub(crate) fn hold_fetch(
+        &mut self,
+        now: u64,
+        mem: &mut Memory,
+        reg: usize,
+        value: u8,
+        deferred: bool,
+    ) -> bool {
         let lt = &self.line;
         let a = self.at(now);
         let t = a.t as i32;
@@ -1136,7 +1143,7 @@ impl Ppu {
             || lt.start != now.wrapping_sub(u64::from(a.t))
             || !(i32::from(lt.mode3)..i32::from(lt.end)).contains(&t)
         {
-            return;
+            return false;
         }
         let mut first_pixel = i32::from(lt.first_pixel);
         // The fine-scroll discard compares its count with the live SCX & 7
@@ -1159,13 +1166,25 @@ impl Ppu {
             self.renderer.set_fine(n as u8);
         }
         let lt = &self.line;
-        let x = i32::from(self.drawn);
+        // The pixel being output: `drawn` after a `flush`; for a deferred
+        // flush ([`Ppu::scroll_write`]) from the line's timing.
+        let x = i32::from(if deferred {
+            lt.pixels_before(a.t).max(self.drawn)
+        } else {
+            self.drawn
+        });
         // Position in the line, the SCX & 7 pixels discarded at the start
         // counted like output pixels: they are popped from 12 dots into
         // mode 3, before the first pixel (after an SCX write above, as
         // many as the new discard count).
         let pos = if t < first_pixel { t - first_pixel } else { x };
-        let (active, start, skip) = self.renderer.window();
+        // As drawn up to `x` (no change after a `flush`).
+        let (active, start, skip) = self.renderer.window_after(
+            usize::from(self.drawn),
+            x as usize,
+            self.lcdc,
+            mem.io[0x4B],
+        );
         let phase =
             (pos + if active {
                 i32::from(skip) - i32::from(start)
@@ -1174,10 +1193,13 @@ impl Ppu {
             }) & 7;
         // Screen x of the first pixel of the tile being output.
         let tile = pos - phase;
-        let stalled = t >= first_pixel
-            && lt.stalls[..usize::from(lt.n_stalls)]
-                .iter()
-                .any(|&(sx, _)| (tile..=x).contains(&i32::from(sx)));
+        // Only looked up where it decides `end` (not for most SCX writes).
+        let stalled = || {
+            t >= first_pixel
+                && lt.stalls[..usize::from(lt.n_stalls)]
+                    .iter()
+                    .any(|&(sx, _)| (tile..=x).contains(&i32::from(sx)))
+        };
         // Tile j + 1 (from `tile + 8`): fetched with the old values, its
         // map entry only (`planes`: the planes still to read), or not yet.
         // An LCDC.4 change reaches the data steps one dot later
@@ -1186,9 +1208,9 @@ impl Ppu {
         // `planes` 0 (no redraw, `Renderer::mix_planes`).
         let late = i32::from(reg == 0x40) * LCDC_TILES_LATE;
         let data = reg == 0x42 || (reg == 0x40 && (value ^ self.lcdc) & 0x10 != 0);
-        let (mut end, mut planes) = if phase >= FETCH_HIGH + late || stalled || !data {
+        let (mut end, mut planes) = if phase >= FETCH_HIGH + late || !data || stalled() {
             (
-                tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !stalled),
+                tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !stalled()),
                 0,
             )
         } else if phase >= FETCH_SAMPLED {
@@ -1208,7 +1230,7 @@ impl Ppu {
             }
         }
         if end <= x {
-            return;
+            return false;
         }
         let seg = Held {
             end: end.min(176) as u8,
@@ -1222,6 +1244,36 @@ impl Ppu {
             *hold = [Held::default(), seg];
         } else if seg.end > hold[1].end {
             *hold = [hold[1], seg];
+        }
+        true
+    }
+
+    /// An SCY (`reg` 0x42) or SCX (0x43) write of `value` at clock `now`:
+    /// [`Ppu::flush`], then [`Ppu::hold_fetch`]. When the line has no held
+    /// part yet and the write holds the pixels up to the fetcher's
+    /// frontier, the flush is left out: every pixel before the frontier,
+    /// drawn or not, is drawn with the held (old) SCX and SCY, and every
+    /// other register the picture depends on flushes before it changes
+    /// (palette RAM and VRAM are blocked in mode 3, VRAM DMA flushes), so
+    /// the pixels before the write come out the same, in one span with the
+    /// held part instead of two. Not on a line OAM DMA touches (`flush`
+    /// fixes the objects' fetches first).
+    #[inline(never)]
+    pub(crate) fn scroll_write(
+        &mut self,
+        now: u64,
+        mem: &mut Memory,
+        frame: &mut Frame,
+        reg: usize,
+        value: u8,
+    ) {
+        if !self.attr_on && mem.obj_rank.hold[1].end == 0 {
+            if !self.hold_fetch(now, mem, reg, value, true) {
+                self.flush(now, mem, frame);
+            }
+        } else {
+            self.flush(now, mem, frame);
+            self.hold_fetch(now, mem, reg, value, false);
         }
     }
 
@@ -1368,6 +1420,7 @@ impl Ppu {
         t.first_pixel = mode3 + 12 + u16::from(scx & 7);
         self.drawn = 0;
         mem.obj_rank.hold[1].end = 0;
+        mem.obj_rank.next = 0;
         self.renderer.start_line(l as u8, scx, &objs, order);
         if n != 0 || window.is_some() {
             self.set_stalls(scx, window);
@@ -2561,7 +2614,7 @@ mod tests {
     fn write_fetch_reg(r: &mut Rig, now: u64, reg: usize, value: u8) {
         r.sync(now);
         r.ppu.flush(now, &mut r.mem, &mut r.frame);
-        r.ppu.hold_fetch(now, &mut r.mem, reg, value);
+        r.ppu.hold_fetch(now, &mut r.mem, reg, value, false);
         if reg == 0x40 {
             r.ppu.write_lcdc(now, value, &mut r.iflags, false);
         } else {

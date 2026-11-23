@@ -799,7 +799,7 @@ impl Ctx<'_, '_> {
                 let at = now - u64::from(double);
                 let s = &mut *self.sys;
                 s.ppu.flush(at, self.mem, self.frame);
-                s.ppu.hold_fetch(at, self.mem, reg, value);
+                s.ppu.hold_fetch(at, self.mem, reg, value, false);
                 // Turning the LCD off outside mode 0 starts an HBlank
                 // transfer block (SameBoy `GB_lcd_off`).
                 if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
@@ -864,9 +864,10 @@ impl Ctx<'_, '_> {
                 };
                 self.run_ppu_to_call(now.max(at));
                 let s = &mut *self.sys;
-                s.ppu.flush(at, self.mem, self.frame);
                 if matches!(reg, 0x42 | 0x43) {
-                    s.ppu.hold_fetch(at, self.mem, reg, value);
+                    s.ppu.scroll_write(at, self.mem, self.frame, reg, value);
+                } else {
+                    s.ppu.flush(at, self.mem, self.frame);
                 }
                 self.mem.io[reg] = value;
                 match reg {

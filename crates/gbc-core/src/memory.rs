@@ -92,6 +92,7 @@ impl Memory {
                     scy: 0,
                     planes: 0,
                 }; 2],
+                next: 0,
             },
             bg_pal: [0; 64],
             obj_pal: [0; 64],
@@ -113,6 +114,7 @@ impl Memory {
         self.io.fill(0);
         self.obj_buf.fill(0);
         self.obj_rank.rank.fill(0);
+        self.obj_rank.next = 0;
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
@@ -136,6 +138,10 @@ pub(crate) struct ObjRank {
     /// the pixels before `end` are drawn with these values. In `end`
     /// order; `[1]` is the last; `[1].end == 0`: none.
     pub(crate) hold: [Held; 2],
+    /// Position in the renderer's object fetch order of the line's first
+    /// object not yet fetched or skipped (`Renderer::fetch_objects`); 0 at
+    /// the line start (`Ppu::latch`).
+    pub(crate) next: u8,
 }
 
 /// One held part of a line ([`ObjRank::hold`]).
@@ -196,12 +202,14 @@ mod tests {
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
         assert!(obj_rank.hold.iter().all(|&h| h == Held::default()));
+        assert_eq!(obj_rank.next, 0);
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
         let total: usize = fields.iter().map(|f| f.len()).sum::<usize>()
             + size_of_val(bg_pairs)
             + size_of_val(&obj_rank.hold)
+            + size_of_val(&obj_rank.next)
             + size_of::<Apu>();
         assert_eq!(
             size_of::<Memory>(),
