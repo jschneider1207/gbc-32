@@ -85,11 +85,13 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Session 13 (2026-11-23): agent on branch `m9-m1` (worktree `../gbc-32-m1`,
-  `gambatte/m1/*` STAT mode-1 edges, 16 ROMs) and agent on `m9-hdma-spsw`
-  merged (c274be8, +21; ADR 0017/0020 amendments 0b221c0; bench/gate not yet
-  run). Agent on `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT
-  leftovers ~11). Orchestrator runs bench/gate/baseline after merges.
+- Session 13 (2026-11-23): merged to main, bench/gate/baseline NOT yet run:
+  c274be8 (HDMA across a speed switch, +21; ADR 0017/0020 amendments) and
+  8e30952..046958f (STAT edges at lines 144/0, +23; ADR 0029). Combined
+  tree: must 86, should 40, stretch 3,345/3,461, 0 regressions, tests clean.
+- Agents: `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT
+  leftovers ~11) and `m9-stat153` (worktree `../gbc-32-stat153`, STAT edges
+  at lines 153/0: m2enable, lycEnable, ly0/lyc153 ds retrigger).
 
 ## Needs human
 Open:
