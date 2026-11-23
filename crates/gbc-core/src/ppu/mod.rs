@@ -1295,6 +1295,9 @@ impl Ppu {
         } else if self.dma.ppu_live && self.dma_touches(start) {
             aware = true;
             self.scan_line(l, start, mem)
+        } else if self.scan.line == start {
+            // LCDC.2 changed in this line's OAM scan ([`Self::obj_size_write`]).
+            self.scan_line(l, start, mem)
         } else {
             // No OAM read of this line is tracked on the mode-2 bus.
             self.bus_live = false;
@@ -1563,6 +1566,33 @@ impl Ppu {
     }
 
     // --- Writes (the bus syncs the PPU to the write's clock first) ---
+
+    /// A CPU write at clock `now` (synced) changes LCDC.2, the object
+    /// height; call before [`Self::write_lcdc`]. The OAM scan compares
+    /// each entry's Y with the height as of that entry's read (SameBoy
+    /// `add_object_from_index` reads LCDC per entry, MIT; Pan Docs: OAM
+    /// scan), so in mode 2 the entries read up to `now - 2` are scanned
+    /// with the old height here and the latch finishes the scan with the
+    /// new one ([`Self::scan_line`]). In single speed the entry read at
+    /// `now - 1` matches with either height, i.e. as 8x16 (gambatte
+    /// `sprites/late_sizechange*` `sp01`/`sp39`/no-`sp` `_2` (CGB 3) vs
+    /// `late_sizechange2_*_1`; behavior only, GPL). The object fetch
+    /// reads LCDC.2 at the fetch already (`render.rs`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn obj_size_write(&mut self, now: u64, double: bool, mem: &Memory) {
+        if !self.lcd_enabled() {
+            return;
+        }
+        let a = self.at(now);
+        let start = now.wrapping_sub(u64::from(a.t));
+        if a.line < LINES && !a.first && self.line.start != start {
+            // The entry read at `now - 1` (single speed) is 8x16 with the
+            // old value 8x16, and with the new one otherwise.
+            let either = u64::from(!double && self.lcdc & 0x04 != 0);
+            self.scan_to(a.line, start, (now + either).saturating_sub(2), mem);
+        }
+    }
 
     /// A STAT update at clock `now` (a STAT or LYC write): re-evaluates the
     /// interrupt line with the mode source and comparison of that
@@ -2735,6 +2765,34 @@ mod tests {
     fn line_objects(r: &Rig) -> Vec<(u8, u8)> {
         let o = &r.ppu.renderer.objects;
         (0..o.len()).map(|s| (o.get(s).0, o.get(s).2)).collect()
+    }
+
+    /// An LCDC.2 write at t = 9 of line 5's OAM scan: entries 1-4 (read at
+    /// t = 6, 8, 10, 12) cover line 5 only as 8x16. Entries read up to
+    /// t = 7 see the old height, the rest the new one, except that in
+    /// single speed entry 2 (read at t = 8) matches with either (gambatte
+    /// `sprites/late_sizechange*`).
+    #[test]
+    fn obj_size_write_splits_the_oam_scan() {
+        for (lcdc, double, want) in [
+            (0x91, false, vec![2, 3, 4]),
+            (0x95, false, vec![1, 2]),
+            (0x95, true, vec![1]),
+        ] {
+            let (mut r, l5) = dma_rig();
+            r.mem.oam = [0; 0xA0];
+            for e in 1..5 {
+                r.mem.oam[e * 4] = 16 + 5 - 10;
+            }
+            r.ppu.oam_written();
+            r.ppu.write_lcdc(l5, lcdc, &mut r.iflags, false);
+            r.sync(l5 + 9);
+            r.ppu.obj_size_write(l5 + 9, double, &r.mem);
+            r.ppu.write_lcdc(l5 + 9, lcdc ^ 0x04, &mut r.iflags, false);
+            r.sync(l5 + 89);
+            let got: Vec<u8> = line_objects(&r).iter().map(|o| o.0).collect();
+            assert_eq!(got, want, "LCDC {lcdc:02X}, double {double}");
+        }
     }
 
     /// A running transfer keeps the OAM scan off OAM: entries 0-9 (read

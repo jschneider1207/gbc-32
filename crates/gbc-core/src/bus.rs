@@ -807,6 +807,9 @@ impl Ctx<'_, '_> {
                     self.done = true;
                 }
                 let s = &mut *self.sys;
+                if (value ^ s.ppu.lcdc) & 0x04 != 0 {
+                    s.ppu.obj_size_write(now, double, self.mem);
+                }
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem);
             }
