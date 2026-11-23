@@ -224,6 +224,25 @@ mod tests {
     }
 
     #[test]
+    fn pcm12_reads_ch2_advanced_to_the_read_clock() {
+        extern crate std;
+        let mut mem = std::boxed::Box::new(Memory::new());
+        mem.apu.post_boot();
+        // Duty 25% (positions 0 and 7 high), volume 15, f = 0x400: 4096
+        // clocks per step.
+        mem.apu.write(0x16, 0x40, 0);
+        mem.apu.write(0x17, 0xF0, 0);
+        mem.apu.write(0x19, 0x84, 0);
+        let first = u64::from(mem.apu.sq[1].countdown);
+        assert_eq!(read_apu(&mem, 0, 0x76), 0x00, "not started");
+        // Position 7 after 7 steps, with the state still at clock 0.
+        let t = first + 6 * 4096 + 1;
+        assert_eq!(read_apu(&mem, t, 0x76), 0xF0);
+        assert_eq!(read_apu(&mem, t + 2 * 4096, 0x76), 0x00, "position 1");
+        assert_eq!(mem.apu.out.synced, 0, "pure");
+    }
+
+    #[test]
     fn power_off_keeps_only_the_output_stream() {
         let mut apu = Apu::new();
         apu.post_boot();
