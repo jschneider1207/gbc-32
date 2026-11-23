@@ -137,3 +137,33 @@ frozen through the byte), the halt is 0x8000 new-speed M-cycles with the
 timer running, and on CGB B/C a DIV reset during STOP that would increment
 TIMA immediately doesn't increment on that M-cycle, for the 4 kHz timer only
 (`gb_timer::after_div_reset`, "speed change glitch").
+
+## Amendment (2026-11-23, session 10): the TIMA edge of STOP's DIV reset
+
+Resolves the `spsw-tima-cgbBC` question above. Our STOP resets DIV at the
+end of its fetch; AGE resets it one M-cycle later, after the second byte
+(`gb_bus::execute_stop`). Instrumenting every test row gives the counter
+at our reset as c = 4 * (17 + DELAY) (4 per M-cycle at either speed), and
+the post-switch phase already agrees with AGE (every non-edge cell passed).
+So the only difference is which edge the reset itself makes, with timer
+input bit b (8, 32, 128, 512):
+- AGE: a fall during the second byte (c mod 2b = 2b - 4) plus an
+  immediate increment if the bit is set at c + 4, except on CGB B/C for
+  4 kHz when the bit rose on exactly that M-cycle ("speed change glitch",
+  `gb_timer::after_div_reset`: (c + 4) mod 2b = b).
+- Ours: an immediate increment if the bit is set at c.
+These agree except at c mod 2b = b - 4 (the bit rises during the second
+byte and falls at AGE's reset) for 262/65/16 kHz. That is every failing
+cell: the 262 kHz read after a switch to double speed (c = 68, 68 mod 16
+= 4), 262 kHz DELAY 4 (c = 84), 65 kHz DELAY 6 (c = 92), and 16 kHz
+DELAY 14 (c = 124), in both directions; the 4 kHz rows pass because the
+glitch cancels the same case. (The 16 kHz edge cells failed too; the
+earlier note that they passed was a misread.)
+
+Rule (`Timer::stop_edge`, called by `Ctx::stop_div_reset` before the
+reset when STOP is two bytes, i.e. IE & IF = 0): if the timer runs at
+262, 65 or 16 kHz and c mod 2b = b - 4, TIMA increments. The pending
+(one-byte) STOP has no second byte and is unchanged. The eager reference
+model of the ADR 0011 differential test mirrors it. CGB E (glitch on all
+but 262 kHz) is not modelled. Gains `spsw-tima-cgbBC` and 14 Gambatte
+`speedchange*_tima0[123]*` ROMs, no regressions (full stage1 manifest).

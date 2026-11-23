@@ -354,6 +354,29 @@ impl Timer {
         old
     }
 
+    /// Before STOP's DIV reset at `now` (the end of its fetch) when STOP
+    /// is two bytes (nothing pending): the TIMA edge the reset would make
+    /// one M-cycle later. AGE (Apache-2.0, read only) resets DIV after
+    /// STOP's second byte; there a timer bit that rises during the second
+    /// byte falls at the reset (an increment our earlier reset misses),
+    /// except for the 4 kHz timer on CGB B/C, where a bit that rose on the
+    /// reset's M-cycle doesn't count (`gb_timer::after_div_reset`, "speed
+    /// change glitch"). Our reset then sees the bit as AGE does in every
+    /// other case: a fall during the byte is our reset's fall.
+    /// Verified by AGE `spsw-tima-cgbBC` (CGB B/C), ADR 0020.
+    #[inline(never)]
+    pub(crate) fn stop_edge(&mut self, now: u64) {
+        let b = self.tima_bit;
+        // The 4 kHz timer (bit 9) and a stopped timer (0) have none.
+        if b & 0xA8 == 0 || self.in_cycle_a(now) {
+            return;
+        }
+        if self.sc(now) & (2 * b - 1) == b - 4 {
+            self.sync(now);
+            self.increment(now);
+        }
+    }
+
     /// A CGB speed switch at `now`: the counter (and the overflow window,
     /// which the eager model advanced only in M-cycle ticks) stays frozen
     /// for `pause` base clocks (0 for none), then runs at the other speed.

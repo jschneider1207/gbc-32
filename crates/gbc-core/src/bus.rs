@@ -480,6 +480,18 @@ impl Ctx<'_, '_> {
         self.schedule_serial();
     }
 
+    /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
+    /// the TIMA edge of AGE's later reset ([`Timer::stop_edge`], ADR 0020).
+    /// Out of line: keeps `stop_begin` within its code-size budget.
+    #[inline(never)]
+    fn stop_div_reset(&mut self) {
+        if self.sys.ie & self.sys.iflags & INT_MASK == 0 {
+            let now = self.clock();
+            self.sys.timer.stop_edge(now);
+        }
+        self.div_reset();
+    }
+
     /// The APU part of a DIV write or STOP (`old`: the counter before it):
     /// if the DIV-APU bit was 1, the reset is its falling edge and the
     /// frame sequencer steps now (SameBoy `GB_set_internal_div_counter`,
@@ -1544,7 +1556,7 @@ impl Bus for Ctx<'_, '_> {
         if p1_lines(self.sys.buttons, self.sys.joyp_select) != 0x0F {
             return StopKind::Joypad;
         }
-        self.div_reset();
+        self.stop_div_reset();
         if self.sys.cgb_mode && self.sys.key1 & 0x01 != 0 {
             StopKind::Switch
         } else {

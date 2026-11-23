@@ -70,6 +70,8 @@ mod tests {
         /// interrupt pending and IME on: to double speed, one M-cycle that
         /// doesn't tick the timer (`Ctx::speed_switch`).
         fn stop(&mut self, switch: bool) {
+            // IE = 0 in this harness: STOP is two bytes.
+            self.timer.stop_edge();
             let fell = self.timer.write_div();
             self.clock_serial(fell);
             if switch {

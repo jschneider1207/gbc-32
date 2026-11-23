@@ -1739,6 +1739,40 @@ mod tests {
         assert_eq!(to_ld_b_b(emu), (32 + 0x8001 * 2 + 2, 0x108, 0x000C));
     }
 
+    /// TIMA after a switch to double speed whose STOP fetch ends `nops`
+    /// M-cycles after a DIV write, with TAC = `tac` (IE = 0, IME off).
+    fn tima_after_switch(tac: u8, nops: usize) -> u8 {
+        // LD A,tac; LDH (07),A; LD A,01; LDH (4D),A; XOR A; LDH (04),A;
+        // NOP * nops; STOP 00; LD B,B.
+        let mut program = vec![
+            0x3E, tac, 0xE0, 0x07, 0x3E, 0x01, 0xE0, 0x4D, 0xAF, 0xE0, 0x04,
+        ];
+        program.extend(core::iter::repeat_n(0x00, nops));
+        program.extend_from_slice(&[0x10, 0x00, 0x40]);
+        let emu = with_program(&program, 0x80);
+        to_ld_b_b(emu);
+        emu.peek(0xFF05)
+    }
+
+    #[test]
+    fn stop_div_reset_counts_a_timer_bit_rising_during_the_second_byte() {
+        // The counter is 4 * (nops + 2) at the end of STOP's fetch (our DIV
+        // reset); AGE resets it 4 later, after the second byte (ADR 0020).
+        // 262 kHz (bit 3): at 8 and 12 the bit is set (an increment); at 16
+        // it just fell (a plain edge); at 20 it rises during the byte and
+        // falls at AGE's reset (both); at 24 it fell and is set again.
+        let t: [u8; 5] = core::array::from_fn(|n| tima_after_switch(0x05, n));
+        let d = t.map(|v| v.wrapping_sub(t[0]));
+        assert_eq!(d, [0, 0, 0, 1, 1], "262 kHz {t:?}");
+        // 65 kHz (bit 5): rises at 32, so the extra edge is at 28.
+        let t: [u8; 3] = core::array::from_fn(|n| tima_after_switch(0x06, n + 4));
+        assert_eq!(t.map(|v| v.wrapping_sub(t[0])), [0, 1, 1], "65 kHz {t:?}");
+        // 4 kHz (bit 9) on CGB B/C: the "speed change glitch" (AGE
+        // `gb_timer::after_div_reset`): 508 adds nothing, 512 does.
+        let t: [u8; 3] = core::array::from_fn(|n| tima_after_switch(0x04, n + 124));
+        assert_eq!(t.map(|v| v.wrapping_sub(t[0])), [0, 0, 1], "4 kHz {t:?}");
+    }
+
     #[test]
     fn speed_switch_with_an_interrupt_pending_does_not_halt() {
         // LD A,01; LDH (FF),A; LDH (0F),A (IE = IF = VBlank, IME off);
