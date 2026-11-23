@@ -106,6 +106,11 @@ Open (session 11):
   fail"; they're CGB E results. Proposal: follow gambatte (our revision)
   and sign off those 4 as "CGB E result" (like the 7 already signed off).
   Same evidence likely covers much of group 15 (20 SameSuite ch1/2/4 ROMs).
+  Update (d8a1428): single speed now steps on the 1 MHz grid (11 flips);
+  7 ds ROMs wait on this (ds_6, 5 ds_2, `speedchange_ch1_nr4init_*_2`).
+  Note: applying the single-speed *grid* rule in ds instead also regresses
+  SameSuite `channel_{1,2}_duty` and 4 gambatte `speedchange*_ds_1`, so
+  the candidate is gambatte's linear rule, re-measured before shipping.
 
 Open (session 10):
 - **Real-game checklist** (plan, bottom; now an M9 task), on native
