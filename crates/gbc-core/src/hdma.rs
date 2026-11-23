@@ -23,7 +23,9 @@
 /// 16-byte blocks at `mcycle` base clocks per M-cycle (4, or 2 in double
 /// speed): 2 dots per byte, plus one M-cycle.
 pub(crate) const fn stall_mcycles(blocks: u32, mcycle: u32) -> u32 {
-    1 + blocks * 32 / mcycle
+    // `mcycle` is 4 or 2: a shift by 2 or 1 (no division, so no
+    // divide-by-zero panic path).
+    1 + ((blocks * 32) >> (mcycle >> 1))
 }
 
 /// HDMA starts a block this many dots after the line's mode-3 end

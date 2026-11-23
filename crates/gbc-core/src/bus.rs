@@ -492,7 +492,11 @@ impl Ctx<'_, '_> {
     /// least one.
     #[inline]
     fn mcycles_to_deadline(&self) -> u32 {
-        (self.hot.budget.max(1) as u32).div_ceil(self.hot.mcycle as u32)
+        // `mcycle` is 4 or 2: a shift by 2 or 1, not a division (no
+        // divide-by-zero panic path on thumbv7em).
+        debug_assert!(self.hot.mcycle == 2 || self.hot.mcycle == 4);
+        let m = self.hot.mcycle as u32;
+        (self.hot.budget.max(1) as u32 + m - 1) >> (m >> 1)
     }
 
     /// The countdown reached zero: run what is due at the current clock
@@ -1281,23 +1285,19 @@ impl Ctx<'_, '_> {
         if self.sys.ppu.drawing() {
             self.sys.ppu.flush(now, self.mem, self.frame);
         }
-        let hot = self.hot.without_dma();
         let bank = self.sys.vram_off;
         let mut v = self.sys.vdma;
         v.pending = false;
         let mut blocks = 0;
         loop {
-            for _ in 0..16 {
-                let src = v.src;
-                let byte = if src < 0x8000 || matches!(src & 0xE000, 0xA000 | 0xC000) {
-                    read::<false>(self.mem, self.sys, &hot, src)
-                } else {
-                    0xFF
-                };
-                self.mem.vram[bank | usize::from(v.dest & 0x1FFF)] = byte;
-                v.src = src.wrapping_add(1);
-                v.dest = v.dest.wrapping_add(1);
-            }
+            // Both counters are 16-aligned (FF52/FF54 bits 0-3 are
+            // ignored, and a block adds 16), so a block is one 16-byte
+            // run of VRAM: `dest & 0x1FFF` never wraps inside it.
+            let block = vdma_block(self.mem, self.sys, v.src);
+            let (vram, _) = self.mem.vram.as_chunks_mut::<16>();
+            vram[((bank | usize::from(v.dest & 0x1FF0)) >> 4) & 0x3FF] = block;
+            v.src = v.src.wrapping_add(16);
+            v.dest = v.dest.wrapping_add(16);
             blocks += 1;
             v.blocks = v.blocks.wrapping_sub(1);
             if v.blocks == 0 || v.dest == 0 {
@@ -1486,6 +1486,34 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     read::<true>(mem, sys, &plain, addr)
 }
 
+/// One VRAM DMA block's 16 source bytes from `src` (16-aligned, so the
+/// block never crosses a region or bank boundary): ROM, cartridge RAM and
+/// WRAM are read as [`read`] reads them, VRAM and E000-FFFF read FF. A
+/// region that is one run of memory (the ROM bank window, plain cartridge
+/// RAM, a WRAM bank) is copied without the per-byte dispatch.
+#[inline(always)]
+fn vdma_block(mem: &Memory, sys: &Sys, src: u16) -> [u8; 16] {
+    debug_assert!(src & 0xF == 0);
+    match src >> 13 {
+        0..=3 | 5 => sys.cart.dma_block(src),
+        6 => *wram_block(mem, sys, usize::from(src)),
+        // VRAM and E000-FFFF: FF (see `Ctx::vram_dma`).
+        _ => [0xFF; 16],
+    }
+}
+
+/// 16 bytes of C000-DFFF from a 16-aligned `a`, as [`wram`] reads them.
+#[inline(always)]
+fn wram_block<'m>(mem: &'m Memory, sys: &Sys, a: usize) -> &'m [u8; 16] {
+    let off = if a & 0x1000 == 0 {
+        a & 0x0FF0
+    } else {
+        sys.wram_off | (a & 0x0FF0)
+    };
+    let (blocks, _) = mem.wram.as_chunks::<16>();
+    &blocks[(off >> 4) & 0x7FF]
+}
+
 /// C000-DFFF and its echo: bank 0, then the SVBK bank.
 #[inline(always)]
 fn wram(mem: &Memory, sys: &Sys, a: usize) -> u8 {
@@ -1666,6 +1694,86 @@ mod tests {
         let Emulator { mem, hw } = emu;
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         ctx.write_mapped(addr, value);
+    }
+
+    /// The per-byte VRAM DMA source read before the block fast path: the
+    /// reference for `vdma_block`.
+    fn vdma_block_ref(mem: &Memory, sys: &Sys, src: u16) -> [u8; 16] {
+        let hot = Hot::new();
+        core::array::from_fn(|i| {
+            let a = src.wrapping_add(i as u16);
+            if a < 0x8000 || matches!(a & 0xE000, 0xA000 | 0xC000) {
+                read::<false>(mem, sys, &hot, a)
+            } else {
+                0xFF
+            }
+        })
+    }
+
+    /// The VRAM DMA block fast path (`vdma_block`) reads what the per-byte
+    /// path (`vdma_block_ref`) reads, for every 16-aligned source, in
+    /// each source region and mapper state: ROM banks (one window ending
+    /// mid-block), cartridge RAM disabled / banked / an RTC register,
+    /// WRAM banks via SVBK (0 maps bank 1), VRAM and E000-FFFF.
+    #[test]
+    fn vdma_block_fast_path_matches_per_byte_reads() {
+        // MBC3+TIMER+RAM+BATTERY, 32 KiB RAM; 0x8008 bytes, so ROM bank 2
+        // is an 8-byte window.
+        let r = rom(0x8008, 0x10, 0x03, 0x80);
+        for (i, b) in r.iter_mut().enumerate().skip(0x150) {
+            *b = (i * 7 + (i >> 8)) as u8;
+        }
+        let emu = load(r);
+        for (i, b) in emu.mem.wram.iter_mut().enumerate() {
+            *b = (i * 5 + (i >> 12) * 33) as u8;
+        }
+        for (i, b) in emu.mem.vram.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        write(emu, 0x0000, 0x0A); // RAM and RTC enabled
+        for i in 0..0x8000u32 {
+            write(emu, 0x4000, (i >> 13) as u8);
+            write(
+                emu,
+                0xA000 | (i & 0x1FFF) as u16,
+                (i * 3 + (i >> 13) * 71) as u8,
+            );
+        }
+        let check = |emu: &Emulator, what: &str| {
+            for src in (0..=0xFFF0u16).step_by(16) {
+                assert_eq!(
+                    vdma_block(emu.mem, &emu.hw.sys, src),
+                    vdma_block_ref(emu.mem, &emu.hw.sys, src),
+                    "{what}: {src:04X}"
+                );
+            }
+        };
+        for (what, writes) in [
+            (
+                "ROM bank 1, RAM bank 0, SVBK 0",
+                &[(0x2000, 1), (0x4000, 0), (0xFF70, 0)][..],
+            ),
+            (
+                "ROM bank 2 (partial), RAM bank 2, SVBK 3",
+                &[(0x2000, 2), (0x4000, 2), (0xFF70, 3)],
+            ),
+            (
+                "RAM bank 3, SVBK 7",
+                &[(0x2000, 1), (0x4000, 3), (0xFF70, 7)],
+            ),
+            ("RTC seconds", &[(0x4000, 0x08)]),
+            ("RAM disabled", &[(0x4000, 1), (0x0000, 0x00)]),
+        ] {
+            for &(a, v) in writes {
+                write(emu, a, v);
+            }
+            check(emu, what);
+        }
+        // The block path sees the WRAM bank: bank 7 at D000.
+        assert_eq!(
+            vdma_block(emu.mem, &emu.hw.sys, 0xD010)[0],
+            emu.mem.wram[0x7010]
+        );
     }
 
     #[test]

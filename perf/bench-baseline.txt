@@ -1,11 +1,11 @@
 # Instruction-count baseline (docs/perf.md). Columns: ROM, emulated seconds, Ir.
 # Rewritten by: scripts/check-bench.sh --update-baseline
 # Commit changes together with the change that caused them (delta and reason in the body).
-blargg/cpu_instrs/cpu_instrs.gb 20 1621636026
+blargg/cpu_instrs/cpu_instrs.gb 20 1621633017
 blargg/cgb_sound/cgb_sound.gb 20 891563386
-cgb-acid2/cgb-acid2.gbc 20 591553002
-synth:event-storm 2 397626064
+cgb-acid2/cgb-acid2.gbc 20 590988058
+synth:event-storm 2 397625928
 synth:dma-storm 3 425954878
-synth:halt-irq 10 248431210
-synth:worst-case 2 429690569
-synth:cgb-raster 2 307009759
+synth:halt-irq 10 247648699
+synth:worst-case 2 423136853
+synth:cgb-raster 2 307009623

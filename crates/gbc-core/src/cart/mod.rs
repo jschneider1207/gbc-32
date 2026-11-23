@@ -605,6 +605,44 @@ impl<'a> Cart<'a> {
             .unwrap_or(0xFF)
     }
 
+    /// The 16 bytes [`Self::read_rom`] or [`Self::read_ram`] return for
+    /// `addr..addr + 16` (`addr` 16-aligned, below C000), for VRAM DMA
+    /// blocks: one copy from the ROM bank window or the RAM bank. The RTC
+    /// register doesn't depend on the address. Every RAM size is 0 or a
+    /// power of two of at least 512 (`cart_ram_size`), so the
+    /// `ram_len - 1` mask keeps the low 4 bits and the 16 bytes are one
+    /// run of `ram_buf`.
+    pub(crate) fn dma_block(&self, addr: u16) -> [u8; 16] {
+        let (mem, off): (&[u8], usize) = if addr < 0x8000 {
+            let window = self.rom_win[usize::from(addr >> 14) & 1];
+            (window, usize::from(addr) & (ROM_BANK - 1))
+        } else if !self.ram_enabled || (self.rtc_sel == 0 && self.ram_len == 0) {
+            return [0xFF; 16];
+        } else if self.rtc_sel != 0 {
+            return [self.read_rtc(); 16];
+        } else {
+            debug_assert!(self.ram_len.is_multiple_of(16));
+            (self.ram_buf, self.ram_index(addr))
+        };
+        match mem.as_chunks::<16>().0.get(off >> 4) {
+            Some(b) => *b,
+            None => Self::block_tail(mem, off),
+        }
+    }
+
+    /// A block from `off` in a ROM window that ends inside it (a ROM that
+    /// isn't a whole number of banks): the bytes past the end read FF, as
+    /// in [`Self::read_rom`] and [`Self::read_ram`].
+    #[cold]
+    #[inline(never)]
+    fn block_tail(mem: &[u8], off: usize) -> [u8; 16] {
+        let mut b = [0xFF; 16];
+        for (x, &y) in b.iter_mut().zip(mem.get(off..).unwrap_or(&[])) {
+            *x = y;
+        }
+        b
+    }
+
     /// A write to A000-BFFF (no panic path; see [`Cart::read_ram`]).
     #[inline]
     pub(crate) fn write_ram(&mut self, addr: u16, value: u8, now: u64) {

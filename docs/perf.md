@@ -36,6 +36,19 @@ in git):
   instructions, so the total fell: 442.70 -> 429.69 M (-2.9%, same core),
   while `vram_dma` costs 20.8 M inclusive (1,215 Ir per block, 174k per
   frame; self 610 Ir per block, about 38 per byte).
+  Block copies (`vdma_block`, `Cart::dma_block`): both counters are
+  16-aligned, so a block is one 16-byte run of its region and is copied
+  whole from the ROM window, the RAM bank or the WRAM bank instead of 16
+  `read` dispatches; VRAM is indexed as 16-byte chunks with a masked index
+  (no bounds checks), and the speed factor is a shift (no divide-by-zero
+  panics in `vram_dma`, `hdma::stall_mcycles` or `mcycles_to_deadline`).
+  worst-case 429.69 -> 423.14 M (-1.5%, 3.54 M per frame, 88% of the
+  line), `vram_dma` 1,215 -> 833 Ir per block inclusive (174k -> 120k per
+  frame), self with `dma_block` 610 -> 219; halt-irq -0.3% (the shift),
+  cgb-acid2 -0.1%. `vram_dma` 708 -> 664 B, `dma_block` + `block_tail`
+  +240 B: total `.text` 84,942 -> 85,068 B (budget 85,100). Left:
+  `vdma_arm` (~30 Ir per call, 3.4 calls per line: 1.76 M) and the run
+  loop's per-block `Cpu::run` exit.
   callgrind: `Ctx::boundary` 15.9%, `Renderer::render` 9.1% (inclusive,
   with `fill_mixed`; 9.7% before the fused object mixing), timer 7.0%,
   serial 5.1%.
