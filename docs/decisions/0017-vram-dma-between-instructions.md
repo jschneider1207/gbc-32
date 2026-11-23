@@ -78,3 +78,32 @@ block)" no longer holds:
   still suppresses them. Only the `hdma_late_m0halt_ds_lcdoffset1_{1,2}`
   pair tells the latter apart, and which half passes depends on the
   `lcd_offset` CPU/PPU phase (M9 triage), so it stays until that is fixed.
+
+## Amendment (2026-11-23, M9 group 8): trigger, IRQ order, HBlank period
+
+Fitted to gambatte's CGB C captures (gambatte, GPL, read for behaviour
+only), replacing parts of the SameBoy-based rules above:
+- **Trigger:** `HBLANK_DELAY` is 2 dots after the mode-0 STAT change,
+  not 3 (gambatte: xpos 167, one dot after its mode-0 interrupt at 166).
+  `dma/hdma_start_scx{,2,3,5}*` and `hdma_late_disable_scx*` (both
+  speeds) allow only 2.
+- **Block before dispatch:** a pending step runs before an interrupt
+  dispatch due at the same boundary (`Cpu::running`; gambatte's DMA event
+  pre-empts the dispatch, also at a HALT wake-up with IME on):
+  `irq_precedence/{,late_}hdma_vs_*` (11).
+- **HBlank period** (`Ppu::hdma_period`): from the trigger to 4 dots into
+  the next line (where STAT still reads mode 0). The HALT sample and the
+  wake-up check use it; an FF55 enable sees it one M-cycle later
+  (gambatte `isHdmaPeriod(cc + 4)`), so an enable at the HBlank's end
+  waits for the next line (`hdma_late_enable_{,ds_}2`) and one between
+  the STAT change and the trigger takes this line's trigger.
+- **Lost triggers:** a trigger during a block's stall is lost (gambatte
+  acknowledges the request at a transfer's end;
+  `hdma_transition_{,ei_}halt_late_unhalt_scx1_*`), and one in a
+  speed-switch STOP's last M-cycle falls into the switch's halt
+  (gambatte `stop(cc - 4)`; `hdma_late_m3speedchange_*_scx1_*`).
+- **Known swap:** `hdma_late_m0halt_ds_lcdoffset1_{1,2}` and the
+  `hdma_late_enable_*lcdoffset*` ROMs bracket the period end ~3 clocks
+  off from the same tests without the lcd_offset phase, so they depend
+  on the lcd_offset CPU/PPU phase fix (M9 triage); `_1` now passes and
+  `_2` fails.

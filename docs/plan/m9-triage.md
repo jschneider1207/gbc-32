@@ -227,6 +227,13 @@ the group's count, and 4 SameSuite ROMs signed off (below). The cause was not on
   `lcdoffset1_1` for `_2`; wait for the lcd_offset phase fix).
 - **Trigger vs mode-0 start and IRQ dispatch** (19): `hdma_late_enable*`,
   `hdma_start_scx5*`, `hdma_late_disable_scx5*`, `irq_precedence` hdma.
+  **Status (`hdma-trigger`, ADR 0017 trigger amendment):** 17 of 19
+  fixed (trigger at STAT mode 0 + 2 dots, block before a due dispatch,
+  HBlank period for FF55 enable/HALT/wake-up, triggers lost in a block's
+  stall or in a speed-switch STOP's last M-cycle), plus 13 from the HALT
+  and speed-switch sub-groups. Left: `hdma_late_enable_{lcdoffset3,
+  ds_lcdoffset1}_2` (lcd_offset phase). Swapped by the same phase:
+  `hdma_late_m0halt_ds_lcdoffset1_1` now passes, `_2` fails.
 - **GDMA length in double speed** (4): `gdma_cycles_*_ds` (S).
 - **Misc** (4): `hdma_pc_7ffe`, `late_gdma_pc_7ffe`,
   `hdma_transition_oamdma_{1,2}` (ADR 0017 "OAM DMA during VRAM DMA").
