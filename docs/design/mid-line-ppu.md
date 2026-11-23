@@ -465,3 +465,33 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Cost.** `.text` 95,636 -> 95,730 B. `synth:cgb-raster` +2.60% vs the
   committed baseline (main +2.63%), `synth:worst-case` -0.32% (as main).
   `Held` not repacked (not needed for this step).
+
+### Live fine-scroll discard (m9-triage group 5)
+
+- **Rule.** The SCX & 7 discard at mode-3 start compares its count with
+  the live SCX & 7 each dot and wraps past 7 (SameBoy display.c,
+  `render_pixel_if_possible`: `position_in_line & 7` vs SCX, -9 back to
+  -16). `hold_fetch` on an SCX write seen at compare `w <= d` (the
+  latched discard count) sets it to the next `n >= w` with `n & 7 ==
+  SCX & 7` (up to 14): `first_pixel`, mode 3's end and the renderer's
+  fine scroll (`set_fine`, `n & 7`: `bg_column` is the same for n and
+  n + 8) move. Writes before the line latch (dot `mode3 + 5`) are latched.
+- **Calibration.** The compare for discard pixel `k` runs `DISCARD_LEAD
+  = 8` dots before that pixel's output slot (`mode3 + 12 + k`), i.e.
+  SameBoy's -16..-9 compares precede the 8 positions -8..-1. Full
+  manifest vs main: 0-6 regress 7-32 ROMs, 7 -> 17 flips / 4 regressions,
+  8 -> 21 / 0, 9 -> 9 / 0, 10-12 -> 4-1 / 0. (Clamping earlier writes to
+  `w = 0` is moot at 8: the latch is already past compare 0.)
+- **Result.** 21 fail->pass, 0 regressions: gambatte `scx_during_m3`
+  `scx_0360c0` `_2`, `_3`, `_ds_1`-`_3`; `scx_0761c0` `_2`-`_4`,
+  `_ds_1`-`_5`; `scx_0063c0_ds_{1,2}`; `scx_0367c0_ds_1`;
+  `scx_m3_extend_{1,ds_1}`; `m2int_m3stat/scx/late_scx4_ds_1`;
+  `enable_display/ly0_late_scx7_m3stat_scx{1,3}_1`. Still failing:
+  `scx_0367c0` `_2`/`_ds_2` (1 px), `_3`/`_ds_3` (143 px, from 12,012),
+  `10spritesPrLine_late_scx4_ds` (not diagnosed; suspect: the object
+  stalls still use the latched SCX). `diff-fingerprint.sh main`: 27 ROMs differ, all
+  SCX-in-discard writers (the 21, those 4, `scx_m3_extend_{2,ds_2}`
+  still passing).
+- **Cost.** `.text` +64 B (95,836 of 96,000). `synth:cgb-raster`
+  325,848,204 -> 325,984,385 Ir (+0.04%; +2.68% of the 3% guard: the one
+  extra compare on each mid-line SCX write), `synth:worst-case` +5 Ir.

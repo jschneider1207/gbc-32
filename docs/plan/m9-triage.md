@@ -27,7 +27,7 @@
 | 2 | OAM DMA: CPU write during a conflicting transfer | 58 | `dma.rs` conflict table | S-M | ~+50 B, cold; none | none (**needs human: reference choice**) |
 | 3 | LCDC.2 (object size) sampled per object | 20 | PPU OAM scan (mode 2) + object fetch | S-M | ~+150 B, cold; low | partly F |
 | 4 | Window stall/start in mode 3 (+ WX=A6/obj X=A7 edge) | 97 | PPU mode-3 length, renderer | L | ~+350-450 B; cgb-raster low | **E** |
-| 5 | Live SCX&7 discard at mode-3 start | 19 | renderer line start, mode-3 length | M | ~+100 B; check on the line-start path | new (A/B residual) |
+| 5 | Live SCX&7 discard at mode-3 start | 19 | renderer line start, mode-3 length | M | ~+100 B; check on the line-start path | **done** (21 flips; 5 residual) |
 | 6 | STAT/LY sub-dot edges at the other CPU phase (`lcd_offset`) | 33 | PPU lazy timing (ADR 0014) | M | ~+100 B; medium (STAT event math) | none (existing M5 task) |
 | 7 | APU square trigger/duty phase (gambatte `sound`, `speedchange`) | 27 | APU trigger delay, 1 MHz phase | M | ~+100 B; low (trigger path) | none |
 | 8 | HDMA timing (4 sub-groups) | 75 | `vdma`, CPU HALT/speed switch, IRQ dispatch | L (M each) | ~+100-300 B, cold; low | none |
@@ -122,6 +122,13 @@ latch it once at line start (design doc section 1 says "once"). A write
 inside the discard window changes both the image offset and mode-3
 length. Not in steps A-G; a small extension of `hold_fetch` plus the
 mode-3 length recompute.
+**Status: done** (hypothesis confirmed). `hold_fetch` moves the discard
+on an SCX write seen before its match; the compare runs 8 dots before the
+pixel's output slot (`DISCARD_LEAD`). 21 fail->pass, 0 regressions
+(`docs/design/mid-line-ppu.md` section 7, "Live fine-scroll discard").
+Residual: `scx_0367c0` `_2`/`_ds_2` (1 px), `_3`/`_ds_3` (143 px),
+`10spritesPrLine_late_scx4_ds` (not diagnosed; suspect: object stalls use the latched
+SCX).
 
 ### 6. STAT/LY edges at the other CPU clock phase (33)
 `lcd_offset/offset{1,2,3}_*` (17) and the `*lcdoffset*` variants in

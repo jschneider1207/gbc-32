@@ -49,7 +49,8 @@
 //!   window start also stalls one dot more (`LineTiming`, AGE
 //!   `stat-mode-window`), which places the mid-line register writes of
 //!   `m3_window_timing_wx_0` right: it passes.
-//! - Mid-line SCX writes keep the line-start SCX & 7 (Pan Docs), but new
+//! - Mid-line SCX writes keep the fine scroll once the discard is over
+//!   (Pan Docs; a write inside it moves it: `Ppu::hold_fetch`), but new
 //!   low bits still carry into the tile column ([`bg_column`]).
 //!   `m3_scx_low_3_bits` still differs at pixels 152-159 (unchanged by the
 //!   carry at any calibration); unresolved.
@@ -235,9 +236,9 @@ pub(crate) struct Renderer {
 
     // Per line.
     ly: u8,
-    /// SCX & 7 as of the start of the line: the hardware discards that
-    /// many pixels once, at the start of mode 3 (Pan Docs: Scrolling, "the
-    /// low 3 bits of SCX are only read at the beginning of the scanline").
+    /// The fine scroll: pixels discarded at the start of mode 3, mod 8.
+    /// SCX & 7 at the line start, or as an SCX write inside the discard
+    /// moved it (`set_fine`); later writes keep it (Pan Docs: Scrolling).
     fine_scx: u8,
     /// The window has been activated on this line and not switched off.
     window_active: bool,
@@ -329,6 +330,12 @@ impl Renderer {
         // was fetched; it is cleared by the first `render` of the line.
         self.obj_dirty |= self.obj_fetched;
         self.obj_fetched = false;
+    }
+
+    /// An SCX write moved the line's fine-scroll discard to `n` pixels
+    /// (`Ppu::hold_fetch`); `n` and `n + 8` give the same columns.
+    pub(crate) const fn set_fine(&mut self, n: u8) {
+        self.fine_scx = n & 7;
     }
 
     /// The slot of the line's last object fetch: the last object in

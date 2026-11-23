@@ -273,6 +273,15 @@ const FETCH_HIGH: i32 = FETCH_SAMPLED + 4;
 /// gambatte `bgtiledata_spx*` more), 2 -> 39; no regressions.
 const LCDC_TILES_LATE: i32 = 1;
 
+/// Dots between the fine-scroll compare of discard pixel `k` and that
+/// pixel's slot in the output (`mode3 + 12 + k`): SameBoy compares at
+/// `position_in_line` -16..-9 and then pops the 8 positions -8..-1 before
+/// x = 0 ([`Ppu::hold_fetch`]). Calibrated over the full manifest (live
+/// compare at `k` = write dot `- mode3 - 12 + DISCARD_LEAD`): 0-6 regress
+/// (7-32 ROMs), 7 -> 17 flips / 4 regressions, 8 -> 21 / 0, 9 -> 9 / 0,
+/// 10-12 -> 4-1 / 0.
+const DISCARD_LEAD: i32 = 8;
+
 impl LineTiming {
     const NONE: Self = Self {
         start: NEVER,
@@ -1107,11 +1116,32 @@ impl Ppu {
         {
             return;
         }
+        let mut first_pixel = i32::from(lt.first_pixel);
+        // The fine-scroll discard compares its count with the live SCX & 7
+        // each dot and wraps past 7 (SameBoy display.c,
+        // `render_pixel_if_possible`, MIT: `position_in_line & 7` vs SCX,
+        // -9 back to -16; Pan Docs: Pixel FIFO, "SCX % 8 pixels are
+        // discarded"). An SCX write seen at compare `w`, at or before the
+        // match (`w <= d`, one test here), moves it to the next `n >= w`
+        // with `n & 7 == SCX & 7`: the first pixel and mode 3's end move by
+        // `n - d` (gambatte `scx_during_m3`, `scx_m3_extend`). `w >= 0`:
+        // earlier writes are latched (`latch`, dot `mode3 + 5`).
+        if reg == 0x43 && t + DISCARD_LEAD <= first_pixel {
+            let start = i32::from(lt.mode3) + 12;
+            let w = t - start + DISCARD_LEAD;
+            let n = w + ((i32::from(value) - w) & 7);
+            let lt = &mut self.line;
+            lt.end = (i32::from(lt.end) + start + n - first_pixel) as u16;
+            first_pixel = start + n;
+            lt.first_pixel = first_pixel as u16;
+            self.renderer.set_fine(n as u8);
+        }
+        let lt = &self.line;
         let x = i32::from(self.drawn);
-        let first_pixel = i32::from(lt.first_pixel);
         // Position in the line, the SCX & 7 pixels discarded at the start
         // counted like output pixels: they are popped from 12 dots into
-        // mode 3, before the first pixel.
+        // mode 3, before the first pixel (after an SCX write above, as
+        // many as the new discard count).
         let pos = if t < first_pixel { t - first_pixel } else { x };
         let (active, start, skip) = self.renderer.window();
         let phase =
@@ -2392,6 +2422,41 @@ mod tests {
     fn first_of(r: &Rig, ly: usize, from: usize, c: u16) -> Option<usize> {
         let row = &r.frame[ly * SCREEN_WIDTH..][..SCREEN_WIDTH];
         (from..SCREEN_WIDTH).find(|&x| row[x] == c)
+    }
+
+    /// An SCX write inside the fine-scroll discard moves it: the compare
+    /// for discard pixel `k` runs at `mode3 + 12 + k - DISCARD_LEAD` and
+    /// wraps past 7 (SameBoy), moving mode 3's end and the image.
+    #[test]
+    fn scx_write_inside_the_discard_moves_it() {
+        // Line 5 starts with SCX 3; `(write dot, new SCX)` -> (mode 3's
+        // end, first pixel of tile 1, map 9800 alternating tiles 0 and 1).
+        let run = |write: Option<(u32, u8)>| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            for (i, b) in r.mem.vram[0x1800..0x1C00].iter_mut().enumerate() {
+                *b = (i & 1) as u8;
+            }
+            r.mem.io[0x43] = 3;
+            let l5 = clock(on, 0, 5 * LINE);
+            if let Some((t, scx)) = write {
+                write_fetch_reg(&mut r, l5 + u64::from(t), 0x43, scx);
+            }
+            r.sync(l5 + 455);
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            (end, first_of(&r, 5, 0, 4))
+        };
+        // Line-start fine scroll 3: map x 8 (tile 1) at screen x 5.
+        assert_eq!(run(None), (Some(256 + 3), Some(5)));
+        // Seen at compare 1 (dot 89): SCX & 7 = 2 matches at 2; 0 only
+        // after the wrap, at 8: the first tile wholly discarded, the image
+        // as with fine scroll 0 (`bg_column` is the same for n and n + 8).
+        assert_eq!(run(Some((89, 2))), (Some(256 + 2), Some(6)));
+        assert_eq!(run(Some((89, 0))), (Some(256 + 8), Some(8)));
+        // Seen at compare 3 (dot 91), before its match: wraps to 8. From
+        // dot 92 compare 3 has matched the line-start 3: no change.
+        assert_eq!(run(Some((91, 0))).0, Some(256 + 8));
+        assert_eq!(run(Some((92, 0))).0, Some(256 + 3));
     }
 
     #[test]
