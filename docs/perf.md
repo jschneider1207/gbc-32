@@ -89,7 +89,15 @@ samples, so the buffer never fills and `AUDIO_BUFFER_FULL` never splits a
 call. Every bench entry runs this way (before task 8 they passed an empty
 buffer: no samples, the APU only advanced).
 
-**APU cost (M6 task 8, x86 Ir per emulated frame).** `synth:worst-case`
+**APU cost (M6 task 8, x86 Ir per emulated frame).** Final state: the APU
+on `synth:worst-case` is **224.1k Ir/frame** (`Ctx::apu_sync` inclusive),
+**over** ADR 0021's original 200k budget/estimate. The human accepted it and
+set the APU budget to 230k (2026-11-22; ADR 0021 last amendment). It stays
+a recorded optimization target if the M7 measurement needs the room (plan
+M8 task "APU cost is over its original estimate"). worst-case is 3.78 M
+Ir/frame, 94.0% of the 4.02 M line; thumbv7em `.text` 94,492 of 96,000 B.
+The rest of this section is how it got there (the table's earlier columns
+and the 270k statement are history). `synth:worst-case`
 (2 s, 119.455 frames), all with buffers; channel cost = Ir over `@0`
 (buffers, no APU setup), from `scripts/check-bench.sh`-style callgrind
 runs of each `@<mask>` variant:
@@ -125,12 +133,11 @@ at every step. What changed:
   Cortex-M runtime unrolling (x4) otherwise doubles them on thumbv7em
   (`Square::integrate` 836 -> 410 B, `Wave::integrate` 1,304 -> 642 B).
 
-Sample output with every channel silent: `Apu::sync` inclusive on `@0`
+History (state at 4dd75a2, superseded by task 8b below): sample output with every channel silent: `Apu::sync` inclusive on `@0`
 is ~56k Ir/frame (6.67 M per 2 s, ~100 Ir per window; it was ~66k
 measured as buffers vs empty buffers). So the APU on worst-case is
-~270k Ir/frame: **still over the 200k budget** (ADR 0021), though
-worst-case is at 3.83 M Ir/frame, **95% of the 4.02 M line** (107%
-before). Noise is now the largest channel (70.9k: 6 LFSR steps per word
+~270k Ir/frame then, over the 200k budget (ADR 0021); worst-case was
+3.83 M Ir/frame, 95% of the 4.02 M line (107% before). Noise is now the largest channel (70.9k: 6 LFSR steps per word
 operation in 7-bit mode, 3 popcounts per window; plan 8b has exact
 ideas). thumbv7em `.text` 93,462 -> 94,120 B (`Apu::sync` 462 -> 832 B).
 
@@ -162,8 +169,9 @@ same fingerprints at buffers 7 and 64):
   multiplies.
 
 The APU on worst-case (`Ctx::apu_sync` inclusive, measured directly) is
-now **224.1k Ir/frame**, within the 230k budget (human decision
-2026-11-22, after the 200k estimate was missed; ADR 0021 amendment). Per window (65,536
+now **224.1k Ir/frame**: still over the original 200k estimate, accepted
+under the human's 230k budget (2026-11-22; ADR 0021 amendment), not a
+met target. Per window (65,536
 per 2 s): CH3 ~114 Ir, CH4 ~83, CH1/CH2 ~76 each, the mixer ~59.
 worst-case 3.78 M Ir/frame, 94.0% of the 4.02 M line. thumbv7em
 `.text` 94,120 -> 94,492 B (`Noise::integrate` 1,094 B; `Apu::sync`

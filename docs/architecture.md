@@ -6,9 +6,9 @@ the structure changes. The reasons behind decisions belong in
 
 > Status: the workspace and the core's public API (ADR 0006) are concrete as
 > of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
-> PPU mode timing and the DMG-compatibility renderer as of M3 (ADR 0014); the APU is
-> still a skeleton. Targets (dev board, then custom
-> board) as of 2026-11-21.
+> PPU mode timing and the DMG-compatibility renderer as of M3 (ADR 0014); the APU
+> (four channels, frame sequencer, 32,768 Hz output) as of M6 (ADR 0021). Targets
+> (dev board, then custom board) as of 2026-11-21.
 
 ## Workspace
 
@@ -180,7 +180,7 @@ desktop and `romtest` use `Box::new(Memory::new())`. `Emulator` holds
 `mem: &'a mut Memory` and `hw: Hw<'a>` (everything else, at most 864 B, 832 B now, checked by a test)
 and is small enough for the stack. Run calls copy the `mem` pointer into
 the per-call `Ctx`, so the hot path is the same as with an inline field.
-Per-line PPU scratch (the object pixel buffer `Memory::obj_buf`, 176 B) lives in `Memory` too, and the CGB palette tables will follow; the renderer gets it as a `&mut` array per `render` call.
+The APU's internal state is `Memory::apu` (all zero = powered off, at most 128 B, checked by a test; ADR 0021 section 2); its register bytes stay in `Memory::io`. Per-line PPU scratch (the object pixel buffer `Memory::obj_buf`, 176 B) lives in `Memory` too, and the CGB palette tables will follow; the renderer gets it as a `&mut` array per `render` call.
 New large state goes in `Memory` as fields whose power-on value is zero
 (non-zero post-boot values are written by `reset`); everything else goes in
 `Hw`.
@@ -193,20 +193,21 @@ enforces `no_std` for non-test code.
 
 See ADR 0002. In short:
 - The CPU is the master clock (ADR 0008). The per-M-cycle tick is only a
-  clock countdown; the timer, serial bit clock (and later DMA and DIV-APU)
+  clock countdown; the timer, serial bit clock (and the DIV-APU edge)
   are computed from the clock on access and act through deadlines in the
   event table (ADR 0011).
 - The PPU and APU are lazily caught up to the current cycle whenever one of
   their registers is written, and at scheduled events (PPU: STAT interrupt
-  edges, VBlank, each visible line's mode-3 end; APU: audio buffer
-  boundaries). PPU register reads are computed from the clock.
+  edges, VBlank, each visible line's mode-3 end; APU: `DivApu` and
+  `AudioBuffer`, below). PPU register reads are computed from the clock.
+  APU register reads are pure (they advance a copy of the channel).
 - PPU mode timing is exact (ADR 0014, below). Pixel output is drawn a
   scanline at a time, with
   a mid-line flush on register writes.
 
 ## Module sketch (`gbc-core`)
 
-Modules marked * exist; the others are planned. Skeleton parts are noted.
+All modules listed exist.
 
 ```
 lib.rs      * Emulator, Hw (cpu + sys), RunResult, run loop, public re-exports, sm83 test API
@@ -224,9 +225,15 @@ timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clo
 ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
   objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
   render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
-apu/        * StereoSample; later channels, frame sequencer, mixer
-dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`); GDMA/HDMA in M5
-cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1; later MBC2/3(+RTC)/5
+apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register write entry, pure reads (`read_apu`), StereoSample, output constants
+  units.rs  *   Length and Envelope, shared by the channels that have them
+  square.rs *   Square (CH1 and CH2, one impl) and Sweep (CH1)
+  wave.rs   *   Wave (CH3): period, wave RAM position, cached waveform sum
+  noise.rs  *   Noise (CH4): LFSR as its output sequence (word-parallel steps)
+  mix.rs    *   Output: window integrator, NR50/NR51 weights, buffer deadline
+dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`)
+hdma.rs     * VRAM DMA (GDMA/HDMA): `VramDma`, block copy, the resumable CPU stall (ADR 0021 GDMA amendment)
+cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1/2/3(+RTC)/5
 serial.rs   * SB/SC internal-clock transfers, last byte sent
 ```
 
@@ -279,6 +286,38 @@ side effects, so the CPU and `Emulator::peek` share one `read` function
 `scripts/fetch-sm83-tests.sh`, verified file by file against the committed
 `tools/sm83-tests/sm83-v1.sha256` (`GBC_REQUIRE_TEST_DATA=1` makes missing
 data a failure instead of a skip).
+
+### APU (ADR 0021)
+
+`apu/`. State is `Memory::apu` (`Apu`: `Output`, `Fs`, `[Square; 2]`,
+`Sweep`, `Wave`, `Noise`); nothing runs per M-cycle. `Apu::sync(now, io,
+audio, len)` advances every channel exactly in base clocks from
+`Output::synced` to `now` and, for a non-empty buffer, integrates the span
+into samples. It is called (out of line, `Ctx::apu_sync`) at:
+
+- every APU register write, FF10-FF3F (`Ctx::write_apu`: sync, then the
+  write; NR52 power via `write_nr52`);
+- each `EventKind::DivApu` deadline (`div_apu_event`: sync, then the
+  frame-sequencer step), the falling edge of the system counter's bit 12
+  (13 in double speed); a DIV write or STOP that is such an edge steps it
+  at once (`apu_div_reset`); a speed switch and reset recompute the
+  deadline (`Sys::set_div_apu_deadline`); it is `NEVER` while off;
+- the `EventKind::AudioBuffer` deadline (`audio_buffer_event`: sync, raise
+  `AUDIO_BUFFER_FULL`), set at call start (`start_audio`) where the last
+  free slot's window ends, `NEVER` for an empty buffer;
+- the end of every run call (`Ctx::finish`).
+
+Reads are pure: FF10-FF25 are `mem.io | mask`; NR52, wave RAM and
+PCM12/PCM34 go through `read_apu`, which advances a copy of the channel to
+the access clock. The invariant is that register-visible state is a
+function of the clock and the register writes only, never of where syncs
+happened or whether a buffer was passed (unit tests split calls randomly;
+`bench --fingerprint --audio-buffer` checks the whole machine).
+
+Output: one stereo sample per 128 base clocks (32,768 Hz), the exact
+average of the mixed signal over the window; the core keeps DC and does no
+filtering. Hardware rules and the SameBoy count conversions are in
+`docs/reference/apu.md`; cost and code size in `docs/perf.md` ("APU cost").
 
 ### PPU timing (ADR 0014)
 
