@@ -4,34 +4,35 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M5 (CGB features): acceptance passes, close review not
-  run yet. M4 is `stage1-m4` (0bf708d), M3 `stage1-m3`, M2 `stage1-m2`,
-  M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, session 07 (log `logs/2026-11-22-07-m5-cgb.md`)
+- **Milestone:** M6 (APU), not started. M5 is `stage1-m5` (690a194), M4
+  `stage1-m4`, M3 `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
+- **Last updated:** 2026-11-22, end of session 07 (M5 close; log
+  `logs/2026-11-22-07-m5-cgb.md`)
 
 ## Next up
 
-1. **M5 close** (AGENTS.md "Independent review"): 3 reviewers in parallel
-   on `stage1-m4..HEAD` (hardware correctness, test integrity incl. the
-   gambatte check 78c6443 and the lockup rule 75902f9 which had no
-   separate review, perf/portability for the PPU/bus/CPU hot-path
-   changes). Only the perf reviewer builds (bench, code size); the other
-   two read and may run `cargo test`. Triage, fix confirmed high/medium,
-   then `--update-baseline` (the committed baseline still lists every
-   gambatte ROM `unsupported`), commit, tag `stage1-m5`.
-2. Unfinished M5 plan items roll forward as plan tasks (STOP-mode
-   accuracy and screen blank in STOP, palette mode-3 blocking, post-boot
-   CGB handover, OAM DMA conflicts vs gambatte, interrupt_time, the
-   other-clock-phase PPU thresholds, cgb-acid-hell 2 px).
-3. Code size: total `.text` is 84,942 of 85,100 B (158 B left). M6 (APU)
-   can't fit without a budget decision or big cuts: raise it with the
-   human before M6 (Needs human).
+Start M6 (`docs/plan/stage-1.md` "M6") in a fresh session. Acceptance:
+must-tier `blargg/cgb_sound` (the only failing must ROM).
 
-Perf watch: `synth:worst-case` ~3.69 M x86 Ir/frame (92% of the 4.02 M
-line, which assumes 1 Ir = 1 M7 cycle; thumbv7em code is 1-2x). Bench vs
-baseline (e22721c): cgb-acid2 +2.28%, cgb-raster +1.86%, the rest under
-+0.5% or negative. Run `check-bench.sh` and `check-code-size.sh` on every
-hot-path step.
+1. **Code size first.** Total `.text` is 85,068 of 85,100 B (32 B left).
+   Human decision (session 07): the total budget is raised once for M6, to
+   a figure measured after the first APU channel lands. So build the first
+   channel (e.g. on a branch, over budget), measure `.text`, estimate the
+   full APU, and bring the human a number before merging. Per-function
+   budgets stay.
+2. APU design per ADR 0002 (batched sample generation into a caller
+   buffer); the romtest audio rule (`_outaudio0/1`, 131 gambatte ROMs
+   `unsupported`) needs the core's audio output across the boundary
+   (ADR 0018).
+3. Stage 1 completion rule (README "Done when", human 2026-11-22): every
+   manifest ROM must pass before Stage 1 is done, except groups the human
+   signs off with a recorded reason. That is milestone M9; don't treat
+   stretch failures as "fine" in planning.
+
+Perf watch: `synth:worst-case` 3.54 M x86 Ir/frame (88% of the 4.02 M
+line, which assumes 1 Ir = 1 M7 cycle; thumbv7em code is 1-2x), now with
+per-line HBlank HDMA (e5cfde3). Baseline rebaselined at e5cfde3/a3dff9b.
+Run `check-bench.sh` and `check-code-size.sh` on every hot-path step.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
@@ -45,11 +46,13 @@ Working rules that matter here:
 
 ## Needs human
 
-Open (session 07): none. The human approved both manifest drafts in
-advance ("You have my ok", 2026-11-22): the PNG-reference group and the
-undef_ops lockup opt-in group, to be committed only if validation
-matches what was described (198 ROMs, no runner errors, the 10 undef_ops
-pass, none of them left in `gambatte-cgb`); otherwise back to the human.
+Open: none. (Coming in M6: the total `.text` budget number, see Next up.)
+
+Decided in session 07 (2026-11-22), human: Stage 1 is done only when every
+manifest test ROM passes, except groups the human signs off with a recorded
+reason (README "Done when", plan M9). Both manifest drafts approved in
+advance ("You have my ok") and committed after validation matched
+(8543723: PNG-reference group, 198 ROMs; undef_ops lockup opt-in group).
 
 Decided in session 07 (2026-11-22), human, after the M5 test-integrity
 review (medium: the lockup rule covered all 3,154 gambatte ROMs, broader
@@ -146,18 +149,15 @@ None.
 
 ## Acceptance snapshot
 
-Session 07, main 58c87a4 (full-manifest run, not yet a committed
-baseline; the committed baseline is still `stage1-m4`'s):
-- must 85/86: only `cgb_sound` fails (M6). cgb-acid2 and
-  mooneye-cgb-boot-regs pass (M5 acceptance).
-- should 32/40 (M4: 26): same-suite-cgb 6/6, age-cgb 14/21;
-  `blargg-interrupt-time` still fails.
-- stretch: about 2,555/3,263 with the gambatte check live (M4: 12, when
-  gambatte was `unsupported`); 131 gambatte audio ROMs `unsupported`
-  until M6.
+M5 baseline (`stage1-m5`, 690a194). `scripts/gate-stage1.sh` passes every
+step except must-tier `cgb_sound` (M6).
 
-Performance (`docs/perf.md`, `perf/bench-baseline.txt` rebaselined at
-e22721c; x86 Ir): worst-case ~443 M (3.69 M/frame, 92% of the 4.02 M
-line); cgb-acid2 +2.28% and cgb-raster +1.86% over the baseline.
-Code size (thumbv7em): gbc-core `.text` 84,942 of 85,100 B. `Hw` within
-its 864 B assert.
+| Tier | Pass | Total | Notes |
+|---|---|---|---|
+| must | 85 | 86 | `cgb_sound` (M6) |
+| should | 32 | 40 | same-suite-cgb 6/6, age-cgb 14/21, `interrupt_time` fails |
+| stretch | 2,573 | 3,461 | 757 fail, 131 audio `unsupported` (M6), 5 no-reference |
+
+Performance (`perf/bench-baseline.txt`, x86 Ir): worst-case 423.1 M
+(3.54 M/frame, 88%), cgb-acid2 591 M, cpu_instrs 1,622 M, halt-irq 248 M,
+cgb-raster 307 M. Code size (thumbv7em): `.text` 85,068 of 85,100 B.
