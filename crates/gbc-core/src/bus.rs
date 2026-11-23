@@ -29,7 +29,7 @@ use crate::ppu::{Frame, Ppu};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
-use crate::{Buttons, Emulator, Events};
+use crate::{Buttons, Emulator, Events, RunResult};
 
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
@@ -125,7 +125,9 @@ impl Sys<'_> {
     /// Sets the `DivApu` deadline at clock `now`: the next falling edge of
     /// the system counter's DIV-APU bit while the APU is `powered`, else
     /// [`NEVER`] (ADR 0021 section 4). Called wherever the counter is
-    /// rebased or the APU powers on. The caller reschedules.
+    /// rebased or the APU powers on. The caller reschedules. Out of line:
+    /// off `speed_switch` and the event handlers (code-size budgets).
+    #[inline(never)]
     pub(crate) fn set_div_apu_deadline(&mut self, powered: bool, now: u64) {
         let at = if powered {
             let k = self.timer.div_apu_bit() + 1;
@@ -327,7 +329,7 @@ pub(crate) struct Ctx<'r, 'a> {
     pub(crate) audio_len: usize,
     pub(crate) events: Events,
     /// Events that end the run call.
-    stop_on: Events,
+    pub(crate) stop_on: Events,
     /// The run call ends once the clock reaches this (`u64::MAX`: no
     /// target, or already reached).
     target: u64,
@@ -502,10 +504,25 @@ impl Ctx<'_, '_> {
         apu.sync(now, io, self.audio, &mut self.audio_len);
     }
 
+    /// The end of a run call that started at clock `start`: the samples
+    /// completed in it are written, a partial window carries over (ADR 0021
+    /// section 3), and the context is dropped. Out of line: once per call,
+    /// off `Emulator::run`.
+    #[inline(never)]
+    pub(crate) fn finish(mut self, start: u64) -> RunResult {
+        self.apu_sync(self.clock());
+        RunResult {
+            events: self.events,
+            clocks: self.clock() - start,
+            audio_samples: self.audio_len,
+        }
+    }
+
     /// The start of a run call: the APU is brought to the clock (advance
     /// only, if a caller left it behind), and with buffer room the
     /// `AudioBuffer` deadline is where the last slot's window ends. The
-    /// caller reschedules.
+    /// caller reschedules. Out of line: once per call, off `Emulator::run`.
+    #[inline(never)]
     fn start_audio(&mut self) {
         let now = self.clock();
         let apu = &mut self.mem.apu;
@@ -643,13 +660,7 @@ impl Ctx<'_, '_> {
                     s.iflags |= s.timer.reload(now);
                     s.sched.set_inline(EventKind::Timer, s.timer.deadline());
                 }
-                EventKind::Serial => {
-                    let done = self.sys.serial.shift();
-                    self.serial_done(done);
-                    // `boundary` reschedules after the loop.
-                    let at = self.serial_deadline(now);
-                    self.sys.sched.set_inline(EventKind::Serial, at);
-                }
+                EventKind::Serial => self.serial_event(now),
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
                 EventKind::Dma => {
@@ -666,10 +677,24 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// A serial bit shift is due at `now` (`EventKind::Serial`). Out of
+    /// line, off `boundary`: only while a transfer runs. `boundary`
+    /// reschedules after the event loop.
+    #[cold]
+    #[inline(never)]
+    fn serial_event(&mut self, now: u64) {
+        let done = self.sys.serial.shift();
+        self.serial_done(done);
+        let at = self.serial_deadline(now);
+        self.sys.sched.set_inline(EventKind::Serial, at);
+    }
+
     /// Applies the scheduled button changes due at the M-cycle boundary
     /// `now`: those at a clock inside the M-cycle that starts at `now` or
     /// earlier (rounded down, ADR 0012), so accesses from `now` on see
-    /// them. Then schedules the next one.
+    /// them. Then schedules the next one. Out of line, off `boundary`.
+    #[cold]
+    #[inline(never)]
     fn apply_inputs(&mut self, now: u64) {
         let m = self.hot.mcycle as u64;
         let s = &mut *self.sys;
@@ -1294,6 +1319,7 @@ impl Ctx<'_, '_> {
     /// stall (up to 4,100 clocks) crossing the `AudioBuffer` deadline
     /// would complete windows with no slot left, dropping them (ADR 0021,
     /// GDMA stall amendment).
+    #[inline(never)]
     pub(crate) fn vdma_stall(&mut self, limit: u64) {
         // In a local: no event handler touches the stall.
         let mut n = u32::from(self.sys.vdma.stall);
@@ -1411,6 +1437,7 @@ impl Ctx<'_, '_> {
     /// Sources: ROM, cartridge RAM and WRAM are read; VRAM and E000-FFFF
     /// read FF (SameBoy reads the CPU data bus there, which this core does
     /// not model).
+    #[inline(never)]
     pub(crate) fn vram_dma(&mut self) {
         let now = self.clock();
         self.run_ppu_to_call(now);

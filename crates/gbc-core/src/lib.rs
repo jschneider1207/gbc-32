@@ -601,14 +601,10 @@ impl<'a> Emulator<'a> {
         // next call resumes it first (ADR 0021, GDMA stall amendment).
         let limit = if single { u64::MAX } else { end };
         loop {
-            if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.fetches_next(&ctx) {
-                ctx.vram_dma();
-            }
-            if ctx.sys.vdma.stall != 0 {
-                ctx.vdma_stall(limit);
-                if ctx.sys.vdma.stall != 0 || (!single && finished(&ctx)) {
-                    break;
-                }
+            if (ctx.sys.vdma.pending || ctx.sys.vdma.stall != 0)
+                && vdma_turn(cpu, &mut ctx, limit, single)
+            {
+                break;
             }
             // A single step: done before it starts, so `run` stops after one.
             ctx.done = finished(&ctx) || ctx.sys.vdma.pending;
@@ -617,14 +613,7 @@ impl<'a> Emulator<'a> {
                 break;
             }
         }
-        // The samples completed in the call are written; a partial window
-        // carries over (ADR 0021 section 3).
-        ctx.apu_sync(ctx.clock());
-        RunResult {
-            events: ctx.events,
-            clocks: ctx.clock() - start,
-            audio_samples: ctx.audio_len,
-        }
+        ctx.finish(start)
     }
 
     // --- Debug access: plain field reads, nothing on the hot path. ---
@@ -755,6 +744,27 @@ impl<'a> Emulator<'a> {
             sys.cart.set_rtc(state.masked(), sys.hot.clock());
         }
     }
+}
+
+/// The VRAM DMA part of a run-call step (ADR 0017; ADR 0021, GDMA stall
+/// amendment): a pending transfer step runs where the CPU would fetch its
+/// next opcode, then its CPU stall runs, stopping early at a stop event or
+/// `limit` (the target, or `u64::MAX` for a `single` step). Returns
+/// whether the call ends: inside the stall, or after it at a stop event
+/// or the target (not for a single step, which runs its instruction).
+/// Out of line, off `Emulator::run` (code-size budgets): only while a
+/// transfer is pending or stalls the CPU.
+#[inline(never)]
+fn vdma_turn(cpu: &Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
+    if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.fetches_next(ctx) {
+        ctx.vram_dma();
+    }
+    if ctx.sys.vdma.stall == 0 {
+        return false;
+    }
+    ctx.vdma_stall(limit);
+    ctx.sys.vdma.stall != 0
+        || (!single && (ctx.events.intersects(ctx.stop_on) || ctx.clock() >= limit))
 }
 
 #[cfg(test)]

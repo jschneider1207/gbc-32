@@ -18,8 +18,17 @@ use crate::ppu::OBJ_BUF_LEN;
 /// integers and flags) whose power-on value is zero; non-zero power-on values (e.g. post-boot I/O registers) are
 /// written by `reset`, not by `new`. Checked by the
 /// `memory_new_is_all_zero_bytes` test.
+// `repr(C)`: `apu` (8-byte aligned) last, so the hot arrays keep the
+// offsets they had before it (rustc puts the most aligned field first),
+// which the bus and renderer code size depends on (Thumb-2 immediates).
 #[cfg_attr(test, derive(PartialEq))]
+#[repr(C)]
 pub struct Memory {
+    /// Per BG palette, the pixel-pair table of its resolved colors
+    /// (`ppu::render::pair_table`), kept up to date on palette writes so
+    /// the renderer never builds one. Palette 0 in DMG compatibility mode
+    /// is BGP's colors.
+    pub(crate) bg_pairs: [[u32; 16]; 8],
     /// 8 banks of 4 KiB (CGB). Bank 0 at C000, banks 1-7 at D000 (SVBK).
     pub(crate) wram: [u8; 0x8000],
     /// 2 banks of 8 KiB (CGB, VBK).
@@ -53,11 +62,6 @@ pub struct Memory {
     pub(crate) bg_pal: [u8; 64],
     /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
     pub(crate) obj_pal: [u8; 64],
-    /// Per BG palette, the pixel-pair table of its resolved colors
-    /// (`ppu::render::pair_table`), kept up to date on palette writes so
-    /// the renderer never builds one. Palette 0 in DMG compatibility mode
-    /// is BGP's colors.
-    pub(crate) bg_pairs: [[u32; 16]; 8],
     /// The APU's internal state (ADR 0021 section 2): here, not in `Hw`, as
     /// it is only touched on cold paths. All zero is powered off.
     pub(crate) apu: Apu,
