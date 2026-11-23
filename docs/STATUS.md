@@ -160,6 +160,7 @@ Context on earlier human decisions:
   `test-data/sm83/`. Set `GBC_REQUIRE_TEST_DATA=1` locally.
 - **Desktop system libraries:** installed. Windows target `x86_64-pc-windows-gnu` added to rustup (user-level, session 09) for `cargo check`. WSL2 Ubuntu 24.04, no `jq`.
   Scripts are bash or Elixir, not Python.
+- **Real-game ROMs (human):** `X:\gbc-roms` = `/mnt/x/gbc-roms` (all 6 checklist games). Read-only for agents: copy to a scratch dir before any run, never write `.sav` files there, never commit ROMs.
 - **Datasheets:** `../gbc-32-hardware/datasheets/` (read-only for agents).
 - **Commits:** stage by explicit path only (AGENTS.md Git). Other agents
   and the human commit concurrently.
