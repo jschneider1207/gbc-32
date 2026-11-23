@@ -895,6 +895,10 @@ impl Ppu {
                 _ if l != 144 || t >= edges::VBLANK => 1,
                 _ if t < edges::QUIRK2 => 0,
                 _ if hold => MODE_HOLD,
+                // Double speed: from `T <= 6` half-dots (dot 4), as the
+                // single-speed `T <= 4`; phase 2 lands half a dot before
+                // its whole dot (`edges::STAT_PHASE2`).
+                _ if t > edges::QUIRK2 && view == View::StatPhase1 => MODE_HOLD,
                 _ => MODE_0_2,
             };
         }
@@ -2271,7 +2275,34 @@ impl Ppu {
     fn update_at(&mut self, now: u64, iflags: &mut u8, double: bool, view: View) {
         let a = self.at(now);
         let mode = self.mode_source(now, a, double, view);
-        let cmp = Self::cmp(a, double).0;
+        // Double speed: the second phase of a STAT write lands half a dot
+        // after the first, which the whole-dot timeline puts a dot late
+        // (`edges::Observer::delay`); the comparison only changes on whole
+        // dots, so the half dot sees the dot before. CGB04C
+        // `m1/lyc143_late_m0enable_lycdisable_ds_1`: phase 2 at line 144
+        // t = 3.5 still sees LY=LYC (143) holding the line (design doc
+        // `lcd-offset-phase.md` step 4, comparison part only).
+        // (Line start: its own dot; the comparison is off or holds there.)
+        let half = u32::from(double && view == View::StatPhase2);
+        let ca = At {
+            t: a.t.saturating_sub(half),
+            ..a
+        };
+        let cmp = Self::cmp(ca, double).0;
+        // Single speed, STAT writes at the comparison-off dot of lines
+        // 1-152: the LY=LYC part is off, so the line drops to its mode
+        // part before the write (gambatte `getLycCmpLy`: `lycperiod` needs
+        // `timeToNextLy > 2` after its 2-cycle lead, our `t <= 2`; behavior
+        // only). CGB04C `m1/m1irq_enable_after_lyc144_2`: LYC=144 selected,
+        // a write at line 145 dot 3 selecting mode 1 instead requests it.
+        if !double
+            && view == View::StatPhase1
+            && a.t == edges::CMP_OFF
+            && (1..=152).contains(&a.line)
+        {
+            let m = self.line_irq.0 & IrqLine::MODE;
+            self.line_irq.0 = m | if m != 0 { IrqLine::STAT } else { 0 };
+        }
         if self.line_irq.eval(self.stat_select, self.lyc, mode, cmp) {
             *iflags |= INT_STAT;
         }

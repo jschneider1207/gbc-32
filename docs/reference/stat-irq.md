@@ -54,8 +54,19 @@ VBlank at t = 5; its mode-2 interrupt at T = 4 is our `Ly3`, t = 3).
   lower the mode part (`MODE_HOLD`): a mode-0 enable at line 143 and a
   mode-1 enable at line 153 trigger only while `T > 4`, an old mode-1
   select blocks while `T > 3`, and such a write no longer changes the
-  selects the mode-1 interrupt is blocked by. Double speed is not
-  changed (its phase 2 lands half a dot in, design step 4).
+  selects the mode-1 interrupt is blocked by. Double speed: the same
+  from `T <= 6` half-dots, i.e. a first phase at line 144 t = 4 (the
+  second phase lands half a dot before its whole dot).
+- Single speed, a STAT write whose first phase lands at the
+  comparison-off dot (t = 3, lines 1-152) sees LY=LYC off: the line
+  drops to its mode part first (gambatte `getLycCmpLy`, `lycperiod`
+  needs `timeToNextLy > 2` after the 2-cycle lead; `m1/m1irq_enable_
+  after_lyc144_2`). Only the first phase: gambatte writes at one time,
+  the first phase (`lycEnable/late_ff41_enable_lcdoffset1_1` regressed
+  when the second phase also did it).
+- Double speed, the second phase of a STAT write compares LY with LYC as
+  of the dot before its whole-dot position (it lands half a dot after
+  the first phase; `m1/lyc143_late_m0enable_lycdisable_ds_1`).
 
 ## Open
 

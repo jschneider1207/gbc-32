@@ -4020,22 +4020,42 @@ mod dma_tests {
         }
     }
 
-    /// CGB, single speed: with the LCD on (frame position = clock - E +
-    /// 7), selects `sel`, then a STAT write of `value` with its access at
-    /// frame position `pos`; returns IF's STAT bit from the write to `n`
-    /// M-cycles after it.
+    /// CGB, single speed: [`stat_irq_after_write_with`] with LYC = FF.
     fn stat_irq_after_write(sel: u8, pos: u64, value: u8, n: u64) -> u8 {
+        stat_irq_after_write_with(0xFF, sel, pos, value, n, false)
+    }
+
+    /// CGB: with LYC = `lyc` and the LCD on (frame position = clock - E +
+    /// 3), selects `sel`, then (in double speed: 2-clock M-cycles from
+    /// here) a STAT write of `value` with its access at frame position
+    /// `pos`; returns IF's STAT bit from the write to `n` M-cycles after
+    /// it.
+    fn stat_irq_after_write_with(
+        lyc: u8,
+        sel: u8,
+        pos: u64,
+        value: u8,
+        n: u64,
+        double: bool,
+    ) -> u8 {
         let emu = setup();
         let mut stat = 0;
         with_ctx(emu, |ctx| {
             let e = ctx.clock();
-            ctx.write(0xFF45, 0xFF);
+            ctx.write(0xFF45, lyc);
             ctx.write(0xFF40, 0x91);
             ctx.write(0xFF41, sel);
-            idle_to(ctx, e, (pos - 3) / 4);
+            // The switch's own timing is not under test.
+            ctx.hot.mcycle = if double { 2 } else { 4 };
+            while ctx.clock() < e + pos - 3 {
+                ctx.idle();
+            }
+            assert_eq!(ctx.clock(), e + pos - 3);
             ctx.sys.iflags = 0;
             ctx.write(0xFF41, value);
-            idle_to(ctx, e, (pos - 3) / 4 + n);
+            while ctx.clock() < e + pos - 3 + n * ctx.hot.mcycle as u64 {
+                ctx.idle();
+            }
             stat = ctx.sys.iflags & crate::ppu::INT_STAT;
         });
         stat
@@ -4077,5 +4097,30 @@ mod dma_tests {
         // Mode 2 enabled at dot 3 is too late for the quirk, and VBlank
         // doesn't repeat it.
         assert_eq!(stat_irq_after_write(0, 144 * 456 + 3, 0x20, 3), 0);
+    }
+
+    /// Single speed: a STAT write's first phase at the comparison-off dot
+    /// (t = 3) sees LY=LYC off, so switching from LYC to mode 1 there
+    /// requests the interrupt; a dot before it the LYC source still holds
+    /// the line (gambatte `m1/m1irq_enable_after_lyc144_{1,2}`, CGB04C).
+    #[test]
+    fn stat_write_at_the_comparison_off_dot_sees_ly_lyc_off() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let w = |pos| stat_irq_after_write_with(144, 0x40, pos, 0x10, 2, false);
+        assert_eq!(w(144 * 456 + 455), 0);
+        assert_eq!(w(145 * 456 + 3), STAT);
+    }
+
+    /// Double speed: a STAT write's second phase, half a dot after the
+    /// first, sees the comparison of that half dot: at line 144 t = 3.5
+    /// LY=LYC (143) still holds the line, so switching LYC for mode 0
+    /// keeps it high (gambatte `m1/lyc143_late_m0enable_lycdisable_ds_1`,
+    /// CGB04C: no STAT interrupt).
+    #[test]
+    fn double_speed_stat_phase_2_sees_the_comparison_half_a_dot_in() {
+        assert_eq!(
+            stat_irq_after_write_with(143, 0x40, 144 * 456 + 3, 0x08, 2, true),
+            0
+        );
     }
 }
