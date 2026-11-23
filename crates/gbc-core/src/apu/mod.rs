@@ -14,16 +14,18 @@
 //! Task 1(a) is the framework: power, the frame sequencer and the output
 //! pipeline. The channels plug into `Apu::write`, `Apu::integrate`,
 //! `Apu::advance`, [`Apu::step`] and the NR52 active bits. Task 1(b): CH2;
-//! task 3: CH1 with its sweep.
+//! task 3: CH1 with its sweep; task 4: CH3 (`write_wave`, `read_apu`).
 
 mod mix;
 mod square;
 mod units;
+mod wave;
 
 pub(crate) use mix::Output;
 
 use crate::memory::Memory;
 use square::{Square, Sweep};
+use wave::Wave;
 
 /// One stereo output sample, written by the core into the caller's audio
 /// buffer at [`AUDIO_SAMPLE_RATE`](crate::AUDIO_SAMPLE_RATE): the average
@@ -64,6 +66,8 @@ pub(crate) struct Apu {
     pub(crate) sq: [Square; 2],
     /// CH1's sweep.
     pub(crate) sweep: Sweep,
+    /// CH3.
+    pub(crate) wave: Wave,
 }
 
 /// Power and the frame sequencer (ADR 0021 section 4).
@@ -77,8 +81,8 @@ pub(crate) struct Fs {
     pub(crate) step: u8,
     /// The next DIV-APU edge is skipped (power on with the APU bit high).
     pub(crate) skip: bool,
-    /// NR52 bits 2, 3: CH3 and CH4 until their tasks (4-5) give them a
-    /// channel; CH1's and CH2's bits are `sq[i].on`.
+    /// NR52 bit 3: CH4 until its task (5) gives it a channel; CH1-CH3's
+    /// bits are `sq[i].on` and `wave.on`.
     pub(crate) active: u8,
     /// SameBoy's 1 MHz phase (`lf_div`) at power on, from the clock: the
     /// square trigger delay (ADR 0021 section 5, task 1(b)).
@@ -99,6 +103,7 @@ impl Apu {
             },
             sq: [Square::ZERO; 2],
             sweep: Sweep::ZERO,
+            wave: Wave::ZERO,
         }
     }
 
@@ -129,6 +134,7 @@ impl Apu {
     pub(crate) fn nr52(&self) -> u8 {
         0x70 | u8::from(self.fs.power) << 7
             | self.fs.active
+            | u8::from(self.wave.on) << 2
             | u8::from(self.sq[1].on) << 1
             | u8::from(self.sq[0].on)
     }
@@ -175,6 +181,9 @@ impl Apu {
         // `GB_apu_div_event`); the envelopes on step 0 (64 Hz).
         for sq in &mut self.sq {
             sq.frame_step(step);
+        }
+        if step & 1 == 1 {
+            self.wave.clock_length();
         }
         if step & 3 == 3 {
             // The sweep, 128 Hz.
@@ -227,22 +236,24 @@ impl Apu {
     /// Advances the channels by `dt` clocks without integrating (the
     /// empty-buffer path, ADR 0021 section 9).
     #[inline]
-    fn advance(&mut self, dt: u64) {
+    fn advance(&mut self, dt: u64, io: &[u8; 0x80]) {
         for sq in &mut self.sq {
             sq.advance(dt);
         }
+        self.wave.advance(dt, io);
     }
 
     /// Advances the channels by `dt` clocks (at most one sample window) and
     /// returns each channel's analog level (-15..15 while its DAC is on,
-    /// else 0) times clocks, summed over the span, for CH1-CH4. CH3 and
-    /// CH4 are silent (DAC off) until their tasks.
+    /// else 0) times clocks, summed over the span, for CH1-CH4. CH4 is
+    /// silent (DAC off) until its task. `io` holds wave RAM.
     #[inline]
-    fn integrate(&mut self, dt: u32) -> [i32; 4] {
+    fn integrate(&mut self, dt: u32, io: &[u8; 0x80]) -> [i32; 4] {
         let mut levels = [0; 4];
         for (level, sq) in levels.iter_mut().zip(&mut self.sq) {
             *level = sq.integrate(dt);
         }
+        levels[2] = self.wave.integrate(dt, io);
         levels
     }
 }
@@ -253,20 +264,39 @@ impl Apu {
 /// 3). Out of line, off `read_high`.
 #[inline(never)]
 pub(crate) fn read_apu(mem: &Memory, now: u64, reg: usize) -> u8 {
+    let dt = now.saturating_sub(mem.apu.out.synced);
     match reg {
         0x26 => mem.apu.nr52(),
         // PCM12/PCM34: each channel's digital output (0-15) if it is on,
         // else 0 (SameBoy `GB_IO_PCM12`/`PCM34`), at `now`: a copy of the
-        // channel is advanced. CH3, CH4: tasks 4-5.
+        // channel is advanced. CH4: task 5.
         0x76 => {
             let [ch1, ch2] = &mem.apu.sq;
-            let dt = now.saturating_sub(mem.apu.out.synced);
             ch1.digital_at(dt) | ch2.digital_at(dt) << 4
         }
-        0x77 => 0x00,
-        // Wave RAM as stored. CH3 playing: the byte it reads (task 4).
-        _ => mem.io[reg],
+        0x77 => mem.apu.wave.digital_at(dt, &mem.io),
+        // Wave RAM: while CH3 plays, the byte it reads at `now` (CGB).
+        _ => mem.apu.wave.read_ram_at(dt, &mem.io, reg),
     }
+}
+
+/// A write to NR30-NR34 (FF1A-FF1E) with the APU on, or to wave RAM
+/// (FF30-FF3F, writable while off too), by the low 7 address bits, after a
+/// sync. While CH3 is on, a wave RAM write lands in the byte being played
+/// (CGB; SameBoy `GB_apu_write`). Every such write recomputes the cached
+/// waveform sum (ADR 0021 sections 5, 8). Out of line, off `write_apu`.
+#[inline(never)]
+pub(crate) fn write_wave(mem: &mut Memory, reg: usize, value: u8) {
+    let Memory { apu, io, .. } = mem;
+    let wave = &mut apu.wave;
+    match reg.checked_sub(0x30) {
+        Some(i) => io[0x30 + wave.ram_offset(i)] = value,
+        None => {
+            io[reg & 0x7F] = value;
+            wave.write(reg.wrapping_sub(0x1A), value, apu.fs.step, io);
+        }
+    }
+    wave.resum(io);
 }
 
 #[cfg(test)]
@@ -416,5 +446,78 @@ mod tests {
         let low = -15 * 8 * 64;
         assert!(buf.iter().any(|s| s.left == low && s.right == low));
         assert_eq!(buf[0].left, 15 * 8 * 64, "first-sample zero: +15");
+    }
+}
+
+#[cfg(test)]
+mod wave_tests {
+    extern crate std;
+    use super::*;
+    use std::boxed::Box;
+
+    /// A powered APU with wave RAM 0x01, 0x23, ... and CH3 (DAC on,
+    /// volume 100%) triggered at f = 0x700 (512 clocks per step, first
+    /// step at 518), through `write_wave`.
+    fn ch3_playing() -> Box<Memory> {
+        let mut mem = Box::new(Memory::new());
+        mem.apu.power_on(0, false);
+        for i in 0..16 {
+            write_wave(
+                &mut mem,
+                0x30 + i,
+                (2 * i as u8) << 4 | (2 * i as u8 + 1) & 0xF,
+            );
+        }
+        for (reg, v) in [(0x1A, 0x80), (0x1C, 0x20), (0x1D, 0x00), (0x1E, 0x87)] {
+            write_wave(&mut mem, reg, v);
+        }
+        mem
+    }
+
+    #[test]
+    fn nr52_bit_2_and_pcm34_low_nibble_follow_ch3() {
+        let mem = ch3_playing();
+        assert_eq!(mem.apu.nr52() & 4, 4);
+        assert_eq!(read_apu(&mem, 0, 0x77), 0x00, "old buffer 0");
+        assert_eq!(read_apu(&mem, 518, 0x77), 0x01);
+        assert_eq!(read_apu(&mem, 518 + 2 * 512, 0x77), 0x03, "index 3");
+        assert_eq!(mem.apu.out.synced, 0, "pure");
+        let mut mem = mem;
+        write_wave(&mut mem, 0x1A, 0x00);
+        assert_eq!(mem.apu.nr52() & 4, 0, "DAC off");
+        assert_eq!(read_apu(&mem, 518, 0x77), 0x00);
+    }
+
+    #[test]
+    fn wave_ram_writes_while_on_reach_the_playing_byte_and_resum() {
+        let mut mem = ch3_playing();
+        let io = mem.io;
+        mem.apu.sync(518 + 512, &io, &mut [], &mut 0); // index 2: byte 1
+        assert_eq!(read_apu(&mem, 518 + 512, 0x3F), 0x23);
+        let sum = mem.apu.wave.sum;
+        write_wave(&mut mem, 0x3F, 0xFF);
+        assert_eq!((mem.io[0x31], mem.io[0x3F]), (0xFF, 0xEF));
+        assert_eq!(mem.apu.wave.sum, sum - 2 - 3 + 30, "resummed");
+        write_wave(&mut mem, 0x1C, 0x40); // 50%
+        // Nibbles 0-15 twice with 2, 3 replaced by 15, 15, each halved.
+        assert_eq!(mem.apu.wave.sum, 112 - 2 + 14, "resummed on NR32");
+    }
+
+    #[test]
+    fn ch3_is_audible_in_the_mix_and_its_length_runs_on_odd_steps() {
+        let mut mem = ch3_playing();
+        let mut io = mem.io;
+        io[0x24] = 0x77;
+        io[0x25] = 0x44; // CH3 only, both sides
+        let mut buf = [StereoSample::default(); 64];
+        let mut len = 0;
+        mem.apu.sync(64 * SAMPLE_PERIOD, &io, &mut buf, &mut len);
+        // Until 518: old buffer 0 -> analog +15; then nibble 1 -> +13.
+        assert_eq!(buf[0].left, 15 * 8 * 64);
+        assert_eq!(buf[5].right, 13 * 8 * 64);
+        write_wave(&mut mem, 0x1B, 0xFF); // length 1
+        write_wave(&mut mem, 0x1E, 0x47);
+        mem.apu.step(); // step 1: length
+        assert!(!mem.apu.wave.on);
     }
 }

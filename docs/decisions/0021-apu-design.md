@@ -466,3 +466,18 @@ contract: a call may now end inside a VRAM DMA stall, on an M-cycle
 boundary, instead of only on instruction boundaries (ADR 0006 amendment,
 `run_until`/`step` docs). `set_buttons_at`'s "between calls the clock is
 on an M-cycle boundary" still holds.
+
+### 2026-11-22: CH3 implementation notes (M6 task 4)
+- **Countdown convention** verified in SameBoy: the trigger's
+  `(f ^ 0x7FF) + 3` ticks are `(2051 - f) * 2` base clocks, as section 5
+  assumed; no `lf_div` term (docs/reference/apu.md). SameBoy's retrigger
+  one tick before a step loads wave RAM byte 0 into the buffer; modelled.
+- **The waveform sum is eager, not invalidated.** `Wave::sum` is
+  recomputed at every NR30-NR34 or wave RAM write (`apu::write_wave`,
+  cold), instead of a lazy cache filled by `integrate`: a lazy fill would
+  make the state depend on whether a buffer was passed, against the
+  section 3 invariant. The zero state stays exact because `Wave` stores
+  the NR32 code (0 = mute, sum 0), not the shift.
+- CH3 register and wave RAM writes go from `Ctx::write_apu` to
+  `apu::write_wave` (out of line; it needs `Memory::io` for wave RAM),
+  not through `Apu::write`. The sync methods take `io` for the same reason.

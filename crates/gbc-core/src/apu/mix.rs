@@ -85,7 +85,7 @@ impl Apu {
         };
         self.out.synced = now;
         if audio.is_empty() {
-            self.advance(dt);
+            self.advance(dt, io);
             self.out.live = false;
             return;
         }
@@ -94,7 +94,7 @@ impl Apu {
         while dt != 0 {
             let pos = u64::from(self.out.pos);
             let seg = (SAMPLE_PERIOD - pos).min(dt);
-            let sums = mix(self.integrate(seg as u32), nr50, nr51);
+            let sums = mix(self.integrate(seg as u32, io), nr50, nr51);
             self.out.acc[0] += sums[0];
             self.out.acc[1] += sums[1];
             dt -= seg;

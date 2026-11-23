@@ -37,3 +37,28 @@ A retrigger of an active channel keeps its output.
 SameBoy's `duties` lists positions 0-7 left to right: 12.5% `00000001`,
 25% `10000001`, 50% `10000111`, 75% `01111110`. As masks with bit i =
 position i: `0x80`, `0x81`, `0xE1`, `0x7E` (`square.rs` `DUTY`).
+
+## Wave channel (CH3) timing and CGB wave RAM access
+
+SameBoy (`Core/apu.c`, MIT) counts CH3 in the same 2 MHz ticks as the
+squares, with the same convention (a `sample_countdown` of n fires after
+n + 1 ticks: `GB_apu_run` steps while `cycles_left > sample_countdown`).
+The step reload `f ^ 0x7FF` gives `2048 - f` ticks = `(2048 - f) * 2` base
+clocks per sample (Pan Docs). The trigger (`GB_apu_write` NR34) loads
+`(f ^ 0x7FF) + 3`: the first step comes `(2051 - f) * 2` base clocks after
+the trigger, with no `lf_div` term and no on/off difference.
+
+- Trigger: index 0, the sample buffer (`current_sample_byte`) kept, the
+  output the buffer's high nibble at once ("we don't change the sample
+  just yet! This was verified on hardware"). Exception: a retrigger of an
+  active channel with `sample_countdown == 0` (one tick, 2 clocks, before
+  a step) loads wave RAM byte 0 into the buffer. The DMG wave RAM
+  corruption on retrigger is `!GB_is_cgb` only.
+- Each step: index + 1 (mod 32), buffer = wave RAM byte `index / 2`,
+  output its high nibble for even indices, low for odd, `>> {4, 0, 1,
+  2}[NR32 code]`.
+- CGB wave RAM while CH3 is on: reads and writes reach byte `index / 2`
+  at any time (`GB_apu_read`/`GB_apu_write`; DMG only within the read
+  window, AGB reads FF). A write does not update the buffer.
+- Pinned arbiters (all pass): blargg `cgb_sound` 09, 10, 12; gambatte
+  `sound/ch3_*` (26 ROMs); same-suite `apu/channel_3/*` gained 13 passes.

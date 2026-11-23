@@ -564,12 +564,14 @@ impl Ctx<'_, '_> {
         match reg {
             0x26 => self.write_nr52(value, now),
             0x10..=0x25 if !self.mem.apu.powered() => {}
+            // CH3 and wave RAM (also while off).
+            0x1A..=0x1E | 0x30..=0x3F => apu::write_wave(self.mem, reg, value),
             // Channel registers: stored, then decoded by the channels.
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
                 self.mem.apu.write(reg, value, now);
             }
-            // Wave RAM: stored (CH3 playing: task 4).
+            // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,
         }
     }
