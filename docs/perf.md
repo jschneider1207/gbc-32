@@ -700,8 +700,10 @@ hash> <path>`, sorted by path, so two builds can be compared bit for bit (ADR
 `misc` and `emulator-only`, `blargg`, `age-test-roms`, `same-suite`,
 `cgb-acid2`, `cgb-acid-hell`, `dmg-acid2`, `mealybug-tearoom-tests`,
 `rtc3test` and `mbc3-tester` (334 ROMs, each run twice: plain and
-`<path>#input`), plus the 3,154 gambatte `*cgb04c*` ROMs run once for N/8
-seconds: 3,822 runs, about 8 s wall on 8 threads at N=3. Fewer than 3,800
+`<path>#input`), plus the 3,154 gambatte `*cgb04c*` ROMs and the 198 with a sibling
+`<stem>_cgb04c.png` and no `cgb04c` in the name (the manifest's
+`gambatte-cgb-png` group), each run once for N/8 seconds (22 frames at N=3;
+the checks read frame 15): 4,020 runs, about 8 s wall on 8 threads at N=3. Fewer than 4,000
 runs (a missing or partial `test-roms/`) is an error; a ROM that fails to
 load prints `LOAD-ERROR <path>`. Each ROM runs on the only supported model
 (CGB C, default palettes) in 456-clock `run_until` chunks with `LD_B_B` and
@@ -737,7 +739,7 @@ output is unchanged.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
 worktree and the working tree, runs both fingerprints with the same args,
-lists the differing ROMs and exits 0 only if none differ. It warns loudly when
+lists the differing ROMs and exits 0 only if none differ. A ROM run on only one side (the corpus changed since <rev>) fails it unless `--allow-corpus-change` is passed (then only the common ROMs are compared). It warns loudly when
 the working tree has uncommitted changes under `crates/`, `tools/` or
 `Cargo.*` (the new side is the working tree, not HEAD), when the two sides
 have different run counts, and when ROMs fail to load. Use it on commits

@@ -55,6 +55,9 @@ use gbc_core::{
 struct Suite {
     dir: &'static str,
     name_contains: Option<&'static str>,
+    /// Only ROMs whose name lacks `cgb04c` and that have a sibling
+    /// `<stem>_cgb04c.png` (the manifest's `gambatte-cgb-png` group).
+    sibling_png: bool,
     div: u64,
     input_pass: bool,
 }
@@ -63,6 +66,7 @@ const fn suite(dir: &'static str) -> Suite {
     Suite {
         dir,
         name_contains: None,
+        sibling_png: false,
         div: 1,
         input_pass: true,
     }
@@ -87,6 +91,18 @@ const CORPUS: &[Suite] = &[
     Suite {
         dir: "gambatte",
         name_contains: Some("cgb04c"),
+        sibling_png: false,
+        div: 8,
+        input_pass: false,
+    },
+    // As the manifest's `gambatte-cgb-png` group (ADR 0018): the 198 ROMs with
+    // a sibling `_cgb04c.png` reference and no `cgb04c` in the name (scx_during_m3,
+    // scy, bgtilemap, bgtiledata, window...). Same run length: the check reads
+    // frame 15 (`run_frames = 15`), and 1/8 of 3 s is 22 frames.
+    Suite {
+        dir: "gambatte",
+        name_contains: None,
+        sibling_png: true,
         div: 8,
         input_pass: false,
     },
@@ -94,8 +110,8 @@ const CORPUS: &[Suite] = &[
 
 /// Fewer runs than this means test-roms/ is missing or partial (the pinned
 /// release gives 334 ROMs outside gambatte, run twice, and 3,154 gambatte
-/// ROMs: 3,822 runs), and "identical" would mean little.
-pub const MIN_RUNS: usize = 3_800;
+/// `cgb04c` ROMs and 198 with a sibling PNG: 4,020 runs), and "identical" would mean little.
+pub const MIN_RUNS: usize = 4_000;
 
 const CHUNK_CLOCKS: u64 = 456;
 
@@ -165,20 +181,38 @@ impl Fnv {
     }
 }
 
-fn collect(dir: &Path, name_contains: Option<&str>, out: &mut Vec<PathBuf>) {
+/// The `gambatte-cgb-png` rule: no `cgb04c` in the name, and a sibling
+/// `<stem>_cgb04c.png` exists.
+fn has_cgb04c_png(p: &Path) -> bool {
+    let named = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.contains("cgb04c"));
+    !named
+        && p.with_extension("")
+            .with_file_name(format!(
+                "{}_cgb04c.png",
+                p.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+            ))
+            .is_file()
+}
+
+fn collect(dir: &Path, s: &Suite, out: &mut Vec<PathBuf>) {
+    let name_contains = s.name_contains;
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect(&p, name_contains, out);
+            collect(&p, s, out);
         } else if matches!(p.extension().and_then(|x| x.to_str()), Some("gb" | "gbc"))
             && name_contains.is_none_or(|s| {
                 p.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.contains(s))
             })
+            && (!s.sibling_png || has_cgb04c_png(&p))
         {
             out.push(p);
         }
@@ -300,7 +334,7 @@ pub fn run(root: &Path, secs: u64, audio: usize, hash_samples: bool) -> std::pro
     }
     for s in CORPUS {
         let mut roms = Vec::new();
-        collect(&root.join(s.dir), s.name_contains, &mut roms);
+        collect(&root.join(s.dir), s, &mut roms);
         let end = secs * u64::from(CLOCK_HZ) / s.div;
         for p in roms {
             if s.input_pass {

@@ -7,6 +7,11 @@
 # Builds tools/bench at <rev> in a temporary git worktree and the current
 # working tree, runs `bench --fingerprint` on both with the same arguments,
 # and diffs the per-ROM hashes. Exit 0 iff identical.
+#
+# A ROM run on only one side (the corpus changed between <rev> and now) is
+# reported as CORPUS lines and fails by default; --allow-corpus-change
+# (a script flag, not passed to bench) compares only the common ROMs and
+# still reports the one-sided ones.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,6 +20,12 @@ cd "$(dirname "$0")/.."
 [ $# -ge 1 ] || { echo "usage: $0 <rev> [--seconds N] [--root DIR]" >&2; exit 2; }
 rev=$1
 shift
+allow_corpus=0
+rest=()
+for a in "$@"; do
+  if [ "$a" = --allow-corpus-change ]; then allow_corpus=1; else rest+=("$a"); fi
+done
+set -- "${rest[@]+${rest[@]}}"
 git rev-parse --verify --quiet "$rev^{commit}" >/dev/null || { echo "diff-fingerprint: unknown rev '$rev'" >&2; exit 2; }
 
 # The new side is the working tree, not HEAD: say so loudly if they differ.
@@ -57,20 +68,37 @@ fi
 if errs=$(grep -c '^LOAD-ERROR' "$tmp/new.txt"); then
   echo "diff-fingerprint: WARNING: $errs ROMs failed to load in the working tree" >&2
 fi
-if diff -q "$tmp/old.txt" "$tmp/new.txt" >/dev/null; then
-  echo "diff-fingerprint: identical ($total ROMs) vs $rev"
-  exit 0
+# One-sided ROMs (corpus changed between <rev> and now) are never "identical".
+# The path is everything after the first space (some paths contain spaces).
+strip() { sed 's/^[^ ]* //' "$1" | sort; }
+strip "$tmp/old.txt" > "$tmp/old.paths"
+strip "$tmp/new.txt" > "$tmp/new.paths"
+comm -23 "$tmp/old.paths" "$tmp/new.paths" | sed 's/^/CORPUS only at rev: /' > "$tmp/corpus.txt"
+comm -13 "$tmp/old.paths" "$tmp/new.paths" | sed 's/^/CORPUS only in working tree: /' >> "$tmp/corpus.txt"
+ncorpus=$(wc -l < "$tmp/corpus.txt")
+if [ "$ncorpus" -gt 0 ]; then
+  head -n 5 "$tmp/corpus.txt"
+  [ "$ncorpus" -le 5 ] || echo "... ($((ncorpus - 5)) more)"
+  if [ "$allow_corpus" = 1 ]; then
+    echo "diff-fingerprint: WARNING: $ncorpus runs exist on only one side (--allow-corpus-change): comparing the common ROMs only" >&2
+  else
+    echo "diff-fingerprint: FAIL: $ncorpus runs exist on only one side; $rev has a different corpus, so \"identical\" would mean less. Pass --allow-corpus-change to compare the common ROMs only." >&2
+    exit 1
+  fi
 fi
 
-# The path is everything after the first space (some paths contain spaces);
-# compare by path so added/removed ROMs show too.
+# Compare by path, over the ROMs both sides ran.
 cmp="$tmp/cmp.txt"
 awk '
   { h = $1; p = $0; sub(/^[^ ]* /, "", p) }
   NR == FNR { old[p] = h; next }
-  { seen[p] = 1; o = (p in old) ? old[p] : "MISSING"; if (o != h) print "DIFF " p "  " o " -> " h }
-  END { for (p in old) if (!(p in seen)) print "DIFF " p "  " old[p] " -> MISSING" }
+  { if ((p in old) && old[p] != h) print "DIFF " p "  " old[p] " -> " h }
 ' "$tmp/old.txt" "$tmp/new.txt" | sort > "$cmp"
+ncmp=$(wc -l < "$cmp")
+if [ "$ncmp" -eq 0 ]; then
+  echo "diff-fingerprint: identical ($((total - ncorpus)) common ROMs compared, $ncorpus one-sided) vs $rev"
+  exit 0
+fi
 cat "$cmp"
-echo "diff-fingerprint: $(wc -l < "$cmp") of $total ROMs differ vs $rev" >&2
+echo "diff-fingerprint: $ncmp of $total ROMs differ vs $rev" >&2
 exit 1
