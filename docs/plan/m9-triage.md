@@ -132,6 +132,9 @@ speed (`late_wy_ds_2`, `arg/late_wy_1toFF_ds_2`,
 `arg/late_wy_FFto{0,2}_ly2_ds_1`, `arg/late_wy_FFto2_ly2_scx5_ds_1`):
 their LYC=153 sync looks 3 dots late in double speed (lcd-offset step 5),
 not a WY rule. Group 4 now has 16 left.
+**Status (`m9-ly153-ds`):** the 5 double-speed rows fixed (LYC=153 sync
+one M-cycle late, then double-speed WY checks half a dot later and
+`WY_LEAD_DS` = 1; lcd-offset step 5). Group 4: 11 left.
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-
@@ -256,6 +259,15 @@ The `_ds` variants of `m0enable`, `m1`, `m2enable`, `lycEnable`,
 `lcd_offset`, `ly0` (all 4), `lyc153int_m2irq` (2), `m2int_*`,
 `irq_precedence/late_m0irq_retrigger_ds`. Same mechanism as group 6 at
 half-dot CPU accesses; do after 6 (likely shares the fix).
+**Status (`m9-ly153-ds`):** LYC=153 compares at `t = 5` (was 6) and the
+dispatch clears a VBlank/STAT IF bit half-way into its last M-cycle:
++27 over the manifest (`lyc153int_m2irq_ifw_ds_1`, `ly0/lycint152_lyc153*_ds_2`
+x3, 4 `*_late_retrigger_ds_1`, `lycEnable/lyc153_*_ds` x2,
+`gdma_cycles_*_ds_1` x4, `lycwirq`/`lycstatwirq_trigger_ly00_*_ds_1`,
+`lcd_offset/offset2_lyc99int_*_1` x3, `m2enable/late_enable_ly0_lcdoffset2_1`,
+single-speed `m2int_m2irq_late_retrigger_1`, `late_m0irq_retrigger_scx1_1`,
+and the 5 WY rows of group 4). Left here: `lyc153int_m2irq_late_retrigger_ds_1`,
+`lycint152_lyc0irq_late_retrigger_ds_1` (edge one dot before the boundary).
 
 ### 10. Line-0 mid-line SCX write (7)
 `scx_0*c0/scx_during_m3_2` and `_ds_1` (46-104 px): the diff image is

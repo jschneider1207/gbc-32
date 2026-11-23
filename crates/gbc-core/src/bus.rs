@@ -838,7 +838,7 @@ impl Ctx<'_, '_> {
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem);
                 if win {
-                    s.ppu.window_write(at, self.mem, false);
+                    s.ppu.window_write(at, self.mem, None);
                 }
             }
             0x41 => {
@@ -907,7 +907,7 @@ impl Ctx<'_, '_> {
                     s.ppu.flush(at, self.mem, self.frame);
                 }
                 if reg == 0x4A {
-                    s.ppu.wy_write(now, self.mem);
+                    s.ppu.wy_write(now, self.mem, double);
                 }
                 self.mem.io[reg] = value;
                 match reg {
@@ -920,8 +920,8 @@ impl Ctx<'_, '_> {
                     ),
                     // The WY condition and the window start in mode 3
                     // (`Ppu::wy_written`; WY lands at the access).
-                    0x4A => s.ppu.wy_written(now, self.mem),
-                    0x4B => s.ppu.window_write(at, self.mem, false),
+                    0x4A => s.ppu.wy_written(now, self.mem, double),
+                    0x4B => s.ppu.window_write(at, self.mem, None),
                     _ => {}
                 }
             }
@@ -1678,6 +1678,37 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn interrupt_flags(&self) -> u8 {
         self.sys.iflags
+    }
+
+    /// The PPU's bits (VBlank, STAT): its edges fall on dots, inside the
+    /// M-cycle, so the PPU runs to the half-way point (SameBoy
+    /// `GB_cpu_run`: `pending_cycles - 2`, then IF is cleared; 1 dot in
+    /// double speed, 2 in single), the bit is cleared, and an edge after
+    /// that requests the interrupt again (a PPU deadline it passed
+    /// reschedules at the M-cycle's end). CGB04C (`_1` not absorbed, `_2`
+    /// absorbed): `m2int_m2irq/m2int_m2irq_late_retrigger_{1,ds_1}`,
+    /// `irq_precedence/late_m0irq_retrigger_{scx1_1,ds_1}`,
+    /// `m1/lycint143_m1irq_late_retrigger_ds_1`,
+    /// `m1/lycint_vblankirq_late_retrigger_ds_1`. The timer and serial
+    /// raise theirs at M-cycle boundaries here: after the M-cycle, as
+    /// before (`tima/tc00_irq_late_retrigger_ds_2`,
+    /// `serial/start_wait_trigger_int8_read_if_ds_2` absorb).
+    /// Inlined into the dispatch: out of line, `synth:halt-irq` ran 0.5%
+    /// more instructions and `Cpu::run` was 1.1 KB larger (measured).
+    #[inline(always)]
+    fn acknowledge(&mut self, pending: u8) {
+        const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
+        let bit = pending.isolate_lowest_one();
+        if bit & PPU != 0 {
+            // Only if a PPU edge can fall there (its deadline).
+            let mid = self.clock() + self.hot.mcycle as u64 / 2;
+            if self.sys.sched.deadline(EventKind::Ppu) <= mid {
+                self.run_ppu_to_call(mid);
+            }
+            self.sys.iflags &= !bit;
+        }
+        self.idle();
+        self.sys.iflags &= !(bit & !PPU);
     }
 
     #[inline(always)]
@@ -2518,6 +2549,47 @@ mod tests {
         assert_ne!(row[47], row[48], "SCX = 0 up to tile 6");
         assert_eq!(row[56], row[48], "tile 7 with SCX = 8");
         assert_ne!(row[64], row[48], "tile 8 with SCX = 8");
+    }
+
+    /// Interrupt dispatch, last M-cycle: the STAT bit is cleared half-way
+    /// into it (`Bus::acknowledge`), so a STAT edge up to there is
+    /// absorbed and one after it requests the interrupt again (gambatte
+    /// `m2int_m2irq/m2int_m2irq_late_retrigger_{1,ds_1}`), in both speeds.
+    #[test]
+    fn dispatch_acknowledges_ppu_interrupts_half_way_into_its_last_mcycle() {
+        // The mode-2 interrupt (STAT bit 5) of line 5 (t = 3) and of the
+        // next frame's line 0 (t = 4): on the CPU's grid (M-cycles from
+        // clock 0 mod 4), the first is at an M-cycle boundary and the
+        // second one clock past it.
+        let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
+        let line0 = line5 + 149 * 456;
+        // (M-cycle clocks, edge, last M-cycle start before it, absorbed)
+        for (m, edge, before, absorbed) in [
+            (4, line5 + 3, 4, false),
+            (4, line0 + 4, 1, true),
+            (2, line5 + 3, 2, false),
+            (2, line0 + 4, 1, true),
+        ] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let start = edge - before;
+            let _ = emu.run_until(start - 40, &mut fb, &mut []);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            ctx.write(0xFF41, 0x20);
+            ctx.hot.mcycle = m;
+            while ctx.clock() < start {
+                ctx.idle();
+            }
+            assert_eq!(ctx.clock(), start);
+            ctx.sys.iflags = crate::ppu::INT_STAT;
+            crate::cpu::Bus::acknowledge(&mut ctx, crate::ppu::INT_STAT);
+            let stat = ctx.sys.iflags & crate::ppu::INT_STAT != 0;
+            assert_eq!(
+                stat, !absorbed,
+                "M-cycle {m}, edge {edge}, last from - {before}"
+            );
+        }
     }
 
     /// CPU accesses to VRAM in mode 3 and to OAM in modes 2-3 are blocked;

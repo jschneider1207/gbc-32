@@ -166,14 +166,25 @@ pub(crate) const PALETTE_EXTRA_SS: u32 = 4;
 pub(crate) const PALETTE_EXTRA_DS: u32 = 2;
 
 /// Line dot from which the line's sticky WY == LY check has seen WY: line
-/// 0, other lines (see the use in `wy_write`).
+/// 0, other lines (see the use in `wy_write`); double speed
+/// [`WY_DS_LATE`] later.
 pub(crate) const WY_CHECK_AT: [u32; 2] = [t(h(7)), t(h(3))];
 
 /// Line dot from which a WY write no longer matches the current LY (see
 /// `Ppu::wy_written`): gambatte (ppu.cpp, behaviour only) checks WY == LY
 /// at line cycle 450 and WY == LY + 1 at 454; with the latter as
-/// [`WY_CHECK_AT`]\[1\] (next line's 3), the former is 455.
+/// [`WY_CHECK_AT`]\[1\] (next line's 3), the former is 455. Double speed
+/// [`WY_DS_LATE`] later: the whole line (`window/arg/late_wy_FFto0_ly2_ds_1`
+/// writes at 455 and still matches).
 pub(crate) const WY_LAST_AT: u32 = t(h(455));
+
+/// Double speed: the WY checks ([`WY_CHECK_AT`], [`WY_LAST_AT`]) half a
+/// dot later (gambatte's double-speed thresholds are odd `cc`, design doc
+/// 1.4), so the first whole dot is one later. CGB04C:
+/// `window/late_wy_ds_1` writes at 7 (before the line-0 check),
+/// `_ds_lcdoffset1_2` at 8 (after); `window/arg/late_wy_1toFF_ds_1` at 3
+/// (before), `_ds_lcdoffset1_2` at 4.
+pub(crate) const WY_DS_LATE: u32 = t(H(1));
 
 /// A LYC write is deferred to the PPU's next update before this dot
 /// (lines 0-152, while LY changes): single speed at the write's view (one
@@ -196,8 +207,16 @@ pub(crate) const QUIRK2: u32 = t(h(2));
 /// Line 144: mode 1, the VBlank interrupt and the frame.
 pub(crate) const VBLANK: u32 = t(h(5));
 
-/// Line 153: the comparison against 153 from here ...
-pub(crate) const L153_CMP: u32 = t(h(6));
+/// Line 153: the comparison against 153 from here (the walk, the read and
+/// the LYC write views), as lines 1-152 ([`CMP_WALK`]): gambatte (behaviour
+/// only) schedules the LYC interrupt at `lyc*456 - 2` for LYC 1-153 alike
+/// (`lyc_irq.cpp`). At 6 (SameBoy's state 14 length on CGB C, on its own
+/// grid) the double-speed default phase dispatched one M-cycle late:
+/// CGB04C `lyc153int_m2irq/lyc153int_m2irq_ifw_ds_1` (the line-0 mode-2
+/// interrupt after its IF write), `ly0/lycint152_lyc153{irq,flag}_ds_2`,
+/// `lcd_offset/offset2_lyc99int_*_1` (single speed, boundaries at
+/// `t = 1 mod 4`). Design doc step 5.
+pub(crate) const L153_CMP: u32 = t(h(5));
 /// ... off from here (single speed; double speed keeps 153) ...
 pub(crate) const L153_OFF: u32 = t(h(8));
 /// ... against 0 from here.

@@ -51,7 +51,7 @@
 //!
 //! Line 153 (states 19, 14, 15, 16, 29, 17): LY reads 153 from `t = 2`
 //! and 0 from `t = 6` (`t = 8` in double speed); the comparison is
-//! against 153 at `t = 6..8` and against 0 from `t = 12`.
+//! against 153 at `t = 5..8` and against 0 from `t = 12`.
 //!
 //! The first line after the LCD is enabled has no OAM scan (GBCTR; SameBoy
 //! "Handle mode 2 on the very first line 0"): mode 0 until position 86,
@@ -196,7 +196,7 @@ enum Pt {
     V4,
     /// Line 144, `t = 5`: mode 1, VBlank interrupt, the frame.
     VBlank,
-    /// Line 153, `t = 6`: comparison against 153.
+    /// Line 153, `t = 5`: comparison against 153.
     L153Cmp,
     /// Line 153, `t = 8`: comparison off (single speed).
     L153Off,
@@ -355,6 +355,11 @@ const DISCARD_LEAD: i32 = 8;
 const WINDOW_LEAD: i32 = 0;
 const WINDOW_ON_LEAD: i32 = 1;
 const WY_LEAD: i32 = 5;
+/// `WY_LEAD` in double speed, with the WY checks half a dot later
+/// (`edges::WY_DS_LATE`): gambatte (behaviour only) delays `wy2` 2.5
+/// dots there instead of 6. CGB04C: `window/arg/late_wy_FFto2_ly2_ds_1`
+/// writes 1 dot before the stall (window), `_scx5_ds_2` at it (none).
+const WY_LEAD_DS: i32 = 1;
 /// Stall dots kept by an LCDC.5 clear during the window stall: those
 /// before the write's clock plus this (calibrated, step E2).
 const WINDOW_OFF_LEAD: i32 = 0;
@@ -365,7 +370,12 @@ const WINDOW_OFF_LEAD: i32 = 0;
 /// earlier relative to the line; SameBoy checks at each line start
 /// (`wy_check`). Calibrated (step E2): one value for all lines, 7 -> 6
 /// flips / 0 regressions, 3-6 -> 2-4 regressions (line 0 ROMs).
-use edges::{WY_CHECK_AT, WY_LAST_AT};
+use edges::{WY_CHECK_AT, WY_DS_LATE, WY_LAST_AT};
+
+/// [`WY_LEAD`] or [`WY_LEAD_DS`].
+const fn wy_lead(double: bool) -> i32 {
+    if double { WY_LEAD_DS } else { WY_LEAD }
+}
 
 impl LineTiming {
     const NONE: Self = Self {
@@ -1125,7 +1135,7 @@ impl Ppu {
                 self.line_irq = line;
             }
             match c.pt {
-                Pt::Latch => self.latch(l, self.first_frame && l == 0, mem),
+                Pt::Latch => self.latch(l, self.first_frame && l == 0, mem, double),
                 // The rest of line `l` (to pixel 160). VRAM, OAM and the
                 // palettes are blocked for the CPU during mode 3, so
                 // drawing here sees what the hardware saw; register writes
@@ -1556,10 +1566,11 @@ impl Ppu {
     /// only `latch` and writes check otherwise).
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory) {
+    pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory, double: bool) {
         if self.lcd_enabled() {
             let a = self.at(now);
-            if a.line < LINES && a.t >= WY_CHECK_AT[usize::from(a.line != 0)] {
+            let at = WY_CHECK_AT[usize::from(a.line != 0)] + WY_DS_LATE * u32::from(double);
+            if a.line < LINES && a.t >= at {
                 self.check_wy(a.line, mem);
             }
         }
@@ -1576,11 +1587,11 @@ impl Ppu {
     /// exist (`latch`, `LineTiming::wy_late`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory) {
+    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, double: bool) {
         if self.lcd_enabled() {
             let a = self.at(now);
             if a.line < LINES {
-                if a.t < WY_LAST_AT {
+                if a.t < WY_LAST_AT + WY_DS_LATE * u32::from(double) {
                     self.check_wy(a.line, mem);
                 }
                 if a.t >= edges::MODE3 && self.line.start != now.wrapping_sub(u64::from(a.t)) {
@@ -1588,7 +1599,7 @@ impl Ppu {
                 }
             }
         }
-        self.window_write(now, mem, true);
+        self.window_write(now, mem, Some(wy_lead(double)));
     }
 
     /// `latch` with a WY write in mode 3 before the pipeline started
@@ -1596,9 +1607,10 @@ impl Ppu {
     /// after it.
     #[cold]
     #[inline(never)]
-    fn wy_late_latched(&mut self, mem: &Memory) {
+    fn wy_late_latched(&mut self, mem: &Memory, double: bool) {
         let t = core::mem::take(&mut self.line.wy_late);
-        self.window_write(self.line.start.wrapping_add(u64::from(t)), mem, true);
+        let at = self.line.start.wrapping_add(u64::from(t));
+        self.window_write(at, mem, Some(wy_lead(double)));
     }
 
     /// The pixel pipeline of line `l` starts: fix its mode-3 timing from
@@ -1606,7 +1618,7 @@ impl Ppu {
     /// first line after LCD enable). Out of line: it runs once per line,
     /// and inlined, its register loads were hoisted into every sync.
     #[inline(never)]
-    fn latch(&mut self, l: u32, first: bool, mem: &mut Memory) {
+    fn latch(&mut self, l: u32, first: bool, mem: &mut Memory, double: bool) {
         // SameBoy checks at the line start and on WY/LCDC writes (bus
         // `write_ppu` calls `check_wy` too); here before the window's
         // start is fixed.
@@ -1673,7 +1685,7 @@ impl Ppu {
             self.attr_on = n != 0;
         }
         if self.line.wy_late != 0 {
-            self.wy_late_latched(mem);
+            self.wy_late_latched(mem, double);
         }
     }
 
@@ -1771,7 +1783,7 @@ impl Ppu {
     /// registers, so the pixels agree with mode 3's length.
     #[cold]
     #[inline(never)]
-    pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, wy: bool) {
+    pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, wy_lead: Option<i32>) {
         let lt = &self.line;
         let a = self.at(now);
         let t = a.t as i32;
@@ -1813,7 +1825,7 @@ impl Ppu {
         self.set_stalls(scx, window);
         self.renderer.set_window(window);
         // The new start is already past: the window waits for the next line.
-        let lead = if wy { WY_LEAD } else { WINDOW_ON_LEAD };
+        let lead = wy_lead.unwrap_or(WINDOW_ON_LEAD);
         if decided(self.window_stall_at(), lead - adj(mem.io[0x4B])) {
             self.set_stalls(scx, None);
             self.renderer.set_window(None);
@@ -2185,7 +2197,7 @@ impl Ppu {
         if deferred {
             return;
         }
-        // Line 153, dots 2-5 and 12-23 (6-11 were deferred above): first
+        // Line 153, dots 2-4 and 12-23 (5-11 were deferred above): first
         // compared with 153; in 12-23 the usual update follows.
         if l == 153
             && (edges::LYC153_OLD_FROM..edges::LYC153_OLD_UNTIL).contains(&t)
@@ -2533,15 +2545,15 @@ mod tests {
                 match reg {
                     0x40 => {
                         r.ppu.lcdc = v;
-                        r.ppu.window_write(now, &r.mem, false);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
                     0x4A => {
                         r.mem.io[0x4A] = v;
-                        r.ppu.wy_written(now, &r.mem);
+                        r.ppu.wy_written(now, &r.mem, false);
                     }
                     _ => {
                         r.mem.io[0x4B] = v;
-                        r.ppu.window_write(now, &r.mem, false);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
                 }
             }
@@ -2814,7 +2826,7 @@ mod tests {
         let mut r = Rig::on_at(on, SEL_LYC, 153);
         let l153 = clock(on, 0, 153 * LINE);
         let irqs = r.irqs(l153 + 100);
-        assert_eq!(irqs.last(), Some(&(l153 + 6, INT_STAT)));
+        assert_eq!(irqs.last(), Some(&(l153 + 5, INT_STAT)));
         // 152 & 153 = 152 mid-carry (t = 1, 2), 153 from t = 3, 0 from 7.
         let ly: Vec<u8> = [0, 2, 3, 6, 7, 12]
             .iter()
@@ -3075,7 +3087,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.ppu.lcdc &= !0x20;
-                r.ppu.window_write(now, &r.mem, false);
+                r.ppu.window_write(now, &r.mem, None);
             }
             let irq = r
                 .irqs(l5 + 455)
@@ -3144,7 +3156,7 @@ mod tests {
                 } else {
                     r.mem.io[reg] = v;
                 }
-                r.ppu.window_write(now, &r.mem, false);
+                r.ppu.window_write(now, &r.mem, None);
             }
             let mut irqs = r.irqs(l5 + u64::from(mid));
             irqs.extend(r.irqs(l5 + 455));
@@ -3203,7 +3215,7 @@ mod tests {
     fn wy_write_after_the_line_check_keeps_the_old_match() {
         // (line, WY = line, then FF written at dot `t`) -> mode-3 end; the
         // window at x = 64 stalls 6 dots.
-        let end = |line: u32, t: u32| {
+        let end_at = |line: u32, t: u32, ds: bool| {
             let on = 1000;
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.ppu.lcdc |= 0x20;
@@ -3213,18 +3225,25 @@ mod tests {
             let l = clock(on, 1, line * LINE);
             let now = l + u64::from(t);
             r.sync(now);
-            r.ppu.wy_write(now, &r.mem);
+            r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = 0xFF;
-            r.ppu.wy_written(now, &r.mem);
+            r.ppu.wy_written(now, &r.mem, ds);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
+        let end = |line, t| end_at(line, t, false);
         assert_eq!(end(5, 2), Some(256));
         assert_eq!(end(5, 3), Some(256 + 6));
         assert_eq!(end(5, 40), Some(256 + 6));
         // Line 0 is checked 4 dots later than the others.
         assert_eq!(end(0, 6), Some(256));
         assert_eq!(end(0, 7), Some(256 + 6));
+        // Double speed: both one dot later (`window/late_wy_ds_1`,
+        // `window/arg/late_wy_1toFF_ds_1`).
+        assert_eq!(end_at(5, 3, true), Some(256));
+        assert_eq!(end_at(5, 4, true), Some(256 + 6));
+        assert_eq!(end_at(0, 7, true), Some(256));
+        assert_eq!(end_at(0, 8, true), Some(256 + 6));
     }
 
     /// When a WY write that makes WY == LY starts the window (gambatte
@@ -3238,7 +3257,7 @@ mod tests {
     fn wy_write_starts_the_window_until_its_check() {
         // (WY written on `line` at dot `t`, SCX, WX) -> mode-3 end of
         // `line + next`; WY = FF before.
-        let end = |line: u32, t: u32, next: u32, scx: u8, wx: u8| {
+        let end_at = |line: u32, t: u32, next: u32, scx: u8, wx: u8, ds: bool| {
             let on = 1000;
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.ppu.lcdc |= 0x20;
@@ -3248,13 +3267,14 @@ mod tests {
             let l = clock(on, 1, line * LINE);
             let now = l + u64::from(t);
             r.sync(now);
-            r.ppu.wy_write(now, &r.mem);
+            r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = line as u8;
-            r.ppu.wy_written(now, &r.mem);
+            r.ppu.wy_written(now, &r.mem, ds);
             let l = clock(on, 1, (line + next) * LINE);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
+        let end = |line, t, next, scx, wx| end_at(line, t, next, scx, wx, false);
         // (a) The window (x = 64) on the next line, or not.
         assert_eq!(end(5, 451, 1, 0, 0x47), Some(256 + 6));
         assert_eq!(end(5, 454, 1, 0, 0x47), Some(256 + 6));
@@ -3271,6 +3291,14 @@ mod tests {
         assert_eq!(end(5, 89, 0, 4, 0x00), Some(256 + 4));
         // The match holds for the next line either way.
         assert_eq!(end(5, 85, 1, 0, 0x00), Some(256 + 6));
+        // Double speed (`WY_DS_LATE`, `WY_LEAD_DS`): (a) the whole
+        // line (`window/arg/late_wy_FFto0_ly2_ds_1`); (b) until 1 dot
+        // before the stall (`late_wy_FFto2_ly2_ds_1`, `_scx5_ds_2`).
+        assert_eq!(end_at(5, 455, 1, 0, 0x47, true), Some(256 + 6));
+        assert_eq!(end_at(5, 95, 0, 0, 0x07, true), Some(256 + 6));
+        assert_eq!(end_at(5, 96, 0, 0, 0x07, true), Some(256));
+        assert_eq!(end_at(5, 100, 0, 5, 0x07, true), Some(256 + 5 + 6));
+        assert_eq!(end_at(5, 101, 0, 5, 0x07, true), Some(256 + 5));
     }
 
     /// The window's pixels and line counter follow the same start decision
@@ -3308,12 +3336,12 @@ mod tests {
                     r.mem.io[reg] = v;
                 }
                 match reg {
-                    0x4A => r.ppu.wy_written(now, &r.mem),
+                    0x4A => r.ppu.wy_written(now, &r.mem, false),
                     0x40 => {
                         r.ppu.check_wy_at(now, &r.mem);
-                        r.ppu.window_write(now, &r.mem, false);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
-                    _ => r.ppu.window_write(now, &r.mem, false),
+                    _ => r.ppu.window_write(now, &r.mem, None),
                 }
             }
             r.sync(l5 + 455);
@@ -3544,7 +3572,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.mem.io[0x4B] = 0x77;
-                r.ppu.window_write(now, &r.mem, false);
+                r.ppu.window_write(now, &r.mem, None);
             }
             r.sync(l5 + 455);
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)

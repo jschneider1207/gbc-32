@@ -144,6 +144,14 @@ pub trait Bus {
     fn interrupt_flags(&self) -> u8;
     /// Writes IF (used to acknowledge a dispatched interrupt). Free.
     fn set_interrupt_flags(&mut self, value: u8);
+    /// The last M-cycle of an interrupt dispatch: idles it and clears the
+    /// lowest bit of `pending` (if any) in IF, which SameBoy does 2
+    /// T-cycles in. Default: after the M-cycle, so a source firing again
+    /// in it is absorbed (at M-cycle granularity, ADR 0008).
+    fn acknowledge(&mut self, pending: u8) {
+        self.idle();
+        self.set_interrupt_flags(self.interrupt_flags() & !(pending.isolate_lowest_one()));
+    }
     /// The CPU raised an event (`Events::LD_B_B`, `Events::CPU_LOCKED`).
     fn event(&mut self, event: Events) {
         let _ = event;
@@ -440,9 +448,8 @@ impl Cpu {
     /// IF in between can cancel the dispatch; PC is then 0000 (Mooneye
     /// `ie_push`; SameBoy `GB_cpu_run`). The chosen IF bit is cleared only
     /// in the last M-cycle (SameBoy: 2 T-cycles into it), so the same
-    /// source firing again by the end of the dispatch is absorbed (gambatte
-    /// `tima/tc00_irq_late_retrigger_2`); at M-cycle granularity (ADR
-    /// 0008) that is after the final M-cycle's events.
+    /// source firing again by then is absorbed (gambatte
+    /// `tima/tc00_irq_late_retrigger_2`; [`Bus::acknowledge`]).
     fn dispatch<B: Bus>(&mut self, bus: &mut B) {
         self.ime = false;
         self.ei_pending = false;
@@ -456,14 +463,12 @@ impl Cpu {
         bus.write(sp, pc as u8);
         self.regs.sp = sp;
         let pending = ie & bus.interrupt_flags() & INT_MASK;
-        bus.idle();
-        if pending == 0 {
-            self.regs.pc = 0x0000;
+        bus.acknowledge(pending);
+        self.regs.pc = if pending == 0 {
+            0x0000
         } else {
-            let bit = pending.trailing_zeros();
-            bus.set_interrupt_flags(bus.interrupt_flags() & !(1 << bit));
-            self.regs.pc = 0x0040 + 8 * bit as u16;
-        }
+            0x0040 + 8 * pending.trailing_zeros() as u16
+        };
     }
 
     /// HALT (opcode 76), after its fetch.

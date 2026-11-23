@@ -152,7 +152,7 @@ positions, with LY changing at `t = 3` (ADR 0014, ADR 0020 amendment).
 | Coincidence bit (read) | `getLycCmpLy`: `timeToNextLy -= 2+2ds`, flag needs `> 2` | off at t = 3, on at 4 (lines 1-143); off at 0-3 on 144-152 (`Ppu::cmp`) |
 | Mode-2 IRQ, lines 1-143 | `mode2_irq_line_cycle = 456-4` (G = -4) | `Pt::Ly3`, t = 3 |
 | Mode-2 IRQ, line 0 | `mode2_irq_line_cycle_ly0 = 456-2` (G = -2) | `Pt::Ly4` line 0, t = 4 |
-| LYC IRQ, LYC = 1-153 | `lyc_irq.cpp` `schedule`: `lyc*456 - 2` (G = -2) | `Pt::Ly4`/`V4` t = 4; LYC 153: `L153Cmp` t = 6 |
+| LYC IRQ, LYC = 1-153 | `lyc_irq.cpp` `schedule`: `lyc*456 - 2` (G = -2) | `Pt::Ly4`/`V4` t = 4; LYC 153: `L153Cmp` t = 5 (was 6, step 5) |
 | LYC IRQ, LYC = 0 | `153*456 + 6` | `L153Zero`, line 153 t = 12 |
 | Mode-1 IRQ | `mode1_irq_frame_cycle = 144*456 - 2` (G = -2) | `Pt::VBlank`, 144:5 |
 | LYC IRQ blocked by | `lycIrqBlockedByM2OrM1StatIrq`: m2 select (LY 1-144), m1 select | STAT line high (the mode-2 source ends at `Ly4`) |
@@ -414,7 +414,7 @@ These literals move into `edges.rs` as derived constants:
 | `vram_blocked` | `[84, 91 / 86]` |
 | `oam_blocked` | `[0,84] [2,84] [3,86] [4,86]` |
 | `palette_blocked` | `[87, 88]`, `extra` 2/4 |
-| `write_lyc` | `t < 2`, 153 windows `2..6`, `6..12`, `12..24` |
+| `write_lyc` | `t < 2`, 153 windows `2..5`, `5..12`, `12..24` (were `2..6`, `6..12`; step 5) |
 | other | `WY_CHECK_AT`, `hdma::HBLANK_DELAY`, `bus.rs` FF41 `now + 1`, FF45 `now + !double` |
 
 Step 0 moves them with no value change, proven by `diff-fingerprint.sh`.
@@ -618,6 +618,28 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    144-152 (2 ROMs), the line-0 m2 IRQ and write windows (sweep;
    `m2irq_count` x4, `late_enable_ly0` x2), the LYC write at line 153
    (1).
+   **Line 153, done (branch `m9-ly153-ds`).** Traced (temporary
+   instrumentation): at the default double-speed phase (M-cycle
+   boundaries at odd `t`) the LYC=153 compare at `t = 6` dispatched at
+   `t = 7`; `lyc153int_m2irq_ifw_ds_1` needs the line-0 mode-2 IRQ
+   (0:4) after its IF write, which landed at 0:5, so the sync must be one
+   M-cycle (2 dots, not the estimated 3) earlier. `L153_CMP` 6 -> 5 (walk,
+   read and LYC-write views; gambatte `lyc*456 - 2` for LYC 1-153 alike,
+   so the same dot as `CMP_WALK`). Two companions it needed: (a) the
+   dispatch clears a VBlank/STAT IF bit half-way into its last M-cycle
+   (SameBoy `GB_cpu_run`, 2 T-cycles; `Bus::acknowledge`), as
+   `lycint152_lyc153irq_late_retrigger_ds_1` regressed without it and six
+   `*_late_retrigger_ds_1` / `_scx1_1` rows flip with it (timer and serial
+   keep the after-the-M-cycle clear: `tc00_irq_late_retrigger_ds_2`,
+   `start_wait_trigger_int8_read_if_ds_2` regress otherwise); (b) the WY
+   checks half a dot later in double speed (`WY_DS_LATE`) with
+   `WY_LEAD_DS` = 1 (`mid-line-ppu.md` section 7, "Late WY writes").
+   Full manifest +27 / -0; `diff-fingerprint.sh main` 54 ROMs (the 27,
+   plus 27 LYC=153- or line-0-synced siblings that keep their status).
+   Left: `lyc153int_m2irq_late_retrigger_ds_1` and
+   `lycint152_lyc0irq_late_retrigger_ds_1` (an edge one dot before the
+   boundary, line 0 `t = 4` and `L153_ZERO`, absorbed here but not on
+   hardware: likely half-dot edges), `m2enable/late_enable_ly0_ds_1`.
 6. **LY read edge re-check** after 1/3 (`ly_count_ds_{2,3}`). Possibly no
    change.
 7. **Access windows:**

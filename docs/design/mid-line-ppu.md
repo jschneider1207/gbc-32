@@ -713,6 +713,13 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   dispatch is likely late (`lyc153int_m2irq_*_ds_1` fail too): first
   `docs/design/lcd-offset-phase.md` step 5 (line-153 edges), then a
   per-speed `WY_LEAD`.
+  **Done (branch `m9-ly153-ds`):** the LYC=153 sync was one M-cycle (2
+  dots) late (lcd-offset step 5). With it, the five need the WY checks
+  half a dot later in double speed (`edges::WY_DS_LATE`: line 0 from 8,
+  other lines from 4, `WY_LAST_AT` the whole line; the `ds_lcdoffset1`
+  siblings write at 8 and 4) and `WY_LEAD_DS` = 1 (`late_wy_FFto2_ly2_ds_1`
+  writes at stall - 1, window; `_scx5_ds_2` at the stall, none). All 5
+  pass, their siblings keep passing.
 
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
