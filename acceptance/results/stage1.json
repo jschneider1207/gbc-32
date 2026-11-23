@@ -3348,11 +3348,8 @@
       "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_7.gbc": "pass",
       "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_8.gbc": "pass",
       "gambatte/scx_during_m3/scx_attrib_during_m3_spx1_ds.gbc": "pass",
-      "gambatte/scx_during_m3/scx_attrib_during_m3_spx2_ds.gbc": "fail",
       "gambatte/scx_during_m3/scx_during_m3_spx0.gbc": "pass",
       "gambatte/scx_during_m3/scx_during_m3_spx1.gbc": "pass",
-      "gambatte/scx_during_m3/scx_during_m3_spx2.gbc": "fail",
-      "gambatte/scx_during_m3/scx_during_m3_spx2_ds.gbc": "fail",
       "gambatte/scy/scx3/scy_during_m3_1.gbc": "pass",
       "gambatte/scy/scx3/scy_during_m3_2.gbc": "pass",
       "gambatte/scy/scx3/scy_during_m3_3.gbc": "pass",
@@ -3426,6 +3423,11 @@
       "gambatte/undef_ops/undef_op_f4_dmg08_cgb04c_out01.gbc": "pass",
       "gambatte/undef_ops/undef_op_fc_dmg08_cgb04c_out01.gbc": "pass",
       "gambatte/undef_ops/undef_op_fd_dmg08_cgb04c_out01.gbc": "pass"
+    },
+    "gambatte-uninit-palram": {
+      "gambatte/scx_during_m3/scx_attrib_during_m3_spx2_ds.gbc": "fail",
+      "gambatte/scx_during_m3/scx_during_m3_spx2.gbc": "fail",
+      "gambatte/scx_during_m3/scx_during_m3_spx2_ds.gbc": "fail"
     },
     "mbc3-tester": {
       "mbc3-tester/mbc3-tester.gb": "pass"
