@@ -3161,7 +3161,18 @@ mod dma_tests {
             // Other deadlines may come first (in CGB mode the first
             // DIV-APU edge is 352 clocks after power on, ADR 0022): skip
             // until the transfer ends; no skip may pass its deadline.
+            // Each skip advances the clock, so a few dozen iterations reach
+            // the deadline; the cap turns a stuck skip into a failure.
+            let mut skips = 0;
             while ctx.hot.dma != 0 {
+                skips += 1;
+                assert!(
+                    skips <= 1000,
+                    "idle skip made no progress: dma still {:#06X} after {skips} skips, clock {} (deadline {})",
+                    ctx.hot.dma,
+                    ctx.clock(),
+                    t0 + 162 * 4
+                );
                 ctx.idle_halted();
                 assert!(ctx.clock() <= t0 + 162 * 4);
             }
