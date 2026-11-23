@@ -392,3 +392,27 @@ alignment-dependent trigger); the sweep calculation delay; the DAC fade.
 - Classic (Pan Docs/blargg) envelope, sweep and noise timing pass the
   register-level tests; the gambatte audio ROMs may need the SameBoy-exact
   models of section 12.
+
+## Amendments
+
+### 2026-11-22: framework implementation notes (M6 task 1(a))
+Clarifications made while implementing; the decisions stand.
+- **"Room" means the call's buffer is non-empty.** Section 9's advance-only
+  test `audio.len() == audio_len` would also fire in the overshoot after
+  `AUDIO_BUFFER_FULL` (buffer full, rest of the instruction), which
+  section 8 wants integrated into `acc` so the next call continues the
+  same window grid. So `Apu::sync` integrates whenever the run call was
+  given a non-empty buffer and takes the advance-only path only for an
+  empty one; a window that completes with no slot left (not expected:
+  the overshoot is under one window) is dropped.
+- **Call start.** `Ctx::new` brings the APU to the clock if a caller left
+  it behind (advance only; normally a no-op after the end-of-call sync),
+  then with room restarts the grid if `!live` and sets the
+  `AudioBuffer` deadline, or `NEVER` without room, so a stale deadline
+  never survives a call.
+- `mem.io[0x26]` is no longer written: NR52 reads come from `Apu` only.
+- `Fs::phase` stores `(clock >> 1) & 1` at power on (SameBoy's 1 MHz
+  `lf_div` phase); task 1(b) fits its use.
+- Unit tests whose precondition is "nothing scheduled" (the idle and
+  halted-skip countdown tests) power the APU off first: post-boot it is
+  on, so `DivApu` fires every 8,192 clocks.

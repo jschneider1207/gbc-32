@@ -202,3 +202,18 @@ state at removal and the save-dirty flag; `into_buffers()` gives the old
 tuple), and the API gained `cart_info`, `save_dirty` and
 `clear_save_dirty`. "Buffers always come back" stands and now covers the
 RTC state too. Details and rationale: ADR 0015.
+
+### 2026-11-22: the audio sample rate (ADR 0021)
+
+The rate "fixed in M6" is **32,768 Hz** stereo (`CLOCK_HZ / 128`), the
+same in both CPU speeds. New public constants: `AUDIO_SAMPLE_RATE`
+(32,768) and `AUDIO_SAMPLE_CLOCKS` (128 base clocks per sample). Each
+sample is the average of the mixed signal over its 128-clock window; the
+core keeps DC, and resampling and the DC-blocking high-pass filter are the
+front end's job. The buffer contract is unchanged: samples are written from
+`audio[0]`, `RunResult::audio_samples` counts them, `AUDIO_BUFFER_FULL`
+ends the call when the last slot is written, and an empty slice discards
+audio. A partial window carries over to the next call, so with buffers
+that never fill the stream doesn't depend on how the caller chunks it;
+size buffers `clocks / 128 + 1` per call (550 for `run_frame`). Details
+and rationale: ADR 0021 sections 8-11.

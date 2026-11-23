@@ -216,6 +216,16 @@ pub const CLOCK_HZ: u32 = 4_194_304;
 /// Base clocks per LCD frame (154 lines x 456 dots).
 pub const FRAME_CLOCKS: u32 = 70_224;
 
+/// Audio output rate: 32,768 Hz stereo, in both CPU speeds (ADR 0021).
+/// Each sample is the average of the mixed signal over its
+/// [`AUDIO_SAMPLE_CLOCKS`]-clock window, with DC kept: resampling to a
+/// device rate and the DC-blocking high-pass filter are the front end's
+/// job. A run call of `n` clocks completes at most `n / 128 + 1` samples.
+pub const AUDIO_SAMPLE_RATE: u32 = CLOCK_HZ >> apu::SAMPLE_PERIOD_LOG2;
+
+/// Base clocks per audio sample (128).
+pub const AUDIO_SAMPLE_CLOCKS: u32 = 1 << apu::SAMPLE_PERIOD_LOG2;
+
 /// What a run call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
@@ -578,6 +588,9 @@ impl<'a> Emulator<'a> {
                 break;
             }
         }
+        // The samples completed in the call are written; a partial window
+        // carries over (ADR 0021 section 3).
+        ctx.apu_sync(ctx.clock());
         RunResult {
             events: ctx.events,
             clocks: ctx.clock() - start,
