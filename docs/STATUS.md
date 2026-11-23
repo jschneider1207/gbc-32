@@ -4,67 +4,90 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M8 (game compatibility + perf baseline), not started. M7
-  is `stage1-m7`, M6 `stage1-m6`, M5 `stage1-m5`, M4 `stage1-m4`, M3
-  `stage1-m3`, M2 `stage1-m2`, M1 `stage1-m1`.
-- **Last updated:** 2026-11-22, end of session 09 (M7 close; log
-  `logs/2026-11-22-09-m7-desktop.md`)
+- **Milestone:** M8 (game compatibility + perf baseline), in progress. M7
+  is `stage1-m7` (M1-M6 tagged likewise).
+- **Last updated:** 2026-11-23, session 10 (log
+  `logs/2026-11-22-10-m8-start.md`)
 
 ## Next up
 
-Start M8 (`docs/plan/stage-1.md` "M8") in a fresh session. The human is
-playing the real-game checklist on native Windows; their reports feed the
-first M8 task. Meanwhile take the unblocked M8 items, user-visible first:
-the M7 review lows (LCD-off screen should be white; `.gb`/`.gbc` sharing a
-`.sav`; Ctrl+C save), the headless frames/second benchmark, then code
-size/ITCM and unaligned ROM reads.
+1. **Real-game checklist results from the human** (plan, bottom) feed the
+   first M8 task. Headless smoke of all 6 games (scratch copies, 3600
+   frames) is clean after this session's core changes.
+2. **Mid-line PPU fidelity** (`docs/design/mid-line-ppu.md`): increment 1 is
+   done on branch `ppu-midline-1` (dfaf2ae, 57842c4; based on ebf3f45, needs
+   a rebase onto main): +35 ROMs, 0 regressions, but +864 B `.text` (over the
+   96,000 B total and `Ppu::draw` 158 > 155). Not merged. Either the
+   human raises the budgets (Needs human) or cold-code cuts free the room
+   (a size-cut pass was running at the end of session 10, see the log), or
+   the cheaper "draw-ahead" variant (design section 7). check-bench,
+   check-itcm-set, check-rom-loads and diff-fingerprint still have to run on
+   the branch.
+3. Remaining M8 items: `spsw-interrupts-cgbBC` (AGE `caution/`, low);
+   M6 hardware lows; PPU edge cases from the M3 review; APU cost
+   (optional); event-storm and ROM placement need Stage 2 hardware.
+4. M8 close: gate passes now; then the milestone review (hardware
+   correctness, test integrity incl. the romtest audio rule change
+   23154a2/b74079a, perf/portability: this milestone changed hot paths:
+   ROM reads, APU, PPU), update the baseline, tag `stage1-m8`. Not before
+   the human's checklist findings are fixed.
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
-window under WSLg and never use the GPU from WSL. That combination
-blue-screened the host (`docs/reference/incident-2026-11-22-wslg-bsod.md`).
-Window/audio/input smoke tests use `scripts/run-windows.sh <rom> --frames
-N [--out shot.png]`: it cross-builds the native `.exe` (mingw is
-installed) and runs it via interop on a scratch ROM copy. Keep runs short
-and only for front-end changes.
+window under WSLg and never use the GPU from WSL. Window/audio/input smoke
+tests use `scripts/run-windows.sh <rom> --frames N [--out shot.png]` on a
+scratch ROM copy; short, and only for front-end changes. Windows Update
+can shut WSL down mid-session (it did at 22:57 on 2026-11-22, installing
+WSL 3.0.5.0): commit often; agents resume from their transcripts.
 
 Desktop front end (`crates/gbc-desktop`): `gbc-desktop <rom> [--scale K]
 [--frames N] [--screenshot out.png] [--dmg-palette auto|gray]
-[--headless]`. winit 0.30 + softbuffer (CPU blit, integer scale), cpal 0.18
-audio with audio-driven pacing (ADR 0024: 20 Hz DC blocker, Catmull-Rom
-resampler, ±0.5% DRC, 50 ms target, clock fallback), gilrs 0.11 gamepad,
-`.sav` next to the ROM with the 48-byte BGB/VBA-M RTC footer, 1 s settle /
-10 s cap autosave (ADR 0023), CGB boot-ROM compatibility palettes for DMG
-games (ADR 0025). Keys: arrows, Z = B, X = A, Enter = Start, Right
-Shift/Backspace = Select, Esc quits. Env: `GBC_NO_AUDIO=1`,
-`GBC_AUDIO_STATS=1`. Gate item 8 builds it and runs `cpu_instrs.gb`
-headless for 600 frames. The human builds natively on Windows from a clone
-(`git pull` from this repo).
+[--headless]`. `--frames N` = N complete frames. Blank LCD shows white.
+Save: `<stem>.sav`, or `<file name>.sav` when `game.gb` and `game.gbc` sit
+side by side (ADR 0023 amendment). Ctrl+C/SIGTERM/panic still write the
+exit save (`ctrlc` crate). Audio: cpal, audio-driven pacing (ADR 0024),
+device reopen with 2-16 s backoff after a stream loss (amendment; real
+device loss untested: manual check below). Keys: arrows, Z = B, X = A,
+Enter = Start, Right Shift/Backspace = Select, Esc quits.
 
-Perf watch (unchanged in M7; the core was not touched): `synth:worst-case`
-3.908 M x86 Ir/frame, **97.2% of the 4.02 M line** (~110k headroom). APU
-budget (human): 230k channels+mixing (224.1k), <= 950 Ir per APU write
-(884.6). Code size: `.text` 94,754 of 96,000 B (1.2 KB left). Run
-`check-bench.sh` and `check-code-size.sh` on every hot-path step. `cargo
-doc -D warnings` fails on 3 links in `cpu/mod.rs` (not in the gate).
+Perf watch: `check-bench.sh` OK (all within +-0.6% of the baseline; the
+worst case was 97.2% of the 4.02 M x86 Ir/frame line at M7 and has moved
++~0.3% since). APU: 883.4 x86 Ir per APU write (budget <= 950).
+`.text` 95,602 of 96,000 B (398 B left) at eb019ba. ITCM set 55.7 KB of a
+56 KiB core budget (`scripts/check-itcm-set.sh`, ADR 0026 Proposed). New
+gate checks this session: `check-rom-loads.sh` (ADR 0027),
+`check-itcm-set.sh`. Wall-clock baseline: `bench --wall` (docs/perf.md).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
-- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change";
-  behavior changes must list and explain every differing ROM.
-- Resources: at most 2 concurrent builds, heavy steps (bench, fingerprint,
-  gate) alone; scratch worktrees get their own target dir and are deleted
-  when done (AGENTS.md "Machine resources").
-- Agents with one theme and a ~15-45 tool-call cap stay on budget.
+- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change".
+- Resources: at most 2 concurrent builds, heavy steps alone; core
+  experiments in scratch worktrees with their own target dir.
+- Parallel agents can collide on ADR numbers: check `docs/decisions/`
+  right before committing an ADR.
 
 ## Needs human
-Open (session 09):
-- **Real-game checklist** (plan, bottom; M8), on native Windows. Done so
-  far: Pokémon Red/Crystal played briefly with sound, no crash natively.
-  Still unchecked: a gamepad, and whether a battery `.sav` survives a
-  restart.
+Open (session 10):
+- **Code-size budget for mid-line PPU fidelity.** Increment 1 (+35 ROMs)
+  needs +864 B; the design's 7 increments need ~0.9-1.2 KB more in total
+  (estimate). Ask: raise gbc-core `.text` 96,000 -> ~97,500 B and
+  `Ppu::draw` 155 -> ~175 B, or keep 96,000 and take the cheaper
+  draw-ahead variant (palette/LCDC.0/1/WX writes within 16 pixels after a
+  map/SCX write apply late). Numbers: `docs/design/mid-line-ppu.md` sec. 6-7.
+- **Benchmark coverage:** should `synth:worst-case` gain one mid-line SCX
+  write per line so the new slow path is measured (~+45k Ir/frame,
+  estimate)? It makes the perf check stricter but moves the baseline.
+- **Real-game checklist** (plan, bottom), on native Windows. Extra checks
+  this session: Ctrl+C in the window still saves; change the default audio
+  output device mid-game (expect `audio stopped`, then within ~2 s
+  `output device back; resuming audio pacing`, no burst); a battery `.sav`
+  survives a restart; a gamepad.
 - Optional, strongest guard against a repeat of the BSOD: set
   `guiApplications=false` in `%UserProfile%\.wslconfig` (disables WSLg).
-
+- FYI: `wsl-pro.service` restarts every 2 s because a cmd.exe AutoRun
+  entry points at a missing `E:\Tools\ansicon\x64\ansicon`; harmless
+  noise.
+- Optional: disable or schedule WSL auto-updates (Windows Update shut WSL
+  down mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
@@ -179,12 +202,16 @@ None.
 
 ## Acceptance snapshot
 
-M7 baseline (`stage1-m7`; identical to M6, the core is unchanged). `scripts/gate-stage1.sh` passes.
+Current HEAD (eb019ba), not yet the committed baseline (`stage1-m7`
+baseline is older; update at M8 close). `scripts/gate-stage1.sh` passed at
+01bca59.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
-| should | 33 | 40 | same-suite-cgb 6/6, age-cgb 14/21, `interrupt_time` fails |
-| stretch | 2,765 | 3,461 | 696 fail, 0 unsupported (131 audio ROMs judged), 5 no-reference |
+| should | 39 | 40 | only age `spsw-interrupts-cgbBC` (AGE caution/) fails |
+| stretch | 2,797 | 3,466 | 5 no-reference |
 
-Performance: see Perf watch above and `perf/bench-baseline.txt` (x86 Ir).
+Session 10 gains (vs the M7 baseline): WX=0 stall (8ba9c4c), line-0 mode 0
++ post-boot position 171 (740154c), frame-sequencer double-speed delay
+(0a83ae5), LY read timing (d2b6e56), STOP DIV-reset TIMA edge (eb019ba).
