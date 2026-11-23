@@ -197,10 +197,13 @@ the group's count, and 4 SameSuite ROMs signed off (below). The cause was not on
   after a switch with the APU on and still fails with the linear rule;
   the grid rule in double speed flips it but also costs SameSuite
   `channel_{1,2}_duty` and 4 `speedchange*_ds_1` (measured).
-- Open: the 2 sweep ROMs (`ch1_init_reset_sweep_counter_timing_10`,
-  `_nr52_3`) are the sweep calculation delay, and
-  `ch2_init_reset_env_counter_timing_15` the envelope timing: they belong
-  with the deferred SameBoy sweep and envelope models, not with this group.
+- Done (2026-11-23): the 2 sweep ROMs (`ch1_init_reset_sweep_counter_timing_10`,
+  `_nr52_3`) and `ch2_init_reset_env_counter_timing_15`: the sweep step
+  4 clocks after its edge, and the trigger windows for the sweep (8
+  clocks) and the envelope (step 7, 4-clock lead), from gambatte's
+  cgb04c captures (`docs/reference/apu.md`, frame sequencer). Also flips
+  SameSuite `channel_1_sweep_restart_2` (group 15). All 161
+  `gambatte/sound` ROMs pass.
 
 ### 8. HDMA timing (75)
 `dma/*` 64 + `irq_precedence/{,late_}hdma_vs_*` 11. Sub-groups, each M:
@@ -333,6 +336,46 @@ tests were developed against SameBoy's default CGB E, and the suite notes
 (`test-roms/same-suite/game-boy-test-roms-howto.md`). Any that turns out
 E-only joins group 16. Touches the integrate hot set (`Noise::integrate`
 etc.), so measure `synth:worst-case` APU cost (budget 230k Ir).
+
+**Status (2026-11-23): 3 of 20 pass** (`channel_{1,2}_duty_delay`, group
+7's duty latch; `channel_1_sweep_restart_2`, the sweep lag and trigger
+window). Applicability of the 17 still failing, for a later sign-off (no
+manifest change proposed here). Evidence keys: README = SameSuite
+`apu/README.md` ("CPU-CGB-C - passes the channel 3 tests and
+non-channel-specific tests. Most other tests fail", from a PCM12/PCM34
+read glitch on C and older; "The NRX2 glitch ... behaves differently
+across CPU-CGB revisions. Currently, only revision E is tested"); SB-C =
+SameBoy `apu.c` has a separate `model <= GB_MODEL_CGB_C` path for it.
+- `channel_1_freq_change_timing-cgb0BC`: **applies to C** (suffix names
+  0/B/C). Missing: the frequency-change timing against the duty step on
+  C and older (not investigated; its `-cgbDE` sibling is signed off).
+- `channel_1_nrx2_glitch`, `channel_2_nrx2_glitch`: **E-only**. README
+  (NRX2 glitch only tested on E); SB-C: `nrx2_glitch` on C goes through an
+  intermediate 0xFF write; our zombie rule is Pan Docs' CGB-02/04 one.
+- `channel_1_nrx2_speed_change`, `channel_2_nrx2_speed_change`:
+  **E-only**. Same NRx2 glitch across a speed switch; same evidence.
+- `channel_4_lfsr_7_15`, `channel_4_lfsr_restart`,
+  `channel_4_lfsr_restart_fast`: **E-only**. README names "the LFSR
+  tests" as failing on C from the PCM34 glitch (to be rewritten to pass
+  on all revisions); SB-C: `nr43_write` glitch steps on C.
+- `channel_4_freq_change`, `channel_4_frequency_alignment`: **E-only**.
+  SB-C: the NR43 alignment term is `{2, 1, 4, 3}` on C vs `{2, 1, 0, 3}`
+  on D+ (`docs/reference/apu.md`, noise), plus the C-only
+  `countdown_reloaded` counter; README: SameBoy itself fails
+  `channel_4_freq_change` on E.
+- `channel_1_sweep`, `channel_1_sweep_restart`: **unclear**. Missing:
+  SameBoy's shift-dependent calculation delay (PCM12 shows the
+  intermediate frequency); README says C fails "most" ch1 tests without
+  naming them, and no cgb04c capture covers the delay (all gambatte
+  sweep captures pass). SB-C: `nr10_write_glitch` differs on C.
+- `channel_1_volume`, `channel_2_volume`: **unclear**. Missing: SameBoy's
+  envelope lock/clock and secondary DIV event; README as above; the
+  gambatte cgb04c envelope captures all pass.
+- `channel_4_align`, `channel_4_delay`, `channel_4_equivalent_frequencies`:
+  **unclear**. Missing: the noise counter phase at trigger (SameBoy
+  `r * 4 + 6` plus alignment); README: C fails most ch4 tests; SB-C has
+  C-only noise counter paths.
+Tally: 1 applies to C, 9 E-only, 7 unclear.
 
 ### 16. SameSuite APU for other revisions (7) - sign-off candidate
 `channel_{1,2,4}_extra_length_clocking-cgb0B`,

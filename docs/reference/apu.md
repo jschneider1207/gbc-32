@@ -32,6 +32,32 @@ counter bit 12 or 13 (Pan Docs "Audio details", DIV-APU; SameBoy
 (128 Hz), envelopes on `fs == 0` (64 Hz; SameBoy decrements at `fs == 7`
 and applies at the next event, the same step). Length runs before the sweep.
 
+- **Sweep lag:** a sweep step that ends the sweep timer lands
+  `SWEEP_LAG` = 4 clocks after its edge (both speeds): `Apu::step` leaves
+  it pending (`Sweep::due`) and the `DivApu` event runs it then
+  (`Ctx::set_apu_deadline`). An access at the edge's clock is before it:
+  an NR52 read still sees CH1 on, an NR10 write still changes the period
+  it uses (gambatte cgb04c `ch1_init_reset_sweep_counter_timing_nr52_3`
+  vs `_4`, `_7` vs `_9`; gambatte `SweepUnit` has its events 2 of its
+  2 MHz units after the 128 Hz boundary, length on it). Steps that only
+  count down stay at the edge: the same either way (a trigger inside the
+  lag reloads the timer), and one sync per sweep period instead of two
+  per 32,768 clocks. A DIV write or speed switch inside the lag re-arms
+  the step 4 clocks after itself.
+- **Sweep trigger window:** a CH1 trigger up to 8 clocks before the edge
+  into step 3 or 7 (or inside the lag) doesn't count that step: one more
+  step to the first calculation (gambatte cgb04c `_timing_7`, 12 clocks
+  before: counts; `_10`, 8 before: doesn't; gambatte `SweepUnit::nr4Init`
+  `(cc + 2 + 2 * cgb) >> 14`; 4 clocks on DMG). SameBoy has no window.
+- **Envelope trigger window:** a CH1, CH2 or CH4 trigger from 4 clocks
+  before the edge into step 7 to 4 clocks before the one into step 0
+  adds one envelope step (`Envelope::delay`): step 0 doesn't count
+  (gambatte cgb04c `ch2_init_reset_env_counter_timing_13`/`_14`, 8 clocks
+  before: counts; `_15`/`_16`, 4 before: doesn't; gambatte
+  `EnvelopeUnit::nr4Init`, `(cc + 2) & 0x7000 == 0`; SameBoy's countdowns
+  tick at step 7, the same step). blargg's `cgb_sound`/`dmg_sound` and
+  `mem_timing` trigger in step 7 (traced) and still pass.
+
 - A DIV write or STOP that clears a set APU bit is a falling edge: the
   frame sequencer steps at once (SameBoy `GB_set_internal_div_counter`).
 - A speed switch changes the bit 12 <-> 13 and reschedules.
@@ -319,6 +345,9 @@ gambatte `sound/` and SameSuite APU ROMs:
   alignment corrections; the core loads one full period), its background
   counting while the channel is off, the alignment term when an NR43
   write lands on a reload, and the NR43 write glitch steps.
-- The sweep calculation delay and the DAC fade.
+- SameBoy's shift-dependent sweep calculation delay (the overflow check
+  and write-back `shift` 1 MHz ticks after the step, PCM12 showing the
+  intermediate frequency) and its CGB-C `nr10_write_glitch`; the 4-clock
+  sweep lag above is the only sweep delay modelled. The DAC fade.
 - DMG and AGB behaviours (wave RAM corruption, length counters surviving
   power off, the DMG read window).

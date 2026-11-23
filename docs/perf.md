@@ -513,7 +513,7 @@ budget 96,000), `.rodata` 4,078 B. `run` + `execute_cb` = 25,568 + 12,078 =
 |---|---|---|
 | A: per instruction/access | `Cpu::run`, `execute_cb`, `step_not_running`, `fetches_next`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`; `vram_blocked`, `oam_blocked`; `halt_begin/end`, `idle_halted`; `Schedule::set` | 43,210 |
 | B: PPU, per line | `Ppu::{sync, latch, scan_to, next_event, point_irq, draw, flush, stat, ly, check_wy_at, scan_line}`, `Renderer::{render, fetch_objects, last_fetched}`, `fill_{plain, mixed, partial<_>}`, `partial_tile<_>`, `LineObjects::scan`, `frame_row`, `cgb_color`, `Ctx::write_ppu` | 15,844 |
-| C: APU, per sync | `Apu::{sync, step, write}`, the three `integrate`s and `advance`s, `frame_step` x2, `Sweep::clock`, `mix::constant`, `div_apu_event`, `apu_sync`, `set_div_apu_deadline`, `start_audio`, `finish`, `audio_buffer_event`, `write_apu` | 5,722 |
+| C: APU, per sync | `Apu::{sync, step, write}`, the three `integrate`s and `advance`s, `frame_step` x2, `Sweep::clock`, `mix::constant`, `div_apu_event`, `set_apu_deadline`, `apu_sync`, `set_div_apu_deadline`, `start_audio`, `finish`, `audio_buffer_event`, `write_apu` | 5,722 |
 | D: frame driver | `Emulator::{run, run_frame, run_until, run_cycles}` | 602 |
 | W: warm (most games, not every frame) | OAM DMA (`oam_dma`, `dma_sync`, `read/write_during_dma`, `ppu_read`), `Cart::{write_rom, update_banks, read_ram}`, `Timer::read`, `vram_dma`, `write_palette_data`, `Noise::clock` | 4,414 |
 
