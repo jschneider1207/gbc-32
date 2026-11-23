@@ -145,3 +145,41 @@ runs the latched one; they differ only if the in-halt block overwrote it
 (`hdma_transition_speedchange_7fffstop_inc`). Fixing it needs a
 latched-opcode path in the CPU fetch (a branch per fetch or a second
 dispatch copy); not worth it for one ROM. +20 `dma` ROMs, no regressions.
+
+## Amendment (2026-11-23, M9 group 8): the opcode around a block, and HALT's request
+
+Fitted to gambatte's CGB C captures (gambatte `Memory::halt`/`stop`/`dma`,
+`Interrupter::prefetch`, GPL, read for behaviour only). SameBoy
+`GB_cpu_run` also fetches before `GB_hdma_run`.
+
+**The opcode is latched before the block.** This replaces "the opcode
+fetch then happens after the stall". The fetch's M-cycle still comes
+after the stall, but its value is latched before the block
+(`Cpu::latch_fetch`, `Mode::Latched`). A block that overwrites the
+opcode, or mode 3 starting during the stall, therefore doesn't change it
+(`hdma_pc_7ffe`, `late_gdma_pc_7ffe_1`). If an interrupt dispatch is due
+then, the fetch is undone.
+
+**A block requested in HALT's M-cycle.** gambatte calls this
+`prefetched`. The byte after HALT is latched at the HALT. It runs after
+the wake-up and the block, with PC unchanged, so it runs twice (as in the
+HALT bug), and before any dispatch (`Mode::Prefetched`). ROMs:
+`hdma_late_m3halt_m2unhalt_inc_*_2`, the `*ldaaimm*` ROMs,
+`7fffhalt_inc`.
+
+**Speed-switch STOP.** STOP's second byte uses the same latch instead of
+the PC rewind. This closes the known gap in the speed-switch amendment
+(`7fffstop_inc`).
+
+**Stall and lost HBlank triggers.** That block's stall is one M-cycle
+shorter (gambatte `cc -= 4`). HBlank triggers up to its full length are
+still lost, because gambatte acknowledges the request at the transfer's
+end (`VramDma::refetch` RAN; the end is kept in `switch_end`).
+
+**HALT wake-up M-cycle.** An HBlank inside it no longer starts a block,
+as after the speed switch (SameBoy clears `halted` after it;
+`hdma_m0halt_late_m3unhalt_scx1_2`). This supersedes the "kept as
+before" note on the `lcdoffset1` pair, which still passes.
+
+Still deferred: OAM DMA during a VRAM DMA (`hdma_transition_oamdma_1`).
++11 ROMs, no regressions.
