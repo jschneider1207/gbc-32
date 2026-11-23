@@ -1,12 +1,15 @@
-//! Desktop front end (milestone M7, docs/plan/stage-1.md). This step is the
-//! part that needs no window, audio or gamepad library: CLI, ROM and save
-//! handling (ADR 0023) and the headless run. Video, audio and input modules
-//! come next and call `session::run` the way `headless` does.
+//! Desktop front end (milestone M7, docs/plan/stage-1.md): CLI, ROM and save
+//! handling (ADR 0023), the headless run, and the interactive window
+//! (`window`, `video`, `input`, `pacing`). Audio comes next.
 
 mod args;
 mod headless;
+mod input;
+mod pacing;
 mod save;
 mod session;
+mod video;
+mod window;
 
 use std::process::ExitCode;
 
@@ -31,8 +34,23 @@ fn main() -> ExitCode {
         sync_rtc_on_load: true,
     };
     let Some(frames) = args.headless_frames else {
-        eprintln!("the window front end is not implemented yet (M7 next step); use --headless");
-        return ExitCode::from(2);
+        let title = format!(
+            "gbc-32 \u{2014} {}",
+            args.rom
+                .file_name()
+                .map_or_else(|| args.rom.to_string_lossy(), |n| n.to_string_lossy())
+        );
+        return match session::run(&opts, |emu, autosave| {
+            window::run(emu, autosave, title, args.scale)
+        })
+        .and_then(|r| r)
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(1)
+            }
+        };
     };
     match headless::run(&opts, frames) {
         Ok(_) => ExitCode::SUCCESS,
