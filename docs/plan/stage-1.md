@@ -190,6 +190,19 @@ The human checks interactive play.
 
 ---
 
+## M9: Test-ROM completion
+
+Human decision (2026-11-22): the core is not complete until every test ROM
+in the manifest passes, whatever its tier (README.md "Done when").
+
+- [ ] Triage every failing ROM by root cause (grouped plan tasks), starting with the `gambatte-cgb-png` failures (180 at M5; many `scy` ROMs fail by the same 2,112 pixels) and the mid-line PPU fidelity task (M8)
+- [ ] Fix them, keeping the perf and code-size budgets (or bringing budget changes to the human with numbers)
+- [ ] For each group that can't pass because the references contradict each other (e.g. the ~70 gambatte `oamdma` bus-conflict ROMs vs SameBoy) or because it doesn't apply to the targeted CGB revision: write up the evidence and get the human's explicit sign-off, recorded per group
+
+**Acceptance:** every manifest ROM passes, or belongs to a group the human signed off with a recorded reason.
+
+---
+
 ## Real-game checklist (human sign-off)
 
 The human supplies these ROMs in `roms/` and plays each one for about

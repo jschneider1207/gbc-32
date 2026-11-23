@@ -54,7 +54,7 @@ Build the emulator as a platform-independent Rust library and prove it on a PC.
 
 **Real games:** Pokémon Crystal (MBC3 + RTC), Link's Awakening DX (general compatibility), Shantae and Alone in the Dark: The New Nightmare (heavy HDMA and CGB graphics), Wario Land 3 (general CGB).
 
-**Done when:** `scripts/gate-stage1.sh` passes (all "must" ROMs, no regressions, core still builds for the MCU) and the listed games play correctly on the desktop (human sign-off).
+**Done when:** `scripts/gate-stage1.sh` passes (all "must" ROMs, no regressions, core still builds for the MCU), the listed games play correctly on the desktop (human sign-off), and **every test ROM in the manifest passes, whatever its tier**. The tiers set the order of work and what gates each milestone, not what the finished core may fail. The only exceptions are failures the human signs off explicitly, per group, with a recorded reason: the references contradict each other (both outcomes can't pass), or the test doesn't apply to the CGB revision targeted (ADR 0003). (Human decision, 2026-11-22.)
 
 ### 2. STM32H7 platform layer
 
