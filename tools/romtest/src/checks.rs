@@ -795,7 +795,7 @@ pub(crate) mod tests {
     fn capture(samples: Vec<StereoSample>) -> AudioCapture {
         AudioCapture {
             until: 1000,
-            start: 0,
+            start: 872, // one sample period (128 clocks): at least 1 sample
             end: 1000,
             samples,
             full: false,
@@ -852,8 +852,14 @@ pub(crate) mod tests {
             assert_eq!(r.status, CheckStatus::Fail, "{rom}");
             assert!(r.detail.contains("before"), "{}", r.detail);
             // No samples at all.
-            let r = gambatte_audio(rom, Some(&capture(Vec::new()))).unwrap();
+            let mut none = capture(Vec::new());
+            none.start = none.end; // an empty window
+            let r = gambatte_audio(rom, Some(&none)).unwrap();
             assert_eq!(r.status, CheckStatus::Fail, "{rom}");
+            // Fewer samples than the window's clocks produce: a runner error.
+            let mut short = capture(vec![s(1, 1)]);
+            short.start = 0; // 1000 clocks: 7 samples
+            assert!(gambatte_audio(rom, Some(&short)).is_err(), "{rom}");
             // Every slot filled: samples may be missing (runner error).
             let mut full = capture(ok);
             full.full = true;

@@ -190,6 +190,20 @@ pub fn audio_failure(
             c.end, c.until
         )));
     }
+    // The window [start, end) yields one sample per AUDIO_SAMPLE_CLOCKS, so
+    // fewer than (end - start) / AUDIO_SAMPLE_CLOCKS means the capture lost
+    // samples (floor(x) - floor(y) >= floor(x - y), so a correct capture
+    // never falls under this). A too-short capture could fake silence.
+    let min = (c.end.saturating_sub(c.start) / u64::from(gbc_core::AUDIO_SAMPLE_CLOCKS)) as usize;
+    if c.samples.len() < min {
+        return Err(format!(
+            "runner error: the last frame's audio has {} samples, fewer than the {min} \
+             that clocks {}..{} produce",
+            c.samples.len(),
+            c.start,
+            c.end
+        ));
+    }
     let Some(&first) = c.samples.first() else {
         return Ok(Some("the last frame produced no audio samples".into()));
     };
