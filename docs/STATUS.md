@@ -96,23 +96,15 @@ Open (session 11):
   CPU/PPU phase (group 6); both should pass once the lcd_offset model
   lands. Merging needs a baseline update that records a regression, so
   it's the human's call. Alternative: hold the branch until group 6.
-- **APU double-speed trigger rule vs SameSuite (M9 group 7).** gambatte's
-  linear CGB rule (first duty step at `+6+2*lf_div` base clocks from off,
-  `+2+2*lf_div` from on, both speeds) flips 6 gambatte cgb04c captures
-  (`ch1_duty0_pos6_to_pos7_timing_ds_6`, 5 `speedchange*_timing*ds_2`)
-  but regresses SameSuite `channel_{1,2}_align{,_cpu}` (4). SameSuite's
-  own README (`test-roms/same-suite/apu/README.md`): "CPU-CGB-C - passes
-  the channel 3 tests and non-channel-specific tests. Most other tests
-  fail"; they're CGB E results. Proposal: follow gambatte (our revision)
-  and sign off those 4 as "CGB E result" (like the 7 already signed off).
-  Same evidence likely covers much of group 15 (20 SameSuite ch1/2/4 ROMs).
-  Update (d8a1428): single speed now steps on the 1 MHz grid (11 flips);
-  7 ds ROMs wait on this (ds_6, 5 ds_2, `speedchange_ch1_nr4init_*_2`).
-  Note: applying the single-speed *grid* rule in ds instead also regresses
-  SameSuite `channel_{1,2}_duty` and 4 gambatte `speedchange*_ds_1`, so
-  the candidate is gambatte's linear rule, re-measured before shipping.
-
-Open (session 10):
+  Design doc `docs/design/lcd-offset-phase.md` recommends holding it and
+  rebasing after its step 1 (step 10 should remove the swap).
+- **Sign-off candidate: power-on OBJ palette RAM (3 ROMs).** gambatte
+  `scx_during_m3_spx2`, `spx2_ds`, `scx_attrib_during_m3_spx2_ds` now pass
+  their timing but differ by 8 px at x 0: OBJ palette 0 colour 2, which no
+  ROM writes; the cgb04c capture shows 0x21926C (that console's power-on
+  palette RAM), we start at 0. Uninitialised RAM is console-specific;
+  modelling one console's dump (gambatte ships one, GPL, reference only)
+  vs signing these off as "depends on uninitialised palette RAM".
 - **Real-game checklist** (plan, bottom; now an M9 task), on native
   Windows. Extra checks: Ctrl+C in the window still saves; change the
   default audio output device mid-game (expect `audio stopped`, then within
@@ -134,6 +126,14 @@ Open (session 10):
   down mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 11 (2026-11-23), human:
+- APU double speed: follow gambatte's CGB C linear trigger rule; sign off
+  SameSuite `channel_{1,2}_align{,_cpu}` (4) as "CGB E result" (SameSuite
+  apu/README: CPU-CGB-C fails most ch1/2 tests). "Yes". Manifest change
+  approved: exclude them from `same-suite-apu`, own stretch group
+  `same-suite-apu-cgbE` (keeps running, reported), baseline refresh with
+  `--allow-removed`.
 
 Decided in session 10 (2026-11-23), human:
 - gbc-core total `.text` budget 96,000 -> 97,500 B (for mid-line PPU
