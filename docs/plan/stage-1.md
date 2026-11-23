@@ -167,7 +167,7 @@ Ordered; one focused agent each (~20-40 tool calls). Every new test is
 mutation-checked. Tasks 1-2 run on branch `m6-apu` (over the `.text`
 budget); nothing merges to `main` before step 2's human decision.
 
-1. [ ] **APU framework + CH2** (branch `m6-apu`), two commits, `.text`
+1. [x] (52b1756, f4e7eb0-344e112, a627b54 GDMA fix, 323c4f0 budgets) **APU framework + CH2** (branch `m6-apu`), two commits, `.text`
    measured after each (`check-code-size.sh` total and per symbol):
    - (a) Framework: `apu/` layout and `Apu` in `Memory` (size test <= 128 B;
      `Hw` unchanged), cold `Ctx::write_apu` for FF10-FF3F, NR52 power off/on
@@ -186,7 +186,7 @@ budget); nothing merges to `main` before step 2's human decision.
      estimate `F + 3.3 S` (ADR 0021 section 11).
    - The one API reviewer (AGENTS.md review rule 3) on the
      `AUDIO_SAMPLE_RATE`/ADR 0006 diff.
-2. [ ] **Code-size checkpoint (orchestrator + human, no agent):** bring F,
+2. [x] (human: 96,000 B, 8c27f73; merged a1bb74a) **Code-size checkpoint (orchestrator + human, no agent):** bring F,
    S and the estimate (plus margin) to the human under "Needs human";
    the human sets the new total `.text` budget once. Then a budget commit
    on the branch and merge `m6-apu` into `main` (merge commit, no
