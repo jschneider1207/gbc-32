@@ -94,7 +94,12 @@ const HALT_IRQ: &[u8] = &[
 /// channels play before this, and the STAT handler (one IRQ per line,
 /// about 146 a frame) toggles NR50's right volume, like a game playing PCM
 /// through the master volume: every APU write syncs the APU, so its fixed
-/// cost per sync counts ([`worst_case`], [`STAT_HANDLER_NR50`]).
+/// cost per sync counts ([`worst_case`], [`STAT_HANDLER_NR50`]). The main
+/// loop also polls STAT and writes SCX (+1 each time) once per visible
+/// line, 10-33 M-cycles after mode 3 starts (the poll loop is 23 M-cycles):
+/// a mid-mode-3 write after the fetcher has started, so the PPU's
+/// held-fetch slow path (`Ppu::hold_fetch`, `render_held`) runs 144 times
+/// a frame, like a game's per-line parallax scroll (human, session 10).
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
@@ -152,6 +157,17 @@ const WORST_CASE: &[u8] = &[
     0xE0, 0x40, //             LDH (LCDC),A
     0xFB, //                   EI
     // wait:
+    0xF0, 0x41, //             LDH A,(STAT)
+    0xE6, 0x03, //             AND 3
+    0xBA, //                   CP D            same mode as the last poll?
+    0x28, 0x09, //             JR Z,serial
+    0x57, //                   LD D,A
+    0xFE, 0x03, //             CP 3
+    0x20, 0x04, //             JR NZ,serial
+    0x1C, //                   INC E           mode 3 just started: new SCX
+    0x7B, //                   LD A,E
+    0xE0, 0x43, //             LDH (SCX),A     mid-line: the held-fetch path
+    // serial:
     0xF0, 0x02, //             LDH A,(SC)
     0x87, //                   ADD A,A         carry = transfer running
     0x38, 0x04, //             JR C,hdma
@@ -160,7 +176,7 @@ const WORST_CASE: &[u8] = &[
     // hdma:
     0xF0, 0x55, //             LDH A,(HDMA5)
     0x87, //                   ADD A,A         no carry = HDMA active
-    0x30, 0xF2, //             JR NC,wait
+    0x30, 0xE2, //             JR NC,wait
     0xAF, //                   XOR A           restart: 0000 -> 8800 (tiles 128-255, unused)
     0xE0, 0x51, //             LDH (HDMA1),A
     0xE0, 0x52, //             LDH (HDMA2),A
@@ -169,7 +185,7 @@ const WORST_CASE: &[u8] = &[
     0xE0, 0x53, //             LDH (HDMA3),A
     0x3E, 0xFF, //             LD A,FF         HBlank, 128 blocks
     0xE0, 0x55, //             LDH (HDMA5),A
-    0x18, 0xE1, //             JR wait
+    0x18, 0xD1, //             JR wait
 ];
 
 /// `synth:worst-case` audio: APU off and on (every channel off, including
@@ -532,6 +548,16 @@ mod tests {
         let r = run("worst-case", u64::from(CLOCK_HZ) / 10, &addrs);
         assert_eq!(&r[..48], &LOGO);
         assert_eq!(r[48] & 0x80, 0, "HDMA active");
+    }
+
+    #[test]
+    fn worst_case_writes_scx_once_per_visible_line() {
+        // Any frame-long window holds 144 mode-3 periods: SCX advances by
+        // exactly 144 (one INC per line, none in VBlank).
+        let at = u64::from(CLOCK_HZ) / 10;
+        let a = run("worst-case", at, &[0xFF43]);
+        let b = run("worst-case", at + 70_224, &[0xFF43]);
+        assert_eq!(b[0].wrapping_sub(a[0]), 144);
     }
 
     #[test]
