@@ -29,6 +29,13 @@ in git):
   cannot cover more), every STAT source (modes 0/1/2, LYC=72) with IE=STAT
   and an 8-byte handler at 0x48 incrementing a WRAM counter. Replaces the
   sum of two separate runs (event-storm + acid2 PPU) as the worst case.
+  Since the M5 perf review it also keeps a CGB HBlank HDMA running from
+  the main loop (128 blocks ROM 0000 -> VRAM 8800, restarted when it ends:
+  one 16-byte block per visible line, 17,150 blocks in 2 s), the per-line
+  hot path no other bench reached. The HDMA stalls replace polling-loop
+  instructions, so the total fell: 442.70 -> 429.69 M (-2.9%, same core),
+  while `vram_dma` costs 20.8 M inclusive (1,215 Ir per block, 174k per
+  frame; self 610 Ir per block, about 38 per byte).
   callgrind: `Ctx::boundary` 15.9%, `Renderer::render` 9.1% (inclusive,
   with `fill_mixed`; 9.7% before the fused object mixing), timer 7.0%,
   serial 5.1%.

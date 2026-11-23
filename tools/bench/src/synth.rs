@@ -86,7 +86,10 @@ const HALT_IRQ: &[u8] = &[
 /// 10 objects on 64 of the 144 lines (40 objects cannot cover more), then
 /// LCD on with BG, window (WY=0, WX=87), objects, every STAT source
 /// (modes 0/1/2 and LYC=72) and only IE=STAT. The STAT handler at 0x48 bumps
-/// a WRAM counter. Then the event-storm timer and serial loop runs.
+/// a WRAM counter. Then the event-storm timer and serial loop runs, which
+/// also keeps a CGB HBlank HDMA going: 128 blocks from ROM 0000 to VRAM
+/// 8800 (tiles 128-255, which nothing displays), restarted as soon as one
+/// ends, so every visible line copies a 16-byte block.
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
@@ -146,10 +149,22 @@ const WORST_CASE: &[u8] = &[
     // wait:
     0xF0, 0x02, //             LDH A,(SC)
     0x87, //                   ADD A,A         carry = transfer running
-    0x38, 0xFB, //             JR C,wait
+    0x38, 0x04, //             JR C,hdma
     0x3E, 0x83, //             LD A,83
     0xE0, 0x02, //             LDH (SC),A
-    0x18, 0xF5, //             JR wait
+    // hdma:
+    0xF0, 0x55, //             LDH A,(HDMA5)
+    0x87, //                   ADD A,A         no carry = HDMA active
+    0x30, 0xF2, //             JR NC,wait
+    0xAF, //                   XOR A           restart: 0000 -> 8800 (tiles 128-255, unused)
+    0xE0, 0x51, //             LDH (HDMA1),A
+    0xE0, 0x52, //             LDH (HDMA2),A
+    0xE0, 0x54, //             LDH (HDMA4),A
+    0x3E, 0x88, //             LD A,88
+    0xE0, 0x53, //             LDH (HDMA3),A
+    0x3E, 0xFF, //             LD A,FF         HBlank, 128 blocks
+    0xE0, 0x55, //             LDH (HDMA5),A
+    0x18, 0xE1, //             JR wait
 ];
 
 /// CGB palette raster effect ("hi-color") in double speed: after the speed
@@ -338,7 +353,7 @@ mod tests {
         assert_eq!(r, [0x04, 0xFD, 0xF0]);
     }
     #[test]
-    fn worst_case_has_ten_objects_on_a_line_and_stat_irqs_running() {
+    fn worst_case_has_ten_objects_on_a_line_stat_irqs_and_hdma_running() {
         // OAM X of object 9 (=8+6*9), STAT sources, the handler's counter.
         let r = run(
             "worst-case",
@@ -350,6 +365,14 @@ mod tests {
         assert_eq!(r[2], 0x02);
         assert_eq!(r[3] & 0x80, 0x80, "double speed");
         assert_ne!(r[4], 0, "STAT handler ran");
+        // HBlank HDMA: ROM 0104-0133 (the logo) copied to 8904, and a
+        // transfer active.
+        let logo: Vec<u16> = (0x8904..0x8934).collect();
+        let mut addrs = logo.clone();
+        addrs.push(0xFF55);
+        let r = run("worst-case", u64::from(CLOCK_HZ) / 10, &addrs);
+        assert_eq!(&r[..48], &LOGO);
+        assert_eq!(r[48] & 0x80, 0, "HDMA active");
     }
 
     #[test]
