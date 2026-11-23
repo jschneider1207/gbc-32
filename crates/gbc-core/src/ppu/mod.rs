@@ -245,6 +245,8 @@ pub(crate) struct LineTiming {
     /// Which stall is the window's (`NO_STALL`: none); the others are the
     /// objects', in fetch order.
     win_stall: u8,
+    /// WX when the stalls were last set (`Ppu::window_write`).
+    wx: u8,
 }
 
 const NO_STALL: u8 = 0xFF;
@@ -282,6 +284,13 @@ const LCDC_TILES_LATE: i32 = 1;
 /// 10-12 -> 4-1 / 0.
 const DISCARD_LEAD: i32 = 8;
 
+/// Dots before the window's stall would begin at which its start is
+/// decided: a WX, WY or LCDC.5 write after that doesn't move it
+/// ([`Ppu::window_write`]). Calibrated over the full manifest.
+const WINDOW_LEAD: i32 = 0;
+const WINDOW_ON_LEAD: i32 = 1;
+const WY_LEAD: i32 = 4;
+
 impl LineTiming {
     const NONE: Self = Self {
         start: NEVER,
@@ -291,6 +300,7 @@ impl LineTiming {
         stalls: [(0, 0); 11],
         n_stalls: 0,
         win_stall: NO_STALL,
+        wx: 0,
     };
 
     /// Pixels output before line position `t` (0-160), under the
@@ -1308,11 +1318,7 @@ impl Ppu {
         // start is fixed.
         self.check_wy(l, mem);
         let scx = mem.io[0x43];
-        let wx = mem.io[0x4B];
-        // The window starts on this line at pixel WX - 7 (SameBoy:
-        // activates for WX < 166 + is_cgb).
-        let window =
-            (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx);
+        let window = self.window_wx(mem);
         let tall = self.lcdc & 0x04 != 0;
         let start = self.synced.wrapping_sub(if first { 91 } else { 89 });
         // One OAM scan per line, for both the stalls and the pixels. On a
@@ -1342,18 +1348,53 @@ impl Ppu {
         // index is resolved when the renderer merges fetched objects).
         let n = objs.len();
         let order = objs.priority_order();
-        let mut xs = [0u8; objects::MAX_PER_LINE];
-        for (x, &slot) in xs.iter_mut().zip(&order[..n]) {
-            *x = objs.get(usize::from(slot)).2;
-        }
         let mode3 = if first { 86 } else { 84 };
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
-        let first_pixel = mode3 + 12 + u16::from(scx & 7);
         let t = &mut self.line;
         t.start = start;
         t.mode3 = mode3;
-        t.first_pixel = first_pixel;
+        t.first_pixel = mode3 + 12 + u16::from(scx & 7);
+        self.drawn = 0;
+        mem.obj_rank.hold[1].end = 0;
+        self.renderer.start_line(l as u8, scx, &objs, order);
+        if n != 0 || window.is_some() {
+            self.set_stalls(scx, window);
+        } else {
+            // No stall (most lines): no call.
+            let t = &mut self.line;
+            t.win_stall = NO_STALL;
+            t.n_stalls = 0;
+            t.end = t.first_pixel + 160;
+        }
+        self.attr_on = false;
+        if aware {
+            self.attr_final = 0;
+            self.attr_on = n != 0;
+        }
+    }
+
+    /// WX if the window starts on the current line: LCDC.5 and the WY
+    /// condition hold and WX <= 166 (SameBoy: activates for WX < 166 +
+    /// is_cgb).
+    fn window_wx(&self, mem: &Memory) -> Option<u8> {
+        let wx = mem.io[0x4B];
+        (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx)
+    }
+
+    /// The pipeline stalls of the current line (`line.stalls`, `win_stall`,
+    /// `end` from `first_pixel`): the renderer's objects in fetch order
+    /// and the window start at WX `window`.
+    #[inline(never)]
+    fn set_stalls(&mut self, scx: u8, window: Option<u8>) {
+        let r = &self.renderer;
+        let n = r.objects.len();
+        let mut xs = [0u8; objects::MAX_PER_LINE];
+        for (x, &slot) in xs.iter_mut().zip(&r.order[..n]) {
+            *x = r.objects.get(usize::from(slot)).2;
+        }
+        let t = &mut self.line;
         t.win_stall = NO_STALL;
+        t.wx = window.unwrap_or(t.wx);
         let mut total = 0u16;
         let mut k = 0;
         if n != 0 || window.is_some() {
@@ -1385,14 +1426,62 @@ impl Ppu {
             }
         }
         t.n_stalls = k as u8;
-        t.end = first_pixel + 160 + total;
-        self.drawn = 0;
-        mem.obj_rank.hold[1].end = 0;
-        self.renderer.start_line(l as u8, scx, &objs, order);
-        self.attr_on = false;
-        if aware {
-            self.attr_final = 0;
-            self.attr_on = n != 0;
+        t.end = t.first_pixel + 160 + total;
+    }
+
+    /// Clock (line position) at which the window's stall begins, under the
+    /// current stalls (`None`: no window stall).
+    fn window_stall_at(&self) -> Option<i32> {
+        let lt = &self.line;
+        let (mut clock, mut x) = (i32::from(lt.first_pixel), 0);
+        for (j, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls) % 12]
+            .iter()
+            .enumerate()
+        {
+            clock += (i32::from(sx) - x).max(0);
+            x = x.max(i32::from(sx));
+            if j == usize::from(lt.win_stall) {
+                return Some(clock);
+            }
+            clock += i32::from(d);
+        }
+        None
+    }
+
+    /// A WX, WY or LCDC.5 write seen by the pixel pipeline at clock `now`
+    /// (registers and the WY condition updated): in mode 3, before the
+    /// window's start has been decided, the window stall moves, appears or
+    /// goes (Pan Docs: Rendering, "Mode 3 length"; SameBoy display.c
+    /// compares `position_in_line` with the live WX - 7 each dot while
+    /// LCDC.5 and `wy_triggered` hold, and clears `wx_triggered` when a
+    /// fetch starts with LCDC.5 clear). The decision is made
+    /// `WINDOW_LEAD` dots before the stall would begin. Approximation: once
+    /// it has begun, later writes change the pixels only.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, wy: bool) {
+        let lt = &self.line;
+        let a = self.at(now);
+        let t = a.t as i32;
+        if lt.start != now.wrapping_sub(u64::from(a.t))
+            || !(i32::from(lt.mode3)..i32::from(lt.end)).contains(&t)
+        {
+            return;
+        }
+        // WX < 7 activates at position WX - 7, before the first pixel
+        // (SameBoy: `position_in_line == WX - 7`; WX = 0 at -7).
+        let adj = |wx: u8| i32::from(wx.min(7)) - 7;
+        let decided = |c: Option<i32>, lead| c.is_some_and(|c| t + lead > c);
+        if decided(self.window_stall_at(), WINDOW_LEAD - adj(self.line.wx)) {
+            return;
+        }
+        let scx = mem.io[0x43];
+        self.set_stalls(scx, self.window_wx(mem));
+        // The new start is already past: the window waits for the next line.
+        let fine = i32::from(self.line.first_pixel) - i32::from(self.line.mode3) - 12;
+        let lead = if wy { WY_LEAD + fine } else { WINDOW_ON_LEAD };
+        if decided(self.window_stall_at(), lead - adj(mem.io[0x4B])) {
+            self.set_stalls(scx, None);
         }
     }
 
@@ -1999,6 +2088,56 @@ mod tests {
         assert_eq!(end(1, 3), Some(256 + 3 + 6));
         assert_eq!(end(0, 3), Some(256 + 3 + 7));
         assert_eq!(end(0, 7), Some(256 + 7 + 7));
+    }
+
+    /// A WX, WY or LCDC.5 write in mode 3 before the window's start moves,
+    /// adds or removes its 6-dot stall; after it, mode 3 keeps it.
+    #[test]
+    fn window_writes_in_mode_3_move_its_stall() {
+        // (register, value, write position) -> mode-3 end; window at
+        // x = 64 (WX = 0x47), WY = 0 or (for the WY write) 0xFF.
+        let end = |w: Option<(usize, u8, u32)>| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, 0, 0xFF);
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4A] = if matches!(w, Some((0x4A, ..))) {
+                0xFF
+            } else {
+                0
+            };
+            r.mem.io[0x4B] = 0x47;
+            let l5 = clock(on, 0, 5 * LINE);
+            if let Some((reg, v, t)) = w {
+                let now = l5 + u64::from(t);
+                r.sync(now);
+                match reg {
+                    0x40 => {
+                        r.ppu.lcdc = v;
+                        r.ppu.window_write(now, &r.mem, false);
+                    }
+                    0x4A => {
+                        r.mem.io[0x4A] = v;
+                        r.ppu.check_wy_at(now, &r.mem);
+                        r.ppu.window_write(now, &r.mem, true);
+                    }
+                    _ => {
+                        r.mem.io[0x4B] = v;
+                        r.ppu.window_write(now, &r.mem, false);
+                    }
+                }
+            }
+            r.sync(l5 + 455);
+            (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
+        };
+        let off = 0x91 & !0x20;
+        assert_eq!(end(None), Some(256 + 6));
+        assert_eq!(end(Some((0x40, off, 100))), Some(256));
+        assert_eq!(end(Some((0x40, off, 200))), Some(256 + 6));
+        assert_eq!(end(Some((0x4A, 5, 100))), Some(256 + 6));
+        assert_eq!(end(Some((0x4A, 5, 200))), Some(256));
+        assert_eq!(end(Some((0x4B, 0xA0, 100))), Some(256 + 6));
+        assert_eq!(end(Some((0x4B, 0xFF, 100))), Some(256));
+        assert_eq!(end(Some((0x4B, 0x17, 150))), Some(256));
     }
 
     #[test]

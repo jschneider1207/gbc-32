@@ -810,8 +810,12 @@ impl Ctx<'_, '_> {
                 if (value ^ s.ppu.lcdc) & 0x04 != 0 {
                     s.ppu.obj_size_write(now, double, self.mem);
                 }
+                let win = (value ^ s.ppu.lcdc) & 0x20 != 0;
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem);
+                if win {
+                    s.ppu.window_write(at, self.mem, false);
+                }
             }
             0x41 => {
                 // CGB: in two phases one dot apart; for the first, the LYC
@@ -873,7 +877,12 @@ impl Ctx<'_, '_> {
                         s.cgb_mode,
                         &mut self.mem.bg_pairs,
                     ),
-                    0x4A => s.ppu.check_wy_at(now, self.mem),
+                    // The window start in mode 3 (`Ppu::window_write`).
+                    0x4A => {
+                        s.ppu.check_wy_at(now, self.mem);
+                        s.ppu.window_write(at, self.mem, true);
+                    }
+                    0x4B => s.ppu.window_write(at, self.mem, false),
                     _ => {}
                 }
             }
