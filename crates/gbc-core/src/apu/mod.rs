@@ -603,3 +603,259 @@ mod wave_tests {
         assert!(!mem.apu.wave.on);
     }
 }
+
+#[cfg(test)]
+mod sync_tests {
+    //! The sync invariant (ADR 0021 section 3; plan M6 task 7): the APU state
+    //! after a span does not depend on how the span is split into syncs, nor
+    //! on whether the syncs integrated (a buffer) or only advanced (an empty
+    //! buffer, section 9); with buffers, the samples do not depend on the split
+    //! either. A seeded script of register writes and frame-sequencer steps
+    //! drives all four channels: CH1's sweep, the envelopes up and down, wave
+    //! RAM and NR32 shifts, the LFSR in 7- and 15-bit modes, lengths expiring,
+    //! retriggers and frequency changes at random clocks.
+
+    extern crate std;
+    use super::*;
+    use std::{boxed::Box, vec, vec::Vec};
+
+    /// xorshift64* (Vigna): a deterministic test PRNG (gbc-core takes no
+    /// dependencies).
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        }
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn byte(&mut self) -> u8 {
+            (self.next() >> 40) as u8
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Ev {
+        /// A write to FF10-FF3F by the low 7 address bits.
+        Write(usize, u8),
+        /// A DIV-APU falling edge.
+        Step,
+    }
+
+    /// Base clocks between DIV-APU edges (512 Hz, single speed).
+    const DIV_APU: u64 = 8192;
+    const STEPS: u64 = 64;
+    const END: u64 = STEPS * DIV_APU + 1000;
+
+    /// The bus's write path with the APU on (bus.rs `write_apu`), after a sync.
+    fn write(mem: &mut Memory, reg: usize, value: u8, now: u64) {
+        match reg {
+            0x1A..=0x1E | 0x30..=0x3F => write_wave(mem, reg, value),
+            _ => {
+                mem.io[reg] = value;
+                mem.apu.write(reg, value, now);
+            }
+        }
+    }
+
+    /// The events of one seed, sorted by clock: all four channels set up and
+    /// triggered at clock 0, a DIV-APU edge every 8,192 clocks, and random
+    /// writes in between.
+    fn script(seed: u64) -> Vec<(u64, Ev)> {
+        let mut rng = Rng::new(seed);
+        let mut evs = Vec::new();
+        let mut at0 = |reg: usize, v: u8| evs.push((0, Ev::Write(reg, v)));
+        at0(0x24, 0x77);
+        at0(0x25, 0xFF);
+        for i in 0..16 {
+            at0(0x30 + i, rng.byte());
+        }
+        // CH1: sweep period 1, add, shift 6; duty 1, length 16; volume 15
+        // down every 3; f = 0x500, length on.
+        for (reg, v) in [(0x10, 0x16), (0x11, 0x70), (0x12, 0xF3), (0x13, 0x00)] {
+            at0(reg, v);
+        }
+        at0(0x14, 0xC5);
+        // CH2: duty 3; volume 2 up every 5; f = 0x7F0 (16 clocks per step).
+        for (reg, v) in [(0x16, 0xC0), (0x17, 0x2D), (0x18, 0xF0), (0x19, 0x87)] {
+            at0(reg, v);
+        }
+        // CH3: length 16, volume 100%, f = 0x610, length on.
+        for (reg, v) in [(0x1A, 0x80), (0x1B, 0xF0), (0x1C, 0x20), (0x1D, 0x10)] {
+            at0(reg, v);
+        }
+        at0(0x1E, 0xC6);
+        // CH4: length 32; volume 10 down every 1; 7-bit, r = 0, s = 0.
+        for (reg, v) in [(0x20, 0x20), (0x21, 0xA1), (0x22, 0x08), (0x23, 0xC0)] {
+            at0(reg, v);
+        }
+        for k in 1..=STEPS {
+            evs.push((k * DIV_APU, Ev::Step));
+        }
+        // Midway, CH4 switches to the 15-bit LFSR (r = 1, s = 3).
+        let mid = STEPS / 2 * DIV_APU + 300;
+        evs.push((mid, Ev::Write(0x22, 0x31)));
+        evs.push((mid, Ev::Write(0x23, 0x80)));
+        for _ in 0..300 {
+            let t = 1 + rng.below(END - 1);
+            let mut v = rng.byte();
+            let reg = match rng.below(6) {
+                0 => 0x10 + rng.below(5) as usize,
+                1 => 0x16 + rng.below(4) as usize,
+                2 => {
+                    let reg = 0x1A + rng.below(5) as usize;
+                    if reg == 0x1A && rng.below(8) != 0 {
+                        v |= 0x80; // CH3's DAC mostly on
+                    }
+                    reg
+                }
+                3 => {
+                    let reg = 0x20 + rng.below(4) as usize;
+                    if reg == 0x22 && rng.below(4) != 0 {
+                        v &= 0x3F; // mostly short periods (s <= 3)
+                    }
+                    reg
+                }
+                4 => 0x24 + rng.below(2) as usize,
+                _ => 0x30 + rng.below(16) as usize,
+            };
+            evs.push((t, Ev::Write(reg, v)));
+        }
+        evs.sort_by_key(|&(t, _)| t);
+        evs
+    }
+
+    /// The register reads that depend on channel state, at `now` (pure).
+    fn reads(mem: &Memory, now: u64) -> [u8; 19] {
+        let mut r = [0; 19];
+        r[0] = read_apu(mem, now, 0x26);
+        r[1] = read_apu(mem, now, 0x76);
+        r[2] = read_apu(mem, now, 0x77);
+        for i in 0..16 {
+            r[3 + i] = read_apu(mem, now, 0x30 + i);
+        }
+        r
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Room {
+        Always,
+        Never,
+        Random,
+    }
+
+    /// One run of `seed`'s script: the APU state at each event (before it
+    /// applies) and at the end, and the samples. With `split`, each gap
+    /// between events is cut at random extra sync points; at each, the reads
+    /// from the stale state (advanced copies) must equal those after the sync.
+    fn drive(seed: u64, split: bool, room: Room) -> (Vec<Apu>, Vec<StereoSample>) {
+        let mut rng = Rng::new(seed ^ 0xA5A5);
+        let mut mem = Box::new(Memory::new());
+        mem.apu.power_on(0, false);
+        let mut buf = vec![StereoSample::default(); (END / SAMPLE_PERIOD + 4) as usize];
+        let mut len = 0;
+        let mut states = Vec::new();
+        let mut prev = 0;
+        let mut sync = |mem: &mut Memory, now: u64, rng: &mut Rng| {
+            let with = match room {
+                Room::Always => true,
+                Room::Never => false,
+                Room::Random => rng.below(2) == 0,
+            };
+            let Memory { apu, io, .. } = mem;
+            let audio: &mut [StereoSample] = if with { &mut buf } else { &mut [] };
+            apu.sync(now, io, audio, &mut len);
+        };
+        let evs = script(seed);
+        let ends = evs.iter().map(|&(t, ev)| (t, Some(ev)));
+        for (t, ev) in ends.chain([(END, None)]) {
+            if split && t > prev {
+                let n = match rng.below(4) {
+                    0 => 0,
+                    1 => 1,
+                    _ => rng.below(24),
+                };
+                let mut cuts: Vec<u64> = (0..n).map(|_| prev + rng.below(t - prev + 1)).collect();
+                cuts.sort_unstable();
+                for c in cuts {
+                    let before = reads(&mem, c);
+                    sync(&mut mem, c, &mut rng);
+                    assert_eq!(before, reads(&mem, c), "seed {seed}: reads at {c}");
+                }
+            }
+            sync(&mut mem, t, &mut rng);
+            prev = t;
+            states.push(mem.apu);
+            match ev {
+                Some(Ev::Write(reg, v)) => write(&mut mem, reg, v, t),
+                Some(Ev::Step) => mem.apu.step(),
+                None => {}
+            }
+        }
+        buf.truncate(len);
+        (states, buf)
+    }
+
+    /// `a` and `b` agree at every event and at the end; with `whole`, in the
+    /// output stream too.
+    fn assert_same(seed: u64, a: &[Apu], b: &[Apu], whole: bool) {
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            let mut y = *y;
+            if !whole {
+                assert_eq!(x.out.synced, y.out.synced);
+                y.out = x.out;
+            }
+            assert_eq!(*x, y, "seed {seed}, event {i}");
+        }
+    }
+
+    #[test]
+    fn random_split_points_change_neither_state_nor_samples() {
+        for seed in 0..12 {
+            let (one, s1) = drive(seed, false, Room::Always);
+            let (split, s2) = drive(seed, true, Room::Always);
+            assert_same(seed, &one, &split, true);
+            assert_eq!(s1.len() as u64, END / SAMPLE_PERIOD);
+            assert!(s1 == s2, "seed {seed}: samples differ");
+            // The script keeps the mix audible and varied.
+            assert!(s1.iter().any(|s| s.left != s1[0].left));
+        }
+    }
+
+    #[test]
+    fn an_empty_buffer_leaves_the_same_channel_state() {
+        for seed in 0..12 {
+            let (with, _) = drive(seed, false, Room::Always);
+            let (without, s) = drive(seed, false, Room::Never);
+            assert!(s.is_empty());
+            assert_same(seed, &with, &without, false);
+            let (mixed, _) = drive(seed, true, Room::Random);
+            assert_same(seed, &with, &mixed, false);
+        }
+    }
+
+    #[test]
+    fn the_script_exercises_every_channel() {
+        // Guards the tests above against a script that leaves channels idle.
+        let (states, _) = drive(1, false, Room::Always);
+        let ever = |f: &dyn Fn(&Apu) -> bool| states.iter().any(f);
+        assert!(ever(&|a| a.sq[0].on && a.sweep.enabled));
+        assert!(ever(&|a| a.sq[1].on && a.sq[1].env.volume > 2));
+        assert!(ever(&|a| a.wave.on && a.wave.index > 0));
+        assert!(ever(&|a| a.noise.on && a.noise.nr43 & 8 != 0));
+        assert!(ever(&|a| a.noise.on && a.noise.nr43 & 8 == 0));
+        // A length expiry (or DAC off) turned a playing channel off.
+        let offs = states
+            .windows(2)
+            .any(|w| w[0].nr52() & !w[1].nr52() & 0xF != 0);
+        assert!(offs);
+    }
+}
