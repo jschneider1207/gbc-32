@@ -78,6 +78,7 @@ impl RtcState {
     /// second is always [`CLOCK_HZ`] base clocks. A halted clock keeps its
     /// sub-second count (rtc3test "RTC off/400": the next tick comes the
     /// remaining time after restarting).
+    #[inline(never)]
     pub(super) fn advance(&mut self, clocks: u64) {
         if self.live.halted {
             return;

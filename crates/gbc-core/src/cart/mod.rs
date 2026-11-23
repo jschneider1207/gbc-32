@@ -560,6 +560,7 @@ impl<'a> Cart<'a> {
 
     /// The caller's buffers (the RAM buffer untrimmed) with the RTC state
     /// at clock `now` and the dirty flag, or `None` for an empty slot.
+    #[inline(never)]
     pub(crate) fn into_ejected(self, now: u64) -> Option<EjectedCart<'a>> {
         if !self.is_loaded() {
             return None;

@@ -79,6 +79,7 @@ pub(crate) struct Sys<'a> {
 }
 
 impl Sys<'_> {
+    #[inline(never)]
     pub(crate) const fn new() -> Self {
         Self {
             hot: Hot::new(),
