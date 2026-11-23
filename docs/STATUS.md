@@ -7,18 +7,18 @@
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
   review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
   (ad56c23). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, end of session 11 (log
-  `logs/2026-11-23-11-m9-fixes.md`). Baseline 94b09ae; gate passes.
+- **Last updated:** 2026-11-23, during session 12. Baseline b59d9a1 (gate
+  passed at 95e948d: must 86/86, should 40/40, stretch 3,252/3,461).
 
 ## Next up (session 12): M9
 
 `docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
 checklist findings from the human become the first fixes when they arrive.
-1. Land `ppu-edges-step1b` with `hdma-trigger` via option (b): rebase
-   `hdma-trigger` onto step1b, fit the HDMA-period edge (design step 10 piece;
-   gambatte `isHdmaPeriod` behaviour only) against `hdma_late_enable_*` and
-   `hdma_late_m0halt_ds_lcdoffset1_{1,2}`; 0 regressions. Then design steps
-   3-10 (`docs/design/lcd-offset-phase.md`).
+1. Done in session 12: step 1b + `hdma-trigger` + design steps 3, 7 (VRAM
+   part) and 10 merged (95e948d, +51/-0; the HDMA period itself needed no
+   change); AGE `spsw-interrupts-cgbBC` fixed (1543bd8). In progress: drop
+   the now-dead per-speed LYC walk compare point (both speeds use t = 5),
+   fingerprint-identical. Remaining lcd-offset design steps 4-9.
 2. Remaining window group 4 (31): late_wy FFto*/10to0, ds late_wy,
    late_enable_afterVblank, late_wx_ff, WX=A6/obj X=A7 edge, re-trigger.
 3. Group 12 remaining: m0enable/disable_*, lycdisable_ff45_* edge positions;
@@ -70,22 +70,12 @@ Working rules that matter here:
   right before committing an ADR (next free: 0029).
 - PPU design size estimates ran ~2-3x low; measure early.
 
-## In flight (held, unmerged; all local branches)
-- `ppu-edges-step1b` (17500ef, on 3ed5096): lcd_offset design step 1 with the
-  compare point in `Cursor::cmp`. +5/-1 (`dma/hdma_late_enable_lcdoffset3_1`,
-  an FF55 write needing the step-10 HDMA-period edge), .text +412 with no
-  budget raised, cgb-acid2 +2.44%; only unit tests re-run after its rebase.
-  Supersedes `lcd-offset-step1` and `ppu-edges`.
-- `hdma-trigger` (on fa2f8f1): HDMA trigger 2 dots after mode-0 STAT, block
-  before IRQ dispatch, HBlank period, lost triggers. +30/-1 (swaps
-  `hdma_late_m0halt_ds_lcdoffset1_{1,2}`). Plan: option (b) above.
-- `lcd-offset-phase` (dfb1c67): data-fit WIP, superseded by the design; delete.
+## In flight
+- `m9-cmp-cleanup` (worktree `../gbc-32-wt-cmp`): the per-speed compare
+  point cleanup above.
 
 ## Needs human
 Open:
-- **`hdma-trigger` swap:** plan is to land it with step1b and fit the
-  HDMA-period edge (0 regressions); the human may instead accept the 1-ROM swap
-  (baseline would record a regression).
 - **Sign-off proposal (upcoming): group-15 SameSuite applicability tally**
   (m9-triage): 1 C-applicable, 9 E-only, 7 unclear.
 - **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
@@ -94,7 +84,9 @@ Open:
   back; resuming audio pacing`, no burst); a battery `.sav` survives a
   restart; a gamepad.
 - **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
-  `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`.
+  `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`,
+  `ppu-edges-step1b` and `hdma-trigger` (landed as rebased copies in
+  session 12). Merged in session 12: `m9-spsw`, `m9-step1b-hdma`.
   Fully merged (`git cherry main <b>` shows no `+`): `bench-worst-case-midline-scx`,
   `ppu-objmix`, `wip/speed-switch-h3`, `worktree-agent-a62aec9bd37d37e1c`,
   `worktree-agent-ab9ff6f40452030b3`, `worktree-agent-ae119d2f1346ad041`.
