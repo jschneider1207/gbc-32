@@ -85,7 +85,10 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None (session 12 ended with no worktrees or unmerged agent branches).
+- Session 13 (2026-11-23): agent on branch `m9-m1` (worktree `../gbc-32-m1`,
+  `gambatte/m1/*` STAT mode-1 edges, 16 ROMs) and agent on `m9-hdma-spsw`
+  (worktree `../gbc-32-hdma-spsw`, HDMA across a speed switch, ~18 ROMs).
+  Not merged yet; orchestrator runs fingerprint/bench/gate after merge.
 
 ## Needs human
 Open:
