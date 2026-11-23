@@ -416,3 +416,17 @@ Clarifications made while implementing; the decisions stand.
 - Unit tests whose precondition is "nothing scheduled" (the idle and
   halted-skip countdown tests) power the APU off first: post-boot it is
   on, so `DivApu` fires every 8,192 clocks.
+
+### 2026-11-22: CH2 implementation notes (M6 task 1(b))
+- **Duty masks.** Section 5's literals (`0000_0001` ...) list positions 0-7
+  left to right, as SameBoy's `duties` does; as Rust masks with bit i =
+  position i they are `0x80, 0x81, 0xE1, 0x7E` (unit-tested against the
+  SameBoy sequences).
+- The trigger countdown conversion is in `docs/reference/apu.md`;
+  `lf_div` = `((now >> 1) ^ phase ^ 1) & 1` (SameBoy initialises it to 1).
+- NR52 bit 1 is `sq[1].on`; `Fs::active` keeps the bits of the channels
+  not yet implemented (CH1 post-boot) until their tasks.
+- The envelope timer loads 8 for a period of 0 (it never counts while the
+  period is 0; an NRx2 write giving a period then counts from 8).
+- Zombie mode's `16 - volume` wraps (volume 17 gives 15): Pan Docs keeps
+  the low 4 bits after all the operations.

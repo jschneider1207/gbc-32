@@ -547,8 +547,12 @@ impl Ctx<'_, '_> {
         match reg {
             0x26 => self.write_nr52(value, now),
             0x10..=0x25 if !self.mem.apu.powered() => {}
-            // Channel registers and wave RAM: stored; the channels decode
-            // them from task 1(b) on.
+            // Channel registers: stored, then decoded by the channels.
+            0x10..=0x25 => {
+                self.mem.io[reg] = value;
+                self.mem.apu.write(reg, value, now);
+            }
+            // Wave RAM: stored (CH3 playing: task 4).
             _ => self.mem.io[reg] = value,
         }
     }
@@ -2393,6 +2397,87 @@ mod tests {
         let _ = run_audio(emu, 400, &mut []);
         assert_eq!(run_audio(emu, 124, &mut audio).audio_samples, 0);
         assert_eq!(run_audio(emu, 4, &mut audio).audio_samples, 1);
+    }
+
+    // --- CH2 (ADR 0021 section 5; M6 task 1(b)) ---
+
+    #[test]
+    fn ch2_length_expiry_clears_nr52_bit_1() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF0); // DAC on
+        write(emu, 0xFF16, 0x3E); // length 2
+        write(emu, 0xFF19, 0xC0); // trigger, length on (fs 0: no extra clock)
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        // The first DIV-APU edge is fs step 1: one length clock.
+        let _ = run_audio(emu, first_div_apu_edge() + 100, &mut []);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02, "2 -> 1");
+        // Step 3 is the next length clock.
+        let _ = run_audio(emu, 2 * 8192, &mut []);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x00, "1 -> 0: off");
+    }
+
+    #[test]
+    fn ch2_dac_off_clears_nr52_bit_1() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF17, 0xF0);
+        write(emu, 0xFF19, 0x80);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        write(emu, 0xFF17, 0x07);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x00);
+    }
+
+    #[test]
+    fn pcm12_high_nibble_is_ch2s_digital_output() {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF16, 0x40); // duty 25%: positions 0 and 7 high
+        write(emu, 0xFF17, 0xF0); // volume 15
+        write(emu, 0xFF18, 0x00);
+        write(emu, 0xFF19, 0x84); // f = 0x400: 4096 clocks per step
+        let _ = run_audio(emu, 2000, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0x00, "position 0, before the first step");
+        let _ = run_audio(emu, 4106 + 6 * 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0xF0, "position 7");
+        // A pure read: the same at the same clock.
+        assert_eq!(emu.peek(0xFF76), 0xF0);
+        let _ = run_audio(emu, 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0xF0, "position 0, started");
+        let _ = run_audio(emu, 4096, &mut []);
+        assert_eq!(emu.peek(0xFF76), 0x00, "position 1");
+    }
+
+    /// CH2 at volume 15, duty 12.5%, frequency `f`, on both sides at
+    /// volume 8, after `warm` windows; then `n` samples.
+    fn ch2_tone(f: u16, warm: usize, n: usize) -> std::vec::Vec<StereoSample> {
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        write(emu, 0xFF24, 0x77);
+        write(emu, 0xFF25, 0x22);
+        write(emu, 0xFF16, 0x00);
+        write(emu, 0xFF17, 0xF0);
+        write(emu, 0xFF18, f as u8);
+        write(emu, 0xFF19, 0x80 | (f >> 8) as u8);
+        let mut audio = vec![StereoSample::default(); warm + n];
+        let r = run_audio(emu, 128 * (warm + n) as u64, &mut audio);
+        assert_eq!(r.audio_samples, warm + n);
+        audio.split_off(warm)
+    }
+
+    #[test]
+    fn a_known_ch2_tone_averages_through_the_mixer() {
+        // One duty high (digital 15 -> analog -15) and seven low (+15) per
+        // period: average 11.25, times volume 8, times 64 = 5760.
+        let want = StereoSample {
+            left: 5760,
+            right: 5760,
+        };
+        // f = 2044: one duty period per 128-clock window, every window.
+        assert!(ch2_tone(2044, 2, 20).iter().all(|&s| s == want));
+        // f = 2016: one step per window; eight windows are one period.
+        let tone = ch2_tone(2016, 10, 32);
+        assert!(tone.iter().any(|&s| s != want));
+        for period in tone.chunks(8) {
+            let sum: i32 = period.iter().map(|s| i32::from(s.left)).sum();
+            assert_eq!(sum, 8 * 5760);
+        }
     }
 
     #[test]

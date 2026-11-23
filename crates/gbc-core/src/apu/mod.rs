@@ -12,14 +12,17 @@
 //! state. All-zero is a valid `Apu`: powered off.
 //!
 //! Task 1(a) is the framework: power, the frame sequencer and the output
-//! pipeline. The channels plug into `Apu::integrate`, `Apu::advance`,
-//! [`Apu::step`] and the NR52 active bits.
+//! pipeline. The channels plug into `Apu::write`, `Apu::integrate`,
+//! `Apu::advance`, [`Apu::step`] and the NR52 active bits. Task 1(b): CH2.
 
 mod mix;
+mod square;
+mod units;
 
 pub(crate) use mix::Output;
 
 use crate::memory::Memory;
+use square::Square;
 
 /// One stereo output sample, written by the core into the caller's audio
 /// buffer.
@@ -46,6 +49,8 @@ pub(crate) struct Apu {
     /// The output stream: kept across power cycles.
     pub(crate) out: Output,
     pub(crate) fs: Fs,
+    /// CH1 and CH2. CH1 is decoded from task 3 on (sweep).
+    pub(crate) sq: [Square; 2],
 }
 
 /// Power and the frame sequencer (ADR 0021 section 4).
@@ -59,11 +64,11 @@ pub(crate) struct Fs {
     pub(crate) step: u8,
     /// The next DIV-APU edge is skipped (power on with the APU bit high).
     pub(crate) skip: bool,
-    /// NR52 bits 0-3: the channels that are on.
+    /// NR52 bits 0, 2, 3: CH1, CH3 and CH4 until their tasks (3-5) give
+    /// them a channel; CH2's bit is `sq[1].on`.
     pub(crate) active: u8,
     /// SameBoy's 1 MHz phase (`lf_div`) at power on, from the clock: the
     /// square trigger delay (ADR 0021 section 5, task 1(b)).
-    #[allow(dead_code)] // Read by the square channels (task 1(b)).
     pub(crate) phase: u8,
 }
 
@@ -79,6 +84,7 @@ impl Apu {
                 active: 0,
                 phase: 0,
             },
+            sq: [Square::ZERO; 2],
         }
     }
 
@@ -100,7 +106,7 @@ impl Apu {
     /// NR52 as read: power, three unused bits as 1, the channel bits
     /// (Pan Docs: FF26 - NR52).
     pub(crate) fn nr52(&self) -> u8 {
-        0x70 | u8::from(self.fs.power) << 7 | self.fs.active
+        0x70 | u8::from(self.fs.power) << 7 | self.fs.active | u8::from(self.sq[1].on) << 1
     }
 
     /// NR52 bit 7 from 1 to 0, after a sync: everything but the output
@@ -139,26 +145,50 @@ impl Apu {
             return;
         }
         fs.step = (fs.step + 1) & 7;
-        // Channel hooks (tasks 1(b), 3-5): `step & 1 == 1` clocks the
-        // length counters (256 Hz), `step & 3 == 3` the sweep (128 Hz),
-        // `step == 0` the envelopes (64 Hz).
+        let step = fs.step;
+        if step & 1 == 1 {
+            // The length counters, 256 Hz.
+            self.sq[1].clock_length();
+        }
+        // `step & 3 == 3`: the sweep (128 Hz, task 3).
+        if step == 0 {
+            // The envelopes, 64 Hz.
+            self.sq[1].clock_envelope();
+        }
+    }
+
+    /// SameBoy's 1 MHz phase `lf_div` at clock `now`: 1 at power on, then
+    /// toggling every 2 base clocks (SameBoy `GB_apu_init`, `GB_apu_run`).
+    /// The exact fit is deferred (ADR 0021 section 12).
+    #[inline]
+    fn lf_div(&self, now: u64) -> u8 {
+        ((now >> 1) as u8 ^ self.fs.phase ^ 1) & 1
+    }
+
+    /// A write to a channel register FF10-FF25 (by the low 7 address bits)
+    /// at clock `now`, after a sync, with the APU on. The byte is already
+    /// stored in `Memory::io`.
+    pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64) {
+        if let 0x16..=0x19 = reg {
+            let (fs, lf) = (self.fs.step, self.lf_div(now));
+            self.sq[1].write(reg - 0x15, value, fs, lf);
+        }
     }
 
     /// Advances the channels by `dt` clocks without integrating (the
-    /// empty-buffer path, ADR 0021 section 9). No channels yet.
+    /// empty-buffer path, ADR 0021 section 9).
     #[inline]
     fn advance(&mut self, dt: u64) {
-        let _ = dt;
+        self.sq[1].advance(dt);
     }
 
     /// Advances the channels by `dt` clocks (at most one sample window) and
     /// returns each channel's analog level (-15..15 while its DAC is on,
-    /// else 0) times clocks, summed over the span, for CH1-CH4. No
-    /// channels yet: silence (every DAC off).
+    /// else 0) times clocks, summed over the span, for CH1-CH4. CH1, CH3
+    /// and CH4 are silent (DAC off) until their tasks.
     #[inline]
     fn integrate(&mut self, dt: u32) -> [i32; 4] {
-        let _ = dt;
-        [0; 4]
+        [0, self.sq[1].integrate(dt), 0, 0]
     }
 }
 
@@ -168,13 +198,17 @@ impl Apu {
 /// 3). Out of line, off `read_high`.
 #[inline(never)]
 pub(crate) fn read_apu(mem: &Memory, now: u64, reg: usize) -> u8 {
-    // `now` is for the channel copies (CH3 wave RAM, PCM: tasks 1(b), 3-5).
-    let _ = now;
     match reg {
         0x26 => mem.apu.nr52(),
         // PCM12/PCM34: each channel's digital output (0-15) if it is on,
-        // else 0 (SameBoy `GB_IO_PCM12`/`PCM34`). No channels yet.
-        0x76 | 0x77 => 0x00,
+        // else 0 (SameBoy `GB_IO_PCM12`/`PCM34`), at `now`: a copy of the
+        // channel is advanced. CH1, CH3, CH4: tasks 3-5.
+        0x76 => {
+            let mut ch2 = mem.apu.sq[1];
+            ch2.advance(now.saturating_sub(mem.apu.out.synced));
+            ch2.digital() << 4
+        }
+        0x77 => 0x00,
         // Wave RAM as stored. CH3 playing: the byte it reads (task 4).
         _ => mem.io[reg],
     }
