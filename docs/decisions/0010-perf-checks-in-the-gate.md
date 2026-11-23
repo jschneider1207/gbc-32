@@ -38,3 +38,10 @@ deterministic for a pinned toolchain and valgrind version.
   either rebaselines in a commit of its own.
 - Instruction counts on x86-64 are a proxy for Cortex-M7 cycles, not a
   measurement of them. Stage 2 measures cycles per frame on the board.
+
+## Amendment (2026-11-23, human decision)
+`synth:worst-case` gains one mid-mode-3 SCX write per line (tools/bench/src/synth.rs),
+so the combined worst case also covers dense mid-line register writes. The 50% bar
+(4.02 M Ir/frame) applies to realistic worst cases; see docs/perf.md
+"Outside the bound". The workload change moved worst-case from the previous
+baseline to 476.5 M Ir (2 s), 3.989 M Ir/frame, 99.2% of the line.

@@ -245,6 +245,14 @@ in 2 s), 107% of the 4.02 M (50% of M7) line; cgb-raster 2.67 M. Before
 task 8 (empty buffers, M6 channels in the core): 1,623.2 / 1,011.0 /
 592.4 / 394.1 / 426.1 / 248.1 / 424.9 / 311.2 M.
 
+**M8 baseline (2026-11-23).** Ir (perf/bench-baseline.txt): cpu_instrs
+1,668,850,426; cgb_sound 1,122,285,440; cgb-acid2 660,041,342; event-storm
+(2 s) 397,507,065; dma-storm (3 s) 439,306,467; halt-irq (10 s)
+280,584,307; worst-case (2 s) 476,467,536; cgb-raster (2 s) 321,950,601;
+apu-writes (2 s) 85,482,907. `synth:worst-case` now also writes SCX once
+per line in mode 3 (human decision, ADR 0010 amendment): 3.989 M Ir per
+emulated frame (119.455 frames in 2 s), 99.2% of the 4.02 M line.
+
 **Combined worst case.** `synth:worst-case` is 505.4 M Ir over 2 s =
 119.455 frames, so 4.23 M Ir per emulated frame: 105% of the 4.02 M
 (50% of M7) line, 0.21 M over it. The earlier sum estimate (event-storm
