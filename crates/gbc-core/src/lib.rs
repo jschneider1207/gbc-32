@@ -763,8 +763,9 @@ impl<'a> Emulator<'a> {
 /// Out of line, off `Emulator::run` (code-size budgets): only while a
 /// transfer is pending or stalls the CPU.
 #[inline(never)]
-fn vdma_turn(cpu: &Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
+fn vdma_turn(cpu: &mut Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
     if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.running() {
+        cpu.latch_fetch(ctx);
         ctx.vram_dma();
     }
     if ctx.sys.vdma.stall == 0 {
@@ -1513,8 +1514,11 @@ mod tests {
         fn stop_wakeup(&self) -> bool {
             self.0.stop_wakeup()
         }
-        fn stop_refetch(&mut self) -> bool {
-            cpu::Bus::stop_refetch(self.0)
+        fn hdma_refetch(&mut self) -> bool {
+            cpu::Bus::hdma_refetch(self.0)
+        }
+        fn fetch_peek(&mut self, addr: u16) -> u8 {
+            cpu::Bus::fetch_peek(self.0, addr)
         }
         fn halt_begin(&mut self) {
             self.0.halt_begin();

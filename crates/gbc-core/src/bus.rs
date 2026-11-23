@@ -1414,16 +1414,15 @@ impl Ctx<'_, '_> {
         (self.clock() as u32).wrapping_sub(self.sys.vdma.switch_end) as i32 >= 0
     }
 
-    /// As [`Bus::halt_end`], with two differences (gambatte CGB C
+    /// As [`Bus::halt_end`], except (gambatte CGB C
     /// captures, ADR 0017 speed-switch amendment):
     /// - OAM DMA resumes one M-cycle later, at the end of the wake-up
     ///   M-cycle (`oamdma/oamdmasrcC0_speedchange_readC000`,
     ///   `dma/hdma_transition_speedchange_oamdma`: a WRAM read after the
     ///   switch sees the transfer one byte earlier).
-    /// - An HBlank in the wake-up M-cycle starts no HDMA block (SameBoy
-    ///   clears `halted` after it; `dma/hdma_m0speedchange_late_m3wakeup_
-    ///   scx{1,2}_2`): [`Bus::wake_stalls`] clears `halted`.
     ///
+    /// As after HALT, an HBlank in the wake-up M-cycle starts no HDMA
+    /// block ([`Bus::wake_stalls`] clears `halted`).
     /// The wake-up's own block (HALT began outside the HBlank) is checked
     /// at the end of the wake-up M-cycle, as after HALT, also when the
     /// countdown ends it (gambatte `intevent_unhalt`;
@@ -1436,7 +1435,6 @@ impl Ctx<'_, '_> {
             d.paused -= self.hot.mcycle as u64;
         }
         self.halt_end();
-        self.sys.vdma.halted = true;
     }
 
     /// The halted skip ([`Bus::idle_halted`]), stopping at the halt's
@@ -1562,7 +1560,13 @@ impl Ctx<'_, '_> {
     /// at a transfer's end, so a trigger during it is lost (CGB C captures
     /// `dma/hdma_transition_{,ei_}halt_late_unhalt_scx1_{1,2}`).
     fn vdma_hblank(&mut self) {
-        let v = &self.sys.vdma;
+        let v = &mut self.sys.vdma;
+        if v.refetch == hdma::RAN {
+            v.refetch = 0;
+            if ((self.hot.clock() as u32).wrapping_sub(v.switch_end) as i32) < 0 {
+                return;
+            }
+        }
         if v.hblank && !v.halted && v.stall == 0 && self.sys.ppu.lcd_enabled() {
             self.vdma_request();
         }
@@ -1582,6 +1586,10 @@ impl Ctx<'_, '_> {
         let v = &mut self.sys.vdma;
         v.halted = true;
         v.wake_ok = !in_hblank;
+        // A block requested in HALT's M-cycle (gambatte `Memory::halt`).
+        if v.pending {
+            v.refetch = hdma::REQUESTED;
+        }
     }
 
     /// The speed-switch halt begins during an HBlank transfer (after the
@@ -1616,7 +1624,7 @@ impl Ctx<'_, '_> {
                 v.hblank = false;
                 self.vdma_sync_reg();
             }
-            self.sys.vdma.refetch = true;
+            self.sys.vdma.refetch = hdma::REQUESTED;
         }
         self.vdma_halt();
     }
@@ -1672,9 +1680,18 @@ impl Ctx<'_, '_> {
             }
         }
         // At most 1 + 128 * 16 M-cycles: fits. One less for the block a
-        // speed-switch STOP's refetch waited for (`VramDma::refetch`).
-        v.stall = hdma::stall_mcycles(blocks, self.hot.mcycle as u32) as u16
-            - u16::from(core::mem::take(&mut v.refetch));
+        // HALT's or speed-switch STOP's latched opcode waited for
+        // (`VramDma::refetch`).
+        let m = self.hot.mcycle as u32;
+        let full = hdma::stall_mcycles(blocks, m);
+        v.stall = full as u16;
+        v.refetch = if v.refetch == hdma::REQUESTED {
+            v.stall -= 1;
+            v.switch_end = (now as u32).wrapping_add(full * m);
+            hdma::RAN
+        } else {
+            0
+        };
         self.sys.vdma = v;
         self.vdma_sync_reg();
     }
@@ -1761,8 +1778,10 @@ impl Bus for Ctx<'_, '_> {
     /// the next line's mode 2 starts none.
     #[inline(always)]
     fn wake_stalls(&mut self) -> bool {
-        // HBlanks start blocks again (already from the wake-up M-cycle
-        // after HALT; after it for the speed switch, `speed_switch_end`).
+        // HBlanks start blocks again after the wake-up M-cycle, not in it
+        // (SameBoy clears `halted` after it; gambatte CGB C captures
+        // `dma/hdma_m0halt_late_m3unhalt_scx1_2`,
+        // `hdma_m0speedchange_late_m3wakeup_scx2_2`).
         self.sys.vdma.halted = false;
         if self.sys.vdma.wake_ok {
             self.vdma_wake();
@@ -1815,13 +1834,23 @@ impl Bus for Ctx<'_, '_> {
         !self.sys.buttons.is_empty()
     }
 
-    /// `VramDma::refetch`, kept to single speed for the block's stall at
-    /// the wake-up (still `pending`), cleared to double speed (the block
-    /// already ran).
-    fn stop_refetch(&mut self) -> bool {
+    /// The CPU's read, without the M-cycle's tick. Cold: only for a
+    /// latched opcode.
+    #[cold]
+    #[inline(never)]
+    fn fetch_peek(&mut self, addr: u16) -> u8 {
+        read::<true>(self.mem, self.sys, &self.hot, addr)
+    }
+
+    /// `VramDma::refetch` is `REQUESTED`: kept while the block is still
+    /// `pending` (it runs at the wake-up), cleared otherwise (a switch to
+    /// double speed ran it at once).
+    fn hdma_refetch(&mut self) -> bool {
         let v = &mut self.sys.vdma;
-        let r = v.refetch;
-        v.refetch = r && v.pending;
+        let r = v.refetch == hdma::REQUESTED;
+        if !v.pending {
+            v.refetch = 0;
+        }
         r
     }
 
@@ -1838,11 +1867,6 @@ impl Bus for Ctx<'_, '_> {
         if self.sys.ppu.dma.paused != NEVER {
             self.dma_resume();
         }
-        // HBlanks start blocks again from the wake-up M-cycle on. SameBoy
-        // still has `halted` set in it; only the gambatte `lcdoffset1` pair
-        // tells the two apart, and which of its halves passes depends on
-        // the lcd_offset phase (M9 triage), so this keeps the old timing.
-        self.sys.vdma.halted = false;
     }
 }
 

@@ -180,12 +180,21 @@ pub trait Bus {
         self.halt_end();
         true
     }
-    /// After a speed switch that halts ([`Bus::speed_switch`]): whether
-    /// STOP's second byte, already read, runs as the next opcode. The
-    /// emulator: a VRAM DMA block requested in STOP's first M-cycle
-    /// (gambatte `Memory::stop`, `prefetched`). Free.
-    fn stop_refetch(&mut self) -> bool {
+    /// After HALT halts ([`Bus::halt_begin`]) or a speed switch that halts
+    /// ([`Bus::speed_switch`]): whether the byte after HALT, or STOP's
+    /// second byte, latched then, runs as the next opcode after the
+    /// wake-up ([`Mode::Prefetched`]). The emulator: a VRAM DMA block
+    /// requested in HALT's M-cycle or STOP's first (gambatte
+    /// `Memory::halt`/`stop`, `prefetched`). Free.
+    fn hdma_refetch(&mut self) -> bool {
         false
+    }
+    /// The byte an opcode fetch at `addr` would read now, without the
+    /// M-cycle (the emulator latches an opcode with it before a VRAM DMA
+    /// block, [`Cpu::latch_fetch`]). Free. Default: FF.
+    fn fetch_peek(&mut self, addr: u16) -> u8 {
+        let _ = addr;
+        0xFF
     }
     /// Whether a stopped CPU wakes up (a button is pressed).
     fn stop_wakeup(&self) -> bool {
@@ -211,6 +220,9 @@ pub enum StopKind {
     Joypad,
 }
 
+/// `step_not_running`: run [`Cpu::latched`] without a fetch.
+const LATCHED: u16 = 0x100;
+
 /// What the CPU does on its next step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -227,6 +239,16 @@ enum Mode {
     HaltBug,
     /// STOP (stub until M5): idles until a button is pressed.
     Stopped,
+    /// The opcode was fetched before a VRAM DMA block ([`Cpu::latch_fetch`],
+    /// PC already past it): the step runs it after one idle M-cycle (the
+    /// fetch's), unless an interrupt dispatch is due, which undoes the
+    /// fetch.
+    Latched,
+    /// HALT or a speed-switch STOP met a VRAM DMA block request: the byte
+    /// after HALT, or STOP's second byte, latched then, runs after the
+    /// wake-up (and the block) as the next opcode, before any dispatch,
+    /// with PC unchanged (gambatte `prefetched_`).
+    Prefetched,
     /// Locked up after an invalid opcode; only a reset recovers.
     Locked,
     /// No cartridge loaded: the console is off and time just passes.
@@ -242,6 +264,10 @@ pub struct Cpu {
     /// (Pan Docs: EI; SameBoy `ime_toggle`).
     ei_pending: bool,
     mode: Mode,
+    /// The opcode of [`Mode::Latched`] and [`Mode::Prefetched`].
+    latched: u8,
+    /// A HALT or speed-switch halt wakes into [`Mode::Prefetched`].
+    prefetched: bool,
 }
 
 impl Default for Cpu {
@@ -257,6 +283,8 @@ impl Cpu {
             regs: Registers::zero(),
             ime: false,
             ei_pending: false,
+            latched: 0,
+            prefetched: false,
             mode: Mode::Running,
         }
     }
@@ -317,7 +345,10 @@ impl Cpu {
     /// pending VRAM DMA step runs before its next step, also before an
     /// interrupt dispatch due there (ADR 0017, trigger amendment).
     pub(crate) fn running(&self) -> bool {
-        matches!(self.mode, Mode::Running | Mode::HaltBug)
+        matches!(
+            self.mode,
+            Mode::Running | Mode::HaltBug | Mode::Latched | Mode::Prefetched
+        )
     }
 
     /// Whether the CPU locked up on an invalid opcode.
@@ -351,28 +382,50 @@ impl Cpu {
 
     #[inline(always)]
     fn step_inline<B: Bus>(&mut self, bus: &mut B) {
-        let mut pc_step = 1;
-        if self.mode != Mode::Running {
-            match self.step_not_running(bus) {
-                Some(step) => pc_step = step,
-                None => return,
+        let op = 'op: {
+            let mut pc_step = 1;
+            if self.mode != Mode::Running {
+                match self.step_not_running(bus) {
+                    // A latched opcode: no fetch.
+                    Some(LATCHED) => break 'op self.latched,
+                    Some(step) => pc_step = step,
+                    None => return,
+                }
             }
-        }
-        if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
-            self.dispatch(bus);
-            return;
-        }
-        // EI takes effect after the instruction that follows it. The check
-        // above used the old IME, so that instruction always runs.
-        if self.ei_pending {
-            self.ei_pending = false;
-            self.ime = true;
-        }
-        let pc = self.regs.pc;
-        let op = bus.read(pc);
-        self.regs.pc = pc.wrapping_add(pc_step);
+            if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                self.dispatch(bus);
+                return;
+            }
+            // EI takes effect after the instruction that follows it. The
+            // check above used the old IME, so that instruction always runs.
+            if self.ei_pending {
+                self.ei_pending = false;
+                self.ime = true;
+            }
+            let pc = self.regs.pc;
+            let op = bus.read(pc);
+            self.regs.pc = pc.wrapping_add(pc_step);
+            op
+        };
         // The only call site, so the 256-arm dispatch is inlined once.
         self.execute(op, bus);
+    }
+
+    /// A VRAM DMA block is about to run where the CPU would fetch its next
+    /// opcode: SameBoy (`GB_cpu_run`) and gambatte (`Interrupter::prefetch`
+    /// in the DMA event) fetch it before the block, so a block that
+    /// overwrites it, or a PPU mode that starts blocking VRAM during the
+    /// stall, doesn't change it (gambatte CGB C `dma/hdma_pc_7ffe`,
+    /// `late_gdma_pc_7ffe_{1,2}`). Only from a plain running state; the
+    /// fetch's M-cycle stays after the stall (ADR 0017).
+    #[cold]
+    pub(crate) fn latch_fetch<B: Bus>(&mut self, bus: &mut B) {
+        if self.mode == Mode::Running {
+            let pc = self.regs.pc;
+            self.latched = bus.fetch_peek(pc);
+            self.regs.pc = pc.wrapping_add(1);
+            self.mode = Mode::Latched;
+        }
     }
 
     /// The step for every mode except `Running`. Returns `None` if the
@@ -393,11 +446,11 @@ impl Cpu {
                 if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
                     bus.halt_end();
                     bus.idle();
-                    self.mode = Mode::Running;
+                    let prefetched = self.wake_prefetched();
                     // A VRAM DMA block the wake-up started runs before the
                     // next instruction: SameBoy fetches its opcode, runs
                     // `GB_hdma_run`, then executes it (ADR 0017, amendment).
-                    if bus.wake_stalls() {
+                    if bus.wake_stalls() || prefetched {
                         return None;
                     }
                     Some(1)
@@ -412,8 +465,8 @@ impl Cpu {
             Mode::SpeedSwitch => {
                 if bus.speed_switch_halt() {
                     bus.idle();
-                    self.mode = Mode::Running;
-                    if bus.wake_stalls() {
+                    let prefetched = self.wake_prefetched();
+                    if bus.wake_stalls() || prefetched {
                         return None;
                     }
                     Some(1)
@@ -444,6 +497,25 @@ impl Cpu {
                     self.mode = Mode::Running;
                 }
                 None
+            }
+            Mode::Latched => {
+                self.mode = Mode::Running;
+                if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                    // gambatte `Interrupter::interrupt`: "undo prefetch".
+                    self.regs.pc = self.regs.pc.wrapping_sub(1);
+                    return Some(1);
+                }
+                if self.ei_pending {
+                    self.ei_pending = false;
+                    self.ime = true;
+                }
+                bus.idle();
+                Some(LATCHED)
+            }
+            Mode::Prefetched => {
+                self.mode = Mode::Running;
+                bus.idle();
+                Some(LATCHED)
             }
             Mode::Locked | Mode::Off => {
                 bus.idle_halted();
@@ -486,6 +558,15 @@ impl Cpu {
         if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK == 0 {
             self.mode = Mode::Halted;
             bus.halt_begin();
+            // A VRAM DMA block requested in HALT's M-cycle: the byte after
+            // HALT, read now (gambatte `halt`: `opcode_ = read(pc)`,
+            // `prefetched_ = mem_.halt()`), runs after the wake-up with PC
+            // unchanged, so it runs twice, as in the HALT bug (CGB C
+            // `dma/hdma_late_m3halt_m2unhalt_inc_*_2`).
+            if bus.hdma_refetch() {
+                self.latched = bus.fetch_peek(self.regs.pc);
+                self.prefetched = true;
+            }
         } else if !self.ime {
             self.mode = Mode::HaltBug;
         } else {
@@ -497,6 +578,20 @@ impl Cpu {
             // SameSuite `ei_delay_halt`).
             self.regs.pc = self.regs.pc.wrapping_sub(1);
         }
+    }
+
+    /// The wake-up from HALT or the speed-switch halt, after its M-cycle:
+    /// into [`Mode::Prefetched`] (the step ends; the next one runs the
+    /// latched opcode, after the VRAM DMA block) or [`Mode::Running`].
+    #[inline(always)]
+    fn wake_prefetched(&mut self) -> bool {
+        self.mode = Mode::Running;
+        if self.prefetched {
+            self.prefetched = false;
+            self.mode = Mode::Prefetched;
+            return true;
+        }
+        false
     }
 
     /// STOP (opcode 10), after SameBoy `stop()` (Pan Docs: "Using the
@@ -522,7 +617,7 @@ impl Cpu {
         let kind = bus.stop_begin();
         if !pending {
             let pc = self.regs.pc;
-            bus.read(pc);
+            self.latched = bus.read(pc);
             self.regs.pc = pc.wrapping_add(1);
         }
         match kind {
@@ -533,12 +628,9 @@ impl Cpu {
                         bus.idle();
                     } else {
                         self.mode = Mode::SpeedSwitch;
-                        // The byte is fetched again from memory, where
-                        // gambatte runs the latched one: they differ only
-                        // if a VRAM DMA block overwrote it in the halt.
-                        if bus.stop_refetch() {
-                            self.regs.pc = self.regs.pc.wrapping_sub(1);
-                        }
+                        // STOP's second byte, read above, runs after the
+                        // halt (gambatte `stop`: `prefetched_`).
+                        self.prefetched = bus.hdma_refetch();
                     }
                 }
             }

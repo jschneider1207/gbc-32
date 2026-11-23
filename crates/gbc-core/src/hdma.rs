@@ -44,6 +44,13 @@ pub(crate) const HBLANK_DELAY: u64 = 2;
 /// `hdma_late_enable_{,ds_}{1,2}`).
 pub(crate) const HBLANK_UNTIL: u64 = 4;
 
+/// [`VramDma::refetch`]: a block requested at HALT or STOP waits for the
+/// wake-up.
+pub(crate) const REQUESTED: u8 = 1;
+/// [`VramDma::refetch`]: that block ran; triggers before `switch_end` are
+/// lost.
+pub(crate) const RAN: u8 = 2;
+
 /// The FF51-FF55 state.
 #[derive(Clone, Copy)]
 pub(crate) struct VramDma {
@@ -69,13 +76,16 @@ pub(crate) struct VramDma {
     /// HBlank transfer: the wake-up, in mode 0, starts a block. Cleared at
     /// the wake-up.
     pub(crate) wake_ok: bool,
-    /// A block was requested in a speed-switch STOP's first M-cycle
-    /// (gambatte `Memory::stop`: `prefetched = hdmaReqFlagged`): STOP's
-    /// second byte runs as the next opcode (`Ctx::stop_refetch`). To single
-    /// speed it stays set until that block runs at the wake-up, whose stall
-    /// is then one M-cycle shorter (gambatte `cc -= 4` after a DMA in the
-    /// `hdma_requested` halt state). Fits this struct's padding.
-    pub(crate) refetch: bool,
+    /// A block requested in HALT's M-cycle or a speed-switch STOP's first
+    /// (gambatte `Memory::halt`/`stop`: `prefetched = hdmaReqFlagged`):
+    /// [`REQUESTED`] until that block runs at the wake-up (to double
+    /// speed the switch runs it at once). Its stall is then one M-cycle
+    /// shorter, but triggers until its full length are still lost
+    /// (gambatte: `cc -= 4` after a DMA in the `hdma_requested` halt
+    /// state, acknowledged at the transfer's end): [`RAN`], with the end
+    /// in `switch_end`, until the next trigger. 0 otherwise. Fits this
+    /// struct's padding.
+    pub(crate) refetch: u8,
     /// M-cycles left of the current transfer step's CPU stall
     /// ([`stall_mcycles`]; at most 2,049). A run call can end inside the
     /// stall (a stop event or its target); the next call resumes it
@@ -84,7 +94,8 @@ pub(crate) struct VramDma {
     /// Not VRAM DMA state: during the CGB speed-switch halt
     /// (`Ctx::speed_switch`), the low 32 bits of the clock at which its
     /// last M-cycle (the wake-up) starts; the halt is far shorter than
-    /// 2^31 clocks, so a wrapping compare is exact. Stale otherwise. Here
+    /// 2^31 clocks, so a wrapping compare is exact. After a [`RAN`] block,
+    /// the end of its full stall (the same way). Stale otherwise. Here
     /// because it fits this struct's padding (the `Hw` size budget), next
     /// to the other HALT state.
     pub(crate) switch_end: u32,
@@ -103,7 +114,7 @@ impl VramDma {
             pending: false,
             halted: false,
             wake_ok: false,
-            refetch: false,
+            refetch: 0,
             stall: 0,
             switch_end: 0,
             line: crate::schedule::NEVER,
@@ -173,6 +184,9 @@ mod tests {
         rom[0x7000..0x7006].copy_from_slice(&[0x76, 0xFA, 0x00, 0x80, 0xFB, 0x00]);
         // STOP with INC A as its second byte, then NOPs.
         rom[0x7100..0x7102].copy_from_slice(&[0x10, 0x3C]);
+        // HALT, INC A, then NOPs; LDH (55),A running into VRAM at 8000.
+        rom[0x6000..0x6002].copy_from_slice(&[0x76, 0x3C]);
+        rom[0x7FFE..0x8000].copy_from_slice(&[0xE0, 0x55]);
         let emu = crate::tests::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         for i in 0..0x100 {
@@ -532,6 +546,17 @@ mod tests {
         emu.hw.cpu.set_registers(r);
     }
 
+    /// Steps until A reads `a`: the length of that step.
+    fn step_until_a(emu: &mut Emulator, a: u8) -> u64 {
+        for _ in 0..200_000 {
+            let d = step(emu);
+            if emu.hw.cpu.registers().a == a {
+                return d;
+            }
+        }
+        panic!("A never {a}");
+    }
+
     /// Steps until PC leaves `pc`: the length of that step.
     fn step_until_pc_moves(emu: &mut Emulator, pc: u16) -> u64 {
         for _ in 0..200_000 {
@@ -579,9 +604,9 @@ mod tests {
         assert_eq!(emu.hw.sys.hot.mcycle, 2);
         assert_eq!(emu.mem.vram[..16], block(0));
         assert_eq!(emu.peek(0xFF55), 0x81);
-        step_until_pc_moves(emu, 0x7101);
+        // INC A, latched at the STOP, runs with PC unchanged.
+        step_until_a(emu, 2);
         assert_eq!(emu.hw.cpu.registers().pc, 0x7102);
-        assert_eq!(emu.hw.cpu.registers().a, 2);
         // Ended: no block on the next lines.
         let t0 = emu.clock();
         while emu.clock() < t0 + 3 * 456 {
@@ -606,8 +631,8 @@ mod tests {
         assert_eq!(emu.hw.sys.hot.mcycle, 4);
         assert_eq!(emu.mem.vram[0], 0);
         assert_eq!(emu.peek(0xFF55), 0x00);
-        let d = step_until_pc_moves(emu, 0x7101);
-        assert_eq!(emu.hw.cpu.registers().a, 2);
+        let d = step_until_a(emu, 2);
+        assert_eq!(emu.hw.cpu.registers().pc, 0x7102);
         assert_eq!(emu.mem.vram[..16], block(0));
         assert_eq!(emu.peek(0xFF55), 0xFF);
         // The stall (1 + 8 M-cycles, less one), then INC A.
@@ -680,5 +705,71 @@ mod tests {
         }
         assert_eq!(emu.mem.vram[16], 0);
         assert_eq!(emu.peek(0xFF55), 0x00);
+    }
+
+    #[test]
+    fn a_block_requested_in_halts_mcycle_makes_the_next_byte_run_twice() {
+        // gambatte `Memory::halt` (`prefetched`; CGB C captures
+        // `dma/hdma_late_m3halt_m2unhalt_inc_scx{1,2}_2`): the byte after
+        // HALT, latched at the HALT, runs after the wake-up and the block
+        // with PC unchanged, so INC A runs twice.
+        let emu = setup(0x91, 0x80);
+        while emu.peek(0xFF41) & 3 != 0
+            || !(1..=140).contains(&emu.peek(0xFF44))
+            || emu.hw.sys.ppu.mode0_start().is_none()
+        {
+            step(emu);
+        }
+        let t = emu.hw.sys.ppu.mode0_start().unwrap() + 456 + super::HBLANK_DELAY;
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x80);
+        while emu.clock() + 4 < t {
+            step(emu);
+        }
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x6000;
+        r.a = 1;
+        emu.hw.cpu.set_registers(r);
+        emu.hw.sys.ie = 0x04;
+        emu.hw.sys.iflags = 0;
+        step(emu);
+        assert!(emu.hw.cpu.halted());
+        assert_eq!(emu.mem.vram[0], 0);
+        for _ in 0..50 {
+            step(emu);
+        }
+        emu.hw.sys.iflags = 0x04;
+        while emu.hw.cpu.registers().pc < 0x6003 {
+            step(emu);
+        }
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.hw.cpu.registers().a, 3);
+    }
+
+    #[test]
+    fn the_opcode_after_a_block_is_fetched_before_it() {
+        // SameBoy `GB_cpu_run` and gambatte (`Interrupter::prefetch`)
+        // fetch the next opcode before the block (CGB C capture
+        // `dma/hdma_pc_7ffe`): INC A at 8000 runs, not the byte the block
+        // writes there.
+        let emu = setup(0x91, 0x80);
+        while emu.peek(0xFF41) & 3 != 0
+            || emu.peek(0xFF44) == 0
+            || !(8..100).contains(&(emu.clock() - emu.hw.sys.ppu.mode0_start().unwrap()))
+        {
+            step(emu);
+        }
+        emu.mem.vram[0] = 0x3C;
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x7FFE;
+        r.a = 0x80;
+        emu.hw.cpu.set_registers(r);
+        step(emu); // LDH (55),A: an HBlank transfer, in mode 0
+        assert_eq!(step(emu), 4 * 9 + 4); // the block, then INC A
+        assert_eq!(emu.mem.vram[..16], block(0));
+        assert_eq!(emu.hw.cpu.registers().a, 0x81);
+        assert_eq!(emu.hw.cpu.registers().pc, 0x8001);
     }
 }
