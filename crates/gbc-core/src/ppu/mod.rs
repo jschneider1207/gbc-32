@@ -342,10 +342,15 @@ const DISCARD_LEAD: i32 = 8;
 ///   hold, and `wx_triggered`/`window_y++` fix the start at that dot. So a
 ///   write takes effect at a dot, not with a lead, which fits
 ///   `WINDOW_LEAD` = 0. Its compare is the same for a window that appears
-///   or goes; the extra dot of `WINDOW_ON_LEAD` for a new start is
-///   calibrated (CGB single speed, sm83_cpu.c: a WX write lands one dot
-///   after an LCDC write, `GB_CONFLICT_WRITE_CPU` vs `GB_CONFLICT_LCDC_CGB`,
-///   so it fits WX at most, not LCDC.5).
+///   or goes, which fits WX (`WX_ON_LEAD` = `WINDOW_LEAD`; the write lands
+///   one dot after the access, `GB_CONFLICT_WRITE_CPU`): CGB04C
+///   `window/late_wx_1`, `late_wx_ff_07_1` move WX 07 -> FF / FF -> 07 at
+///   the stall's dot (window gone / there), `_2` one M-cycle later (kept /
+///   none); `late_wx_ff_0f_*` the same at x = 8. Leads 0 to -2 give the
+///   same manifest, 1 loses `late_wx_ff_*_1`. An LCDC.5 set needs the
+///   extra dot of `WINDOW_ON_LEAD` (calibrated): `late_reenable_scx3_2`
+///   sets it at the stall's dot (none), and lead 0 also loses
+///   `late_reenable_ds_2`, `late_enable_ly0_ds_2`.
 /// - A WY write is checked later (SameBoy `wy_check_scheduled`): on CGB
 ///   single speed at the next dot where `wy_check_modulo & 7 == 0`, 1-8
 ///   dots after the write on an 8-dot grid aligned to the LCD-on clock,
@@ -359,6 +364,7 @@ const DISCARD_LEAD: i32 = 8;
 /// - Pan Docs (Window) and GBCTR give no write-to-effect timing.
 const WINDOW_LEAD: i32 = 0;
 const WINDOW_ON_LEAD: i32 = 1;
+pub(crate) const WX_ON_LEAD: i32 = WINDOW_LEAD;
 const WY_LEAD: i32 = 5;
 /// `WY_LEAD` in double speed, with the WY checks half a dot later
 /// (`edges::WY_DS_LATE`): gambatte (behaviour only) delays `wy2` 2.5
@@ -1581,12 +1587,18 @@ impl Ppu {
 
     /// An LCDC write at clock `now` (synced; WY: [`Self::wy_written`]):
     /// the WY condition is checked against the current line right away
-    /// (SameBoy `wy_check_scheduled`, a few dots later).
-    pub(crate) fn check_wy_at(&mut self, now: u64, mem: &Memory) {
+    /// (SameBoy `wy_check_scheduled`, a few dots later), but as for a WY
+    /// write only before the line's last check ([`WY_LAST_AT`]): gambatte
+    /// (ppu.cpp `M2_LyNon0`, behaviour only) sets its sticky match from
+    /// LCDC.5 and WY == LY at line cycle 450, then compares LY + 1. CGB04C
+    /// `window/late_enable_afterVblank_lcdoffset1_1` sets LCDC.5 at 454 of
+    /// line 0 with WY = 0 (window on line 1), `late_enable_afterVblank_2`
+    /// at 455 (none); double speed `_ds_1` at 455 (window: the whole line).
+    pub(crate) fn check_wy_at(&mut self, now: u64, mem: &Memory, double: bool) {
         if self.lcd_enabled() {
-            let l = self.at(now).line;
-            if l < LINES {
-                self.check_wy(l, mem);
+            let a = self.at(now);
+            if a.line < LINES && a.t < WY_LAST_AT + WY_DS_LATE * u32::from(double) {
+                self.check_wy(a.line, mem);
             }
         }
     }
@@ -1857,10 +1869,12 @@ impl Ppu {
     /// it has begun, later writes don't move it (SameBoy: `wx_triggered`).
     /// The renderer starts the window and counts its row from the same
     /// decision (`set_stalls`, `Renderer::set_window`), not from the live
-    /// registers, so the pixels agree with mode 3's length.
+    /// registers, so the pixels agree with mode 3's length. `on_lead`: the
+    /// lead for a new start (WY: `wy_lead`, WX: `WX_ON_LEAD`; `None`, an
+    /// LCDC.5 set: `WINDOW_ON_LEAD`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn window_write(&mut self, now: u64, mem: &mut Memory, wy_lead: Option<i32>) {
+    pub(crate) fn window_write(&mut self, now: u64, mem: &mut Memory, on_lead: Option<i32>) {
         let lt = &self.line;
         let a = self.at(now);
         let t = a.t as i32;
@@ -1904,7 +1918,7 @@ impl Ppu {
         self.set_stalls(scx, window);
         self.renderer.set_window(window);
         // The new start is already past: the window waits for the next line.
-        let lead = wy_lead.unwrap_or(WINDOW_ON_LEAD);
+        let lead = on_lead.unwrap_or(WINDOW_ON_LEAD);
         if decided(self.window_stall_at(), lead - adj(mem.io[0x4B])) {
             self.set_stalls(scx, None);
             self.renderer.set_window(None);
@@ -3439,6 +3453,40 @@ mod tests {
         assert_eq!(end_at(5, 101, 0, 5, 0x07, true), Some(256 + 5));
     }
 
+    /// An LCDC.5 set at the end of line L with WY = L matches L only before
+    /// the line's last WY check (`WY_LAST_AT`, as for a WY write), so line
+    /// L + 1 has the window or not (gambatte
+    /// `window/late_enable_afterVblank_{1,2}`, `_lcdoffset1_1`: line 0 at
+    /// 451 / 455 / 454; `arg/late_enable_afterVblank_{3,4}`: line 1 at 451
+    /// / 455; `_ds_1`: double speed, line 0 at 455, the whole line).
+    #[test]
+    fn window_enable_matches_wy_until_the_line_s_last_check() {
+        // (LCDC.5 set on `line` at dot `t`, WY = line) -> mode-3 end of
+        // `line + 1`; the window at x = 64 stalls 6 dots.
+        let end_at = |line: u32, t: u32, ds: bool| {
+            let on = 1000;
+            let mut r = Rig::on_at(on, 0, 0xFF);
+            r.mem.io[0x4A] = line as u8;
+            r.mem.io[0x4B] = 0x47;
+            // Frame 1: line 0 is not the first line after LCD enable.
+            let l = clock(on, 1, line * LINE);
+            let now = l + u64::from(t);
+            r.sync(now);
+            r.ppu.lcdc |= 0x20;
+            r.ppu.check_wy_at(now, &r.mem, ds);
+            r.ppu.window_write(now, &mut r.mem, None);
+            let l = clock(on, 1, (line + 1) * LINE);
+            r.sync(l + 455);
+            (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
+        };
+        for line in [0, 1, 5] {
+            assert_eq!(end_at(line, 451, false), Some(256 + 6), "{line}");
+            assert_eq!(end_at(line, 454, false), Some(256 + 6), "{line}");
+            assert_eq!(end_at(line, 455, false), Some(256), "{line}");
+            assert_eq!(end_at(line, 455, true), Some(256 + 6), "{line}");
+        }
+    }
+
     /// The window's pixels and line counter follow the same start decision
     /// as mode 3's length (`set_stalls`), not the live WY, LCDC.5 and WX
     /// (M8-close review): (a) a WY write too late to start the window this
@@ -3476,7 +3524,7 @@ mod tests {
                 match reg {
                     0x4A => r.ppu.wy_written(now, &mut r.mem, false),
                     0x40 => {
-                        r.ppu.check_wy_at(now, &r.mem);
+                        r.ppu.check_wy_at(now, &r.mem, false);
                         r.ppu.window_write(now, &mut r.mem, None);
                     }
                     _ => r.ppu.window_write(now, &mut r.mem, None),
@@ -3547,7 +3595,7 @@ mod tests {
             let lcdc = |r: &mut Rig, t: u32, v: u8| {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(r, now, 0x40, v);
-                r.ppu.check_wy_at(now, &r.mem);
+                r.ppu.check_wy_at(now, &r.mem, false);
                 r.ppu.window_write(now, &mut r.mem, None);
             };
             let now = l5 + 122;
@@ -3603,7 +3651,7 @@ mod tests {
             for &(t, v) in writes {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(&mut r, now, 0x40, v);
-                r.ppu.check_wy_at(now, &r.mem);
+                r.ppu.check_wy_at(now, &r.mem, false);
                 r.ppu.window_write(now, &mut r.mem, None);
             }
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
@@ -3642,7 +3690,7 @@ mod tests {
             r.ppu.lcdc = 0xD1;
             let now = l5 + u64::from(t);
             write_fetch_reg(&mut r, now, 0x40, 0xF1);
-            r.ppu.check_wy_at(now, &r.mem);
+            r.ppu.check_wy_at(now, &r.mem, false);
             r.ppu.window_write(now, &mut r.mem, None);
             r.sync(l5 + 2 * u64::from(LINE));
             let px = |x: usize| r.frame[5 * SCREEN_WIDTH + x];

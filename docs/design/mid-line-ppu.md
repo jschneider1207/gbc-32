@@ -788,6 +788,47 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   (window map/tile-data writes vs object stalls), `m3_wx_4_change_sprites`
   (the CGB WX-match glitch, SameBoy `cgb_wx_glitch`, not a re-trigger).
 
+### Late LCDC.5 set and WX on-screen writes (branch `m9-win-vblank`)
+
+- **Rule 1, LCDC.5 set at the line's end.** `check_wy_at` (LCDC writes)
+  compared WY == LY for the whole line, so a set at 455 of line L with
+  WY = L still matched and line L + 1 drew the window. Now, as for a WY
+  write (`wy_written`), only before `WY_LAST_AT` (+ `WY_DS_LATE` in
+  double speed): gambatte (ppu.cpp `M2_LyNon0`, behaviour only) sets the
+  sticky match from LCDC.5 && WY == LY at line cycle 450, then compares
+  LY + 1. Pinned exactly: `window/late_enable_afterVblank_lcdoffset1_1`
+  sets it at 454 of line 0 (window), `_2` at 455 (none); `arg/_3`/`_4`
+  at 451/455 of line 1; double speed `_ds_1` at 455 (window). Calibration
+  452-454 lose `_lcdoffset1_1` and `_ds_1`.
+- **Rule 2, WX write that brings the window on screen.** E1's
+  `WINDOW_ON_LEAD` (1) applied to WX too. WX lands one dot after the
+  access (`GB_CONFLICT_WRITE_CPU`); with that, `late_wx_ff_07_1` (FF ->
+  07 at the stall's dot 96: window) and `late_wx_1` (07 -> FF at 96:
+  gone) are the same live-WX compare (SameBoy: WX == position + 7 each
+  dot), lead 0 = `WINDOW_LEAD` (`WX_ON_LEAD`). Leads 0, -1, -2: same
+  manifest; 1: the 2 fail. LCDC.5 sets keep lead 1: lead 0 for all
+  loses `late_reenable_scx3_2` (set at the stall's dot 99, none),
+  `late_reenable_ds_2`, `late_enable_ly0_ds_2`.
+- **Result.** 4 fail->pass, 0 regressions; `diff-fingerprint.sh main`:
+  exactly those 4. Tests `window_enable_matches_wy_until_the_line_s_last_check`
+  (mutations: no deadline, 454, 456, no double-speed dot) and
+  `bus::wx_write_starts_the_window_up_to_its_stall` (mutation: WX with
+  `WINDOW_ON_LEAD`). Cost: `.text` 92,134 -> 92,152 B; ITCM set 48,692
+  -> 48,710; `check-bench.sh` `cgb-acid2` +2.43% of the 3% guard,
+  `synth:worst-case` +0.02% vs baseline.
+- **Left: `late_enable_afterVblank_ds_lcdoffset1_2`.** Write positions
+  (sync: the line-0 mode-2 interrupt): `_ds_1` 455 (window), `_ds_2`
+  line 1 dot 1 (none), `_ds_lcdoffset1_1` 452 (window), `_2` 454 (none):
+  no write threshold fits both phases. Probe: moving line 0's `Ly4`
+  (t = 4) to 5 in double speed flips it and
+  `lyc153int_m2irq_late_retrigger_ds_1`, but loses
+  `lycwirq_trigger_ly00_stat50_ds_lcdoffset1_2` and
+  `lycstatwirq_trigger_ly00_10_50_ds_lcdoffset1_2` (they need the
+  mode-1 end and LYC = 0 compare at 4). So the line-0 mode-2 pulse in
+  double speed is likely half a dot later than ours (seen only at the
+  even-dot phase); fixing it needs a separate walk point (hot path,
+  `lcd-offset-phase.md` step 5 "line-0 m2 edges"), not done here.
+
 ### Step F (object stalls vs mid-line writes, branch `ppu-step-f`)
 
 - **Rule 1, objects left of tile 0.** SameBoy (display.c,

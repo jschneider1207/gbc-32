@@ -144,6 +144,15 @@ and re-trigger"). Group 4: 8 left: `late_enable_afterVblank*` (3),
 `m3_lcdc_tile_sel_win_change`, `m3_wx_4_change_sprites` (not re-trigger:
 window map/tile-data writes against object stalls, and the CGB WX-match
 glitch, SameBoy `cgb_wx_glitch`).
+**Status (`m9-win-vblank`):** 4 fixed: `late_enable_afterVblank_2`,
+`arg/late_enable_afterVblank_4` (an LCDC.5 set from `WY_LAST_AT` no longer
+matches WY == LY for the next line, as a WY write), `late_wx_ff_{07,0f}_1`
+(a WX write that brings the window on screen counts up to the stall's
+dot, `WX_ON_LEAD` 0; LCDC.5 sets keep lead 1); mid-line-ppu.md "Late
+LCDC.5 set and WX on-screen writes". Group 4: 4 left:
+`late_enable_afterVblank_ds_lcdoffset1_2` (not a WY rule: the line-0
+mode-2 interrupt in double speed at the `ds_lcdoffset1` phase, see the
+design doc) and the 3 Mealybug rows above.
 
 ### 5. Live SCX&7 discard at mode-3 start (19)
 `scx_during_m3/scx_0*c0/*_{3,4}` and `*_ds_{2..5}` (13 PNG ROMs, 6,600-

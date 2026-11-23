@@ -25,7 +25,7 @@ use crate::dma::{self, Conflict, OamDma};
 use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
-use crate::ppu::{Frame, Ppu, View, edges};
+use crate::ppu::{self, Frame, Ppu, View, edges};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
@@ -836,7 +836,7 @@ impl Ctx<'_, '_> {
                 }
                 let win = (value ^ s.ppu.lcdc) & 0x20 != 0;
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
-                s.ppu.check_wy_at(now, self.mem);
+                s.ppu.check_wy_at(now, self.mem, double);
                 if win {
                     s.ppu.window_write(at, self.mem, None);
                 }
@@ -921,7 +921,7 @@ impl Ctx<'_, '_> {
                     // The WY condition and the window start in mode 3
                     // (`Ppu::wy_written`; WY lands at the access).
                     0x4A => s.ppu.wy_written(now, self.mem, double),
-                    0x4B => s.ppu.window_write(at, self.mem, None),
+                    0x4B => s.ppu.window_write(at, self.mem, Some(ppu::WX_ON_LEAD)),
                     _ => {}
                 }
             }
@@ -2497,6 +2497,32 @@ mod tests {
             let want = if (x / 8) % 2 == 0 { gray[3] } else { gray[0] };
             assert_eq!(p, want, "x = {x}");
         }
+    }
+
+    /// A WX write in mode 3 that brings the window on screen starts it if
+    /// it lands (one dot after the access, `GB_CONFLICT_WRITE_CPU`) by the
+    /// window stall's dot (`ppu::WX_ON_LEAD`), as one that moves it off
+    /// screen removes it (gambatte `window/late_wx_ff_0f_{1,2}`, CGB04C).
+    #[test]
+    fn wx_write_starts_the_window_up_to_its_stall() {
+        // WY = 0, LCDC.5 set, WX FF -> 0F on line 5: the window (map 9800
+        // column 0, dark) at x = 8 over the BG's column 1 (light); its
+        // stall would begin at dot 104.
+        let run = |t: u64| {
+            let emu = striped_bg();
+            let Emulator { mem, hw } = &mut *emu;
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            ctx.write(0xFF4B, 0xFF);
+            ctx.write(0xFF4A, 0);
+            ctx.write(0xFF40, 0xB1);
+            drop(ctx);
+            write_in_mode3(emu, 5, t, 0xFF4B, 0x0F)
+        };
+        let row = run(103);
+        assert_eq!(row[8], row[0], "lands at 104: the window at x = 8");
+        let row = run(107);
+        assert_ne!(row[8], row[0], "lands at 108: too late");
     }
 
     /// A SCX write in mode 3 (landing at the access, `GB_CONFLICT_READ_OLD`)
