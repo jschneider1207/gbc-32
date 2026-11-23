@@ -31,7 +31,7 @@
 //!
 //! Lines 0-143 (SameBoy states 35, 6, 7, 8, 10, 32, 21, 22):
 //! - `t = 0..3`: still the previous line: LY, coincidence against LY-1,
-//!   mode 0 (line 0: mode 1);
+//!   mode 0 (line 0: mode 1, except mode 0 at `t = 3` in single speed);
 //! - `t = 3`: LY changes; the coincidence comparison is off for one dot
 //!   (`ly_for_comparison = -1`: the STAT bit reads 0, the interrupt line
 //!   holds); the mode-2 interrupt source rises ("the OAM STAT interrupt
@@ -98,17 +98,23 @@ pub(crate) const ON_POS: u32 = 7;
 pub(crate) const VBLANK_POS: u32 = 144 * LINE + 5;
 
 /// Frame position at clock 0 after reset, where the CGB boot ROM hands
-/// over: LY = 144, about 164 dots in (Gambatte's measured CGB post-boot
-/// state, `setPostBiosState`: `videoCycles = 144*456 + 164`; its line
-/// origin may differ from ours by a dot or two).
+/// over: LY = 144, 171 dots in.
 ///
-/// The phase against the M-cycle grid is exact, though: the boot ROM
-/// enabled the LCD with a single-speed write at an M-cycle boundary, so
-/// every M-cycle boundary since sits at a position of `ON_POS` mod 4
-/// (3), as after any LCD enable. Mooneye `acceptance/ppu/intr_2_*` (which
-/// keep the LCD on from boot) fail by one M-cycle with the 164 of
-/// Gambatte; 163 is the nearest position on the grid.
-pub(crate) const POST_BOOT_POS: u32 = 144 * LINE + 163;
+/// The phase against the M-cycle grid is exact: the boot ROM enabled the
+/// LCD with a single-speed write at an M-cycle boundary, so every M-cycle
+/// boundary since sits at a position of `ON_POS` mod 4 (3), as after any
+/// LCD enable (an off-grid value such as 164 fails hundreds of ROMs).
+/// On the grid, Gambatte `display_startstate/stat{,_scx2,_scx3,_scx5}_1`
+/// and `_2` (CGB-mode cartridges, results from a CGB04C) pin it: their
+/// STAT reads one M-cycle apart must see mode 3 (out87) and mode 0
+/// (out84). That holds at 171 only; 167 and below read mode 3 in `_2`,
+/// 175 and above mode 0 in `_1`. Mooneye (DMG-mode cartridges:
+/// `intr_2_*`, `boot_*`, `stat_irq_blocking`) passes at 155-171 and does
+/// not tell them apart; the DMG-mode boot ROM path could end at another
+/// position, but no test we have measures it (ADR 0022: the post-boot
+/// DIV does differ by mode). Gambatte's own post-boot state,
+/// `videoCycles = 144*456 + 164`, is in its line origin, not ours.
+pub(crate) const POST_BOOT_POS: u32 = 144 * LINE + 171;
 
 const _: () = assert!(POST_BOOT_POS % 4 == ON_POS % 4);
 
@@ -522,7 +528,14 @@ impl Ppu {
             };
         }
         if t < 4 {
-            u8::from(l == 0)
+            // Line 0 is still mode 1 from VBlank, but on CGB B/C it reads
+            // mode 0 for one M-cycle at `t = 3` in single speed. AGE
+            // `stat-mode/stat-mode.inc` (`M1E`: "no mode-0 m-cycle at the
+            // end of mode-1 on CGB-E", so B/C have one; `stat-mode-
+            // dmgC-cgbBC`, `-ncmBC`); Gambatte `ly0/lycint152_ly0stat_2`
+            // and `enable_display/frame1_m2stat_count_1` (CGB04C). SameBoy
+            // clears the mode there on DMG only: it models CGB-E here.
+            u8::from(l == 0 && (t != 3 || double))
         } else if t < 84 {
             2
         } else if t < self.mode3_end(now, a, double) {
@@ -1801,6 +1814,22 @@ mod tests {
         );
     }
 
+    /// Line 0 after VBlank: mode 1, a single mode-0 dot at `t = 3` in
+    /// single speed (CGB B/C), then mode 2. Double speed has no mode-0 dot.
+    #[test]
+    fn line_0_after_vblank_reads_mode_0_at_dot_3_in_single_speed() {
+        let on = 1000;
+        let mut r = Rig::on_at(on, 0, 0xFF);
+        let l0 = clock(on, 1, 0);
+        r.sync(l0 + 8);
+        let at = |t: u64, double: bool| r.ppu.stat(l0 + t, double) & 3;
+        let single: Vec<u8> = (0..6).map(|t| at(t, false)).collect();
+        assert_eq!(single, [1, 1, 1, 0, 2, 2]);
+        let double: Vec<u8> = (0..6).map(|t| at(t, true)).collect();
+        assert_eq!(double, [1, 1, 1, 1, 2, 2]);
+        assert_eq!((r.ly(l0 + 2), r.ly(l0 + 3)), (0, 0));
+    }
+
     #[test]
     fn stat_interrupt_sources_and_blocking() {
         let on = 1000;
@@ -1940,12 +1969,12 @@ mod tests {
         let mut p = Ppu::new();
         p.reset(false);
         assert_eq!((p.ly(0, false), p.stat(0, false) & 3), (144, 1));
-        // Line 144, dot 163: line 145 starts 293 clocks later, and LY
+        // Line 144, dot 171: line 145 starts 285 clocks later, and LY
         // reads 145 from its dot 2.
-        assert_eq!((p.ly(294, false), p.ly(295, false)), (144, 145));
+        assert_eq!((p.ly(286, false), p.ly(287, false)), (144, 145));
         // No interrupt source is enabled: the first deadline is the end of
-        // the next frame's line 0 mode 3 (70224 - 65827 + 256).
-        assert_eq!(p.next_event(false), 4653);
+        // the next frame's line 0 mode 3 (70224 - 65835 + 256).
+        assert_eq!(p.next_event(false), 4645);
         // Position 3 mod 4 at every M-cycle boundary, as after an enable.
         assert_eq!(POST_BOOT_POS % 4, 3);
     }
