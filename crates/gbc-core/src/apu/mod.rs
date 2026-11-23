@@ -155,16 +155,25 @@ impl Apu {
     /// (CH1 on, its DAC on, volume 0 and the envelope stopped: the boot
     /// chime has decayed by hand-over; ADR 0021 section 7, provisional),
     /// frame sequencer at step 0. CH1 matches the post-boot registers
-    /// (NR10 = 80: sweep off; NR11 = BF: duty 2; NR12 = F3); its frequency,
-    /// length and duty position are not observable through them and stay 0
-    /// (provisional).
+    /// (NR10 = 80: sweep off; NR11 = BF: duty 2; NR12 = F3) and keeps
+    /// running at the boot chime's last note, f = 0x7C1 (252 clocks per
+    /// step; the boot ROM's second NR13 write), until a game retriggers it.
+    /// Its duty phase at hand-over is fitted to gambatte's hardware-verified
+    /// `ch1_init_pos_*` ROMs (cgb04c), which freeze the position by
+    /// retriggering at a varied clock: the step into position 1 (duty 2
+    /// low) must fall in clocks 144-147 + 504 here; 147 keeps the steps on
+    /// the single-speed write grid, as the boot ROM's own trigger left them.
+    /// The length counter stays 0 (provisional).
     pub(crate) fn post_boot(&mut self) {
         *self = Self::new();
         self.fs.power = true;
         let ch1 = &mut self.sq[0];
         ch1.on = true;
-        ch1.high = true;
         ch1.duty = 2;
+        ch1.freq = 0x7C1;
+        ch1.pos = 6;
+        ch1.high = true;
+        ch1.countdown = 147;
         ch1.env.nrx2 = 0xF3;
     }
 
@@ -378,6 +387,23 @@ mod tests {
         assert_eq!(read_apu(&mem, t, 0x76), 0xF0);
         assert_eq!(read_apu(&mem, t + 2 * 4096, 0x76), 0x00, "position 1");
         assert_eq!(mem.apu.out.synced, 0, "pure");
+    }
+
+    #[test]
+    fn post_boot_ch1_runs_on_at_0x7c1_in_the_fitted_phase() {
+        // gambatte `ch1_init_pos_*` (cgb04c): high (duty 2, position 0)
+        // through clock 650, low (position 1) from 651 for 4 steps.
+        let mut apu = Apu::new();
+        apu.post_boot();
+        let mut ch1 = apu.sq[0];
+        ch1.advance(650);
+        assert_eq!((ch1.pos, ch1.high), (0, true));
+        ch1.advance(1);
+        assert_eq!((ch1.pos, ch1.high), (1, false));
+        ch1.advance(4 * 252 - 1);
+        assert_eq!((ch1.pos, ch1.high), (4, false));
+        ch1.advance(1);
+        assert_eq!((ch1.pos, ch1.high), (5, true));
     }
 
     #[test]

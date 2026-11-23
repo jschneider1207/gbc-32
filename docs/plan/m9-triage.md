@@ -163,6 +163,25 @@ the extra delay when retriggering an active channel; `lf_div` derived from
 SameBoy `apu.c` (`lf_div`, square `sample_countdown` on trigger), ADR
 0021 section 12. Trigger path only, not the integrate loop.
 
+**Status (2026-11-23): 6 of 27 done**, 0 regressions. The cause was not
+one mechanism (`docs/reference/apu.md` has the details):
+- Done: the duty output bit latches at each step, so an NRx1 change
+  shows from the next step (`ch1_duty0_to_duty3_pos3{,_2}`, 2); the
+  post-boot CH1 keeps running at f = 0x7C1 in a phase fitted to
+  `ch1_init_pos_*` (`ch1_init_pos_{1,2,3,8}`, 4).
+- **Needs human (revision conflict)**: the CGB-C double-speed trigger
+  delay (gambatte's linear `+ lf_div` rule) flips `ch1_duty0_pos6_to_pos7_
+  timing_ds_6` and the 5 `speedchange*_ch1_duty0_pos6_to_pos7_timing*
+  ds_2` (cgb04c), but regresses SameSuite `channel_{1,2}_align{,_cpu}`
+  (4), whose README says real CPU-CGB-C fails them. Measured, not shipped;
+  same shape as sign-off candidate 2.
+- Different mechanism, open: the 12 `speedchange*_..._timing{,_nop}_2`
+  (trigger in single speed): the APU's tick phase across the speed switch
+  itself (one tick late). The 2 sweep ROMs (`ch1_init_reset_sweep_counter_
+  timing_10`, `_nr52_3`) are the sweep calculation delay, and
+  `ch2_init_reset_env_counter_timing_15` the envelope timing: they belong
+  with the deferred SameBoy sweep and envelope models, not with this group.
+
 ### 8. HDMA timing (75)
 `dma/*` 64 + `irq_precedence/{,late_}hdma_vs_*` 11. Sub-groups, each M:
 - **HDMA across a speed switch** (26): `hdma_late_m3speedchange_*`,

@@ -102,9 +102,30 @@ base clock is not modelled (half a tick); the exact fit, and SameBoy's
 extra delay when retriggering an active channel, are deferred (ADR 0021
 section 12, gambatte `ch*_duty*_pos*`).
 
-Until its first duty step a newly started channel outputs digital 0 (Pan
-Docs: "On first startup..."; SameBoy sets bit 7 of `current_sample_index`).
-A retrigger of an active channel keeps its output.
+**Double speed: a revision conflict.** In double speed `lf_div` alternates
+per M-cycle, and the sign of the `lf_div` term differs by revision (SameBoy
+`GB_apu_write`: `6 + lf_div` for an off channel on CGB C and older in
+double speed, `6 - lf_div` otherwise). The core keeps `- lf_div`, which
+SameSuite's `channel_{1,2}_align{,_cpu}` need; SameSuite's APU README says
+real CPU-CGB-C fails its channel 1/2/4 tests (CGB-E results). Gambatte's
+cgb04c ROMs `ch1_duty0_pos6_to_pos7_timing_ds_6` and the five
+`speedchange*_ch1_duty0_pos6_to_pos7_timing*ds_2` need the CGB-C sign;
+measured in this core, gambatte's own linear rule (`DutyUnit::nr4Change`:
+first step `(2048 - f) * 2 + 3 + lf_div` ticks after an off-channel
+trigger, 2 fewer for an on channel, both speeds; in base clocks `+ 6 + 2 *
+lf_div` and `+ 2 + 2 * lf_div`) flips those 6 and regresses the 4
+SameSuite ROMs. Which revision's ROMs win is the human's call (m9-triage
+group 7).
+
+**The output bit is latched at each duty step.** `Square::high` holds the
+duty bit sampled when the position last moved; an NRx1 duty change shows
+only from the next step, and a retrigger or NRx2 write keeps it (gambatte
+`DutyUnit::nr1Change` leaves `high_` alone; its cgb04c
+`ch1_duty0_to_duty3_pos3*` ROMs, whose duty change lands either side of a
+step; SameBoy latches it the same way, `square_duty_output`, but only for
+pre-CGB models). Until its first duty step a newly started channel
+outputs digital 0 (Pan Docs: "On first startup..."; SameBoy
+`sample_surpressed`): a trigger of a channel that was off clears the bit.
 
 ## Duty patterns
 
@@ -221,8 +242,14 @@ duty step; a new wave channel reads the kept buffer's output at once.
 - **On** (0 -> 1): duty positions 0, wave buffer 0 (Pan Docs); frame
   sequencer start as above; the 1 MHz phase is recorded from the clock.
 - **Post-boot**: powered on, NR52 reads F1: CH1 on, DAC on, volume 0,
-  envelope stopped (the boot chime has decayed by hand-over; provisional,
-  frequency/length/duty position not observable and left 0).
+  envelope stopped (the boot chime has decayed by hand-over). CH1 keeps
+  running at the chime's last note, f = 0x7C1 (252 clocks per step), duty
+  2, position 6 with 147 clocks to its next step at clock 0. The phase is
+  fitted to gambatte's cgb04c `ch1_init_pos_1..8`, which retrigger CH1 at
+  clocks spread over 4 steps to freeze its position: the step into
+  position 1 must fall within clocks 144-147 (+ 504) for all 8; 147 puts
+  the steps on the single-speed write grid, as the boot ROM's own trigger
+  does. The length counter stays 0 (provisional).
 
 ## Wave RAM access while CH3 is on (CGB)
 
@@ -251,7 +278,18 @@ gambatte `sound/` and SameSuite APU ROMs:
   CGB-C `_nrx2_glitch` (the classic model plus zombie mode is used).
 - The square trigger delay fit: a trigger at an odd base clock (half a
   tick), the extra delay when retriggering an active channel (gambatte
-  `ch*_duty*_pos*`).
+  `ch*_duty*_pos*`), and the CGB-C double-speed sign (above: a revision
+  conflict with SameSuite).
+- The APU's 2 MHz phase across a speed switch: 12 gambatte
+  `speedchange*_ch1_duty0_pos6_to_pos7_timing*_2` ROMs (trigger in single
+  speed, retrigger after one to four switches) see the step to position 7
+  one tick (2 base clocks) earlier relative to the retrigger than the core
+  does. Not the trigger delay (the trigger is in single speed) and not the
+  odd-clock CPU grid after a switch to single speed (snapping triggers to
+  the 2 MHz grid changed nothing); deriving `lf_div` from the DIV counter
+  (gambatte's `cycleCounter_` keeps its phase across NR52 power on and
+  loses it on DIV resets, which STOP does) made things worse. Likely the
+  APU ticks counted over the switch itself.
 - The noise counter's phase at trigger (SameBoy loads `r * 4 + 6` plus
   alignment corrections; the core loads one full period), its background
   counting while the channel is off, the alignment term when an NR43
