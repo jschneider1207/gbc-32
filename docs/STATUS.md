@@ -87,8 +87,9 @@ Working rules that matter here:
 ## In flight
 - Session 13 (2026-11-23): agent on branch `m9-m1` (worktree `../gbc-32-m1`,
   `gambatte/m1/*` STAT mode-1 edges, 16 ROMs) and agent on `m9-hdma-spsw`
-  (worktree `../gbc-32-hdma-spsw`, HDMA across a speed switch, ~18 ROMs).
-  Not merged yet; orchestrator runs fingerprint/bench/gate after merge.
+  merged (c274be8, +21; ADR 0017/0020 amendments 0b221c0; bench/gate not yet
+  run). Agent on `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT
+  leftovers ~11). Orchestrator runs bench/gate/baseline after merges.
 
 ## Needs human
 Open:
