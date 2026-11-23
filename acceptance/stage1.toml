@@ -242,6 +242,15 @@ exclude = [
   "same-suite/apu/channel_1/channel_1_align_cpu.gb",
   "same-suite/apu/channel_2/channel_2_align.gb",
   "same-suite/apu/channel_2/channel_2_align_cpu.gb",
+  "same-suite/apu/channel_1/channel_1_nrx2_glitch.gb",
+  "same-suite/apu/channel_2/channel_2_nrx2_glitch.gb",
+  "same-suite/apu/channel_1/channel_1_nrx2_speed_change.gb",
+  "same-suite/apu/channel_2/channel_2_nrx2_speed_change.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_7_15.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_restart.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_restart_fast.gb",
+  "same-suite/apu/channel_4/channel_4_freq_change.gb",
+  "same-suite/apu/channel_4/channel_4_frequency_alignment.gb",
 ]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
@@ -249,6 +258,11 @@ checks = [{ fibonacci = true }]
 # Signed off (human, 2026-11-23): CGB E results; SameSuite apu/README:
 # CPU-CGB-C fails most channel 1/2 tests. We follow gambatte cgb04c
 # captures (ADR 0003: CPU CGB C). See docs/STATUS.md, session 11.
+# Also signed off (human, 2026-11-23, session 12): the NRx2 glitch, LFSR
+# and ch4 frequency ROMs below, as CGB E results (apu/README: the NRX2
+# glitch is only tested on revision E; a PCM12/PCM34 read glitch on CGB C
+# and older fails most ch1/2/4 tests; SameBoy has CGB-C-specific paths).
+# Evidence: docs/plan/m9-triage.md group 15.
 [[group]]
 # source: same-suite/game-boy-test-roms-howto.md
 id = "same-suite-apu-cgbE"
@@ -258,6 +272,15 @@ roms = [
   "same-suite/apu/channel_1/channel_1_align_cpu.gb",
   "same-suite/apu/channel_2/channel_2_align.gb",
   "same-suite/apu/channel_2/channel_2_align_cpu.gb",
+  "same-suite/apu/channel_1/channel_1_nrx2_glitch.gb",
+  "same-suite/apu/channel_2/channel_2_nrx2_glitch.gb",
+  "same-suite/apu/channel_1/channel_1_nrx2_speed_change.gb",
+  "same-suite/apu/channel_2/channel_2_nrx2_speed_change.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_7_15.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_restart.gb",
+  "same-suite/apu/channel_4/channel_4_lfsr_restart_fast.gb",
+  "same-suite/apu/channel_4/channel_4_freq_change.gb",
+  "same-suite/apu/channel_4/channel_4_frequency_alignment.gb",
 ]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
