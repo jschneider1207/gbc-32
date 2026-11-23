@@ -138,6 +138,7 @@ impl Apu {
     /// A DIV-APU falling edge (after a sync to its clock): the frame
     /// sequencer steps, unless the edge is the one skipped after power on.
     /// Pan Docs "Audio details", DIV-APU; SameBoy `GB_apu_div_event`.
+    #[inline(never)]
     pub(crate) fn step(&mut self) {
         let fs = &mut self.fs;
         if fs.skip {
