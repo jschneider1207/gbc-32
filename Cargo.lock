@@ -136,6 +136,9 @@ version = "0.1.0"
 [[package]]
 name = "gbc-desktop"
 version = "0.1.0"
+dependencies = [
+ "gbc-core",
+]
 
 [[package]]
 name = "getrandom"
