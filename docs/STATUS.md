@@ -10,26 +10,29 @@
 
 ## Next up
 
-M6 in progress on branch `m6-apu` (worktree `../gbc-32-m6`; plan M6
-tasks, ADR 0021). Done there: 1a framework (52b1756), 1b CH2 (f4e7eb0,
-5cfc7b5, 840ae2e, 344e112). In progress: fix for the API review's medium
-finding (a GDMA stall across the AudioBuffer deadline drops up to ~32
-samples) and its low doc findings.
+M6 on `main` (branch `m6-apu` merged at a1bb74a, deleted). Plan M6 tasks
+1-6 done: framework, CH1-CH4, GDMA no-drop fix (resumable VRAM DMA stall,
+a627b54), `.text` budgets. **must-tier `cgb_sound` passes** (a86cc85), so
+the must tier is 86/86. Task 9 (romtest `_outaudio0/1` rule) in progress.
 
-1. **Before merging `m6-apu`:** bring the per-function overruns from 1a
-   back under budget (`Ctx::boundary` 2,288/2,220, `speed_switch`
-   1,082/880; check `draw`, `Emulator::run` too), then the budget commit
-   (total `.text` 96,000 B, human decision below) and merge (merge
-   commit). Measured: F = 88,614 B, F+S = 90,348 B, estimate F+3.3S =
-   94,336 B.
-2. Then plan M6 tasks 3-11 (CH1+sweep, CH3, CH4, cgb_sound, sync
-   invariants, bench audio, romtest audio rule, docs, close). cgb_sound
-   at 344e112: 01, 09, 10, 11 pass; 02-08, 12 fail. Five stretch
-   gambatte `ch2_*nr52*_out0` ROMs went pass->fail with CH2 (they passed
-   only because CH2 was silent): investigate in the cgb_sound/timing task.
+1. Remaining M6 tasks, in order: 7 sync-invariant checks, 8 perf (bench
+   audio buffers + all four channels in `synth:worst-case`, APU budget
+   <= 200k Ir/frame; ADR 0021 fallbacks), 10 docs, 11 milestone close
+   (three reviewers; then baseline + tag `stage1-m6`).
+2. The committed acceptance baseline is stale: 5 gambatte
+   `ch2_*nr52*_out0` ROMs show pass->fail vs the M5 baseline (they passed
+   only while CH2 was silent; still failing after CH4); ~90 fail->pass.
+   The M6 close rebaseline records them; triage the 5 in M9 (or earlier
+   if cheap).
 3. Stage 1 completion rule (README "Done when", human 2026-11-22): every
    manifest ROM must pass before Stage 1 is done, except groups the human
    signs off with a recorded reason (M9).
+
+Measured: `.text` 93,462 of 96,000 B after CH4. `cgb_sound` bench was
+rebaselined at 9984949 (workload change: identical `Cpu::run` machine
+code, 8.2% more instructions; APU 1.1% of the run). Pre-existing:
+`cargo doc` with `-D warnings` fails on 3 links in `cpu/mod.rs` (not in
+the gate).
 
 Perf watch: `synth:worst-case` 3.54 M x86 Ir/frame (88% of the 4.02 M
 line, which assumes 1 Ir = 1 M7 cycle; thumbv7em code is 1-2x), now with
