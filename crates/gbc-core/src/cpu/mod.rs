@@ -70,7 +70,7 @@ impl Registers {
             pc: 0x0100,
         };
         if !cgb_mode {
-            // Byte reads through `Rom::get` (ADR 0026); the caller checked
+            // Byte reads through `Rom::get` (ADR 0027); the caller checked
             // that the header is there.
             let at = |i| rom.get(i).unwrap_or(0);
             let nintendo =

@@ -50,7 +50,7 @@ step "Code-size budgets (thumbv7em, cortex-m7)"
 ./scripts/check-code-size.sh || fail "code-size budgets (perf/code-size-budgets.txt, docs/perf.md)"
 
 step "ROM reads are byte loads (thumbv7em, ES0491 2.7.3)"
-./scripts/check-rom-loads.sh || fail "wide ROM load (docs/decisions/0026-byte-wide-rom-reads.md)"
+./scripts/check-rom-loads.sh || fail "wide ROM load (docs/decisions/0027-byte-wide-rom-reads.md)"
 
 step "Instruction-count benchmark (valgrind)"
 ./scripts/check-bench.sh || fail "instruction-count benchmark (perf/bench-baseline.txt, docs/perf.md)"

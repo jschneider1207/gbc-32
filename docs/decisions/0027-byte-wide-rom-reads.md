@@ -1,4 +1,4 @@
-# 0026: Byte-wide ROM reads
+# 0027: Byte-wide ROM reads
 
 Status: Accepted (2026-11-22)
 

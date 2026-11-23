@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fail if the MCU build (thumbv7em-none-eabihf, release, cortex-m7) reads
-# ROM bytes with anything wider than a byte load (ADR 0026).
+# ROM bytes with anything wider than a byte load (ADR 0027).
 #
 # The STM32H735 does not support unaligned reads from the FMC SDRAM that
 # holds the ROM (ES0491 2.7.3). Every ROM read in gbc-core is `Rom::get`
@@ -33,7 +33,7 @@ unmarked=$(grep -rn "\.into_inner()" crates/gbc-core/src --include='*.rs' \
   | grep -v "^$SRC:" | grep -vF "check-rom-loads: allowed" || true)
 if [ -n "$unmarked" ]; then
   printf '%s\n' "$unmarked" >&2
-  echo "FAIL: Rom::into_inner use without a 'check-rom-loads: allowed' marker (ADR 0026)" >&2
+  echo "FAIL: Rom::into_inner use without a 'check-rom-loads: allowed' marker (ADR 0027)" >&2
   exit 1
 fi
 
@@ -75,7 +75,7 @@ awk -v line="$lines" -v src="$SRC" '
     nf = 0; for (f in funcs) nf++
     if (!seen) { print "FAIL: " src " not in the debug line tables" > "/dev/stderr"; exit 1 }
     if (total == 0) { print "FAIL: no loads attributed to " src ":" line " (marker moved, or Rom::get no longer used?)" > "/dev/stderr"; exit 1 }
-    if (bad > 0) { printf "FAIL: %d of %d ROM loads are wider than a byte (ADR 0026)\n", bad, total > "/dev/stderr"; exit 1 }
+    if (bad > 0) { printf "FAIL: %d of %d ROM loads are wider than a byte (ADR 0027)\n", bad, total > "/dev/stderr"; exit 1 }
     printf "OK: %d ROM loads in %d functions, all byte-wide\n", total, nf
   }
 ' "${asm[@]}"

@@ -242,7 +242,7 @@ fn is_mbc1m(rom: &[u8]) -> bool {
         return false;
     }
     // Byte by byte through `Rom::get`, not a slice compare (a `memcmp`
-    // may read words; ADR 0026).
+    // may read words; ADR 0027).
     let rom = Rom::new(rom);
     match (rom.sub(0x104, 0x134), rom.sub(0x4_0104, 0x4_0134)) {
         (Some(a), Some(b)) => (0..0x30).all(|i| a.get(i) == b.get(i)),
@@ -618,7 +618,7 @@ impl<'a> Cart<'a> {
     /// The 16 bytes [`Self::read_rom`] or [`Self::read_ram`] return for
     /// `addr..addr + 16` (`addr` 16-aligned, below C000), for VRAM DMA
     /// blocks: 16 byte reads from the ROM bank window (never a wide copy:
-    /// the ROM may be in memory without unaligned reads, ADR 0026) or one
+    /// the ROM may be in memory without unaligned reads, ADR 0027) or one
     /// copy from the RAM bank. The RTC
     /// register doesn't depend on the address. Every RAM size is 0 or a
     /// power of two of at least 512 (`cart_ram_size`), so the

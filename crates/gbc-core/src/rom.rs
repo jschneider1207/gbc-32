@@ -1,4 +1,4 @@
-//! The caller's ROM, read one byte at a time (ADR 0026).
+//! The caller's ROM, read one byte at a time (ADR 0027).
 //!
 //! On the Stage 3 MCU the ROM sits in FMC SDRAM, and the STM32H735 does
 //! not support unaligned reads from the FMC (ES0491 2.7.3: "a half-word
