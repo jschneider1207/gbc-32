@@ -512,3 +512,14 @@ ultrasonic wave periods, 16,384 Hz) are not used.
 The APU is still **over its original budget** (224.1 k vs 200 k): it is a
 recorded optimization target for later if needed (plan, M8 task "APU cost
 is over its original estimate").
+
+### 2026-11-22: NR52 power-on skip, two edges (gate fix)
+
+The DIV-APU section's power-on skip was one edge. SameBoy
+(`GB_apu_div_event`) skips the first edge (`GB_SKIP_DIV_EVENT_SKIP`), and
+on the second (`GB_SKIP_DIV_EVENT_SKIPPED`) clocks the units at step 1
+again without advancing; `Fs::skip` now counts the two edges. The APU-bit
+test samples the counter at the end of the NR52 write's M-cycle
+(`sc(now) + 4`; SameBoy `cycle_write` advances the pending cycles before
+the write). Together with the CGB-mode post-boot counter (ADR 0022) this
+fixes the 5 gambatte `ch2_*nr52*` regressions against the M5 baseline.

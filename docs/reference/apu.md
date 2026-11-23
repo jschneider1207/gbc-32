@@ -26,16 +26,20 @@ and AGB differences are noted only where the code deliberately differs.
 DIV-APU is the falling edge of DIV bit 4 (bit 5 in double speed): system
 counter bit 12 or 13 (Pan Docs "Audio details", DIV-APU; SameBoy
 `apu_bit`). `fs` counts steps since power on, mod 8 (SameBoy
-`div_divider`). A step: if `skip`, clear it and stop; else `fs = (fs + 1)
-& 7`, then length on `fs & 1 == 1` (256 Hz), sweep on `fs & 3 == 3`
+`div_divider`). A step: during the power-on skip (below), see there; else
+`fs = (fs + 1) & 7`, then length on `fs & 1 == 1` (256 Hz), sweep on `fs & 3 == 3`
 (128 Hz), envelopes on `fs == 0` (64 Hz; SameBoy decrements at `fs == 7`
 and applies at the next event, the same step). Length runs before the sweep.
 
 - A DIV write or STOP that clears a set APU bit is a falling edge: the
   frame sequencer steps at once (SameBoy `GB_set_internal_div_counter`).
 - A speed switch changes the bit 12 <-> 13 and reschedules.
-- NR52 power on: `fs = 0`; if the APU bit is 1 at that moment, `skip = true,
-  fs = 1` (the first edge comes too soon and is skipped).
+- NR52 power on: `fs = 0`; if the APU bit is 1 at the end of the write's
+  M-cycle (SameBoy `cycle_write` runs the pending cycles first), `fs = 1`
+  and the first edge is skipped (it comes too soon); the second clocks the
+  units at `fs = 1` again without stepping, so the third steps to 2
+  (SameBoy `GB_apu_div_event`: `GB_SKIP_DIV_EVENT_SKIP`, then `_SKIPPED`;
+  gambatte `sound/ch2_*nr52*`, CGB; ADR 0021 note 2026-11-22).
 - "The next step doesn't clock length" (Pan Docs "Obscure behavior") is
   `fs & 1 == 1`.
 - The rising-edge `GB_apu_div_secondary_event` is not modelled.
