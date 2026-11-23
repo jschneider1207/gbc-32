@@ -85,12 +85,17 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Session 13 (2026-11-23): merged to main, bench/gate/baseline NOT yet run:
-  c274be8 (HDMA across a speed switch, +21; ADR 0017/0020 amendments) and
-  8e30952..046958f (STAT edges at lines 144/0, +23; ADR 0029), b05f1b3..ced776f
-  (STAT/LYC windows, +20; ADR 0029 amendment). At ced776f: must 86, should
-  40, stretch 3,365/3,461, 0 regressions, tests clean, .text 93,084 B.
-- Agent: `m9-hdma-halt` (worktree `../gbc-32-hdma-halt`, HDMA/HALT leftovers ~11).
+- Session 13 (2026-11-23): four M9 fixes merged to main (c274be8 HDMA speed
+  switch +21; 8e30952..046958f STAT 144/0 +23; b05f1b3..ced776f STAT/LYC +20;
+  dcfa9f8 latched opcode around VRAM DMA +11; ADR 0017/0020 amendments,
+  ADR 0029). Combined: must 86, should 40, stretch 3,376/3,461, 0 regressions.
+- **Gate FAILS at ba25229 on check-bench**: cgb-acid2 +4.29%, halt-irq +3.37%,
+  worst-case +1.60% = 4.053 M Ir/frame, OVER the 4.02 M line. Everything else
+  passes (.text 93,912 B, ITCM 49,122 B). Baseline NOT updated. Perf agent on
+  `m9-perf` (worktree `../gbc-32-perf`) attributing and recovering Ir,
+  behavior-preserving (fingerprint identical). No more code work until it lands.
+- HDMA leftover: `hdma_transition_oamdma_1` = OAM DMA during a VRAM DMA
+  (ADR 0017 deferred).
 - STAT leftovers (agent hypotheses): `lyc_ff45_trigger_delay_2` needs a delayed
   IF request 5 cycles after an LYC write (gambatte CGB single speed);
   `lycstatwirq_trigger_ly00_10_50_1` is phase 2 vs the walk at line 0 (open);
