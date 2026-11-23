@@ -196,7 +196,7 @@ budget); nothing merges to `main` before step 2's human decision.
    0 = 8, overflow check on trigger with shift != 0, second calculation,
    negate quirk on NR10 write), PCM12 low nibble. Arbiters: cgb_sound
    04, 05, 06 (`rom_singles`).
-4. [ ] **CH3 wave**: NR30 DAC, 256 length, NR32 shift, sample buffer kept
+4. [x] **CH3 wave** (b05ef54, 9827fa4): NR30 DAC, 256 length, NR32 shift, sample buffer kept
    on trigger, trigger delay `(2051 - f) * 2` (verify the countdown
    convention in SameBoy), CGB wave RAM read/write while on (pure read via
    a channel copy), no corruption on retrigger, cached waveform sum,
