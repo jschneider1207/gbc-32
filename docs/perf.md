@@ -804,3 +804,25 @@ the ROMs are not in the repo and the title screens/intros they show are not a
 fixed workload): Pokemon Crystal 13,835 frames/s (72,280 ns, 0.289
 Mcycles/frame), Shantae 6,965 (143,569 ns, 0.574), Wario Land 3 7,445
 (134,312 ns, 0.537). Pass them with `--rom PATH`.
+
+## Outside the bound: dense mid-mode-3 register writes
+
+Human decision (2026-11-23, session 10): the 50% bar (README) covers
+realistic worst cases, which `synth:worst-case` models (all paths at once,
+plus one mid-mode-3 SCX write per line once that workload lands). Programs
+that write PPU registers many times per line are outside it. Measured by the
+M8 perf review (x86 M Ir/frame, % of the 4.02 M line; test loop `LD (C),A;
+XOR D` unrolled, a changed value every 3 M-cycles, ~11.7k writes/frame in
+double speed, ~3.8k in mode 3):
+
+| Write | stage1-m7 | M8 (pre-418421c) |
+|---|---:|---:|
+| SCX, double speed | 6.12 | 7.84 (195%) |
+| SCY, double speed | 6.12 | 8.74 |
+| LCDC bits 2/3/4, double speed | 6.27 | 10.15 (252%) |
+| WX (window on), double speed | 6.13 | 7.11 |
+| SCX, single speed | 3.33 (83%) | 4.34 (108%) |
+| control (HRAM writes) | 1.83 | 1.81 |
+
+Such a game would run slower than real time on the MCU rather than fail;
+frame pacing absorbs it. Stage 2 task: measure these on the M7.

@@ -120,6 +120,9 @@ Decided in session 10 (2026-11-23), human:
   `channel_1_freq_change_timing-A`, `-cgbDE`) are signed off as "targets
   another CGB revision" (ADR 0003: we emulate CPU CGB C). They stay in the
   manifest and keep running; they don't block Stage 1. "Sign off on the 7."
+- The 50% bar covers realistic worst cases; dense mid-mode-3 register
+  writes (many per line) are outside it, documented in docs/perf.md
+  "Outside the bound" with a Stage 2 measurement task. "Yes that is fine."
 - `synth:worst-case` gains one mid-line SCX write per line so the
   held-fetch slow path counts against the 4.02 M line (stricter; moves the
   bench baseline). "Do the other thing." Queued after the OAM DMA and
