@@ -4151,4 +4151,59 @@ mod dma_tests {
         assert_eq!(w(154 * 456 + 5), STAT);
         assert_eq!(w(154 * 456 + 7), 0);
     }
+
+    /// Single speed: clearing the mode-1 select 1-2 dots before line
+    /// 153's LY=LYC comparison doesn't unblock the LYC=153 interrupt
+    /// (gambatte `lycEnable/lyc153_late_m1disable_{1,2}`, CGB04C).
+    #[test]
+    fn mode_1_clear_just_before_the_line_153_comparison_still_blocks() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let w = |pos| stat_irq_after_write_with(153, 0x50, pos, 0x40, 3, false);
+        assert_eq!(w(152 * 456 + 455), STAT);
+        assert_eq!(w(153 * 456 + 3), 0);
+    }
+
+    /// Single speed, line 153: a LYC write is compared with 153 up to dot
+    /// 7, the held LY=LYC (152) dropped from dot 4 (view; access at 3), and
+    /// not from dot 12 (gambatte `lycEnable/lyc153_late_ff45_enable_{3,5}`,
+    /// CGB04C).
+    #[test]
+    fn line_153_lyc_write_windows() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        for (lyc, pos, want) in [(152, 153 * 456 + 3, STAT), (0xFF, 153 * 456 + 11, 0)] {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                let e = ctx.clock();
+                ctx.write(0xFF45, lyc);
+                ctx.write(0xFF40, 0x91);
+                ctx.write(0xFF41, 0x40);
+                idle_to(ctx, e, (pos - 3) / 4);
+                ctx.sys.iflags = 0;
+                ctx.write(0xFF45, 153);
+                ctx.idle();
+                assert_eq!(ctx.sys.iflags & STAT, want, "access at {pos}");
+            });
+        }
+    }
+
+    /// LCD off with the coincidence bit kept set: a STAT write newly
+    /// selecting LY=LYC requests the interrupt, one keeping it selected
+    /// doesn't (gambatte `memory.cpp` FF41; `lycEnable/lcdoff_lycirqen_1`).
+    #[test]
+    fn lcd_off_lyc_select_with_the_kept_coincidence_bit() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            ctx.write(0xFF45, 0);
+            ctx.write(0xFF40, 0x91);
+            ctx.idle();
+            ctx.write(0xFF40, 0x11);
+            ctx.sys.iflags = 0;
+            ctx.write(0xFF41, 0x40);
+            assert_eq!(ctx.sys.iflags & STAT, STAT);
+            ctx.sys.iflags = 0;
+            ctx.write(0xFF41, 0x40);
+            assert_eq!(ctx.sys.iflags & STAT, 0);
+        });
+    }
 }

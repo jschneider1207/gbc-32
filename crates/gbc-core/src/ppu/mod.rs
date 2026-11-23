@@ -141,6 +141,8 @@ const NO_MODE: u8 = 3;
 const MODE_0_2: u8 = 4;
 /// The mode part of the line holds ([`edges::MODE_HOLD_SS`]).
 const MODE_HOLD: u8 = 5;
+/// Mode 1, but the mode part may rise and not fall ([`Ppu::mode_source`]).
+const MODE_1_STICKY: u8 = 6;
 
 /// How a CPU write sees the STAT interrupt sources (design doc
 /// `docs/design/lcd-offset-phase.md` 3.2). Lines 1-152, the walk compares
@@ -255,7 +257,11 @@ impl IrqLine {
         // By mode source: modes 0-2, `NO_MODE`, `MODE_0_2` (`MODE_HOLD`:
         // none, the mode part holds).
         const SOURCE: [u8; 5] = [SEL_MODE0, SEL_MODE1, SEL_MODE2, 0, SEL_MODE0 | SEL_MODE2];
-        if let Some(&source) = SOURCE.get(usize::from(mode)) {
+        if mode == MODE_1_STICKY {
+            if select & SEL_MODE1 != 0 {
+                s |= Self::MODE;
+            }
+        } else if let Some(&source) = SOURCE.get(usize::from(mode)) {
             s = if select & source != 0 {
                 s | Self::MODE
             } else {
@@ -891,6 +897,18 @@ impl Ppu {
         // of `MODE_HOLD_SS` (edges).
         let hold = !double && view != View::LycWrite;
         if l >= LINES {
+            // Single speed, VBlank: a STAT write landing 1-2 dots before
+            // the walk compares LY=LYC (lines 145-153 at `CMP_WALK`, line
+            // 153 against 0 at `L153_ZERO`) no longer changes the selects
+            // the LYC interrupt is blocked by: clearing mode 1 there keeps
+            // the mode part (gambatte `lyc_irq.cpp` `regChange` latches
+            // `statReg_` only while `time_ - cc > 2`, and `doEvent` blocks
+            // LYC 0 and 145-153 by its mode-1 select; behaviour only).
+            // CGB04C `lycEnable/lyc153_late_m1disable_2`, `lyc0_m1disable_2`.
+            let near = |e: u32| (e - 2..e).contains(&t);
+            if hold && l != 144 && (near(edges::CMP_WALK) || (l == 153 && near(edges::L153_ZERO))) {
+                return MODE_1_STICKY;
+            }
             return match t {
                 _ if l != 144 || t >= edges::VBLANK => 1,
                 _ if t < edges::QUIRK2 => 0,
@@ -2372,6 +2390,13 @@ impl Ppu {
         let added = value & !self.stat_select;
         self.stat_select = value & 0x78;
         if !self.lcd_enabled() {
+            // LCD off: newly selecting LY=LYC while the kept coincidence
+            // bit is set requests the interrupt (gambatte `memory.cpp`, FF41
+            // write, CGB: only a select the write sets; behaviour only).
+            // CGB04C `lycEnable/lcdoff_lycirqen_1`.
+            if self.lyc_flag_off && added & SEL_LYC != 0 {
+                *iflags |= INT_STAT;
+            }
             return;
         }
         if was_quiet != self.quiet() {
@@ -2433,6 +2458,25 @@ impl Ppu {
         }
         let a = self.at(now);
         let (l, t) = (a.line, a.t);
+        // Single speed, line 153 to dot 7 (view; access one dot earlier):
+        // the new value is compared with 153, and from dot 4 the held
+        // comparison of 152 is over first. gambatte (behaviour only,
+        // `lycRegChangeTriggersStatIrq` with `getLycCmpLy`): from line
+        // 152's `T <= 8` the write compares the next LY, 153, up to line
+        // 153's start (our access t = 6); the old LYC's period ends at
+        // `timeToNextLy <= 2` (access t = 3); from there on to dot 12 it
+        // compares 0. CGB04C `lycEnable/lyc153_late_ff45_enable_3`,
+        // `_lcdoffset1_1` (IRQ), `_2`, `_4` (none).
+        if !double && l == 153 && t < edges::LYC153_SS_UNTIL {
+            if t >= edges::L153_CMP - 1 {
+                let m = self.line_irq.0 & IrqLine::MODE;
+                self.line_irq.0 = m | if m != 0 { IrqLine::STAT } else { 0 };
+            }
+            if self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153)) {
+                *iflags |= INT_STAT;
+            }
+            return;
+        }
         let defer_until = if double {
             edges::LYC_DEFER_UNTIL_DS
         } else {
@@ -2445,9 +2489,12 @@ impl Ppu {
         if deferred {
             return;
         }
-        // Line 153, dots 2-4 and 12-23 (5-11 were deferred above): first
-        // compared with 153; in 12-23 the usual update follows.
+        // Double speed, line 153, dots 2-4 and 12-23 (5-11 were deferred
+        // above): first compared with 153; in 12-23 the usual update
+        // follows. Single speed has no 12-23 window (gambatte compares 0
+        // there: `lycEnable/lyc153_late_ff45_enable_5`, CGB04C).
         if l == 153
+            && double
             && (edges::LYC153_OLD_FROM..edges::LYC153_OLD_UNTIL).contains(&t)
             && self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153))
         {

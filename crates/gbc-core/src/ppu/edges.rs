@@ -243,6 +243,10 @@ pub(crate) const L153_OFF: u32 = t(h(8));
 /// ... against 0 from here.
 pub(crate) const L153_ZERO: u32 = t(h(12));
 
+/// Line 153, single speed: a LYC write (view) before this dot is compared
+/// with 153 (see `Ppu::write_lyc`).
+pub(crate) const LYC153_SS_UNTIL: u32 = 8;
+
 /// Line 153: a LYC write in `LYC153_OLD_FROM..LYC153_OLD_UNTIL` (outside
 /// the deferred `L153_CMP..L153_ZERO`) is first compared with 153
 /// (SameBoy's states 14 and 29 "hacks").

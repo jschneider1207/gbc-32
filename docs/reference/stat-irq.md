@@ -85,6 +85,25 @@ From gambatte `statChangeTriggersM2IrqCgb` and `statChangeTriggersM0LycOrM1StatI
   t = 4 is before gambatte's event, after our walk's pulse). CGB04C
   `m2enable/late_enable_ly0_ds_1`, `_ds_lcdoffset1_1`.
 
+## VBlank LYC interrupts and LYC writes (single speed)
+
+- gambatte `lyc_irq.cpp`: the LYC interrupt for LYC 0 and 145-153 is
+  blocked by the mode-1 select latched at the last STAT write landing
+  more than 2 cycles before the event (`regChange`, `time_ - cc > 2`). A
+  STAT write 1-2 dots before a VBlank comparison point (lines 145-153 at
+  t = 3-4, line 153 at t = 10-11) may raise the mode part but not lower
+  it (`MODE_1_STICKY`). CGB04C `lycEnable/lyc153_late_m1disable_2`,
+  `lyc0_m1disable_2`, `lyc153_late_enable_m1disable_2`.
+- LYC writes at line 153 (`lycRegChangeTriggersStatIrq`): up to our
+  access t = 6 (view 7) the new value is compared with 153; from access
+  t = 3 the old LYC (152) no longer holds the line; from line 153's
+  gambatte start (access t = 7) on it is compared with 0, so SameBoy's
+  12-23 window comparing 153 stays for double speed only.
+  CGB04C `lycEnable/lyc153_late_ff45_enable_{3,5,lcdoffset1_1}`.
+- LCD off: a STAT write newly selecting LY=LYC while the kept coincidence
+  bit is set requests the interrupt (gambatte `memory.cpp` FF41).
+  `lycEnable/lcdoff_lycirqen_1`.
+
 ## Open
 
 - `lycstatwirq_trigger_ly00_10_50_1` and `_ds_1` (want `E0`): the write
