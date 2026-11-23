@@ -261,6 +261,7 @@ stall (object enable checked at pixel output on CGB, LCDC.2 read at the
 object's tile fetch, SameBoy `get_object_line_address`), not diagnosed
 further here. `m3_lcdc_tile_sel_change` lines with X = 5-7 objects are a
 new lead (section 7).
+**Status (2026-11-23): the 3 palette-RAM ROMs are signed off (human); manifest group `gambatte-uninit-palram`.**
 
 ### 12. STAT IRQ edges, single speed (47)
 `miscmstatirq/lycstatwirq_trigger_*` (9, all `outE0`: no IRQ expected
