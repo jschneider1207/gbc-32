@@ -383,7 +383,10 @@ SameBoy `apu.c` has a separate `model <= GB_MODEL_CGB_C` path for it.
   **unclear**. Missing: the noise counter phase at trigger (SameBoy
   `r * 4 + 6` plus alignment); README: C fails most ch4 tests; SB-C has
   C-only noise counter paths.
-Tally: 1 applies to C, 9 E-only, 7 unclear.
+Tally: 1 applies to C, 9 E-only, 7 unclear. **The 9 E-only ROMs were signed
+off by the human (2026-11-23, session 12): "CGB E result", group
+`same-suite-apu-cgbE` (cde49e4).** Fix targets: the 1 C ROM and the 7
+unclear.
 
 ### 16. SameSuite APU for other revisions (7) - sign-off candidate
 `channel_{1,2,4}_extra_length_clocking-cgb0B`,

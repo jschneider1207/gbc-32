@@ -76,8 +76,6 @@ Working rules that matter here:
 
 ## Needs human
 Open:
-- **Sign-off proposal (upcoming): group-15 SameSuite applicability tally**
-  (m9-triage): 1 C-applicable, 9 E-only, 7 unclear.
 - **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
   checks: Ctrl+C in the window still saves; change the default audio output
   device mid-game (expect `audio stopped`, then within ~2 s `output device
@@ -101,6 +99,13 @@ Open:
   mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 12 (2026-11-23), human:
+- SameSuite group 15: sign off the 9 E-only ROMs (ch1/2 `nrx2_glitch`,
+  `nrx2_speed_change`; ch4 `lfsr_7_15`, `lfsr_restart{,_fast}`,
+  `freq_change`, `frequency_alignment`) as "CGB E result". "Sign off the
+  9". Moved into stretch group `same-suite-apu-cgbE` (cde49e4, baseline
+  303bc6d). The other 8 stay fix targets.
 
 Decided in session 11 (2026-11-23), human:
 - APU double speed: follow gambatte's CGB C linear trigger rule; sign off
