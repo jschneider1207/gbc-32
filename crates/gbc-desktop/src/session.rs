@@ -5,7 +5,7 @@ use std::path::Path;
 
 use gbc_core::{CLOCK_HZ, Config, Emulator, Memory, cart_info};
 
-use crate::save::{SaveFile, SettleTracker, sync_rtc};
+use crate::save::{MAX_OWED_SECS, SaveFile, SettleTracker, sync_rtc};
 
 /// Unix time now, in seconds. The only wall clock the front end reads.
 pub fn unix_now() -> u64 {
@@ -33,7 +33,8 @@ pub struct Autosave {
 
 impl Autosave {
     /// Saves once the game has written to its save and then left it alone
-    /// for one second of emulated time. Failures warn and are retried.
+    /// for one second of emulated time, or after `MAX_OWED_SECS` of
+    /// continuous writes. Failures warn and are retried.
     pub fn after_frame(&mut self, emu: &mut Emulator<'_>) {
         let Some(file) = &self.file else { return };
         let dirty = emu.save_dirty();
@@ -86,7 +87,7 @@ pub fn run<R>(
 
     let mut autosave = Autosave {
         file: save,
-        tracker: SettleTracker::new(u64::from(CLOCK_HZ)),
+        tracker: SettleTracker::new(u64::from(CLOCK_HZ), u64::from(CLOCK_HZ) * MAX_OWED_SECS),
         now: opts.now,
     };
     let result = body(&mut emu, &mut autosave);

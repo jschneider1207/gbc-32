@@ -179,20 +179,31 @@ impl SaveFile {
     }
 }
 
+/// Longest a write may stay owed, in seconds of emulated time, however
+/// busy the game keeps the save. Without a cap a game that uses cart SRAM
+/// as work RAM writes every frame, never goes quiet and saves only at exit.
+pub const MAX_OWED_SECS: u64 = 10;
+
 /// Decides when to write during play. The core's dirty flag stays set
 /// until cleared, so the tracker takes each observation of it (the caller
 /// clears the flag right after `poll`) and waits for a quiet period of
-/// emulated time, because games write a save over several frames.
+/// emulated time, because games write a save over several frames. A write
+/// owed for `max_owed_clocks` is due even if writes continue.
 pub struct SettleTracker {
     quiet_clocks: u64,
+    max_owed_clocks: u64,
+    /// Emulated clock of the first unsaved write, while a save is owed.
+    first_write: Option<u64>,
     /// Emulated clock of the last observed write, while a save is owed.
     last_write: Option<u64>,
 }
 
 impl SettleTracker {
-    pub fn new(quiet_clocks: u64) -> Self {
+    pub fn new(quiet_clocks: u64, max_owed_clocks: u64) -> Self {
         Self {
             quiet_clocks,
+            max_owed_clocks,
+            first_write: None,
             last_write: None,
         }
     }
@@ -202,19 +213,23 @@ impl SettleTracker {
     pub fn poll(&mut self, dirty: bool, clock: u64) -> bool {
         if dirty {
             self.last_write = Some(clock);
+            self.first_write.get_or_insert(clock);
+        }
+        let (Some(first), Some(last)) = (self.first_write, self.last_write) else {
             return false;
+        };
+        let quiet = !dirty && clock.saturating_sub(last) >= self.quiet_clocks;
+        if quiet || clock.saturating_sub(first) >= self.max_owed_clocks {
+            self.first_write = None;
+            self.last_write = None;
+            return true;
         }
-        match self.last_write {
-            Some(t) if clock.saturating_sub(t) >= self.quiet_clocks => {
-                self.last_write = None;
-                true
-            }
-            _ => false,
-        }
+        false
     }
 
     /// A failed write is owed again.
     pub fn retry(&mut self, clock: u64) {
+        self.first_write = Some(clock);
         self.last_write = Some(clock);
     }
 }
@@ -334,7 +349,7 @@ mod tests {
 
     #[test]
     fn settle_waits_for_quiet() {
-        let mut t = SettleTracker::new(100);
+        let mut t = SettleTracker::new(100, 100_000);
         assert!(!t.poll(false, 0), "nothing owed");
         assert!(!t.poll(true, 10));
         assert!(!t.poll(false, 50));
@@ -344,6 +359,39 @@ mod tests {
         assert!(!t.poll(false, 1000), "written once only");
         t.retry(1000);
         assert!(t.poll(false, 1100));
+    }
+    #[test]
+    fn constant_writes_save_at_the_cap() {
+        let mut t = SettleTracker::new(100, 1000);
+        for clock in (0..1000).step_by(10) {
+            assert!(!t.poll(true, clock), "not due at {clock}");
+        }
+        assert!(t.poll(true, 1000), "due once owed for the cap");
+        // The timer restarts with the next write and the cap applies again.
+        for clock in (1010..2000).step_by(10) {
+            assert!(!t.poll(true, clock), "not due at {clock}");
+        }
+        assert!(t.poll(true, 2010), "next save at most one cap later");
+    }
+
+    #[test]
+    fn quiet_second_still_saves_before_the_cap() {
+        let mut t = SettleTracker::new(100, 1000);
+        assert!(!t.poll(true, 500));
+        assert!(!t.poll(false, 599));
+        assert!(t.poll(false, 600));
+        assert!(!t.poll(false, 5000), "nothing owed after saving");
+    }
+
+    #[test]
+    fn retry_after_forced_save_restarts_the_cap() {
+        let mut t = SettleTracker::new(100, 1000);
+        assert!(!t.poll(true, 0));
+        assert!(t.poll(true, 1000));
+        t.retry(1000);
+        assert!(!t.poll(true, 1500));
+        assert!(!t.poll(true, 1999));
+        assert!(t.poll(true, 2000), "cap counts from the retry");
     }
 
     #[test]

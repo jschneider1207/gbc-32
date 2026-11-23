@@ -39,7 +39,7 @@ save, because the RTC counts without setting the dirty flag; headless
 runs do the same. During play, `Autosave::after_frame` (called once per
 frame) peeks `save_dirty()`, clears it, and writes once one second of
 emulated time (`CLOCK_HZ` base clocks, speed independent) passes with no
-further change, since games write saves over several frames. Peeking and
+further change, since games write saves over several frames; a write owed for 10 s of emulated time is saved even if writes continue (amended after M7 review: a game using SRAM as work RAM never goes quiet). Peeking and
 clearing at once makes the front end own the "write owed" state; a failed
 write warns and is retried one second later. Emulated time, not wall
 time, so headless runs and tests behave the same.
