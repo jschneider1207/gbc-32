@@ -93,8 +93,6 @@ Open:
   device mid-game (expect `audio stopped`, then within ~2 s `output device
   back; resuming audio pacing`, no burst); a battery `.sav` survives a
   restart; a gamepad.
-- **Sign-off candidate (M9):** possibly AGE `spsw-interrupts-cgbBC` (AGE
-  `caution/`; its source still needs a read before asking).
 - **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
   `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`.
   Fully merged (`git cherry main <b>` shows no `+`): `bench-worst-case-midline-scx`,
@@ -265,7 +263,7 @@ Baseline 94b09ae (`acceptance/results/stage1.json`, session 11 end; M8 tag
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
-| should | 39 | 40 | only age `spsw-interrupts-cgbBC` (AGE caution/) fails |
+| should | 40 | 40 | `spsw-interrupts-cgbBC` fixed in session 12 (1543bd8; baseline not yet refreshed) |
 | stretch | 3,201 | 3,461 | 5 no-reference; 7 signed off (other CGB revisions) + 4 SameSuite align ROMs in `same-suite-apu-cgbE` (signed off as CGB E) |
 
 Overall 97.9%; audio 130/131.

@@ -39,7 +39,7 @@
 | 14 | Mealybug/AGE residuals (A-C, G, acid-hell) | 9 | renderer | M-L (diagnose each) | ~+100-250 B | A-C residual, **G** |
 | 15 | SameSuite APU, applicable to CGB C | 20 | APU (noise, sweep, envelope, NRx2) | L | +300-600 B; medium (integrate hot set) | none |
 | 16 | SameSuite APU for other revisions | 7 | n/a | **sign-off** | none | none |
-| 17 | AGE `spsw-interrupts-cgbBC` (should tier) | 1 | CPU speed switch + IRQ | M | small | none |
+| 17 | AGE `spsw-interrupts-cgbBC` (should tier) | 1 | CPU speed switch + IRQ | **fixed** (1543bd8) | 0 B | none |
 
 Total 506 (group 4 = 93 gambatte + 4 Mealybug).
 
@@ -391,15 +391,12 @@ session 10):** "targets another CGB revision"; kept in the manifest,
 not blocking Stage 1.
 
 ### 17. AGE `spsw-interrupts-cgbBC` (1, should tier)
-Registers end as garbage (`B=0 C=107 ...`), so the run goes off the
-rails rather than missing by a cycle. The ROM sits in AGE's
-`speed-switch/caution/`: it ends the post-STOP HALT period early with an
-interrupt, which Nintendo's manual warns against (the author saw his CGB
-E become unstable, the CGB B did not). It is named for CGB B/C, so it
-applies to us. Read the AGE source (Apache-2.0) and AGE's speed-switch
-implementation; ADR 0020 models the halt as uninterruptible except with
-IE&IF already pending. If the hardware behavior is unstable, it becomes
-a sign-off candidate with that evidence.
+**Fixed** (session 12, 1543bd8, ADR 0020 amendment). The "garbage
+registers" were AGE's normal failure exit (`B=0`), not a divergence. The
+halt-interrupt rows already passed; the "immediate interrupt" rows (IE&IF
+pending, `ei; stop`) were one M-cycle early at both speeds, i.e. the CGB E
+table (SameBoy's model). On CGB B/C the held DIV reset also applies with
+an interrupt pending and IME on. Not a sign-off candidate.
 
 ## Sign-off candidates (M9 bullet 3)
 1. Group 16 (7 ROMs): other revisions. Strong evidence.
