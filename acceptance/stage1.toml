@@ -285,5 +285,163 @@ checks = [{ screenshot = "{dir}/{stem}_cgb_c.png" }]
 id = "gambatte-cgb"
 tier = "stretch"
 roms = ["gambatte/**/*cgb04c*"]
+exclude = ["gambatte/undef_ops/**"]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
+
+[[group]]
+# source: gambatte/game-boy-test-roms-howto.md
+# These ROMs execute an invalid opcode on purpose: the CPU locks up while
+# the LCD keeps showing the result, and the final frame decides (Gambatte
+# lockup rule, acceptance/README.md; human decision 2026-11-22).
+id = "gambatte-cgb-undef-ops"
+tier = "stretch"
+roms = ["gambatte/undef_ops/*cgb04c*"]
+exit = { run_frames = 15 }
+checks = [{ gambatte = true }]
+lockup = "run_on"
+
+[[group]]
+# source: gambatte/game-boy-test-roms-howto.md (sibling .png references; ADR 0018).
+# ROMs with a sibling `_cgb04c.png` whose names carry no `cgb04c` tag, so
+# `gambatte-cgb` never selects them. bgen/bgtilemap/scy: every ROM has a
+# PNG, so a glob; the other directories also hold ROMs with no CGB rule, so
+# their ROMs are listed one by one. Human decision 2026-11-22 (session 07).
+id = "gambatte-cgb-png"
+tier = "stretch"
+roms = [
+  "gambatte/bgen/*.gbc",
+  "gambatte/bgtilemap/**/*.gbc",
+  "gambatte/scy/**/*.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_1.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_2.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_3.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_4.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_ds_3.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx08_ds_4.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_1.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_3.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_ds_1.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_ds_2.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_ds_3.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx09_ds_4.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0A_1.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0A_2.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0A_3.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0A_4.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0B_2.gbc",
+  "gambatte/bgtiledata/bgtiledata_spx0B_4.gbc",
+  "gambatte/scx_during_m3/scx1_scx0_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx2_scx0_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx2_scx1_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0060c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0063c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0360c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0363c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0367c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_1.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_2.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_3.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_4.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_5.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_6.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_1.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_2.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_3.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_4.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_5.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_6.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_7.gbc",
+  "gambatte/scx_during_m3/scx_0761c0/scx_during_m3_ds_8.gbc",
+  "gambatte/scx_during_m3/scx_attrib_during_m3_spx1_ds.gbc",
+  "gambatte/scx_during_m3/scx_attrib_during_m3_spx2_ds.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx0.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx1.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2.gbc",
+  "gambatte/scx_during_m3/scx_during_m3_spx2_ds.gbc",
+  "gambatte/window/on_screen/weon_wx18_weoff_weon_wx80.gbc",
+  "gambatte/window/on_screen/wx17_weoff_wxA5_weon.gbc",
+  "gambatte/window/on_screen/wx17_wxA5.gbc",
+  "gambatte/window/on_screen/wxA5_weoff_at_xposA5.gbc",
+  "gambatte/window/on_screen/wxA6_3.gbc",
+  "gambatte/window/on_screen/wxA6_late_we_reenable_1.gbc",
+  "gambatte/window/on_screen/wxA6_late_we_reenable_2.gbc",
+  "gambatte/window/on_screen/wxA6_late_we_reenable_3.gbc",
+  "gambatte/window/on_screen/wxA6_late_we_reenable_4.gbc",
+  "gambatte/window/on_screen/wxA6_scx7.gbc",
+  "gambatte/window/on_screen/wxA6_weoff_at_xposA6.gbc",
+  "gambatte/window/on_screen/wxA6_wy00.gbc",
+  "gambatte/window/on_screen/wxA6_wy01.gbc",
+  "gambatte/window/on_screen/wxA6_wy01_weoff_ly02.gbc",
+  "gambatte/window/on_screen/wxA6_wy01_weoff_ly02_weon_ly60.gbc",
+  "gambatte/window/on_screen/wxA6_wy01_wxA5_ly02.gbc",
+  "gambatte/window/on_screen/wxA6_wy01_wxA7_ly02.gbc",
+  "gambatte/window/on_screen/wxA6_wy8F.gbc",
+]
 exit = { run_frames = 15 }
 checks = [{ gambatte = true }]
