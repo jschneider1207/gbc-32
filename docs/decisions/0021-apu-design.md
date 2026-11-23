@@ -508,3 +508,7 @@ and wave windows, batched mixing, and doubling-identity noise stepping
 the 4.02 M line. The human chose to accept this result and set the APU
 budget to **230 k Ir/frame**. The output-changing fallbacks (mean level for
 ultrasonic wave periods, 16,384 Hz) are not used.
+
+The APU is still **over its original budget** (224.1 k vs 200 k): it is a
+recorded optimization target for later if needed (plan, M8 task "APU cost
+is over its original estimate").
