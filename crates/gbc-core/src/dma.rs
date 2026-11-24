@@ -211,6 +211,8 @@ impl OamDma {
     /// the read gets the 16-bit word being written instead (SameBoy
     /// `oam_read`; Pan Docs: OAM DMA bus conflicts, "the PPU reads
     /// whatever 16-bit word the DMA unit is writing").
+    // Cold callers only (`Ppu::scan_to`, `Ppu::fix_attrs`): one copy.
+    #[inline(never)]
     pub(crate) fn ppu_read(dest: u8, addr: u8, oam: &[u8; 0xA0], old: &[u8; 0xA0]) -> u8 {
         let a = if (1..LEN).contains(&dest) {
             (dest & !1) | (addr & 1)
