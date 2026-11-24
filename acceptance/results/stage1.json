@@ -3444,9 +3444,9 @@
       "mealybug-tearoom-tests/ppu/m3_lcdc_obj_en_change_variant.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_obj_size_change.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_obj_size_change_scx.gb": "pass",
-      "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_change.gb": "fail",
+      "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_change.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_change2.gb": "pass",
-      "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_win_change.gb": "fail",
+      "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_win_change.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_tile_sel_win_change2.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_win_en_change_multiple.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_lcdc_win_map_change.gb": "pass",
@@ -3459,7 +3459,7 @@
       "mealybug-tearoom-tests/ppu/m3_scy_change2.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_window_timing.gb": "pass",
       "mealybug-tearoom-tests/ppu/m3_window_timing_wx_0.gb": "pass",
-      "mealybug-tearoom-tests/ppu/m3_wx_4_change_sprites.gb": "fail"
+      "mealybug-tearoom-tests/ppu/m3_wx_4_change_sprites.gb": "pass"
     },
     "mealybug-no-cgb-reference": {
       "mealybug-tearoom-tests/ppu/m3_lcdc_win_en_change_multiple_wx.gb": "no-reference",
