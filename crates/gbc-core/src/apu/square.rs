@@ -387,30 +387,28 @@ impl Sweep {
     /// A trigger of `ch` (after its own trigger): the frequency is copied
     /// to the shadow, the timer reloads, the sweep is enabled if the
     /// period or the shift is non-zero, and with a non-zero shift one
-    /// calculation runs for its overflow check only. `late`: the trigger
-    /// is close enough before a sweep step (`Apu::write_rest`) that the
-    /// step doesn't count: one more step to the first calculation.
+    /// calculation runs for its overflow check only.
     ///
-    /// An overflow check still pending from the last sweep step is
-    /// cancelled: it belongs to the old note, and run later it would add
-    /// the new shadow shifted by whatever NR10 holds by then (M10 review
-    /// A3-6). SameBoy `GB_apu_write` NR14: a trigger reloads
-    /// `square_sweep_calculate_countdown` and `sweep_length_addend` for
-    /// its own check (shift 0: addend 0, nothing can overflow); the one
-    /// in flight is replaced, not left to run. This trigger's own check
-    /// is instant here (`docs/reference/apu.md`, "Not modelled").
-    ///
-    /// The bus has the cancelled check's next tick scheduled (`due` stays
-    /// set), so that event still runs `clock`, now as a step: one more on
-    /// the timer makes it a step that only counts down, and with `due`
-    /// clear after it the bus goes back to waiting for the DIV-APU edge.
+    /// A sweep step that follows too closely doesn't count, so the timer
+    /// gets one more for it to take back off: the step of an edge up to 8
+    /// clocks away (`near`, `Apu::write_rest`), or the event that is
+    /// pending now (`due`), whose `clock` the bus has already scheduled.
+    /// That event is the lagged step itself or a tick of the overflow
+    /// check after a write-back, and the check is cancelled here: it
+    /// belongs to the old note, and run later it would add the new shadow
+    /// shifted by whatever NR10 holds by then (M10 review A3-6), so its
+    /// tick runs as a step that only counts down. SameBoy `GB_apu_write`
+    /// NR14: a trigger reloads `square_sweep_calculate_countdown` and
+    /// `sweep_length_addend` for its own check (shift 0: addend 0,
+    /// nothing can overflow); the one in flight is replaced, not left to
+    /// run. This trigger's own check is instant here
+    /// (`docs/reference/apu.md`, "Not modelled").
     #[inline]
-    pub(crate) fn trigger(&mut self, ch: &mut Square, late: bool) {
-        let cancel = self.check != 0;
+    pub(crate) fn trigger(&mut self, ch: &mut Square, near: bool) {
         self.check = 0;
         self.shadow = ch.freq & 0x7FF;
         self.reload();
-        self.timer += u8::from(late) + u8::from(cancel);
+        self.timer += u8::from(self.due || near);
         let shift = self.nr10 & 7;
         self.enabled = self.period() != 0 || shift != 0;
         self.negate_used = false;

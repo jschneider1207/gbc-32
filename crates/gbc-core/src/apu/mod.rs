@@ -376,8 +376,8 @@ impl Apu {
     /// the envelopes' step 0 (`Apu::env_late`) delays its envelope.
     ///
     /// A CH1 trigger up to 8 clocks before the edge into step 3 or 7, or
-    /// before the sweep step it causes (`Sweep::due`), resets the sweep
-    /// timer after that step: it doesn't count. gambatte
+    /// before the sweep step it causes (`Sweep::due`, in `Sweep::trigger`),
+    /// resets the sweep timer after that step: it doesn't count. gambatte
     /// `SweepUnit::nr4Init` (GPL, behaviour only): the timer starts from
     /// `(cc + 2 + 2 * cgb) >> 14`, 2 MHz units; hardware captures cgb04c
     /// `ch1_init_reset_sweep_counter_timing_7` (12 clocks before: counts)
@@ -397,8 +397,7 @@ impl Apu {
         let env = match reg {
             0x14 => {
                 let ch1 = &mut self.sq[0];
-                let skip = self.sweep.due && self.sweep.check == 0 || fs & 3 == 2 && dist <= 8;
-                self.sweep.trigger(ch1, skip);
+                self.sweep.trigger(ch1, fs & 3 == 2 && dist <= 8);
                 &mut ch1.env
             }
             0x19 => &mut self.sq[1].env,
