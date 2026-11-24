@@ -8,12 +8,14 @@
 //! is maintained there (incrementally, rescanning only when the earliest
 //! entry moves later) and never per M-cycle.
 //!
-//! Every dispatch takes the due entry and recomputes the minimum, so that
-//! fold runs once per event (about 1.8 M times per emulated second in
-//! `synth:worst-case`). The kinds after `Ppu` fire rarely (`Dma` at most
-//! every ~160 M-cycles, `Input` per button change, the APU ones in M6), so
-//! their minimum is cached in [`Schedule::slow`], and the per-event fold is
-//! over the three hot kinds and that cache: four values, not eight.
+//! The dispatch (`Ctx::run_events`) tests the three hot kinds in place,
+//! lets each handler store its next deadline, and folds the minimum once
+//! at the end ([`Schedule::take_hot`], [`Schedule::rearm`],
+//! [`Schedule::settle`]). The kinds after `Ppu` fire rarely (`Dma` at most
+//! every ~160 M-cycles, `Input` per button change, the APU ones per
+//! frame-sequencer step or audio buffer), so their minimum is cached in
+//! [`Schedule::slow`], and that fold is over the three hot kinds and the
+//! cache: four values, not eight.
 
 /// No deadline.
 pub(crate) const NEVER: u64 = u64::MAX;
@@ -113,8 +115,7 @@ impl Schedule {
     ///
     /// The minimum is kept incrementally: a deadline at or before it
     /// becomes it, and the table is rescanned only when the entry that
-    /// held it moves later. A handler re-arming its own kind (cleared by
-    /// `take_due`, so not the holder) never rescans.
+    /// held it moves later.
     #[inline(never)]
     pub(crate) fn set(&mut self, kind: EventKind, at: u64) {
         self.set_inline(kind, at);
@@ -159,38 +160,89 @@ impl Schedule {
     /// before `now`, with its deadline cleared to [`NEVER`] (its handler
     /// sets the next one). `None` once nothing is due, at the cost of one
     /// compare: nothing is due while `now` is before the minimum.
+    ///
+    /// The test-only composition of the three steps `Ctx::run_events`
+    /// uses: [`Self::take_hot`] per hot kind, [`Self::take_slow`], and
+    /// [`Self::settle`].
     #[cfg(test)]
     pub(crate) fn take_due(&mut self, now: u64) -> Option<EventKind> {
         if now < self.next {
             return None;
         }
-        self.take_first_due(now)
+        let hot = &EventKind::ALL[..EventKind::HOT];
+        let kind = match hot.iter().find(|&&k| self.take_hot(k, now)) {
+            Some(&k) => Some(k),
+            None => self.take_slow(now),
+        };
+        self.settle(self.hot_min());
+        kind
     }
 
-    /// `take_due` once something is due (`now >= next()`; `None` if not):
-    /// the first due entry (an early-exit scan, the slow entries only if
-    /// their minimum is due), then the new minimum (a branchless fold; one
-    /// pass doing both measured slower, a branch per entry). Inlined into
-    /// `Ctx::boundary`: -14 M Ir in `synth:worst-case` (2 s), for +28 B
-    /// of MCU code net (`boundary` grows, this symbol goes; docs/perf.md).
+    /// The event loop's test of one hot kind (`Timer`, `Serial`, `Ppu`):
+    /// whether its deadline is at or before `now`, clearing it to
+    /// [`NEVER`] if so (its handler sets the next one).
+    ///
+    /// This does not maintain the minimum: [`Self::next`] is stale from
+    /// here until [`Self::settle`], which the event loop calls once after
+    /// its last handler. One fold per `Ctx::boundary` instead of one per
+    /// event and another in the handler's `set` (docs/perf.md, "One-pass
+    /// scheduler").
     #[inline(always)]
-    pub(crate) fn take_first_due(&mut self, now: u64) -> Option<EventKind> {
-        let i = match self.at[..EventKind::HOT].iter().position(|&t| t <= now) {
-            Some(i) => i,
-            None => {
-                if self.slow > now {
-                    return None;
-                }
-                let slow = &self.at[EventKind::HOT..];
-                EventKind::HOT + slow.iter().position(|&t| t <= now)?
-            }
-        };
-        self.at[i] = NEVER;
-        if i >= EventKind::HOT {
-            self.recompute_slow();
+    pub(crate) fn take_hot(&mut self, kind: EventKind, now: u64) -> bool {
+        let i = kind as usize;
+        debug_assert!(i < EventKind::HOT);
+        let due = self.at[i] <= now;
+        if due {
+            self.at[i] = NEVER;
         }
-        self.recompute();
+        due
+    }
+
+    /// The first slow kind (`Dma` on) due at `now`, cleared to [`NEVER`],
+    /// or `None`: one compare while none is due. Keeps [`Self::slow`]
+    /// exact; like [`Self::take_hot`], leaves the minimum to
+    /// [`Self::settle`].
+    #[inline(always)]
+    pub(crate) fn take_slow(&mut self, now: u64) -> Option<EventKind> {
+        if self.slow > now {
+            return None;
+        }
+        let slow = &self.at[EventKind::HOT..];
+        let i = EventKind::HOT + slow.iter().position(|&t| t <= now)?;
+        self.at[i] = NEVER;
+        self.recompute_slow();
         Some(EventKind::ALL[i])
+    }
+
+    /// Sets the deadline of a hot kind from its own handler, between
+    /// [`Self::take_hot`] and [`Self::settle`]: a plain store, the minimum
+    /// being recomputed by `settle`.
+    #[inline(always)]
+    pub(crate) fn rearm(&mut self, kind: EventKind, at: u64) {
+        let i = kind as usize;
+        debug_assert!(i < EventKind::HOT);
+        self.at[i] = at;
+    }
+
+    /// Whether the deadline of `kind` is at or before `now`.
+    #[inline(always)]
+    pub(crate) fn due(&self, kind: EventKind, now: u64) -> bool {
+        self.at[kind as usize] <= now
+    }
+
+    /// The minimum of the hot entries.
+    #[inline(always)]
+    pub(crate) fn hot_min(&self) -> u64 {
+        let hot = &self.at[..EventKind::HOT];
+        hot.iter().fold(NEVER, |m, &t| m.min(t))
+    }
+
+    /// Makes the minimum exact again after the event loop's takes and
+    /// re-arms. `hot` is the current [`Self::hot_min`].
+    #[inline(always)]
+    pub(crate) fn settle(&mut self, hot: u64) {
+        debug_assert_eq!(hot, self.hot_min());
+        self.next = hot.min(self.slow);
     }
 }
 

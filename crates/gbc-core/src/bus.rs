@@ -986,24 +986,52 @@ impl Ctx<'_, '_> {
     /// fixed order (ADR 0011). Each handler sets its next deadline. The
     /// caller checked that something is due (`now >= sched.next()`).
     fn run_events(&mut self, now: u64) {
-        while let Some(kind) = self.sys.sched.take_first_due(now) {
-            match kind {
+        // One pass over the hot kinds in index order, each handler
+        // storing its next deadline in place, then one fold for the
+        // minimum (`Schedule::hot_min`, `settle`). The order is the one a
+        // "first due kind, again after each handler" loop gives: the pass
+        // starts over wherever a handler left an earlier kind (or its
+        // own) due at `now`.
+        //
+        // `sched.next()` is stale inside the handlers; a `reschedule`
+        // there is redone by `boundary`.
+        loop {
+            let s = &mut *self.sys;
+            if s.sched.take_hot(EventKind::Timer, now) {
                 // A reload's interrupt request. With IE bit 2 clear, the
                 // reload itself and those that follow while IF bit 2
                 // stays set are computed at the next access
                 // (`schedule_timer`).
-                EventKind::Timer => {
-                    let s = &mut *self.sys;
-                    s.iflags |= INT_TIMER;
-                    if s.ie & INT_TIMER != 0 {
-                        debug_assert_eq!(s.timer.deadline(), now);
-                        s.timer.reload(now);
-                        s.sched.set_inline(EventKind::Timer, s.timer.deadline());
+                s.iflags |= INT_TIMER;
+                if s.ie & INT_TIMER != 0 {
+                    debug_assert_eq!(s.timer.deadline(), now);
+                    s.timer.reload(now);
+                    let at = s.timer.deadline();
+                    s.sched.rearm(EventKind::Timer, at);
+                    if at <= now {
+                        continue;
                     }
                 }
-                EventKind::Serial => self.serial_event(now),
-                EventKind::Ppu => self.sync_ppu(),
-                EventKind::Input => self.apply_inputs(now),
+            }
+            if s.sched.take_hot(EventKind::Serial, now) {
+                self.serial_event(now);
+                let sched = &self.sys.sched;
+                if sched.due(EventKind::Timer, now) || sched.due(EventKind::Serial, now) {
+                    continue;
+                }
+            }
+            if self.sys.sched.take_hot(EventKind::Ppu, now) {
+                self.sync_ppu(now);
+            }
+            let hot = self.sys.sched.hot_min();
+            if hot <= now {
+                continue;
+            }
+            let Some(kind) = self.sys.sched.take_slow(now) else {
+                self.sys.sched.settle(hot);
+                break;
+            };
+            match kind {
                 EventKind::Dma => {
                     if self.sys.ppu.dma.tail < dma::LEN {
                         self.dma_tail_end();
@@ -1013,11 +1041,12 @@ impl Ctx<'_, '_> {
                     }
                 }
                 EventKind::VramDma => self.vdma_hblank(),
+                EventKind::Input => self.apply_inputs(now),
                 EventKind::DivApu => self.div_apu_event(now),
                 EventKind::AudioBuffer => self.audio_buffer_event(now),
-            }
-            if now < self.sys.sched.next() {
-                break;
+                EventKind::Timer | EventKind::Serial | EventKind::Ppu => {
+                    debug_assert!(false, "{kind:?} is a hot kind");
+                }
             }
         }
     }
@@ -1033,7 +1062,7 @@ impl Ctx<'_, '_> {
         debug_assert!(!self.sys.serial.running());
         // `NEVER`, the transfer being over.
         let at = self.serial_deadline();
-        self.sys.sched.set_inline(EventKind::Serial, at);
+        self.sys.sched.rearm(EventKind::Serial, at);
     }
 
     /// Applies the scheduled button changes due at the M-cycle boundary
@@ -1054,10 +1083,11 @@ impl Ctx<'_, '_> {
     /// The `Ppu` deadline: catches the PPU up to the current clock and
     /// reschedules.
     #[inline(never)]
-    fn sync_ppu(&mut self) {
-        let now = self.clock();
+    fn sync_ppu(&mut self, now: u64) {
         self.run_ppu::<PPU_DUE>(now);
-        self.schedule_ppu();
+        let s = &mut *self.sys;
+        let at = s.ppu.next_event(self.hot.mcycle == 2);
+        s.sched.rearm(EventKind::Ppu, at);
     }
 
     /// Catches the PPU up to clock `at` (the current clock, or one dot
