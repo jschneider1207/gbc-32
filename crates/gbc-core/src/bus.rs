@@ -1397,10 +1397,6 @@ impl Ctx<'_, '_> {
             0x51..=0x54 if cgb => s.vdma.write_addr(reg - 0x50, value),
             0x55 if cgb => self.write_hdma5(value),
             0x4D if cgb => s.key1 = value & 0x01,
-            // RP, the infrared port (CGB mode only): the LED (bit 0) and
-            // the read enable (bits 6-7) are stored; read in
-            // `read_io_other`.
-            0x56 if cgb => self.mem.io[reg] = value & 0xC1,
             0x4F if cgb => {
                 s.vbk = value & 0x01;
                 s.vram_off = usize::from(s.vbk) * 0x2000;
@@ -1424,8 +1420,12 @@ impl Ctx<'_, '_> {
             }
             // Undocumented CGB registers (SameBoy Core/memory.c,
             // `write_high_memory`: GB_IO_PSWX/PSWY/PSW/PGB store the
-            // value; the read masks are in `read_io`).
-            0x72..=0x75 => self.mem.io[reg] = value,
+            // value; the read masks are in `read_io`). RP (FF56, the
+            // infrared port) too, in either mode (SameBoy: `GB_IO_RP`
+            // stores on any CGB); its read is CGB mode only
+            // (`read_io_other`). One arm with them: `write_io` is in the
+            // ITCM set, and a separate arm cost it 40 B.
+            0x56 | 0x72..=0x75 => self.mem.io[reg] = value,
             _ => {}
         }
     }
@@ -2580,7 +2580,7 @@ fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // SameBoy: "You will read your own IR LED if it's on"). Not
         // modelled: the receiver adapting to a steady light (Pan Docs).
         0x56 if cgb => {
-            let rp = mem.io[reg];
+            let rp = mem.io[reg] & 0xC1;
             (0x3E | rp) & !(u8::from(rp == 0xC1) << 1)
         }
         _ => 0xFF,
