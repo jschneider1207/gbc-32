@@ -2244,6 +2244,52 @@ mod tests {
         }
     }
 
+    /// WY = 40 and the window enabled (WX = 71) from VBlank; LCDC.5 is
+    /// cleared at about dot `t` of line `line` and set again in line 48's
+    /// OAM scan. Returns the dot at which line 49's mode 3 is seen to end
+    /// (M-cycle steps): 6 dots later with the window than without.
+    fn line_49_mode_3_end(clear: Option<(u64, u64)>) -> u64 {
+        let emu = emulator();
+        let mut fb = frame();
+        let start = emu.clock() + u64::from(FRAME_CLOCKS - ppu::POST_BOOT_POS);
+        let mut to = |emu: &mut Emulator, line: u64, t: u64| {
+            let _ = emu.run_until(start + 456 * line + t, &mut fb, &mut []);
+            assert!(emu.clock() < start + 456 * line + t + 4);
+        };
+        write_reg(emu, 0xFF4A, 40);
+        write_reg(emu, 0xFF4B, 71);
+        write_lcdc(emu, 0xB1);
+        if let Some((line, t)) = clear {
+            to(emu, line, t);
+            write_lcdc(emu, 0x91);
+            to(emu, 48, 20);
+            write_lcdc(emu, 0xB1);
+        }
+        to(emu, 49, 200);
+        assert_eq!(emu.peek(0xFF41) & 3, 3);
+        while emu.peek(0xFF41) & 3 == 3 {
+            let _ = emu.step(&mut fb, &mut []);
+        }
+        emu.clock() - (start + 456 * 49)
+    }
+
+    /// The WY == LY condition is sampled at the line start with LCDC.5 as
+    /// it is then, and holds for the frame: clearing LCDC.5 later on the
+    /// WY line doesn't undo it (SameBoy display.c `wy_check` at each line
+    /// start; Pan Docs: Window, "checked at the start of Mode 2 only").
+    /// Review A2-05: a clear before the pipeline start lost the match.
+    #[test]
+    fn lcdc_5_clear_on_the_wy_line_keeps_the_wy_match() {
+        let window = line_49_mode_3_end(None);
+        // Cleared before line 40's check: no match on line 40, no window.
+        let none = line_49_mode_3_end(Some((39, 440)));
+        assert!(window >= none + 4, "{window} {none}");
+        // Cleared in line 40's OAM scan, in its mode 3, in its HBlank.
+        for t in [8, 20, 84, 150, 300] {
+            assert_eq!(line_49_mode_3_end(Some((40, t))), window, "at {t}");
+        }
+    }
+
     #[test]
     fn joypad_interrupt_ends_halt() {
         // LD A,10; LDH (FF),A (IE = joypad); XOR A; LDH (0F),A; LD A,10;

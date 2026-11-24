@@ -976,6 +976,11 @@ impl Ctx<'_, '_> {
                     s.ppu.obj_size_fetch(at, value, self.mem);
                 }
                 let win = (value ^ s.ppu.lcdc) & 0x20 != 0;
+                // The line's WY check, if past, saw the old LCDC.5 (as for
+                // a WY write): clearing it doesn't undo a match. (For
+                // every LCDC write: a test of the bit here costs more
+                // code than the cold call.)
+                s.ppu.wy_write(now, self.mem, double);
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);
                 s.ppu.check_wy_at(now, self.mem, double);
                 if win {

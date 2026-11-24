@@ -2013,10 +2013,13 @@ impl Ppu {
         }
     }
 
-    /// Before a WY write at clock `now`: once past the line's WY == LY
-    /// check point ([`WY_CHECK_AT`]), the old WY was compared with LY, so a
-    /// match then holds even if the write changes WY before mode 3 (here
-    /// only `latch` and writes check otherwise).
+    /// Before a WY write, or an LCDC write that clears LCDC.5, at clock
+    /// `now`: once past the line's WY == LY check point ([`WY_CHECK_AT`]),
+    /// the old WY was compared with LY, with LCDC.5 as it was, so a match
+    /// then holds even if the write changes either before mode 3 (here
+    /// only `latch` and writes check otherwise). SameBoy (display.c
+    /// `wy_check`, MIT) checks at each line start and needs LCDC.5 only
+    /// then; gambatte (ppu.cpp `M2_LyNon0`, behaviour only) likewise.
     #[cold]
     #[inline(never)]
     pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory, double: bool) {
