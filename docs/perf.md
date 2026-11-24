@@ -476,10 +476,12 @@ Run: `scripts/check-code-size.sh` (about 1 s warm, a few seconds cold).
   in unnoticed. Growth shows in review; lower a figure when a function
   shrinks for good.
 
-Measurement: `RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core
---release --target thumbv7em-none-eabihf --target-dir target/codesize`
-(release is pinned to `codegen-units = 1` in `Cargo.toml`, the build the
-firmware will use; no LTO, there is no firmware crate to link yet), then
+Measurement: `RUSTFLAGS="<.cargo/config.toml flags> -C target-cpu=cortex-m7"
+cargo build -p gbc-core --release --target thumbv7em-none-eabihf
+--target-dir target/codesize` (the flags from `scripts/lib/rustflags.sh`,
+"Build flags" below; release is pinned to `codegen-units = 1` in
+`Cargo.toml`, the build the firmware will use; no LTO, there is no
+firmware crate to link yet), then
 `nm -S --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
 on the object in the rlib, with `-C` for the names in the budgets file.
 `(total .text)` is the sum of every `.text*` section (`size -A`),
@@ -845,10 +847,62 @@ binding constraint is the total, 97,136 of 122,880 B, which
 `check-code-size.sh` gates. On the H753 the set total (55,072 of
 57,344 B) is reported, not gated.
 
+## Build flags
+
+Every build of the workspace gets one rustc flag beyond the profiles in
+`Cargo.toml` (human, 2026-11-24; ADR 0008, amendment "the LLVM
+address-folding limit, applied"):
+
+```
+-C llvm-args=-cgp-max-address-users-to-scan=100000
+```
+
+LLVM's CodeGenPrepare stops folding an address into its memory accesses
+once it has more than 100 uses in one function (default of this hidden
+option); `Cpu::run` has far more on the `Ctx` fields, and paid a reload
+per access. With the flag: cpu_instrs -6.70% Ir, cgb_sound -5.67%, every
+bench line lower, thumb `.text` -1,130 B (ADR 0008 has the table).
+
+Where it is set, and how it can't be lost unnoticed:
+
+- `.cargo/config.toml`, `[build] rustflags`: the one definition. It covers
+  every cargo build run inside the repository: tests, bench, romtest, the
+  desktop front end (also the `x86_64-pc-windows-gnu` cross build of
+  `scripts/run-windows.sh`), the gate's thumbv7em build and, later, the
+  firmware. Keep it a one-line array.
+- A `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`) variable *replaces* the
+  config's flags. The scripts that set their own (`check-code-size.sh`,
+  `check-itcm-set.sh`, `check-rom-loads.sh`: `-C target-cpu=cortex-m7`)
+  source `scripts/lib/rustflags.sh`, which reads the config line and adds
+  to it, so the two cannot drift; it fails (exit 1) if the line is
+  missing or lacks the option.
+- `scripts/check-bench.sh` asks the binary it is about to measure what it
+  was built with (`bench --rustflags`, recorded by `tools/bench/build.rs`
+  from `CARGO_ENCODED_RUSTFLAGS`) and fails unless the config's flags are
+  among them: a `RUSTFLAGS` left in the environment would otherwise
+  produce another build's numbers.
+- Not covered, on purpose: `cargo fuzz` (`tools/fuzz/fuzz`, nightly) sets
+  `RUSTFLAGS` itself for its sanitizer and coverage flags, which replaces
+  the config. It is a bug-finding build on another LLVM, never measured.
+  `scripts/diff-fingerprint.sh` builds the old revision with that
+  revision's own config (before 2026-11-24: without the flag); the
+  fingerprints must match either way, since the flag changes no behaviour.
+
+**On a toolchain bump** (`rust-toolchain.toml`): the option belongs to the
+pinned LLVM. If LLVM drops it, every build fails with an unknown-option
+error; if it renames or changes it, builds pass and the numbers move. So
+re-validate on the new toolchain: run `scripts/check-bench.sh` and
+`scripts/check-code-size.sh` as committed, then again with the value in
+`.cargo/config.toml` temporarily set to `=100`, LLVM's default (the
+"without" build; the guards accept it, so nothing else needs editing).
+Keep the flag only if it still lowers Ir and `.text`; record both sets of
+numbers in ADR 0008 and restore `=100000`.
+
 ## Instruction-count benchmark
 
 `scripts/check-bench.sh` runs `tools/bench` (release build, one codegen
-unit as pinned in `Cargo.toml`) under
+unit as pinned in `Cargo.toml`, the flags of "Build flags" above, which it
+checks first) under
 `valgrind --tool=callgrind` and compares the instructions executed (Ir) per
 ROM with `perf/bench-baseline.txt`. It exits non-zero if any ROM is more than
 3% above its baseline; improvements are printed but pass. Ir is deterministic

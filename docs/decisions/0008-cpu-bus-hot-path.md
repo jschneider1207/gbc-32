@@ -307,3 +307,38 @@ tick into each exit of an inlined read (~410 copies, were ~160) and the
 3-instruction test into 113 handler ends. `Cart::read_ram` is
 `#[inline(never)]` now: the inliner had made it a call at 88 of the 89
 reads before and a copy at all 89 after (4.6 KB).
+
+### 2026-11-24: the LLVM address-folding limit, applied
+
+The human adopted the option recorded above for every build (STATUS,
+"Decided in session 16"). `.cargo/config.toml` sets
+`rustflags = ["-C", "llvm-args=-cgp-max-address-users-to-scan=100000"]`;
+the scripts that set their own `RUSTFLAGS` (the thumbv7em checks) read it
+from there through `scripts/lib/rustflags.sh`, and `scripts/check-bench.sh`
+refuses a bench binary built without it (docs/perf.md "Build flags":
+where it applies, the one exception, `cargo fuzz`, and how to re-validate
+it on a toolchain bump, since it is a hidden option of the pinned LLVM).
+Behaviour is unchanged: the fingerprints of the corpus (plain, and with
+`--audio-buffer 7 --hash-samples`) are identical to the previous commit,
+and the tests, the `checked` tests, the invariance checks, the fuzz pass
+and the romtest manifest pass as before.
+
+Measurements (x86 Ir, `scripts/check-bench.sh`; the baseline file was
+re-recorded with the flag in the same commit):
+
+| | old baseline | before (3607e6b) | with the flag | flag alone |
+|---|---|---|---|---|
+| cpu_instrs | 1,694,717,771 | 1,485,980,477 | 1,386,439,274 | -6.70% |
+| cgb_sound | 1,130,295,021 | 1,017,749,178 | 960,093,465 | -5.67% |
+| cgb-acid2 | 689,083,500 | 686,715,304 | 685,678,561 | -0.15% |
+| event-storm | 208,386,107 | 186,880,187 | 178,953,593 | -4.24% |
+| dma-storm | 428,664,099 | 415,725,646 | 407,169,612 | -2.06% |
+| halt-irq | 286,184,478 | 279,274,729 | 275,833,921 | -1.23% |
+| worst-case | 313,479,719 | 287,997,910 | 280,343,420 | -2.66% |
+| cgb-raster | 324,867,705 | 298,250,339 | 289,973,226 | -2.78% |
+| apu-writes | 82,421,047 | 81,113,630 | 80,523,505 | -0.73% |
+| total `.text` (B) | | 112,110 | 110,980 | -1,130 |
+| `Cpu::run` (B) | | 26,544 | 25,414 | -1,130 |
+
+No line got worse. (Against the old baseline the flag takes cpu_instrs
+from -12.31% to -18.19%, the figure measured before the merge.)
