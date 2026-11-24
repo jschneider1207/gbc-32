@@ -190,7 +190,7 @@ impl Apu {
         self.fs.power = true;
         let ch1 = &mut self.sq[0];
         ch1.on = true;
-        ch1.duty = 2;
+        ch1.set_duty(2);
         ch1.freq = 0x7C1;
         ch1.pos = 6;
         ch1.high = true;
@@ -734,7 +734,16 @@ mod tests {
         for (reg, v) in [(0x10, 0x20), (0x12, 0xF0), (0x14, 0x87)] {
             apu.write(reg, v, 100, 0, 104);
         }
-        assert_eq!(apu.sweep.timer, 2, "inside the check");
+        // The trigger cancels the check (`Sweep::trigger`); the tick the bus
+        // has scheduled runs as a step that only counts down, to the same
+        // timer as before.
+        assert_eq!((apu.sweep.due, apu.sweep.check), (true, 0));
+        apu.sweep.clock(&mut apu.sq[0]);
+        assert_eq!(
+            (apu.sweep.timer, apu.sweep.due),
+            (2, false),
+            "inside the check"
+        );
         assert_eq!(sweep_timer_after_trigger(3, 8000, false), 2);
     }
 

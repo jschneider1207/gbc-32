@@ -119,8 +119,8 @@ and applies at the next event, the same step). Length runs before the sweep.
   `sweep_calculation_done`, on every revision; SameSuite `channel_1_sweep`,
   shift 7: on 7 M-cycles after the step, off 8 after). A check whose shift
   was written to 0 meanwhile is dropped (SameBoy pauses it). A CH1 trigger
-  inside the window cancels the pending check (`Sweep::trigger`; the ticks
-  still run as events): SameBoy's trigger reloads the countdown and the
+  inside the window cancels the pending check (`Sweep::trigger`; the tick
+  already scheduled runs as a step that only counts down): SameBoy's trigger reloads the countdown and the
   addend for its own check, so the old one never judges the new note with
   a later NR10 (M10 review A3-6). `calc()` is `shadow +-
   (shadow >> shift)`; subtraction sets `negate_used`; over 2047 turns the

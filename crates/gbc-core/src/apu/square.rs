@@ -29,7 +29,10 @@ pub(crate) struct Square {
     /// The 11-bit frequency (NRx3, NRx4 bits 0-2): the period used at the
     /// next reload.
     pub(crate) freq: u16,
-    /// NRx1 bits 6-7.
+    /// The duty pattern of NRx1 bits 6-7 (`DUTY`), XOR `DUTY[0]` so that
+    /// the all-zero state is duty 0 (`set_duty`, `pattern`). Kept as the
+    /// pattern, not the code: the steps need no table load (code size;
+    /// `advance` and `integrate` are in ITCM).
     pub(crate) duty: u8,
     /// The duty position, 0-7. Only APU power off resets it (Pan Docs).
     pub(crate) pos: u8,
@@ -59,6 +62,18 @@ impl Square {
         len: Length::ZERO,
         env: Envelope::ZERO,
     };
+
+    /// Sets the duty from its code (NRx1 bits 6-7).
+    #[inline]
+    pub(crate) fn set_duty(&mut self, code: u8) {
+        self.duty = DUTY[usize::from(code & 3)] ^ DUTY[0];
+    }
+
+    /// The duty pattern as a mask, bit i = position i (`DUTY`).
+    #[inline]
+    fn pattern(&self) -> u8 {
+        self.duty ^ DUTY[0]
+    }
 
     /// Base clocks per duty step: `(2048 - f) * 4`, 4-8192.
     #[inline]
@@ -102,7 +117,7 @@ impl Square {
     #[inline]
     fn step(&mut self, n: u32) {
         self.pos = (self.pos + (n & 7) as u8) & 7;
-        self.high = DUTY[usize::from(self.duty & 3)] >> self.pos & 1 != 0;
+        self.high = self.pattern() >> self.pos & 1 != 0;
     }
 
     /// Advances by `dt` clocks without integrating (ADR 0021 section 9),
@@ -153,7 +168,7 @@ impl Square {
         let spans = out.iter_mut().zip(segs);
         let vol2 = 2 * i32::from(self.env.volume);
         let p = self.period();
-        let duty = DUTY[usize::from(self.duty & 3)];
+        let duty = self.pattern();
         let whole = duty.count_ones();
         for (o, &dt) in spans {
             let dt = u32::from(dt);
@@ -198,7 +213,7 @@ impl Square {
     pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, delay: u8) {
         match off {
             1 => {
-                self.duty = value >> 6;
+                self.set_duty(value >> 6);
                 self.len.load(LENGTH_MAX, u16::from(value & 0x3F));
             }
             2 => {
@@ -315,16 +330,10 @@ pub(crate) struct Sweep {
     /// bus runs `clock` `SWEEP_LAG` clocks after the last `DivApu` event.
     pub(crate) due: bool,
     /// 1 MHz ticks (4 base clocks each) to the overflow check that
-    /// follows a write-back (0: none; `clock`), in bits 0-2. With
-    /// `CHECK_CANCELLED` set, the ticks still run but no check follows
+    /// follows a write-back (0: none; `clock`). A trigger cancels it
     /// (`trigger`).
     pub(crate) check: u8,
 }
-
-/// `Sweep::check`: a trigger came since the write-back, so the pending
-/// overflow check is void. The remaining ticks still count down as events
-/// (`due`), because the bus's `DivApu` deadline is already set for them.
-const CHECK_CANCELLED: u8 = 0x80;
 
 /// Base clocks from the DIV-APU edge that steps the frame sequencer to 3
 /// or 7 to the sweep step it causes. gambatte (`SweepUnit`, GPL, behaviour
@@ -406,14 +415,18 @@ impl Sweep {
     /// its own check (shift 0: addend 0, nothing can overflow); the one
     /// in flight is replaced, not left to run. This trigger's own check
     /// is instant here (`docs/reference/apu.md`, "Not modelled").
+    ///
+    /// The bus has the cancelled check's next tick scheduled (`due` stays
+    /// set), so that event still runs `clock`, now as a step: one more on
+    /// the timer makes it a step that only counts down, and with `due`
+    /// clear after it the bus goes back to waiting for the DIV-APU edge.
     #[inline]
     pub(crate) fn trigger(&mut self, ch: &mut Square, late: bool) {
-        if self.check != 0 {
-            self.check |= CHECK_CANCELLED;
-        }
+        let cancel = self.check != 0;
+        self.check = 0;
         self.shadow = ch.freq & 0x7FF;
         self.reload();
-        self.timer += u8::from(late);
+        self.timer += u8::from(late) + u8::from(cancel);
         let shift = self.nr10 & 7;
         self.enabled = self.period() != 0 || shift != 0;
         self.negate_used = false;
@@ -456,13 +469,9 @@ impl Sweep {
         self.due = false;
         if self.check != 0 {
             self.check -= 1;
-            self.due = self.check & 7 != 0;
-            if !self.due {
-                let cancelled = self.check & CHECK_CANCELLED != 0;
-                self.check = 0;
-                if !cancelled && self.nr10 & 7 != 0 {
-                    self.calc(ch);
-                }
+            self.due = self.check != 0;
+            if !self.due && self.nr10 & 7 != 0 {
+                self.calc(ch);
             }
             return;
         }
@@ -519,6 +528,23 @@ mod tests {
             }
             assert_eq!(got, want, "duty {duty}");
         }
+    }
+
+    /// The zero state (APU power on, NRx1 never written) is duty 0, 12.5%.
+    #[test]
+    fn a_channel_never_given_a_duty_plays_12_5_percent() {
+        let mut sq = Square::ZERO;
+        sq.write(2, 0xF0, 0, 10);
+        sq.write(3, 0xFF, 0, 10);
+        sq.write(4, 0x87, 0, 10);
+        sq.advance(u64::from(sq.countdown));
+        // Positions 1-7, then 0, from the first step: high at 7.
+        let mut high = [0; 8];
+        for h in &mut high {
+            *h = sq.digital();
+            sq.advance(4);
+        }
+        assert_eq!(high, [0, 0, 0, 0, 0, 0, 15, 0]);
     }
 
     #[test]
@@ -863,13 +889,12 @@ mod tests {
         sw.trigger(&mut sq, false);
         assert!(sq.on);
         sw.write(0x11, &mut sq);
-        // The event chain keeps its ticks (the bus's `DivApu` deadline
-        // follows `due`), but nothing is calculated at its end.
-        for left in (0..5).rev() {
-            assert!(sw.due, "{left} ticks before the end");
-            sw.clock(&mut sq);
-            assert!(sq.on, "the old check does not judge the new note");
-        }
+        // The event the bus has scheduled for the next tick still comes
+        // (`due`), as a step that only counts the timer back down; then
+        // the chain is over and nothing was calculated.
+        assert_eq!((sw.due, sw.check, sw.timer), (true, 0, 2));
+        sw.clock(&mut sq);
+        assert!(sq.on, "the old check does not judge the new note");
         assert_eq!((sw.due, sw.check, sw.timer), (false, 0, 1), "no step taken");
         assert_eq!(sq.freq, 0x7F0);
         // The next sweep step calculates as usual, and its check runs.
