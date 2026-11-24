@@ -113,3 +113,20 @@ the two lists cannot drift apart.
   included); those entries become live again when their mapper is added.
 - HuC1 and HuC3 are planned next (A4-1); MBC7 needs a sensor input in the
   API (ADR 0006 extension) and stays refused until a target game needs it.
+
+## Amendment (2026-11-24): HuC1 and HuC3 load
+The human approved both for Stage 1 (STATUS, "Decided in session 16"), and
+they are emulated (`docs/reference/hudson-mappers.md`; HuC3 clock state:
+ADR 0032). In the table above, **FE (HuC3) and FF (HuC1) now load**;
+`MapperKind::is_supported` is true for `HuC1` and `HuC3`, and the "emulated"
+list in the API sketch gains them. Still refused: MMM01 (0B-0D), MBC6
+(20), MBC7 (22), Pocket Camera (FC), TAMA5 (FD) and every unassigned code.
+
+One consequence for the padding case named above: a ROM file whose header
+byte 0147 is FF or FE filler now loads as HuC1 or HuC3 instead of being
+refused. That is what the header says; such a file has no valid header at
+all (no logo, wrong checksum), which the core does not check.
+
+The tests that used FF or FE as their example of a refused mapper use MBC7
+(22) or TAMA5 (FD) instead; `supported_kinds_are_the_ones_that_load` lists
+FE and FF.

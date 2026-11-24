@@ -1,5 +1,6 @@
 //! Cartridge: ROM, external RAM, mappers and RTC. No MBC, MBC1 (and
-//! MBC1M), MBC2, MBC3/MBC30, MBC5 and HuC1 are emulated; a header that names
+//! MBC1M), MBC2, MBC3/MBC30, MBC5, HuC1 and HuC3 are emulated; a header that
+//! names
 //! any other mapper ([`MapperKind`]) is a load error (ADR 0031).
 //!
 //! The ROM and cartridge RAM are borrowed from the caller for the
@@ -45,6 +46,9 @@ pub struct EjectedCart<'a> {
     /// [`EjectedCart::save_dirty`], so persist it at exit regardless of that
     /// flag.
     pub rtc: Option<RtcState>,
+    /// The HuC3 clock state at the moment the cartridge was removed, or
+    /// `None` if it is not a HuC3 cartridge. Persist it like `rtc`.
+    pub huc3_rtc: Option<Huc3RtcState>,
     /// [`Emulator::save_dirty`](crate::Emulator::save_dirty) at removal:
     /// the game changed its save since the caller last cleared the flag.
     pub save_dirty: bool,
@@ -72,6 +76,7 @@ impl core::fmt::Debug for EjectedCart<'_> {
             .field("rom_len", &self.rom.len())
             .field("cart_ram_len", &self.cart_ram.len())
             .field("rtc", &self.rtc)
+            .field("huc3_rtc", &self.huc3_rtc)
             .field("save_dirty", &self.save_dirty)
             .finish()
     }
@@ -185,7 +190,8 @@ pub enum MapperKind {
     PocketCamera,
     /// Bandai TAMA5: FD. Not emulated.
     Tama5,
-    /// Hudson HuC3: FE. Not emulated.
+    /// Hudson HuC3 (clock; its infrared port and speaker are not
+    /// connected to anything): FE.
     HuC3,
     /// Hudson HuC1 (infrared port, not connected to anything): FF.
     HuC1,
@@ -223,7 +229,13 @@ impl MapperKind {
         // `supported_kinds_are_the_ones_that_load` checks every code).
         matches!(
             self,
-            Self::RomOnly | Self::Mbc1 | Self::Mbc2 | Self::Mbc3 | Self::Mbc5 | Self::HuC1
+            Self::RomOnly
+                | Self::Mbc1
+                | Self::Mbc2
+                | Self::Mbc3
+                | Self::Mbc5
+                | Self::HuC1
+                | Self::HuC3
         )
     }
 
@@ -339,15 +351,19 @@ pub struct CartInfo {
     /// The cartridge has an MBC3 real-time clock
     /// ([`Emulator::rtc_state`](crate::Emulator::rtc_state) is `Some`).
     pub rtc: bool,
+    /// The cartridge has a HuC3 clock
+    /// ([`Emulator::huc3_rtc_state`](crate::Emulator::huc3_rtc_state) is
+    /// `Some`): type FE.
+    pub huc3_rtc: bool,
 }
 
 impl CartInfo {
     /// Whether the cartridge has anything to persist: a battery, and RAM
-    /// or an RTC behind it. Without a battery the cartridge RAM is lost at
+    /// or a clock (MBC3 or HuC3) behind it. Without a battery the cartridge RAM is lost at
     /// power off on hardware, so a front end should not write a save file
     /// (nor load one: a game may rely on RAM starting fresh).
     pub const fn has_save(&self) -> bool {
-        self.battery && (self.ram_size != 0 || self.rtc)
+        self.battery && (self.ram_size != 0 || self.rtc || self.huc3_rtc)
     }
 }
 
@@ -362,10 +378,14 @@ pub fn cart_info(rom: &[u8]) -> Result<CartInfo, LoadErrorKind> {
         ram_size,
         battery: has_battery(rom),
         rtc: has_rtc(rom),
+        huc3_rtc: header(rom, HEADER_CART_TYPE) == 0xFE,
     })
 }
 
+mod huc3;
 mod rtc;
+
+pub use huc3::Huc3RtcState;
 
 use crate::rom::Rom;
 
@@ -536,6 +556,10 @@ enum Mapper {
     /// Hudson HuC1 (type FF): ROM and RAM banking, and an infrared port in
     /// place of the RAM enable (Pan Docs: HuC1). See `write_rom`.
     HuC1,
+    /// Hudson HuC3 (type FE): ROM and RAM banking and a mode register that
+    /// puts RAM, the clock chip's mailbox or the infrared port at
+    /// A000-BFFF (Pan Docs: HuC-3). See `set_huc3_mode`.
+    HuC3,
 }
 
 impl Mapper {
@@ -563,15 +587,30 @@ impl Mapper {
                 rumble: cart_type >= 0x1C,
             },
             K::HuC1 => Self::HuC1,
-            K::Mmm01 | K::Mbc6 | K::Mbc7 | K::PocketCamera | K::Tama5 | K::HuC3 | K::Unknown => {
+            K::HuC3 => Self::HuC3,
+            K::Mmm01 | K::Mbc6 | K::Mbc7 | K::PocketCamera | K::Tama5 | K::Unknown => {
                 return Err(LoadErrorKind::UnsupportedMapper { mapper, cart_type });
             }
         })
     }
 }
 
-/// `Cart::rtc_sel` for the infrared register of the Hudson mappers at
-/// A000-BFFF (the MBC3 values are 08-0C and FF).
+/// `Cart::rtc_sel` values of the Hudson mappers: what is at A000-BFFF when
+/// it is not plain read/write RAM (0). The MBC3 values are 08-0C and FF
+/// (nothing mapped), so these start at 10: `10 | mode` for the HuC3 mode
+/// register values that map something (Pan Docs: HuC-3, "0000-1FFF -
+/// RAM/RTC/IR Select"). Everything from `SEL_RAM_RO` up is handled by
+/// `Cart::read_huc` and `Cart::write_huc`.
+///
+/// HuC3 mode 0: cartridge RAM, read-only.
+const SEL_RAM_RO: u8 = 0x10;
+/// HuC3 mode B: clock command/argument (write).
+const SEL_CLOCK_ARG: u8 = 0x1B;
+/// HuC3 mode C: clock command/response (read).
+const SEL_CLOCK_RESPONSE: u8 = 0x1C;
+/// HuC3 mode D: clock semaphore.
+const SEL_CLOCK_SEMAPHORE: u8 = 0x1D;
+/// HuC3 mode E, and HuC1's IR mode: the infrared register.
 const SEL_IR: u8 = 0x1E;
 
 /// Bytes per switchable ROM bank and RAM bank.
@@ -593,6 +632,9 @@ pub(crate) struct Cart<'a> {
     rtc_synced: u64,
     /// Bit 0 of the last 6000-7FFF write (MBC3 latch: 0 then 1 latches).
     rtc_latch: bool,
+    /// The HuC3 clock chip, as of clock `rtc_synced` too. Read its clock
+    /// through [`Cart::huc3_at`].
+    huc3: huc3::Huc3,
     /// The game changed the save since the caller last cleared this: a RAM
     /// write that changed a byte, or an RTC register write. (Clock ticks
     /// and latches don't count: the caller saves the RTC with the time
@@ -628,14 +670,15 @@ pub(crate) struct Cart<'a> {
     /// RAM bank (4 bits, 3 on rumble carts). Bank 0 is a real bank.
     ///
     /// MBC3 reuses both: `mbc5_rom` is its ROM bank (8 bits stored, 7 used
-    /// below 4 MiB) and `mbc5_ram` the raw 4000-5FFF value. HuC1 too: its
-    /// 6-bit ROM bank and 3-bit RAM bank.
+    /// below 4 MiB) and `mbc5_ram` the raw 4000-5FFF value. HuC1 and HuC3
+    /// too: a 6-bit or 7-bit ROM bank and a 3-bit or 4-bit RAM bank.
     mbc5_rom: u16,
     mbc5_ram: u8,
     /// MBC3: the selected RTC register, 08-0C, or 0xFF when the 4000-5FFF
     /// value maps nothing at A000-BFFF (RTC select above 0C, or RAM
     /// bank 4-7 on an RTC cart below MBC30); 0 when RAM is mapped. Kept apart from `mbc5_ram`
-    /// so the RAM read path tests one byte. HuC1: `SEL_IR` in IR mode.
+    /// so the RAM read path tests one byte. HuC1 and HuC3: one of the
+    /// `SEL_*` values when A000-BFFF is not read/write RAM.
     rtc_sel: u8,
 }
 
@@ -649,6 +692,7 @@ impl<'a> Cart<'a> {
             rtc: RtcState::zero(),
             rtc_synced: 0,
             rtc_latch: false,
+            huc3: huc3::Huc3::new(),
             save_dirty: false,
             mapper: Mapper::None,
             rom_mask: 0,
@@ -707,6 +751,11 @@ impl<'a> Cart<'a> {
         self.mapper == Mapper::Mbc3Rtc
     }
 
+    /// Whether the cartridge has a HuC3 clock.
+    pub(crate) fn has_huc3_rtc(&self) -> bool {
+        self.mapper == Mapper::HuC3
+    }
+
     /// Whether a cartridge is inserted (a loaded ROM is never empty).
     pub(crate) fn is_loaded(&self) -> bool {
         !self.rom.is_empty()
@@ -732,10 +781,12 @@ impl<'a> Cart<'a> {
             return None;
         }
         let rtc = self.has_rtc().then(|| self.rtc_at(now));
+        let huc3_rtc = self.has_huc3_rtc().then(|| self.huc3_at(now));
         Some(EjectedCart {
             rom: self.rom.into_inner(), // check-rom-loads: allowed (hand-back)
             cart_ram: self.ram_buf,
             rtc,
+            huc3_rtc,
             save_dirty: self.save_dirty,
         })
     }
@@ -746,6 +797,7 @@ impl<'a> Cart<'a> {
     pub(crate) fn reset(&mut self) {
         self.rtc_synced = 0;
         self.rtc_latch = false;
+        self.huc3.reset_mailbox();
         self.bank1 = 1;
         self.bank2 = 0;
         self.mode = 0;
@@ -757,6 +809,11 @@ impl<'a> Cart<'a> {
         // HuC1, "Most MBCs can disable the cartridge RAM [...] HuC1
         // doesn't do this"); it powers on in RAM mode (`rtc_sel` 0).
         self.ram_enabled = matches!(self.mapper, Mapper::None | Mapper::HuC1);
+        if self.mapper == Mapper::HuC3 {
+            // Mode 0 at power-on (SameBoy `GB_configure_cart` zeroes the
+            // mapper state): RAM, read-only.
+            self.set_huc3_mode(0);
+        }
         self.update_banks();
     }
 
@@ -781,7 +838,7 @@ impl<'a> Cart<'a> {
             return 0xFF;
         }
         if self.rtc_sel != 0 {
-            return self.read_rtc();
+            return self.read_rtc(addr);
         }
         if self.ram_len == 0 {
             return 0xFF;
@@ -797,7 +854,7 @@ impl<'a> Cart<'a> {
     /// blocks: 16 byte reads from the ROM bank window (never a wide copy:
     /// the ROM may be in memory without unaligned reads, ADR 0027) or one
     /// copy from the RAM bank. The RTC
-    /// register doesn't depend on the address. Every RAM size is 0 or a
+    /// and Hudson registers don't depend on the address. Every RAM size is 0 or a
     /// power of two of at least 512 (`cart_ram_size`), so the
     /// `ram_len - 1` mask keeps the low 4 bits and the 16 bytes are one
     /// run of `ram_buf`.
@@ -806,10 +863,10 @@ impl<'a> Cart<'a> {
             let window = self.rom_win[usize::from(addr >> 14) & 1];
             let off = usize::from(addr) & (ROM_BANK - 1);
             return Self::rom_block(window, off);
-        } else if !self.ram_enabled || (self.rtc_sel == 0 && self.ram_len == 0) {
+        } else if !self.ram_enabled || (self.ram_mapped() && self.ram_len == 0) {
             return [0xFF; 16];
-        } else if self.rtc_sel != 0 {
-            return [self.read_rtc(); 16];
+        } else if !self.ram_mapped() {
+            return [self.read_rtc(addr); 16];
         } else {
             debug_assert!(self.ram_len.is_multiple_of(16));
             (self.ram_buf, self.ram_index(addr))
@@ -888,9 +945,29 @@ impl<'a> Cart<'a> {
         rtc
     }
 
-    /// Advances the stored RTC to clock `now`.
+    /// Advances the stored clock (the MBC3 RTC, or the HuC3 clock on a
+    /// HuC3 cartridge) to clock `now`.
     pub(crate) fn rtc_sync(&mut self, now: u64) {
-        self.rtc = self.rtc_at(now);
+        if self.mapper == Mapper::HuC3 {
+            self.huc3.clock = self.huc3_at(now);
+        } else {
+            self.rtc = self.rtc_at(now);
+        }
+        self.rtc_synced = now;
+    }
+
+    /// The HuC3 clock state at clock `now` (caught up, without storing
+    /// it).
+    pub(crate) fn huc3_at(&self, now: u64) -> Huc3RtcState {
+        let mut clock = self.huc3.clock;
+        clock.advance(now.saturating_sub(self.rtc_synced));
+        clock
+    }
+
+    /// Replaces the HuC3 clock state as of clock `now`. `state` is masked
+    /// ([`Huc3RtcState::masked`]).
+    pub(crate) fn set_huc3(&mut self, state: Huc3RtcState, now: u64) {
+        self.huc3.clock = state;
         self.rtc_synced = now;
     }
 
@@ -900,11 +977,19 @@ impl<'a> Cart<'a> {
         self.rtc_synced = now;
     }
 
+    /// Whether A000-BFFF shows cartridge RAM (read/write, or HuC3's
+    /// read-only mode) rather than a register or nothing.
+    fn ram_mapped(&self) -> bool {
+        matches!(self.rtc_sel, 0 | SEL_RAM_RO)
+    }
+
     /// A000-BFFF read with an RTC register (or nothing) selected: the
     /// latched copy, so no catch-up. Unused bits read 0 (rtc3test "Valid
     /// bits"); the stored registers are already cut to their widths.
+    /// Also the way to the Hudson mappers' special modes (`read_huc`),
+    /// the only ones that use `addr`.
     #[inline(never)]
-    fn read_rtc(&self) -> u8 {
+    fn read_rtc(&self, addr: u16) -> u8 {
         let t = &self.rtc.latched;
         match self.rtc_sel {
             0x08 => t.seconds,
@@ -912,11 +997,43 @@ impl<'a> Cart<'a> {
             0x0A => t.hours,
             0x0B => t.days as u8,
             0x0C => (t.days >> 8) as u8 & 1 | u8::from(t.halted) << 6 | u8::from(t.day_carry) << 7,
-            // HuC1 IR register: C0 = no light seen, C1 = light (Pan Docs:
-            // HuC1, A000-BFFF; SameBoy `Core/memory.c` `read_mbc_ram`:
-            // `0xC0 | effective_ir_input`). No IR peer is emulated, so
-            // the receiver never sees light.
+            SEL_RAM_RO..=SEL_IR => self.read_huc(addr),
+            _ => 0xFF,
+        }
+    }
+
+    /// A000-BFFF read in one of the Hudson mappers' special modes. Cold:
+    /// it keeps this code out of `read_rtc`, which sits with the hot
+    /// code (ITCM), and games spend their time in the plain RAM mode.
+    #[cold]
+    #[inline(never)]
+    fn read_huc(&self, addr: u16) -> u8 {
+        match self.rtc_sel {
+            // HuC3 mode 0: the RAM reads as usual (Pan Docs: HuC-3, "$0
+            // Cart RAM (read-only)"; SameBoy `Core/memory.c`
+            // `read_mbc_ram` also reads RAM in mode 0, with a "R/O RAM?
+            // (or is it disabled?)" note).
+            SEL_RAM_RO if self.ram_len != 0 => self
+                .ram_buf
+                .get(self.ram_index(addr))
+                .copied()
+                .unwrap_or(0xFF),
+            // The IR register. HuC1: C0 = no light seen, C1 = light (Pan
+            // Docs: HuC1, A000-BFFF; SameBoy `read_mbc_ram`: `0xC0 |
+            // effective_ir_input`). No IR peer is emulated, so the
+            // receiver never sees light. HuC3: Pan Docs says the register
+            // is "similar to the equivalent register of the HuC1" with
+            // the light in bit 0 and D7 not connected (open bus, usually
+            // high), so the same C0 is returned; SameBoy returns only the
+            // light bit (00) with a "what are the other bits?" note.
+            // Bits 1-6 on a HuC3 are unverified on hardware.
             SEL_IR => 0xC0,
+            SEL_CLOCK_RESPONSE => self.huc3.read_response(),
+            SEL_CLOCK_SEMAPHORE => self.huc3.read_semaphore(),
+            // A HuC3 mode that maps nothing readable (1-9, F), the
+            // write-only mode B, or read-only RAM on a cartridge without
+            // RAM: Pan Docs says open bus, "often $FF" (SameBoy returns
+            // 01 for the unknown modes, with a TODO).
             _ => 0xFF,
         }
     }
@@ -930,11 +1047,9 @@ impl<'a> Cart<'a> {
     /// `rtc_cycles` on a seconds write only).
     #[inline(never)]
     fn write_rtc(&mut self, v: u8, now: u64) {
-        // Nothing mapped (FF), or the HuC1 IR register: a write there only
-        // switches the IR transmitter LED (Pan Docs: HuC1), which nothing
-        // can see. It never reaches the RAM and is no save change.
-        if self.rtc_sel >= SEL_IR {
-            return;
+        // Nothing mapped (FF) or a Hudson mode.
+        if self.rtc_sel >= SEL_RAM_RO {
+            return self.write_huc(v, now);
         }
         // Count the time before the write with the old halt state.
         self.rtc_sync(now);
@@ -955,6 +1070,49 @@ impl<'a> Cart<'a> {
             }
             _ => {}
         }
+    }
+
+    /// A000-BFFF write in one of the Hudson mappers' special modes (or
+    /// with nothing mapped). None of them reaches the RAM:
+    /// - HuC3 mode 0 is read-only RAM (Pan Docs: HuC-3; SameBoy
+    ///   `write_mbc_ram` requires `mbc_ram_enable`, which is `mode ==
+    ///   0xA`);
+    /// - the IR register only switches the transmitter LED (Pan Docs:
+    ///   HuC1), which nothing can see;
+    /// - the modes that map nothing ignore writes (Pan Docs: HuC-3).
+    ///
+    /// The HuC3 clock chip takes a command in mode B and runs it when
+    /// the semaphore register (mode D) is written with bit 0 clear (Pan
+    /// Docs: HuC-3, "$D - RTC Semaphore"; games write FE). See `huc3.rs`.
+    #[inline(never)]
+    fn write_huc(&mut self, v: u8, now: u64) {
+        match self.rtc_sel {
+            SEL_CLOCK_ARG => self.huc3.write_command(v),
+            SEL_CLOCK_SEMAPHORE if v & 1 == 0 => {
+                // The command may read or set the time: count up to now.
+                self.rtc_sync(now);
+                self.save_dirty |= self.huc3.execute();
+            }
+            _ => {}
+        }
+    }
+
+    /// A write of `value` to the HuC3 mode register (0000-1FFF): what
+    /// A000-BFFF shows. Only the low 4 bits count (Pan Docs: HuC-3,
+    /// "0000-1FFF - RAM/RTC/IR Select"; SameBoy `Core/gb.h` `mode:4`):
+    /// 0 = RAM read-only, A = RAM read/write, B = clock command/argument,
+    /// C = clock command/response, D = clock semaphore, E = IR; any other
+    /// value maps nothing. `ram_enabled` stays set throughout: the mode
+    /// is all in `rtc_sel`, so that plain RAM access (mode A) costs what
+    /// it costs on the other mappers.
+    fn set_huc3_mode(&mut self, value: u8) {
+        self.ram_enabled = true;
+        self.rtc_sel = match value & 0x0F {
+            0x0A => 0,
+            0x00 => SEL_RAM_RO,
+            m @ 0x0B..=0x0E => 0x10 | m,
+            _ => 0xFF,
+        };
     }
 
     /// RAM smaller than the window (2 KiB) or than the selected bank
@@ -1093,6 +1251,25 @@ impl<'a> Cart<'a> {
                 }
                 self.update_banks();
             }
+            Mapper::HuC3 => {
+                // Pan Docs: HuC-3; SameBoy `Core/memory.c` `write_mbc`
+                // (GB_HUC3) and `Core/gb.h` (`huc3`: `rom_bank:7`,
+                // `ram_bank:4`).
+                match addr >> 13 {
+                    0 => self.set_huc3_mode(value),
+                    // ROM bank, 7 bits. Bank 0 can be mapped at 4000-7FFF
+                    // (Pan Docs: "Like the MBC5, bank $00 can also be
+                    // mapped to this region").
+                    1 => self.mbc5_rom = u16::from(value & 0x7F),
+                    // RAM bank ("at least 2 bits" in Pan Docs, 4 in
+                    // SameBoy); the RAM size masks it (`ram_index`).
+                    2 => self.mbc5_ram = value & 0x0F,
+                    // 6000-7FFF: games write 01 at startup, with no
+                    // observable effect (Pan Docs: "Nothing?").
+                    _ => {}
+                }
+                self.update_banks();
+            }
         }
     }
 
@@ -1112,7 +1289,7 @@ impl<'a> Cart<'a> {
                 usize::from(self.mbc5_rom),
                 usize::from(self.mbc5_ram & 7),
             ),
-            Mapper::Mbc5 { .. } | Mapper::HuC1 => {
+            Mapper::Mbc5 { .. } | Mapper::HuC1 | Mapper::HuC3 => {
                 (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram))
             }
             Mapper::Mbc1 | Mapper::Mbc1M => {
@@ -1397,7 +1574,8 @@ mod tests {
                 mapper: MapperKind::Mbc1,
                 ram_size: 0x8000,
                 battery: true,
-                rtc: false
+                rtc: false,
+                huc3_rtc: false,
             }
         );
         assert_eq!(info(0x06, 0x00).ram_size, 512);
@@ -1412,10 +1590,10 @@ mod tests {
     }
 
     /// The codes that load: every type Pan Docs assigns to no mapper,
-    /// MBC1, MBC2, MBC3, MBC5 or HuC1.
-    const SUPPORTED: [u8; 20] = [
+    /// MBC1, MBC2, MBC3, MBC5, HuC1 or HuC3.
+    const SUPPORTED: [u8; 21] = [
         0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x19, 0x1A,
-        0x1B, 0x1C, 0x1D, 0x1E, 0xFF,
+        0x1B, 0x1C, 0x1D, 0x1E, 0xFE, 0xFF,
     ];
 
     /// A4-1/D12: a mapper the core does not emulate is refused with a
@@ -1431,7 +1609,6 @@ mod tests {
             (0x22, K::Mbc7),
             (0xFC, K::PocketCamera),
             (0xFD, K::Tama5),
-            (0xFE, K::HuC3),
             // Unassigned codes, the old "MBC4" range (15-17) among them.
             (0x04, K::Unknown),
             (0x07, K::Unknown),
@@ -1491,10 +1668,10 @@ mod tests {
     #[test]
     fn unsupported_mapper_message_names_it() {
         use std::string::ToString;
-        let e = cart_info(&rom_with(0xFE, 0x03)).unwrap_err();
+        let e = cart_info(&rom_with(0xFD, 0x03)).unwrap_err();
         assert_eq!(
             e.to_string(),
-            "unsupported cartridge: HuC3 (header cartridge type FE)"
+            "unsupported cartridge: TAMA5 (header cartridge type FD)"
         );
         let e = cart_info(&rom_with(0x16, 0x03)).unwrap_err();
         assert_eq!(
@@ -2082,6 +2259,7 @@ mod huc_tests {
                 ram_size: 0x8000,
                 battery: true,
                 rtc: false,
+                huc3_rtc: false,
             })
         );
         assert!(cart_info(&r).unwrap().has_save());
@@ -2221,5 +2399,564 @@ mod huc_tests {
         c.write_rom(0x0000, 0x0E, 0);
         c.reset();
         assert_eq!(c.read_ram(0xA000), 0x55);
+    }
+
+    fn huc3<'a>(rom: &'a [u8], ram: &'a mut [u8]) -> Cart<'a> {
+        Cart::new(rom, ram).unwrap()
+    }
+
+    #[test]
+    fn huc3_header() {
+        let mut r = rom(0xFE, 2);
+        let info = cart_info(&r).unwrap();
+        assert_eq!(info.mapper, MapperKind::HuC3);
+        assert_eq!((info.ram_size, info.battery), (0x8000, true));
+        assert!(info.huc3_rtc && !info.rtc);
+        assert!(info.has_save());
+        // The clock alone is a save, as for MBC3+TIMER+BATTERY.
+        r[HEADER_RAM_SIZE] = 0x00;
+        assert!(cart_info(&r).unwrap().has_save());
+        r[HEADER_RAM_SIZE] = 0x03;
+        assert_eq!(Mapper::from_header(&r), Ok(Mapper::HuC3));
+        r[HEADER_RAM_SIZE] = 0x02;
+        assert_eq!(cart_ram_size(&r), Ok(0x2000));
+    }
+
+    #[test]
+    fn huc3_rom_bank_is_7_bits_and_zero_is_bank_zero() {
+        // 256 banks, more than the register reaches (see the HuC1 test).
+        let r = rom(0xFE, 256);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        assert_eq!((c.read_rom(0x0000), bank(&c)), (0, 1));
+        for b in [2u8, 0x3F, 0x40, 0x7F] {
+            c.write_rom(0x2000, b, 0);
+            assert_eq!(bank(&c), b);
+        }
+        c.write_rom(0x3FFF, 0x05, 0);
+        assert_eq!(bank(&c), 5);
+        // The other ranges don't select a ROM bank.
+        c.write_rom(0x1FFF, 0x06, 0);
+        c.write_rom(0x4000, 0x07, 0);
+        c.write_rom(0x6000, 0x01, 0);
+        assert_eq!(bank(&c), 5);
+        // Bit 7 is dropped.
+        c.write_rom(0x2000, 0x89, 0);
+        assert_eq!(bank(&c), 9);
+        // Bank 0 can be mapped at 4000-7FFF (Pan Docs).
+        c.write_rom(0x2000, 0x00, 0);
+        assert_eq!(bank(&c), 0);
+        c.write_rom(0x2000, 0x7F, 0);
+        assert_eq!(c.read_rom(0x0000), 0);
+    }
+
+    #[test]
+    fn huc3_rom_bank_masks_to_rom_size() {
+        let r = rom(0xFE, 16);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        c.write_rom(0x2000, 0x13, 0);
+        assert_eq!(bank(&c), 3);
+        c.write_rom(0x2000, 0x7F, 0);
+        assert_eq!(bank(&c), 15);
+        c.write_rom(0x2000, 0x10, 0);
+        assert_eq!(bank(&c), 0);
+    }
+
+    #[test]
+    fn huc3_ram_banking() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        c.write_rom(0x0000, 0x0A, 0);
+        for b in 0..4u8 {
+            c.write_rom(0x4000, b, 0);
+            c.write_ram(0xA000, 0x30 + b, 0);
+            c.write_ram(0xBFFF, 0x40 + b, 0);
+        }
+        for b in 0..4u8 {
+            c.write_rom(0x5FFF, b, 0);
+            assert_eq!(c.read_ram(0xA000), 0x30 + b);
+            assert_eq!(c.read_ram(0xBFFF), 0x40 + b);
+            assert_eq!(c.ram()[usize::from(b) * RAM_BANK], 0x30 + b);
+        }
+        // Past the RAM size the bank mirrors; other ranges don't select.
+        c.write_rom(0x4000, 0x0E, 0);
+        assert_eq!(c.read_ram(0xA000), 0x32);
+        c.write_rom(0x6000, 0x01, 0);
+        c.write_rom(0x2000, 0x01, 0);
+        assert_eq!(c.read_ram(0xA000), 0x32);
+    }
+
+    #[test]
+    fn huc3_mode_0_is_read_only_ram_and_the_power_on_mode() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        ram[0] = 0x11;
+        ram[0x2005] = 0x22;
+        let mut c = huc3(&r, &mut ram);
+        // Power-on: readable, not writable.
+        assert_eq!(c.read_ram(0xA000), 0x11);
+        c.write_ram(0xA000, 0x99, 0);
+        assert_eq!(c.read_ram(0xA000), 0x11);
+        assert!(!c.save_dirty);
+        // Mode A writes; mode 0 again (any value with low nibble 0) reads
+        // what was written and protects it.
+        c.write_rom(0x0000, 0x0A, 0);
+        c.write_ram(0xA000, 0x33, 0);
+        assert!(c.save_dirty);
+        for v in [0x00u8, 0xF0] {
+            c.write_rom(0x1FFF, v, 0);
+            assert_eq!(c.read_ram(0xA000), 0x33);
+            c.write_ram(0xA000, 0x44, 0);
+            assert_eq!(c.read_ram(0xA000), 0x33);
+        }
+        assert_eq!(c.ram()[0], 0x33);
+        // Read-only RAM is banked and addressed like read/write RAM.
+        c.write_rom(0x4000, 0x01, 0);
+        assert_eq!(c.read_ram(0xA005), 0x22);
+        assert_eq!(c.read_ram(0xA006), 0x00);
+        let mut want = [0u8; 16];
+        want[5] = 0x22;
+        assert_eq!(c.dma_block(0xA000), want);
+        // A reset returns to mode 0 from any mode.
+        c.write_rom(0x0000, 0x0A, 0);
+        c.reset();
+        c.write_ram(0xA000, 0x55, 0);
+        assert_eq!(c.read_ram(0xA000), 0x33);
+    }
+
+    #[test]
+    fn huc3_mode_a_is_read_write_ram_by_low_nibble() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        for (i, v) in [0x0Au8, 0xFA, 0x1A].into_iter().enumerate() {
+            c.write_rom(0x0000, 0x00, 0);
+            c.write_rom(0x0000, v, 0);
+            c.write_ram(0xA010, 0x60 + i as u8, 0);
+            assert_eq!(c.read_ram(0xA010), 0x60 + i as u8, "mode {v:02X}");
+        }
+        let ej = c.into_ejected(0).unwrap();
+        assert_eq!(ej.save_ram()[0x10], 0x62);
+    }
+
+    #[test]
+    fn huc3_ir_mode_reads_no_light_and_ignores_writes() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0x5Au8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        c.write_rom(0x0000, 0x0E, 0);
+        assert_eq!(c.read_ram(0xA000), 0xC0);
+        assert_eq!(c.read_ram(0xBFFF), 0xC0);
+        assert_eq!(c.dma_block(0xB000), [0xC0; 16]);
+        c.write_ram(0xA000, 0x01, 0);
+        assert_eq!(c.read_ram(0xA000), 0xC0);
+        assert!(!c.save_dirty);
+        assert!(c.ram().iter().all(|&b| b == 0x5A));
+    }
+
+    #[test]
+    fn huc3_other_modes_map_nothing() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0x5Au8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        for m in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 0x0F, 0xF1, 0x2F] {
+            c.write_rom(0x0000, m, 0);
+            assert_eq!(c.read_ram(0xA000), 0xFF, "mode {m:02X}");
+            assert_eq!(c.dma_block(0xA000), [0xFF; 16], "mode {m:02X}");
+            c.write_ram(0xA000, 0x00, 0);
+        }
+        assert!(!c.save_dirty);
+        assert!(c.ram().iter().all(|&b| b == 0x5A));
+        // The RAM is back, untouched, in a RAM mode.
+        c.write_rom(0x0000, 0x00, 0);
+        assert_eq!(c.read_ram(0xA000), 0x5A);
+    }
+
+    #[test]
+    fn huc3_without_ram_reads_ff_in_both_ram_modes() {
+        let mut r = rom(0xFE, 2);
+        r[HEADER_RAM_SIZE] = 0x00;
+        let mut c = huc3(&r, &mut []);
+        for m in [0x00u8, 0x0A] {
+            c.write_rom(0x0000, m, 0);
+            assert_eq!(c.read_ram(0xA000), 0xFF);
+            assert_eq!(c.dma_block(0xA000), [0xFF; 16]);
+            c.write_ram(0xA000, 0x12, 0);
+        }
+        assert!(!c.save_dirty);
+    }
+
+    const HZ: u64 = crate::CLOCK_HZ as u64;
+    const MINUTE: u64 = 60 * HZ;
+
+    /// Runs one clock command as games do (Pan Docs: HuC-3, "RTC
+    /// Communication Protocol"): wait for the semaphore, write the
+    /// command and argument in mode B, clear the semaphore in mode D,
+    /// wait again, read the response in mode C. Returns the whole
+    /// response byte.
+    fn command(c: &mut Cart<'_>, value: u8, now: u64) -> u8 {
+        c.write_rom(0x0000, 0x0D, now);
+        assert_eq!(c.read_ram(0xA000) & 1, 1, "ready before");
+        c.write_rom(0x0000, 0x0B, now);
+        c.write_ram(0xA000, value, now);
+        c.write_rom(0x0000, 0x0D, now);
+        c.write_ram(0xA000, 0xFE, now);
+        assert_eq!(c.read_ram(0xA000) & 1, 1, "ready after");
+        c.write_rom(0x0000, 0x0C, now);
+        c.read_ram(0xA000)
+    }
+
+    fn set_address(c: &mut Cart<'_>, address: u8, now: u64) {
+        command(c, 0x40 | (address & 0x0F), now);
+        command(c, 0x50 | (address >> 4), now);
+    }
+
+    /// `n` nibbles from `address` on, with the auto-incrementing read.
+    fn read_nibbles(c: &mut Cart<'_>, address: u8, n: u32, now: u64) -> u32 {
+        set_address(c, address, now);
+        (0..n).fold(0, |x, i| {
+            x | u32::from(command(c, 0x10, now) & 0x0F) << (4 * i)
+        })
+    }
+
+    fn write_nibbles(c: &mut Cart<'_>, address: u8, n: u32, value: u32, now: u64) {
+        set_address(c, address, now);
+        for i in 0..n {
+            command(c, 0x30 | (value >> (4 * i)) as u8 & 0x0F, now);
+        }
+    }
+
+    /// The time as games read it: extended command 0 copies it to
+    /// locations 00-06. Returns (days, minute of the day).
+    fn read_time(c: &mut Cart<'_>, now: u64) -> (u16, u16) {
+        command(c, 0x60, now);
+        let t = read_nibbles(c, 0x00, 7, now);
+        ((t >> 12) as u16, (t & 0xFFF) as u16)
+    }
+
+    /// The time as games set it: locations 00-06, then extended command 1.
+    fn set_time(c: &mut Cart<'_>, days: u16, minutes: u16, now: u64) {
+        write_nibbles(c, 0x00, 7, u32::from(minutes) | u32::from(days) << 12, now);
+        command(c, 0x61, now);
+    }
+
+    #[test]
+    fn huc3_clock_time_is_set_and_read_through_commands() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        assert_eq!(read_time(&mut c, 0), (0, 0));
+        assert!(!c.save_dirty);
+        // 12:34 on day 0x1234, each nibble distinct.
+        set_time(&mut c, 0x1234, 12 * 60 + 34, 0);
+        assert!(c.save_dirty);
+        assert_eq!(read_time(&mut c, 0), (0x1234, 754));
+        assert_eq!(c.huc3_at(0).minutes, 754);
+        assert_eq!(c.huc3_at(0).days, 0x1234);
+        // The clock commands never touch the RAM.
+        assert!(c.ram().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn huc3_clock_counts_emulated_minutes_and_days() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 100, 600, 0);
+        // 59 seconds later it is still the same minute; at 60 it ticks.
+        assert_eq!(read_time(&mut c, 59 * HZ), (100, 600));
+        assert_eq!(read_time(&mut c, 60 * HZ - 1), (100, 600));
+        assert_eq!(read_time(&mut c, 60 * HZ), (100, 601));
+        // N seconds: 3 h 25 min 59 s after the set.
+        assert_eq!(
+            read_time(&mut c, (3 * 3600 + 25 * 60 + 59) * HZ),
+            (100, 805)
+        );
+        // N days.
+        let later = 5 * 1440 * MINUTE + 205 * MINUTE;
+        assert_eq!(read_time(&mut c, later), (105, 805));
+        // Counting never dirties the save.
+        c.save_dirty = false;
+        assert_eq!(read_time(&mut c, later + MINUTE), (105, 806));
+        assert!(!c.save_dirty);
+    }
+
+    #[test]
+    fn huc3_clock_day_rollover() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 41, 1439, 0);
+        assert_eq!(read_time(&mut c, MINUTE - 1), (41, 1439));
+        assert_eq!(read_time(&mut c, MINUTE), (42, 0));
+        // The day counter is 16 bits and wraps to 0.
+        set_time(&mut c, 0xFFFF, 1439, MINUTE);
+        assert_eq!(read_time(&mut c, 2 * MINUTE), (0, 0));
+    }
+
+    #[test]
+    fn huc3_setting_the_time_restarts_the_minute() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        // 40 s into a minute, the time is set: the next tick is a whole
+        // minute later, not 20 s later.
+        set_time(&mut c, 0, 10, 40 * HZ);
+        assert_eq!(read_time(&mut c, 99 * HZ), (0, 10));
+        assert_eq!(read_time(&mut c, 100 * HZ), (0, 11));
+    }
+
+    #[test]
+    fn huc3_time_buffer_is_a_snapshot() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 3, 59, 0);
+        command(&mut c, 0x60, 0);
+        // Time passes; the buffer still holds the copy until the next
+        // extended command 0.
+        let now = 10 * MINUTE;
+        let t = read_nibbles(&mut c, 0x00, 7, now);
+        assert_eq!((t >> 12, t & 0xFFF), (3, 59));
+        assert_eq!(read_time(&mut c, now), (3, 69));
+        // Writing the buffer alone does not set the clock.
+        write_nibbles(&mut c, 0x00, 7, 0, now);
+        assert_eq!(c.huc3_at(now).minutes, 69);
+    }
+
+    #[test]
+    fn huc3_command_runs_on_the_semaphore_write_only() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 0, 0x5A5, 0);
+        command(&mut c, 0x60, 0);
+        set_address(&mut c, 0x00, 0);
+        // The command alone (mode B) does nothing yet; mode C shows it
+        // with the old result.
+        c.write_rom(0x0000, 0x0B, 0);
+        c.write_ram(0xA000, 0x10, 0);
+        c.write_rom(0x0000, 0x0C, 0);
+        let before = c.read_ram(0xA000);
+        assert_eq!(before & 0x70, 0x10);
+        // A semaphore write with bit 0 set does not run it.
+        c.write_rom(0x0000, 0x0D, 0);
+        c.write_ram(0xA000, 0xFF, 0);
+        c.write_ram(0xA000, 0x01, 0);
+        c.write_rom(0x0000, 0x0C, 0);
+        assert_eq!(c.read_ram(0xA000), before);
+        // Bit 0 clear runs it, once per write: nibbles 5, A, 5.
+        for want in [0x5, 0xA, 0x5] {
+            c.write_rom(0x0000, 0x0D, 0);
+            c.write_ram(0xA000, 0x00, 0);
+            c.write_rom(0x0000, 0x0C, 0);
+            assert_eq!(c.read_ram(0xA000) & 0x0F, want);
+        }
+        // Writes in mode C are ignored.
+        c.write_ram(0xA000, 0x00, 0);
+        assert_eq!(c.read_ram(0xA000) & 0x0F, 0x5);
+    }
+
+    #[test]
+    fn huc3_clock_register_read_values() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0x5Au8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 0, 0x3AC, 0);
+        command(&mut c, 0x60, 0);
+        set_address(&mut c, 0x00, 0);
+        // Mode C: bit 7 high (not connected), the command in bits 4-6,
+        // the result in bits 0-3; the same everywhere in A000-BFFF.
+        assert_eq!(command(&mut c, 0x10, 0), 0x80 | 0x10 | 0x0C);
+        assert_eq!(c.read_ram(0xBFFF), 0x9C);
+        assert_eq!(c.dma_block(0xA000), [0x9C; 16]);
+        // Bit 7 of the command written is not connected: 90 is command 1
+        // (read), here of the next location.
+        assert_eq!(command(&mut c, 0x90, 0), 0x9A);
+        // Mode D: ready.
+        c.write_rom(0x0000, 0x0D, 0);
+        assert_eq!(c.read_ram(0xA000), 0x81);
+        assert_eq!(c.read_ram(0xB123), 0x81);
+        // Mode B is write-only.
+        c.write_rom(0x0000, 0x0B, 0);
+        assert_eq!(c.read_ram(0xA000), 0xFF);
+        // None of it is RAM.
+        assert!(c.ram().iter().all(|&b| b == 0x5A));
+    }
+
+    #[test]
+    fn huc3_access_address_and_auto_increment() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        // Command 3 writes and increments: 1..7 into locations 00-06.
+        write_nibbles(&mut c, 0x00, 7, 0x0765_4321, 0);
+        // Commands 4 and 5 set the two address nibbles independently.
+        command(&mut c, 0x43, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 4);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 5);
+        // The address is now 05: the high nibble changes alone.
+        command(&mut c, 0x55, 0); // 55: nothing kept there
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0);
+        command(&mut c, 0x50, 0); // 06 (the read incremented it)
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 7);
+        // Command 4 leaves the high nibble alone: 58 -> 5A.
+        write_nibbles(&mut c, 0x58, 3, 0x321, 0);
+        set_address(&mut c, 0x58, 0);
+        command(&mut c, 0x4A, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 3);
+        c.save_dirty = false;
+        // Command 2 writes without incrementing (SameBoy).
+        set_address(&mut c, 0x02, 0);
+        command(&mut c, 0x2E, 0);
+        command(&mut c, 0x2D, 0);
+        assert_eq!(read_nibbles(&mut c, 0x00, 7, 0), 0x0765_4D21);
+        // The address wraps from FF to 00.
+        set_address(&mut c, 0xFF, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 1);
+        set_address(&mut c, 0xFF, 0);
+        command(&mut c, 0x30, 0);
+        command(&mut c, 0x3B, 0);
+        assert_eq!(read_nibbles(&mut c, 0x00, 7, 0), 0x0765_4D2B);
+        // Commands 0 and 7 do nothing.
+        set_address(&mut c, 0x00, 0);
+        command(&mut c, 0x0F, 0);
+        command(&mut c, 0x7F, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0xB);
+        assert!(!c.save_dirty);
+    }
+
+    #[test]
+    fn huc3_status_and_tone_commands_are_answered_benignly() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 77, 123, 0);
+        c.save_dirty = false;
+        // Status request: games need the result 1.
+        assert_eq!(command(&mut c, 0x62, 0), 0x80 | 0x60 | 1);
+        // A read replaces the result; the status request gives 1 again.
+        set_address(&mut c, 0x10, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0xB);
+        assert_eq!(command(&mut c, 0x62, 0) & 0x0F, 1);
+        // The tone (extended command E, twice) and its settings at
+        // locations 26-27, and unknown extended commands: accepted,
+        // nothing changes.
+        let before = c.huc3;
+        write_nibbles(&mut c, 0x26, 2, 0x13, 0);
+        for ext in [0x6E, 0x6E, 0x63, 0x6F] {
+            assert_eq!(command(&mut c, ext, 0) & 0x0F, 1, "{ext:02X}");
+        }
+        assert_eq!(read_nibbles(&mut c, 0x26, 2, 0), 0);
+        assert_eq!(c.huc3.clock, before.clock);
+        assert_eq!(read_time(&mut c, 0), (77, 123));
+        assert!(!c.save_dirty);
+    }
+
+    #[test]
+    fn huc3_location_map() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 0xFEDC, 0x4A7, 0);
+        c.save_dirty = false;
+        // 10-12 and 13-16: the running counters, without a copy.
+        assert_eq!(read_nibbles(&mut c, 0x10, 7, 0), 0x0FED_C4A7);
+        assert_eq!(read_nibbles(&mut c, 0x10, 3, MINUTE), 0x4A8);
+        // They can't be written directly.
+        write_nibbles(&mut c, 0x10, 7, 0, MINUTE);
+        assert_eq!(read_nibbles(&mut c, 0x10, 7, MINUTE), 0x0FED_C4A8);
+        assert!(!c.save_dirty);
+        // 58-5A, 5B-5E, 5F: the event (alarm) time, kept and saved.
+        write_nibbles(&mut c, 0x58, 8, 0x1876_5321, MINUTE);
+        assert!(c.save_dirty);
+        assert_eq!(read_nibbles(&mut c, 0x58, 8, MINUTE), 0x1876_5321);
+        let s = c.huc3_at(MINUTE);
+        assert_eq!((s.alarm_minutes, s.alarm_days), (0x321, 0x8765));
+        assert!(s.alarm_enabled);
+        // 5F keeps bit 0 only.
+        write_nibbles(&mut c, 0x5F, 1, 0xE, MINUTE);
+        assert_eq!(read_nibbles(&mut c, 0x5F, 1, MINUTE), 0);
+        assert!(!c.huc3_at(MINUTE).alarm_enabled);
+        // Setting the time leaves the event time alone.
+        set_time(&mut c, 1, 1, MINUTE);
+        assert_eq!(read_nibbles(&mut c, 0x58, 7, MINUTE), 0x0876_5321);
+        // Everything else reads 0 and is not kept.
+        for a in [0x07u8, 0x0F, 0x17, 0x26, 0x57, 0x60, 0xFF] {
+            write_nibbles(&mut c, a, 1, 0xF, MINUTE);
+            assert_eq!(read_nibbles(&mut c, a, 1, MINUTE), 0, "location {a:02X}");
+        }
+        assert_eq!(read_time(&mut c, MINUTE), (1, 1));
+    }
+
+    #[test]
+    fn huc3_out_of_range_minutes_through_the_protocol() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        // FFF minutes (what a fresh SameBoy save holds): counts to the
+        // top of the 12 bits and wraps without a day carry.
+        set_time(&mut c, 9, 0xFFF, 0);
+        assert_eq!(read_time(&mut c, MINUTE - 1), (9, 0xFFF));
+        assert_eq!(read_time(&mut c, MINUTE), (9, 0));
+    }
+
+    #[test]
+    fn huc3_reset_keeps_the_clock_and_clears_the_mailbox() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        set_time(&mut c, 2, 30, 0);
+        command(&mut c, 0x60, 0);
+        set_address(&mut c, 0x01, 0);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0x1);
+        // The emulator catches the clock up, then resets (clock back to 0).
+        c.rtc_sync(5 * MINUTE);
+        c.reset();
+        assert_eq!(c.huc3_at(0).minutes, 35);
+        assert_eq!(c.huc3_at(MINUTE).minutes, 36);
+        // Mode 0 again, and the mailbox is empty.
+        c.write_rom(0x0000, 0x0C, 0);
+        assert_eq!(c.read_ram(0xA000), 0x80);
+        assert_eq!(command(&mut c, 0x10, 0) & 0x0F, 0, "buffer and address");
+        assert_eq!(read_time(&mut c, 0), (2, 35));
+    }
+
+    #[test]
+    fn huc3_state_restore_and_eject() {
+        let r = rom(0xFE, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = huc3(&r, &mut ram);
+        let s = Huc3RtcState {
+            minutes: 1439,
+            days: 6,
+            subminute_clocks: (MINUTE - 10) as u32,
+            ..Huc3RtcState::default()
+        };
+        // Restored at clock 1000: it counts from there.
+        c.set_huc3(s, 1000);
+        assert_eq!(c.huc3_at(1000), s);
+        assert_eq!(read_time(&mut c, 1009), (6, 1439));
+        assert_eq!(read_time(&mut c, 1010), (7, 0));
+        assert!(!c.save_dirty);
+        let ej = c.into_ejected(1010 + MINUTE + 3).unwrap();
+        let got = ej.huc3_rtc.unwrap();
+        assert_eq!((got.days, got.minutes, got.subminute_clocks), (7, 1, 3));
+        assert_eq!(ej.rtc, None);
+    }
+
+    #[test]
+    fn huc1_and_mbc3_have_no_huc3_clock() {
+        for t in [0xFFu8, 0x10] {
+            let r = rom(t, 2);
+            let mut ram = [0u8; 0x8000];
+            let c = Cart::new(&r, &mut ram).unwrap();
+            assert!(!c.has_huc3_rtc());
+            assert!(!cart_info(&r).unwrap().huc3_rtc);
+            assert_eq!(c.into_ejected(0).unwrap().huc3_rtc, None);
+        }
     }
 }

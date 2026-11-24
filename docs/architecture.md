@@ -67,7 +67,8 @@ conservative stand-in for HyperRAM. The custom-board contract is
 
 The core is a library the platform drives. It never calls out to the
 platform. The concrete API and its rationale are in ADR 0006 (construction:
-ADR 0009; save persistence: ADR 0015; unsupported mappers: ADR 0031); the
+ADR 0009; save persistence: ADR 0015 and 0032; unsupported mappers: ADR
+0031); the
 crate docs in
 `crates/gbc-core/src/lib.rs` have desktop and
 MCU usage examples.
@@ -91,15 +92,16 @@ Emulator<'a>                       // 'a = lifetime of the Memory and cartridge 
   fn step      (&mut self,              &mut Frame, &mut [StereoSample]) -> RunResult
   // debug: clock(), registers(), peek(addr), serial_byte(), lcd_enabled(), screen_blank(), cpu_locked()
   // cartridge: cart_ram(), cart_info(), rtc_state(), set_rtc_state(),
+  //            huc3_rtc_state(), set_huc3_rtc_state(),
   //            save_dirty(), clear_save_dirty()
 RunResult { events: Events, clocks: u64, audio_samples: usize }
 cart_ram_size(rom) -> Result<usize, LoadErrorKind>
 cart_info(rom) -> Result<CartInfo, LoadErrorKind>  // before load: mapper? battery? RTC? RAM size
-CartInfo { mapper: MapperKind, ram_size, battery, rtc }, fn has_save()  // has_save = battery && (RAM || RTC)
-MapperKind { RomOnly, Mbc1, Mbc2, Mbc3, Mbc5,       // emulated
-             Mmm01, Mbc6, Mbc7, PocketCamera, Tama5, HuC3, HuC1, Unknown }  // refused at load
+CartInfo { mapper: MapperKind, ram_size, battery, rtc, huc3_rtc }, fn has_save()  // has_save = battery && (RAM || a clock)
+MapperKind { RomOnly, Mbc1, Mbc2, Mbc3, Mbc5, HuC1, HuC3,   // emulated
+             Mmm01, Mbc6, Mbc7, PocketCamera, Tama5, Unknown }  // refused at load
   fn from_cart_type(u8) -> Self, fn is_supported(self) -> bool, fn name(self) -> &'static str
-EjectedCart<'a> { rom, cart_ram, rtc: Option<RtcState>, save_dirty }  // cart_ram untrimmed
+EjectedCart<'a> { rom, cart_ram, rtc: Option<RtcState>, huc3_rtc: Option<Huc3RtcState>, save_dirty }  // cart_ram untrimmed
   fn save_ram(&self) -> &[u8]                       // the header-sized part (the save file)
   fn into_buffers(self) -> CartBuffers<'a>
 type CartBuffers<'a> = (&'a [u8], &'a mut [u8])     // RAM buffer as passed (untrimmed)
@@ -121,9 +123,12 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   into an unaligned halfword or word read, and the platform has to map the
   SDRAM as normal, cacheable memory through the MPU.
 - **Mapper:** resolved once at load from the cartridge type (0147), plus
-  the ROM contents for MBC1 multicarts (ADR 0016). A header that names a
-  mapper the core does not emulate (HuC1, HuC3, MBC6, MBC7, MMM01, TAMA5,
-  Pocket Camera) or an unassigned type code is refused:
+  the ROM contents for MBC1 multicarts (ADR 0016). Emulated: no mapper,
+  MBC1 (and MBC1M), MBC2, MBC3/MBC30 (with the RTC), MBC5, HuC1 and HuC3
+  (`docs/reference/hudson-mappers.md`; their infrared ports see no light
+  and the HuC3 speaker and alarm do nothing). A header that names a
+  mapper the core does not emulate (MBC6, MBC7, MMM01, TAMA5, Pocket
+  Camera) or an unassigned type code is refused:
   `load`, `cart_ram_size` and `cart_info` return
   `LoadErrorKind::UnsupportedMapper`, which names the mapper, so a front
   end can tell the user before it touches a save file (ADR 0031). It
@@ -147,6 +152,10 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   (`RtcState::advance_seconds`: halt-aware, hardware rollover, day
   carry). `eject` and `load` over a cartridge return its RTC state at
   removal in the `EjectedCart`, so a game switch never loses it.
+  The HuC3 clock (a minute-of-day and a day counter behind a command
+  mailbox) works the same way through its own type and calls:
+  `huc3_rtc_state`/`set_huc3_rtc_state`, `Huc3RtcState::advance_seconds`,
+  `EjectedCart::huc3_rtc` (ADR 0032).
 - **Video:** the caller passes a `Frame` (160×144 RGB555 `u16`, bits 0–4
   red, 5–9 green, 10–14 blue) to every run call, so it can double-buffer.
   The core draws into it line by line; it holds a whole frame when the
@@ -249,7 +258,7 @@ apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register wr
   mix.rs    *   Output: window integrator, NR50/NR51 weights, buffer deadline
 dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`)
 hdma.rs     * VRAM DMA (GDMA/HDMA): `VramDma`, block copy, the resumable CPU stall (ADR 0021 GDMA amendment)
-cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1/2/3(+RTC)/5
+cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1/2/3(+RTC)/5, HuC1/HuC3 (huc3.rs: the HuC3 clock chip)
 serial.rs   * SB/SC internal-clock transfers, last byte sent
 ```
 

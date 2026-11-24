@@ -109,3 +109,13 @@ too.
 a cartridge with an unsupported mapper does not load and has no
 `CartInfo` (`cart_info` fails with `LoadErrorKind::UnsupportedMapper`,
 ADR 0031, human's direction). `CartInfo` also gained `mapper: MapperKind`.
+
+## Amendment (2026-11-24, HuC3)
+"Not done: HuC3 ... RTC" no longer applies to HuC3: the mapper is emulated
+and its clock is persisted through a second, additive surface
+(`Emulator::huc3_rtc_state`/`set_huc3_rtc_state`, `Huc3RtcState`,
+`EjectedCart::huc3_rtc`, `CartInfo::huc3_rtc`; ADR 0032). `RtcState`,
+`rtc_state`, `set_rtc_state`, `EjectedCart::rtc` and `CartInfo::rtc` are
+unchanged and stay MBC3-only. `CartInfo::has_save()` is now `battery &&
+(ram_size != 0 || rtc || huc3_rtc)`. The dirty flag is also set by a HuC3
+clock command that sets the time or the event time.

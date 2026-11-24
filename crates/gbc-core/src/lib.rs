@@ -47,7 +47,8 @@
 //! not emulate ([`LoadErrorKind::UnsupportedMapper`], which names the
 //! [`MapperKind`]): report that and leave any save file alone. The save is
 //! [`Emulator::cart_ram`] plus, for MBC3+RTC carts,
-//! [`Emulator::rtc_state`] (stored with the wall-clock time).
+//! [`Emulator::rtc_state`] (stored with the wall-clock time), or for HuC3
+//! carts [`Emulator::huc3_rtc_state`], which works the same way (ADR 0032).
 //! [`Emulator::save_dirty`] says when the game changed it, so a front end
 //! (or the MCU, writing to flash) saves only then and calls
 //! [`Emulator::clear_save_dirty`]. When the cartridge leaves,
@@ -191,8 +192,8 @@ mod timer;
 
 pub use apu::StereoSample;
 pub use cart::{
-    CartBuffers, CartInfo, EjectedCart, LoadError, LoadErrorKind, MIN_ROM_SIZE, MapperKind,
-    RtcState, RtcTime, cart_info, cart_ram_size,
+    CartBuffers, CartInfo, EjectedCart, Huc3RtcState, LoadError, LoadErrorKind, MIN_ROM_SIZE,
+    MapperKind, RtcState, RtcTime, cart_info, cart_ram_size,
 };
 pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
@@ -330,7 +331,7 @@ impl<'a> Emulator<'a> {
     /// hands back `rom` and `cart_ram`.
     ///
     /// A cartridge whose header names a mapper the core does not emulate
-    /// (HuC3, MBC6, MBC7, MMM01, TAMA5, the Pocket Camera, or an
+    /// (MBC6, MBC7, MMM01, TAMA5, the Pocket Camera, or an
     /// unassigned type code; see [`MapperKind`]) is refused with
     /// [`LoadErrorKind::UnsupportedMapper`] rather than run without
     /// banking. [`cart_info`] and [`cart_ram_size`] fail the same way, so
@@ -782,6 +783,32 @@ impl<'a> Emulator<'a> {
             sys.cart.set_rtc(state.masked(), sys.hot.clock());
         }
     }
+
+    /// The HuC3 clock state at [`Emulator::clock`], or `None` if the
+    /// cartridge is not a HuC3 one ([`CartInfo::huc3_rtc`]). The HuC3
+    /// counterpart of [`Emulator::rtc_state`] (ADR 0032): save it with
+    /// the cart RAM, restore it with [`Emulator::set_huc3_rtc_state`].
+    pub fn huc3_rtc_state(&self) -> Option<Huc3RtcState> {
+        let sys = &self.hw.sys;
+        sys.cart
+            .has_huc3_rtc()
+            .then(|| sys.cart.huc3_at(sys.hot.clock()))
+    }
+
+    /// Restores the HuC3 clock state. Ignored if the cartridge is not a
+    /// HuC3 one. Call it after [`Emulator::load`], as for
+    /// [`Emulator::set_rtc_state`]; to sync to wall-clock time:
+    /// `emu.set_huc3_rtc_state(saved.advance_seconds(elapsed))`.
+    ///
+    /// The state is masked ([`Huc3RtcState::masked`]), so
+    /// `huc3_rtc_state()` afterwards may differ from `state`. Like
+    /// `set_rtc_state`, it does not set [`Emulator::save_dirty`].
+    pub fn set_huc3_rtc_state(&mut self, state: Huc3RtcState) {
+        let sys = &mut self.hw.sys;
+        if sys.cart.has_huc3_rtc() {
+            sys.cart.set_huc3(state.masked(), sys.hot.clock());
+        }
+    }
 }
 
 /// The VRAM DMA part of a run-call step (ADR 0017; ADR 0021, GDMA stall
@@ -976,7 +1003,6 @@ mod tests {
         let emu = emulator();
         let before = (emu.clock(), emu.registers(), emu.cart_info());
         for (cart_type, mapper) in [
-            (0xFE, MapperKind::HuC3),
             (0x22, MapperKind::Mbc7),
             (0x0D, MapperKind::Mmm01),
             (0x20, MapperKind::Mbc6),
