@@ -416,4 +416,4 @@ The human supplies these ROMs in `roms/` and plays each one for about
 | Link's Awakening DX | General compatibility | |
 | Shantae | Heavy HDMA, CGB graphics | |
 | Alone in the Dark: The New Nightmare | HDMA, CGB graphics | |
-| Wario Land 3 | General CGB | |
+| Wario Land 3 | General CGB | Played ~15 min (human, 2026-11-23): looks and sounds right; save kept across Esc and Ctrl+C exits; audio device switch recovered twice (`audio stopped` then `output device back`). Open: "seemed to struggle to keep up", under investigation |
