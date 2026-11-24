@@ -265,6 +265,13 @@ fn palette_index_step(index: &mut u8) -> usize {
     i
 }
 
+/// [`Ctx::run_ppu`]: the walk alone, without posting timed requests.
+const PPU_WALK: u8 = 0;
+/// [`Ctx::run_ppu`]: a sync.
+const PPU_SYNC: u8 = 1;
+/// [`Ctx::run_ppu`]: the sync the PPU deadline runs.
+const PPU_DUE: u8 = 2;
+
 /// OR masks for reads of FF10-FF2F: write-only bits (lengths, frequency
 /// low bytes, trigger) and unused bits and registers read 1 (Pan Docs:
 /// Audio Registers; SameBoy Core/apu.c `read_mask`; Mooneye
@@ -1045,11 +1052,13 @@ impl Ctx<'_, '_> {
         s.schedule_inputs(m);
     }
 
-    /// Catches the PPU up to the current clock and reschedules.
+    /// The `Ppu` deadline: catches the PPU up to the current clock and
+    /// reschedules.
     #[inline(never)]
     fn sync_ppu(&mut self) {
         let now = self.clock();
-        self.sync_ppu_to(now);
+        self.run_ppu::<PPU_DUE>(now);
+        self.schedule_ppu();
     }
 
     /// Catches the PPU up to clock `at` (the current clock, or one dot
@@ -1060,23 +1069,26 @@ impl Ctx<'_, '_> {
         self.schedule_ppu();
     }
 
-    /// [`Self::sync_ppu_to`] without the rescheduling. `POST` false: the
-    /// walk alone (`Ppu::walk_to`), for a caller that isn't an IF
-    /// observer; a timed interrupt request due by `at` then waits for the
-    /// next sync, which the PPU deadline (at or before the request) or an
-    /// IF observer's own check of that deadline runs.
+    /// [`Self::sync_ppu_to`] without the rescheduling. `HOW`:
+    /// - `PPU_SYNC`: `Ppu::sync`;
+    /// - `PPU_DUE`: the same at the PPU deadline, where an update point
+    ///   is due (`Ppu::sync_due`);
+    /// - `PPU_WALK`: the walk alone (`Ppu::walk_to`), for a caller that
+    ///   isn't an IF observer; a timed interrupt request due by `at` then
+    ///   waits for the next sync, which the PPU deadline (at or before the
+    ///   request) or an IF observer's own check of that deadline runs.
     #[inline(always)]
-    fn run_ppu<const POST: bool>(&mut self, at: u64) {
+    fn run_ppu<const HOW: u8>(&mut self, at: u64) {
         if self.hot.dma != 0 {
             self.dma_sync(self.clock());
         }
         let double = self.hot.mcycle == 2;
         let s = &mut *self.sys;
-        let events = if POST {
-            s.ppu.sync(at, self.mem, self.frame, &mut s.iflags, double)
-        } else {
-            s.ppu
-                .walk_to(at, self.mem, self.frame, &mut s.iflags, double)
+        let (ppu, iflags) = (&mut s.ppu, &mut s.iflags);
+        let events = match HOW {
+            PPU_WALK => ppu.walk_to(at, self.mem, self.frame, iflags, double),
+            PPU_DUE => ppu.sync_due(at, self.mem, self.frame, iflags, double),
+            _ => ppu.sync(at, self.mem, self.frame, iflags, double),
         };
         self.raise(events);
         if self.sys.vdma.hblank {
@@ -1084,12 +1096,12 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// [`Self::run_ppu`] (posting) as a call, for the callers other than
-    /// `write_palette_data` (the one hot enough to inline it, for raster
-    /// palette effects), for the code-size budgets.
+    /// [`Self::run_ppu`] ([`PPU_SYNC`]) as a call, for the callers other
+    /// than the PPU deadline and `write_palette_data` (raster palette
+    /// effects), which are hot enough to inline it.
     #[inline(never)]
     fn run_ppu_to_call(&mut self, at: u64) {
-        self.run_ppu::<true>(at);
+        self.run_ppu::<PPU_SYNC>(at);
     }
 
     /// Sets the Ppu deadline and reschedules.
@@ -1376,7 +1388,7 @@ impl Ctx<'_, '_> {
     fn write_palette_data(&mut self, obj: bool, value: u8) {
         let now = self.clock();
         // Palette RAM only: not an IF observer.
-        self.run_ppu::<false>(now);
+        self.run_ppu::<PPU_WALK>(now);
         let s = &mut *self.sys;
         let i = palette_index_step(&mut self.mem.io[if obj { 0x6A } else { 0x68 }]);
         // Synced to `now`: drawing (latched, so past the window start, and

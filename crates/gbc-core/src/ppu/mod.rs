@@ -1476,11 +1476,52 @@ impl Ppu {
         events
     }
 
+    /// [`Self::sync`] for the caller that runs the [`Self::next_event`]
+    /// deadline: an update point is due then (or a timed request), so
+    /// without [`Self::walk_to`]'s test for none.
+    #[inline(always)]
+    pub(crate) fn sync_due(
+        &mut self,
+        now: u64,
+        mem: &mut Memory,
+        frame: &mut Frame,
+        iflags: &mut u8,
+        double: bool,
+    ) -> Events {
+        let events = self.run_points(now, mem, frame, iflags, double);
+        self.post_irqs(now, iflags);
+        events
+    }
+
     /// [`Self::sync`] without posting the timed requests: for a caller
     /// that looks at the PPU's state at `now` and not at IF. The requests
     /// stay due ([`Self::next_event`]), so the sync that deadline runs, or
     /// the one an IF observer runs first, posts them.
+    #[inline(always)]
     pub(crate) fn walk_to(
+        &mut self,
+        now: u64,
+        mem: &mut Memory,
+        frame: &mut Frame,
+        iflags: &mut u8,
+        double: bool,
+    ) -> Events {
+        // No update point to run (most register and palette writes):
+        // `now` is before the cursor's point, in the cursor's frame.
+        let p = now.wrapping_sub(self.frame_start);
+        if self.lcd_enabled() && p < u64::from(self.cursor.pos.min(FRAME)) {
+            self.synced = now;
+            Events::EMPTY
+        } else {
+            self.run_points(now, mem, frame, iflags, double)
+        }
+    }
+
+    /// [`Self::walk_to`] with update points to run (or the LCD off, or
+    /// `now` in the next frame). Out of line: the callers inline only the
+    /// test above.
+    #[inline(never)]
+    fn run_points(
         &mut self,
         now: u64,
         mem: &mut Memory,
