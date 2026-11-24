@@ -913,7 +913,7 @@ impl Renderer {
                 0x1800
             };
             let y = self.ly.wrapping_add(regs.scy);
-            fill::<MIX>(bg, obj_bg, src, lcdc, mode, map, y, col);
+            fill_tiles::<MIX>(bg, obj_bg, src, lcdc, mode, map, y, col);
         }
         if !win.is_empty() {
             let col = ((win_from - usize::from(self.window_start())) as u8)
@@ -923,7 +923,7 @@ impl Renderer {
             } else {
                 0x1800
             };
-            fill::<MIX>(win, obj_win, src, lcdc, mode, map, self.window_row, col);
+            fill_tiles::<MIX>(win, obj_win, src, lcdc, mode, map, self.window_row, col);
         }
     }
 
@@ -1135,48 +1135,6 @@ impl Mode {
         attr_mask: 0,
         master: 0xFF,
     };
-}
-
-/// [`fill_tiles`], both copies out of line: inlined, each would be
-/// duplicated in `render` (BG and window; code size, `docs/perf.md`). One
-/// call per BG or window part of a span.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn fill<const MIX: bool>(
-    out: &mut [u16],
-    obj: &[u8],
-    src: &Sources,
-    lcdc: u8,
-    mode: Mode,
-    map: usize,
-    y: u8,
-    col: u8,
-) {
-    if MIX {
-        fill_mixed(out, obj, src, lcdc, mode, map, y, col);
-    } else {
-        fill_plain(out, src, lcdc, mode, map, y, col);
-    }
-}
-
-#[inline(never)]
-fn fill_plain(out: &mut [u16], src: &Sources, lcdc: u8, mode: Mode, map: usize, y: u8, col: u8) {
-    fill_tiles::<false>(out, &[], src, lcdc, mode, map, y, col);
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn fill_mixed(
-    out: &mut [u16],
-    obj: &[u8],
-    src: &Sources,
-    lcdc: u8,
-    mode: Mode,
-    map: usize,
-    y: u8,
-    col: u8,
-) {
-    fill_tiles::<true>(out, obj, src, lcdc, mode, map, y, col);
 }
 
 /// One pixel of a span with objects: BG color index `c` (before the

@@ -50,8 +50,6 @@ report 122 <gbc_core::bus::Ctx>::write_vram
 report 175 gbc_core::bus::read_oam
 report 192 <gbc_core::bus::Ctx>::write_oam
 report 1252 <gbc_core::ppu::render::Renderer>::render
-report 1050 gbc_core::ppu::render::fill_mixed
-report 815 gbc_core::ppu::render::fill_plain
 report 229 gbc_core::ppu::render::fill_partial::<false>
 report 145 gbc_core::ppu::render::fill_partial::<true>
 report 1796 <gbc_core::ppu::Ppu>::latch
