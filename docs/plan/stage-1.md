@@ -413,7 +413,7 @@ The human supplies these ROMs in `roms/` and plays each one for about
 | Game | Exercises | Result |
 |---|---|---|
 | Pokémon Crystal | MBC3 + RTC, saves | |
-| Link's Awakening DX | General compatibility | |
+| Link's Awakening DX | General compatibility | Played (human, 2026-11-23, 84858f7): side by side with SameBoy, little noticeable smoothness difference; hitches = 2-3 LCD-off frames |
 | Shantae | Heavy HDMA, CGB graphics | Played (human, 2026-11-23, build 30609c3): plays well, colours and sound right. Open: "pretty choppy when a lot of stuff was happening at once" (frame pacing vs in-game slowdown, under investigation with `GBC_FRAME_STATS`) |
 | Alone in the Dark: The New Nightmare | HDMA, CGB graphics | |
 | Wario Land 3 | General CGB | Played ~15 min (human, 2026-11-23): looks and sounds right; save kept across Esc and Ctrl+C exits; audio device switch recovered twice (`audio stopped` then `output device back`). Open: "seemed to struggle to keep up", under investigation |
