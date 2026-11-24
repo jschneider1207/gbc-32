@@ -990,20 +990,13 @@ a later one computes something different shows up as differing ROMs.
 same mode (two tests of the skip's length are ignored there).
 
 Known differences are listed in the script (`KNOWN_EAGER`), each with its
-diagnosis; a listed ROM that stops differing fails the check too. One
-today:
-
-- `gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1`: in single speed,
-  line 0's mode-2 pulse is walked at dot 4, but the CPU must see its IF
-  request a dot later. `Ppu::next_event` gets that by putting the deadline
-  one past the point, so the request is posted late only because nothing
-  syncs the PPU on the point itself. This ROM's IF read is at an M-cycle
-  boundary on that dot (0:4, CPU grid offset 3): an eager sync there posts
-  the request a dot early and the read sees it. So IF bit 1 at that one
-  dot depends on sync placement, by design (the doc comment of
-  `next_event` names the ROM). A refactor that adds a PPU sync at an
-  M-cycle start (for instance on an IF read) changes this ROM in the
-  product build; the clean form is a pending bit posted at the point + 1.
+diagnosis; a listed ROM that stops differing fails the check too. None
+today. The one there was,
+`gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1`, came from line 0's
+single-speed mode-2 pulse: its IF request was a dot late only because the
+PPU deadline was one past the walk point, so a sync on the point posted
+it early. The request is now a timed one (`irq::PendingIrq`, ADR 0032),
+posted at the point + 1 whenever the PPU is synced.
 
 Diagnosing a difference: `bench --fingerprint --trace <run>` prints one
 line per 456-clock chunk (the running hash, the clock, events, registers

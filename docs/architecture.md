@@ -369,6 +369,15 @@ interrupt, completes the frame (VBlank, `FRAME_READY`) or ends a visible
 line's mode 3, which is the `EventKind::Ppu` deadline. With no STAT source
 selected the walk skips to `Latch`/`End`/`VBlank` only.
 
+IF (`Sys::iflags`) holds bits 0-4 and nothing else, so the CPU's
+interrupt checks are `IE & IF` with no mask. A request that reaches IF at
+a later clock than the point or write that makes it (single speed: a LYC
+write's request, line 0's mode-2 pulse) waits as "bits B at clock T" in
+`Ppu::irq` (`irq::PendingIrq`, ADR 0032): `Ppu::next_event` is at most T,
+and `Ppu::sync` to T or later posts it, so IF never depends on when the
+PPU was last synced. Rules: `docs/reference/stat-irq.md`, "Timed
+requests".
+
 Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
 `SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
 "OBJ penalty algorithm"), as `LineTiming` with the per-pixel stalls so

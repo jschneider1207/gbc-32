@@ -134,3 +134,12 @@ LYC-write request, line 0 and the dispatch's IF push". +6 ROMs
 `lycstatwirq_trigger_ly00_10_50_1`, `if_and_ie_0_vector_4`), no
 regressions. +898 B `.text` (96,550 of 97,500); cgb-acid2 +0.28% Ir
 (686.27 M), worst-case +0.04% (476.78 M).
+
+## Amendment (2026-11-24): where the delayed requests live
+
+The decisions above stand. Their storage changed (ADR 0032): the
+LYC-write request no longer waits in IF bits 5-6 but as a timed request
+in the PPU (`irq::PendingIrq`), 5 dots after the write lands, and line
+0's single-speed mode-2 pulse reaches IF through the same mechanism
+instead of a late PPU deadline. `Ppu::early_point` no longer serves IF
+writes on the pulse.
