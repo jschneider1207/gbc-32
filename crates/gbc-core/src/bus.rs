@@ -2599,13 +2599,27 @@ impl Bus for Ctx<'_, '_> {
 #[inline(always)]
 pub(crate) fn read<const CPU: bool>(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let a = usize::from(addr);
-    match (addr | hot.dma) >> 13 {
-        0..=3 => sys.cart.read_rom(addr),
-        4 if CPU => read_vram(mem, sys, hot, addr),
-        4 => mem.vram[(sys.vram_off | (a & 0x1FFF)) & 0x3FFF],
-        5 => sys.cart.read_ram(addr),
-        6 => wram(mem, sys, a),
-        _ => read_high(mem, sys, hot, addr),
+    // ROM, then C000-FFFF (WRAM here, the rest in `read_high`) before
+    // VRAM and cartridge RAM: the order of how often code reads them. As
+    // a `match` on the region, a WRAM read came after the VRAM and
+    // cartridge RAM compares (cpu_instrs and cgb_sound, which run from
+    // WRAM, -5.9% and -5.1% Ir for +770 B; docs/perf.md "CPU read
+    // path").
+    let key = addr | hot.dma;
+    if key < 0x8000 {
+        sys.cart.read_rom(addr)
+    } else if key >= 0xC000 {
+        if key < 0xE000 {
+            wram(mem, sys, a)
+        } else {
+            read_high(mem, sys, hot, addr)
+        }
+    } else if key >= 0xA000 {
+        sys.cart.read_ram(addr)
+    } else if CPU {
+        read_vram(mem, sys, hot, addr)
+    } else {
+        mem.vram[(sys.vram_off | (a & 0x1FFF)) & 0x3FFF]
     }
 }
 

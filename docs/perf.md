@@ -622,6 +622,28 @@ same 25,414 B on thumbv7em (no bytes to win there) and costs two more
 x86 instructions on every bank 0 read, which is most of what cpu_instrs
 executes; the branch stays.
 
+### CPU read path (M10, review B8)
+
+The inlined `bus::read` dispatched with a `match` on `(addr | dma) >> 13`,
+which LLVM laid out as ROM, VRAM, cartridge RAM, WRAM, `read_high`: a
+WRAM read (data, the stack, and every opcode of code running from RAM)
+paid two compares for regions that are read rarely. It is now an `if`
+chain: below 8000 ROM (unchanged), then C000 and up (below E000 WRAM,
+else `read_high`), then cartridge RAM, then VRAM. Measured on the chosen
+write form above (check-bench Ir against the same baseline, so the
+write form's gain is in every row; `.text` against 113,138 B):
+
+| Form | cpu_instrs | cgb_sound | cgb-acid2 | event-storm | dma-storm | halt-irq | worst-case | cgb-raster | apu-writes | `.text` (B) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| write form 2 alone | -1.65% | -0.17% | -0.03% | -0.38% | -0.20% | -0.96% | -0.56% | -1.51% | -0.47% | |
+| ROM, `>> 13 == 6` WRAM, `>= E000` high, cart RAM, VRAM | -7.59% | -5.23% | -0.04% | -0.39% | -1.58% | -0.84% | -0.59% | -1.50% | -0.43% | +1,126 |
+| ROM, `>= C000` (`< E000` WRAM, else high), cart RAM, VRAM (chosen) | -7.52% | -5.22% | -0.04% | -0.39% | -5.24% | -1.14% | -0.67% | -1.50% | -0.53% | +770 |
+
+cpu_instrs, cgb_sound and `synth:dma-storm` run their code from WRAM,
+which is where the 5% comes from; code running from ROM gains only on
+its data and stack reads (the other lines). `Cpu::run` 25,414 ->
+26,128 B.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change
