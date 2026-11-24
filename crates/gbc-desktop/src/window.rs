@@ -64,7 +64,9 @@ impl App<'_, '_> {
         self.blank = blank;
         if let Some(s) = &mut self.stats {
             let ready = r.events.contains(Events::FRAME_READY);
-            s.emulated(ready, ready && self.draw == self.shown, Instant::now());
+            if let Some(h) = s.emulated(ready, ready && self.draw == self.shown, Instant::now()) {
+                eprintln!("{h}");
+            }
         }
         if r.events.contains(Events::FRAME_READY) {
             std::mem::swap(&mut self.draw, &mut self.shown);
@@ -212,6 +214,9 @@ impl ApplicationHandler for App<'_, '_> {
         self.poll_pads();
         let t_pads = Instant::now();
         self.pacing.begin(t_pads);
+        if let (Some(s), Some(fill)) = (&mut self.stats, self.pacing.fill_ms()) {
+            s.fill(fill);
+        }
         let mut ran = 0;
         while self.pacing.should_run(ran) {
             if self.frames_left == Some(0) {

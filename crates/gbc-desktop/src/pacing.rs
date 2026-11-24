@@ -285,6 +285,14 @@ impl Pacing {
         }
     }
 
+    /// The fill audio pacing decides on, in ms (`None` under the clock).
+    pub fn fill_ms(&self) -> Option<f64> {
+        match self {
+            Pacing::Audio(a) => Some(a.fill() as f64 * 1e3 / f64::from(a.rate().max(1))),
+            Pacing::Clock { .. } => None,
+        }
+    }
+
     pub fn next_wake(&self, now: Instant) -> Instant {
         match self {
             Pacing::Audio(a) => now + audio_wake_after(a.fill(), a.target(), a.rate()),

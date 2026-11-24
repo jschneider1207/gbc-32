@@ -7,6 +7,63 @@
 
 use std::time::{Duration, Instant};
 
+/// A gap between completed frames at least this long is printed on its
+/// own line, with what happened during it ([`Hitch`]).
+pub const HITCH: Duration = Duration::from_millis(50);
+
+/// What happened between two completed frames that were [`HITCH`] or more
+/// apart, to tell the causes apart:
+/// - `frames` about `gap / 16.74 ms` with `blank = frames - 1`: the game
+///   had the LCD off (as on hardware; nothing to present);
+/// - `busy` or `step` near `gap`: blocked inside our code;
+/// - `late` near `gap`: the OS woke the loop late;
+/// - few frames, small busy and late, high `fill`: the pacer held frames
+///   back (the audio fill estimate stayed above target).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hitch {
+    pub gap: Duration,
+    /// Frames emulated in the gap, the completing one included.
+    pub frames: u64,
+    pub blank: u64,
+    pub busy: Duration,
+    pub step: Duration,
+    pub late: Duration,
+    /// Audio pacing fill estimate seen at wake-ups in the gap (ms), min
+    /// and max; `None` under clock pacing.
+    pub fill: Option<(f64, f64)>,
+}
+
+impl std::fmt::Display for Hitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        write!(
+            f,
+            "hitch: {:.1} ms between pictures, {} frames emulated ({} blank), busy max {:.1} step max {:.1} wake late max {:.2} ms",
+            ms(self.gap),
+            self.frames,
+            self.blank,
+            ms(self.busy),
+            ms(self.step),
+            ms(self.late),
+        )?;
+        match self.fill {
+            Some((lo, hi)) => write!(f, ", audio fill {lo:.1}-{hi:.1} ms"),
+            None => write!(f, ", clock pacing"),
+        }
+    }
+}
+
+/// The gap in progress since the last completed frame.
+#[derive(Default)]
+struct GapWork {
+    frames: u64,
+    blank: u64,
+    busy: Duration,
+    step: Duration,
+    late: Duration,
+    fill: Option<(f64, f64)>,
+}
+
 /// How often a line is printed.
 pub const STATS_PERIOD: Duration = Duration::from_secs(4);
 
@@ -95,6 +152,9 @@ pub struct FrameStats {
     /// longest write.
     saves: u64,
     save_max: Duration,
+    /// Since the last completed frame; kept across periods.
+    gap: GapWork,
+    last_completed: Option<Instant>,
 }
 
 impl FrameStats {
@@ -120,6 +180,8 @@ impl FrameStats {
             pads_max: Duration::ZERO,
             saves: 0,
             save_max: Duration::ZERO,
+            gap: GapWork::default(),
+            last_completed: None,
         }
     }
 
@@ -131,13 +193,16 @@ impl FrameStats {
     /// The iteration begun last ended at `now`.
     pub fn iteration_ended(&mut self, now: Instant) {
         if let Some(t) = self.iter_start.take() {
-            self.busy_max = self.busy_max.max(now.saturating_duration_since(t));
+            let d = now.saturating_duration_since(t);
+            self.busy_max = self.busy_max.max(d);
+            self.gap.busy = self.gap.busy.max(d);
         }
     }
 
     /// Running one wake-up's frames took `d`.
     pub fn step_took(&mut self, d: Duration) {
         self.step_max = self.step_max.max(d);
+        self.gap.step = self.gap.step.max(d);
     }
 
     /// One blit and present took `d`.
@@ -161,6 +226,7 @@ impl FrameStats {
         let late = actual.saturating_duration_since(requested);
         self.late_sum += late;
         self.late_max = self.late_max.max(late);
+        self.gap.late = self.gap.late.max(late);
         self.late_count += 1;
     }
 
@@ -169,19 +235,42 @@ impl FrameStats {
         self.per_wake[(n as usize).min(3)] += 1;
     }
 
+    /// The audio pacing fill estimate at a wake-up, in ms.
+    pub fn fill(&mut self, ms: f64) {
+        let (lo, hi) = self.gap.fill.get_or_insert((ms, ms));
+        *lo = lo.min(ms);
+        *hi = hi.max(ms);
+    }
+
     /// One frame was emulated at `now`; `completed` if it produced a new
     /// picture, `unchanged` if that picture equals the previous one.
-    pub fn emulated(&mut self, completed: bool, unchanged: bool, now: Instant) {
+    /// Returns the gap since the previous picture if it was a [`HITCH`].
+    pub fn emulated(&mut self, completed: bool, unchanged: bool, now: Instant) -> Option<Hitch> {
         self.emulated += 1;
         self.blank += u64::from(!completed);
-        if completed {
-            self.unchanged += u64::from(unchanged);
-            if self.pending {
-                self.unpresented += 1;
-            }
-            self.pending = true;
-            self.frame_gaps.mark(now);
+        self.gap.frames += 1;
+        self.gap.blank += u64::from(!completed);
+        if !completed {
+            return None;
         }
+        self.unchanged += u64::from(unchanged);
+        if self.pending {
+            self.unpresented += 1;
+        }
+        self.pending = true;
+        self.frame_gaps.mark(now);
+        let prev = self.last_completed.replace(now);
+        let w = std::mem::take(&mut self.gap);
+        let gap = now.saturating_duration_since(prev?);
+        (gap >= HITCH).then_some(Hitch {
+            gap,
+            frames: w.frames,
+            blank: w.blank,
+            busy: w.busy,
+            step: w.step,
+            late: w.late,
+            fill: w.fill,
+        })
     }
 
     /// The window presented at `now`.
@@ -233,11 +322,15 @@ impl FrameStats {
         let present_gaps = std::mem::replace(&mut self.present_gaps, Gaps::new());
         let pending = self.pending;
         let iter_start = self.iter_start;
+        let gap = std::mem::take(&mut self.gap);
+        let last_completed = self.last_completed;
         *self = FrameStats {
             frame_gaps,
             present_gaps,
             pending,
             iter_start,
+            gap,
+            last_completed,
             ..FrameStats::new(now)
         };
         Some(line)
@@ -365,6 +458,49 @@ mod tests {
         s.woke(t0 + ms(10), t0);
         let line = s.report(t0 + STATS_PERIOD).unwrap();
         assert!(line.contains("wake late mean 2.00 max 5.00 ms"), "{line}");
+    }
+
+    #[test]
+    fn a_long_gap_reports_what_happened_in_it() {
+        let t0 = Instant::now();
+        let mut s = FrameStats::new(t0);
+        assert_eq!(s.emulated(true, false, t0), None, "no gap before the first");
+        assert_eq!(s.emulated(true, false, t0 + ms(17)), None, "short gap");
+        // LCD off for 8 frames, then a picture 9 frames after the last.
+        s.step_took(ms(1));
+        s.woke(t0, t0 + ms(2));
+        s.fill(60.0);
+        for i in 0..8 {
+            assert_eq!(s.emulated(false, false, t0 + ms(34 + 17 * i)), None);
+        }
+        s.iteration_began(t0 + ms(100));
+        s.iteration_ended(t0 + ms(103));
+        s.fill(52.5);
+        s.fill(66.0);
+        // A report in between doesn't cut the gap.
+        s.report(t0 + STATS_PERIOD).unwrap();
+        let h = s.emulated(true, false, t0 + ms(170)).expect("a hitch");
+        assert_eq!(
+            h,
+            Hitch {
+                gap: ms(153),
+                frames: 9,
+                blank: 8,
+                busy: ms(3),
+                step: ms(1),
+                late: ms(2),
+                fill: Some((52.5, 66.0)),
+            }
+        );
+        assert_eq!(
+            h.to_string(),
+            "hitch: 153.0 ms between pictures, 9 frames emulated (8 blank), \
+             busy max 3.0 step max 1.0 wake late max 2.00 ms, audio fill 52.5-66.0 ms"
+        );
+        // The next gap starts from scratch.
+        let h = s.emulated(true, false, t0 + ms(240)).expect("a hitch");
+        assert_eq!((h.frames, h.blank, h.busy, h.fill), (1, 0, ms(0), None));
+        assert!(h.to_string().ends_with(", clock pacing"), "{h}");
     }
 
     #[test]
