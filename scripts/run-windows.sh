@@ -11,7 +11,8 @@
 # interop, copies the PNG back (--out, default target/run-windows/last.png),
 # deletes the scratch dir and exits with the exe's exit code. Set
 # GBC_AUDIO_STATS=1 and/or GBC_FRAME_STATS=1 to see audio and frame-pacing
-# statistics on stderr.
+# statistics on stderr (GBC_PRESENT_PHASE=0 and GBC_PRECISE_WAIT=0, which
+# turn off phase-aware presents and precise waits, are forwarded too).
 #
 # Files (docs/desktop-diagnostics.md): GBC_FRAME_LOG=<linux path> writes the
 # per-frame CSV there (the exe writes it in the scratch dir; it is copied
@@ -77,7 +78,7 @@ fi
 [ -z "$log_out" ] || export GBC_FRAME_LOG="$(win frames.csv)"
 
 # The GBC_* variables reach the Windows process only via WSLENV.
-export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS:GBC_FRAME_STATS:GBC_FRAME_LOG"
+export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS:GBC_FRAME_STATS:GBC_FRAME_LOG:GBC_PRESENT_PHASE:GBC_PRECISE_WAIT"
 
 set +e
 (cd "$scratch" && ./gbc-desktop.exe "$(wslpath -w "$scratch/$rom_name")" \

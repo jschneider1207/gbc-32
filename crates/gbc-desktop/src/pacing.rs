@@ -87,6 +87,44 @@ pub fn audio_wake_after(fill: usize, target: usize, rate: u32) -> Duration {
     drain.clamp(AUDIO_WAKE_MIN, AUDIO_WAKE_MAX)
 }
 
+/// Audio pacing with precise waits: how long until `fill` device frames
+/// drain *below* `target` at `rate` (when the next frame is due); zero
+/// when already below.
+pub fn audio_due_after(fill: usize, target: usize, rate: u32) -> Duration {
+    if fill < target {
+        return Duration::ZERO;
+    }
+    Duration::from_secs_f64((fill - target + 1) as f64 / f64::from(rate.max(1)))
+}
+
+/// When the window loop should wake next for pacing: at `at`, which is a
+/// frame's due time to be met precisely (`precise`, see `wait.rs`), or
+/// only a time to look again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Due {
+    pub at: Instant,
+    pub precise: bool,
+}
+
+/// Audio pacing: the next [`Due`] at `now`. A frame due within
+/// [`AUDIO_WAKE_MAX`] plus the spin margin is a precise deadline; further
+/// off, wake after [`AUDIO_WAKE_MAX`] to look again (the fill estimate
+/// can move meanwhile).
+pub fn audio_due(fill: usize, target: usize, rate: u32, now: Instant) -> Due {
+    let d = audio_due_after(fill, target, rate);
+    if d <= AUDIO_WAKE_MAX + crate::wait::SPIN_MARGIN {
+        Due {
+            at: now + d,
+            precise: true,
+        }
+    } else {
+        Due {
+            at: now + AUDIO_WAKE_MAX,
+            precise: false,
+        }
+    }
+}
+
 /// Audio pacing: the buffered frames as if the device played them
 /// continuously. Devices take a chunk per callback (WASAPI: 10 ms), so
 /// the ring's fill falls in steps, and pacing on it alone runs frames only
@@ -293,10 +331,22 @@ impl Pacing {
         }
     }
 
+    /// When to wake next without precise waits (`GBC_PRECISE_WAIT=0`).
     pub fn next_wake(&self, now: Instant) -> Instant {
         match self {
             Pacing::Audio(a) => now + audio_wake_after(a.fill(), a.target(), a.rate()),
             Pacing::Clock { pacer, .. } => pacer.next_deadline(),
+        }
+    }
+
+    /// When the next frame is due, for precise waits.
+    pub fn next_due(&self, now: Instant) -> Due {
+        match self {
+            Pacing::Audio(a) => audio_due(a.fill(), a.target(), a.rate(), now),
+            Pacing::Clock { pacer, .. } => Due {
+                at: pacer.next_deadline(),
+                precise: true,
+            },
         }
     }
 }
@@ -528,6 +578,32 @@ mod tests {
         // Without smoothing frames run on callback boundaries (the bug).
         let raw = simulate(false, 0);
         assert!(raw.iter().any(|g| (g - frame_ms).abs() > 5.0), "{raw:?}");
+    }
+
+    #[test]
+    fn a_near_frame_is_a_precise_deadline_a_far_one_a_check() {
+        let t = Instant::now();
+        // 48 kHz: 240 frames above target drain below it in 241 frames.
+        let d = audio_due(2400 + 240, 2400, 48_000, t);
+        assert!(d.precise);
+        assert_eq!(d.at - t, Duration::from_secs_f64(241.0 / 48_000.0));
+        let now = Due {
+            at: t,
+            precise: true,
+        };
+        assert_eq!(audio_due(2399, 2400, 48_000, t), now);
+        assert_eq!(
+            audio_due_after(2400, 2400, 48_000),
+            Duration::from_secs_f64(1.0 / 48_000.0)
+        );
+        // Due in 9.5 ms: within the 8 ms wake cap plus the 2 ms margin.
+        assert!(audio_due(2400 + 456, 2400, 48_000, t).precise);
+        // Due in 16 ms: look again in 8 ms.
+        let far = Due {
+            at: t + AUDIO_WAKE_MAX,
+            precise: false,
+        };
+        assert_eq!(audio_due(2400 + 768, 2400, 48_000, t), far);
     }
 
     #[test]

@@ -1,7 +1,8 @@
-//! Display refresh timing from the Windows compositor (DWM), for
-//! `GBC_FRAME_LOG`: which refresh a present landed on. Only a query
-//! (`DwmGetCompositionTimingInfo`); nothing here renders. Elsewhere
-//! [`now`] and [`refresh_rate`] return `None`.
+//! Display refresh timing from the Windows compositor (DWM): the refresh
+//! grid presents are timed against ([`grid`], `present.rs`) and, for
+//! `GBC_FRAME_LOG`, which refresh a present landed on ([`now`]). Only a
+//! query (`DwmGetCompositionTimingInfo`); nothing here renders. Elsewhere
+//! [`grid`], [`now`], [`refresh_rate`] and [`process_cpu`] return `None`.
 //!
 //! Since Windows 8.1 the query takes no window and reports the
 //! compositor's global clock: the time of the vertical blank of its last
@@ -60,12 +61,17 @@ mod imp {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
     use windows_sys::Win32::System::Performance::{
         QueryPerformanceCounter, QueryPerformanceFrequency,
     };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
     use super::Refresh;
+    use crate::present::Grid;
 
     fn freq() -> u64 {
         static F: OnceLock<u64> = OnceLock::new();
@@ -105,6 +111,47 @@ mod imp {
         super::on_grid(qpc, vblank, anchor, period, freq())
     }
 
+    pub fn grid() -> Option<Grid> {
+        let info = timing()?;
+        let mut qpc = 0i64;
+        // SAFETY: `qpc` is a valid, writable i64 for the call.
+        unsafe { QueryPerformanceCounter(&mut qpc) };
+        let now = Instant::now();
+        let (vblank, period, f) = (info.qpcVBlank as i64, info.qpcRefreshPeriod, freq());
+        if period == 0 || f == 0 {
+            return None;
+        }
+        let ns = |ticks: i64| {
+            Duration::from_nanos(
+                (i128::from(ticks.unsigned_abs()) * 1_000_000_000 / i128::from(f)) as u64,
+            )
+        };
+        let ago = qpc - vblank;
+        let vblank = if ago >= 0 {
+            now.checked_sub(ns(ago))?
+        } else {
+            now.checked_add(ns(ago))?
+        };
+        Some(Grid {
+            vblank,
+            period: ns(period as i64),
+        })
+    }
+
+    pub fn process_cpu() -> Option<Duration> {
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut c, mut e, mut k, mut u) = (zero, zero, zero, zero);
+        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+        // closing; the four FILETIMEs are valid and writable for the call.
+        let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+        let t = |f: FILETIME| u64::from(f.dwHighDateTime) << 32 | u64::from(f.dwLowDateTime);
+        // 100 ns units.
+        (ok != 0).then(|| Duration::from_nanos((t(k) + t(u)) * 100))
+    }
+
     pub fn refresh_rate() -> Option<(u32, u32)> {
         let r = timing()?.rateRefresh;
         let (n, d) = (r.uiNumerator, r.uiDenominator);
@@ -115,6 +162,16 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::Refresh;
+    use crate::present::Grid;
+    use std::time::Duration;
+
+    pub fn grid() -> Option<Grid> {
+        None
+    }
+
+    pub fn process_cpu() -> Option<Duration> {
+        None
+    }
 
     pub fn now() -> Option<Refresh> {
         None
@@ -123,6 +180,17 @@ mod imp {
     pub fn refresh_rate() -> Option<(u32, u32)> {
         None
     }
+}
+
+/// The display's refresh grid now: its last vblank as an `Instant` and
+/// the period (Windows, compositor on).
+pub fn grid() -> Option<crate::present::Grid> {
+    imp::grid()
+}
+
+/// CPU time this process has used, user and kernel (Windows).
+pub fn process_cpu() -> Option<std::time::Duration> {
+    imp::process_cpu()
 }
 
 /// Where now is on the display's refresh grid (Windows, compositor on).

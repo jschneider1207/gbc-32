@@ -19,6 +19,7 @@ ringbuf = "0.6.0"
 softbuffer = "0.4"
 winit = "0.30"
 
-# GBC_FRAME_LOG: DWM refresh timing (a query; no GPU use) and the QPC clock.
+# DWM refresh timing (a query; no GPU use) for phase-aware presents and
+# GBC_FRAME_LOG, the QPC clock, and process CPU time for the stats.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Graphics_Dwm", "Win32_System_Performance"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Threading"] }

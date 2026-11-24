@@ -18,11 +18,13 @@ mod input;
 mod input_log;
 mod pacing;
 mod png;
+mod present;
 mod save;
 mod save_writer;
 mod session;
 mod shutdown;
 mod video;
+mod wait;
 mod window;
 
 use std::process::ExitCode;
