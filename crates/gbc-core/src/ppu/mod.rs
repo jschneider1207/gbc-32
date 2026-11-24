@@ -1646,8 +1646,15 @@ impl Ppu {
             }) & 7;
         // Screen x of the first pixel of the tile being output.
         let mut tile = pos - phase;
-        // Dots since tile j's fetch window began (`Ppu::tile_lead`).
-        let (before, win_hit, obj_hit) = self.tile_lead(t, x, tile);
+        let data = reg == 0x42 || (reg == 0x40 && (value ^ self.lcdc) & 0x10 != 0);
+        // Dots since tile j's fetch window began (`Ppu::tile_lead`). A map
+        // select or SCX write once tile j's first pixel and pixel 0 are out
+        // misses tile j + 1 whatever the stalls (the common case: no walk).
+        let (before, win_hit, obj_hit) = if data || phase < FETCH_SAMPLED || x == 0 {
+            self.tile_lead(t, x, tile)
+        } else {
+            (t - first_pixel - x, false, false)
+        };
         let mut phase = t - first_pixel - tile - before;
         if phase < 0 && win_now {
             // In the window's stall: its tile 0 is the one being fetched.
@@ -1663,15 +1670,15 @@ impl Ppu {
         // (objects at X = 3-7, 16, 17) and `m3_lcdc_tile_sel_win_change`
         // (X = 14-17, stalls after the write) need it on time there, gambatte
         // `bgtiledata_spx*` one dot early on lines without objects or with
-        // one in an earlier tile (calibrated; no reference explains it). SameBoy (sm83_cpu.c `GB_CONFLICT_LCDC_CGB`)
-        // writes both on time, but a clear glitches the next dot's data
-        // read (`tile_sel_glitch`: the tile number as the data, in that ROM
-        // the old tile's bytes), which the early clear stands for here.
+        // one in an earlier tile (calibrated; no reference explains it).
+        // SameBoy (sm83_cpu.c `GB_CONFLICT_LCDC_CGB`) writes both on time,
+        // but a clear glitches the next dot's data read (`tile_sel_glitch`:
+        // the tile number as the data, in that ROM the old tile's bytes),
+        // which the early clear stands for here.
         // Only SCY and LCDC.4 reach the data steps: other writes leave
         // `planes` 0 (no redraw, `Renderer::mix_planes`).
         let clear = self.lcdc & !value & 0x10 != 0;
         let late = i32::from(reg == 0x40 && (clear || !obj_hit)) * LCDC_TILES_LATE;
-        let data = reg == 0x42 || (reg == 0x40 && (value ^ self.lcdc) & 0x10 != 0);
         let (mut end, mut planes) = if phase >= FETCH_HIGH + late || !data || win_hit {
             (
                 tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !win_hit),
@@ -4494,11 +4501,12 @@ mod tests {
         r.mem.vram[8..10].copy_from_slice(&[0, 0xFF]);
         r.mem.vram[0x1004..0x1006].copy_from_slice(&[0xFF, 0]);
         r.mem.vram[0x1008..0x100A].copy_from_slice(&[0xFF, 0]);
-        // Map 9800 row 6 column 0: tile 1 (color 3).
+        // Map 9800 row 6 column 0 and row 7 column 1: tile 1 (color 3).
         r.mem.vram[0x1800 + 192] = 1;
+        r.mem.vram[0x1800 + 224 + 1] = 1;
         // Objects at X = 16 (pixel 8, tile 1's first: 11-dot stall from
         // line position 104) on lines 1 and 10; at X = 0 (with the junk
-        // pixels) on line 50; at X = 24 (pixel 16) on line 40. OBJ off: no
+        // pixels) on lines 50 and, at X = 1, 60; at X = 24 (pixel 16) on line 40. OBJ off: no
         // object pixel.
         let oam = [
             16 + 1,
@@ -4517,8 +4525,12 @@ mod tests {
             24,
             0,
             0,
+            16 + 60,
+            1,
+            0,
+            0,
         ];
-        r.mem.oam[..16].copy_from_slice(&oam);
+        r.mem.oam[..20].copy_from_slice(&oam);
         r.ppu.oam_written();
         let row = |r: &Rig, ly: usize, x: usize| r.frame[ly * SCREEN_WIDTH + x];
         // Line 1: SCY 0 -> 1 3 dots into the stall: tile 2's low plane was
@@ -4557,6 +4569,17 @@ mod tests {
         r.mem.io[0x43] = 0;
         r.sync(l + u64::from(LINE));
         assert_eq!((row(&r, 50, 7), row(&r, 50, 8)), (4, 3));
+        // Line 60, SCX 3: SCX 3 -> 11 at the first dot of the junk-pixel
+        // object's stall (here after the discard, pixel 0 next): tile 1's
+        // fetch begins after that stall, so it has the new column (2:
+        // tile 0, row 4) instead of column 1 (tile 1).
+        r.mem.io[0x43] = 3;
+        let l = clock(on, 0, 60 * LINE);
+        write_fetch_reg(&mut r, l + 99, 0x43, 11);
+        r.sync(l + 300);
+        r.mem.io[0x43] = 0;
+        r.sync(l + u64::from(LINE));
+        assert_eq!((row(&r, 60, 4), row(&r, 60, 5)), (3, 3));
     }
 
     /// The window's tile 0 is fetched from the window's activation, the
