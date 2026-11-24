@@ -570,7 +570,8 @@ impl Renderer {
             let from = x0.max(end.saturating_sub(8));
             if h.planes != 0 && from < to {
                 let next = hold.get(i + 1).map_or(*regs, regs_of);
-                self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src);
+                let latch = &mut obj_rank.sel_latch;
+                self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src, latch);
             }
             x0 = to;
         }
@@ -597,6 +598,7 @@ impl Renderer {
         next: &Regs,
         planes: u8,
         src: &Sources,
+        latch: &mut (u8, u8),
     ) {
         let lcdc = held.lcdc;
         let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
@@ -639,15 +641,13 @@ impl Renderer {
         // Decoded rows: the low plane in the even bits ([`decode`]).
         let mask = |p: u8| (u16::from(p & 1) * 0x5555) | (u16::from(p >> 1 & 1) * 0xAAAA);
         let (m, g) = (mask(planes), mask(planes >> 2));
-        // The glitched planes: the tile index as data, X flip applied at
-        // the push (SameBoy `data_for_tile_sel_glitch`, MIT; Mealybug
-        // TILE_SEL notes). Not for an index >= 0x80: both data areas map
-        // it to 8800-8FFF, the read address doesn't change.
-        let index = src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
-        let glitch = if index < 0x80 {
-            SPREAD[usize::from(attr & BG_ATTR_X_FLIP != 0)][usize::from(index)] * 3
+        let glitch = if g != 0 {
+            let index =
+                src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
+            let tile_x = (x0 as u8).wrapping_sub(col & 7);
+            self.tile_sel_glitch(src, latch, lcdc, planes, index, attr, y, tile_x, old, new)
         } else {
-            old
+            0
         };
         let w = ((old & !m & !g) | (new & m) | (glitch & g)) << (2 * (col & 7));
         // One instance (mixed with no object pixels when none are shown):
@@ -658,6 +658,62 @@ impl Renderer {
             &[0; 8]
         };
         fill_partial::<true>(&mut row[x0..x1], obj, w, attr, master, src.colors);
+    }
+
+    /// For [`Renderer::mix_planes`]: the decoded row (as [`decode`]) whose
+    /// glitched plane (`planes` bits 2-3, one) the fetcher took for the
+    /// tile at screen x `tile_x` with tile index `index`, attributes
+    /// `attr` and row `y`, read across an LCDC.4 change on that plane's
+    /// read dot (CGB TILE_SEL glitch; Mealybug TILE_SEL notes, SameBoy
+    /// `data_for_tile_sel_glitch`, MIT). `lcdc` is from before the change.
+    /// The data is a byte, X-flipped at the push:
+    /// - a clear: the tile index, except for an index >= 0x80 (both data
+    ///   areas map it to 8800-8FFF: the read doesn't change). The byte at
+    ///   the old address goes to `latch` (`ObjRank::sel_latch`);
+    /// - a set: the latch, the last byte read with 8000-8FFF addressing
+    ///   (Mealybug: "bitplane 1 data from the most recently drawn sprite
+    ///   ... or tile"): the high plane of the last object fetched before
+    ///   this tile's reads (slot + 1 in `planes` bits 4-7) unless a clear's
+    ///   read on this line came after it. A read on an earlier line isn't
+    ///   modelled: then the row as `old` (bits 4-7 = 15: an object stall in
+    ///   tile j or j + 1, `Ppu::hold_fetch`) or `new`, which the earlier
+    ///   `LCDC_TILES_LATE` calibration fitted.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn tile_sel_glitch(
+        &self,
+        src: &Sources,
+        latch: &mut (u8, u8),
+        lcdc: u8,
+        planes: u8,
+        index: u8,
+        attr: u8,
+        y: u8,
+        tile_x: u8,
+        old: u16,
+        new: u16,
+    ) -> u16 {
+        let (byte, key) = *latch;
+        let data = if lcdc & LCDC_TILES_8000 != 0 {
+            let a = (usize::from(index) << 4 | usize::from(y & 7) << 1)
+                ^ (ATTR_FETCH[usize::from(attr)] as usize & 0x3FFF);
+            let read = src.vram[(a | usize::from(planes >> 3 & 1)) & 0x3FFF];
+            // Objects from this tile's x on are fetched after the read.
+            *latch = (read, tile_x.wrapping_add(8));
+            if index < 0x80 { index } else { read }
+        } else {
+            let this = key != 0;
+            let s = usize::from(planes >> 4).wrapping_sub(1);
+            if s < MAX_PER_LINE && u16::from(self.objects.get(s).2) + 8 >= u16::from(key) {
+                src.vram[self.obj_high_addr(src.oam, src.attrs, s, self.ly, lcdc)]
+            } else if this {
+                byte
+            } else {
+                return if planes >> 4 == 0 { new } else { old };
+            }
+        };
+        SPREAD[usize::from(attr & BG_ATTR_X_FLIP != 0)][usize::from(data)] * 3
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`
@@ -789,6 +845,31 @@ impl Renderer {
     pub(crate) fn next_object(&self, next: u8) -> Option<usize> {
         (usize::from(next) < self.objects.len())
             .then(|| usize::from(self.order[usize::from(next) % MAX_PER_LINE]) % MAX_PER_LINE)
+    }
+
+    /// The VRAM address of the high bit plane byte of line `ly`'s row of
+    /// the line's object in slot `slot` (tile and attributes from `attrs`
+    /// or `oam`, as [`Renderer::fetch_object`]), its height from `lcdc`.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn obj_high_addr(
+        &self,
+        oam: &[u8; 0xA0],
+        attrs: Option<&[(u8, u8); MAX_PER_LINE]>,
+        slot: usize,
+        ly: u8,
+        lcdc: u8,
+    ) -> usize {
+        let (index, y, _) = self.objects.get(slot);
+        let (tile, flags) = match attrs {
+            Some(a) => a[slot % MAX_PER_LINE],
+            None => {
+                let b = usize::from(index.min(39)) * 4;
+                (oam[b + 2], oam[b + 3])
+            }
+        };
+        let bank = usize::from(self.cgb && flags & CGB_ATTR_BANK != 0) << 13;
+        ((object_row(ly, y, tile, flags, lcdc) | bank) + 1) & 0x3FFF
     }
 
     /// Decodes one object's row into the object buffer.
@@ -1330,6 +1411,7 @@ mod tests {
                     rank: [0; OBJ_BUF_LEN],
                     hold: [Held::default(); 3],
                     next: 0,
+                    sel_latch: (0, 0),
                 },
             }
         }
@@ -2128,6 +2210,7 @@ mod tests {
                     rank: [0; OBJ_BUF_LEN],
                     hold: [Held::default(); 3],
                     next: 0,
+                    sel_latch: (0, 0),
                 },
             };
             split.r.start_frame();

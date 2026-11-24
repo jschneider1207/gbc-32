@@ -375,8 +375,8 @@ const FETCH_HIGH: i32 = FETCH_SAMPLED + 4;
 /// LCDC writes land in phases (SameBoy `GB_CONFLICT_LCDC_CGB`: the
 /// TILE_SEL change takes effect one dot after the access dot). Calibrated
 /// over the full manifest (vs 0 extra dots): 0 -> 30 flips, 1 -> 45 (15
-/// gambatte `bgtiledata_spx*` more), 2 -> 39; no regressions. Not for a
-/// set during an object stall ([`Ppu::hold_fetch`]).
+/// gambatte `bgtiledata_spx*` more), 2 -> 39; no regressions. A change on
+/// the dot before glitches the plane ([`Ppu::hold_fetch`]).
 const LCDC_TILES_LATE: i32 = 1;
 
 /// Dots between the fine-scroll compare of discard pixel `k` and that
@@ -1679,10 +1679,10 @@ impl Ppu {
         // Dots since tile j's fetch window began (`Ppu::tile_lead`). A map
         // select or SCX write once tile j's first pixel and pixel 0 are out
         // misses tile j + 1 whatever the stalls (the common case: no walk).
-        let (before, win_hit, obj_hit) = if data || phase < FETCH_SAMPLED || x == 0 {
+        let (before, win_hit, obj_hit, last) = if data || phase < FETCH_SAMPLED || x == 0 {
             self.tile_lead(t, x, tile)
         } else {
-            (t - first_pixel - x, false, false)
+            (t - first_pixel - x, false, false, NO_STALL)
         };
         let mut phase = t - first_pixel - tile - before;
         if phase < 0 && win_now {
@@ -1693,21 +1693,25 @@ impl Ppu {
         // Tile j + 1 (from `tile + 8`): fetched with the old values, its
         // map entry only (`planes`: the planes still to read), or not yet.
         // An LCDC.4 change reaches the data steps one dot early
-        // (`LCDC_TILES_LATE`), except a set (0 -> 1) with an object stall in
-        // tile j or j + 1, before or after the write (in tile 0: also one
-        // among the junk pixels): Mealybug `m3_lcdc_tile_sel_change`
-        // (objects at X = 3-7, 16, 17) and `m3_lcdc_tile_sel_win_change`
-        // (X = 14-17, stalls after the write) need it on time there, gambatte
-        // `bgtiledata_spx*` one dot early on lines without objects or with
-        // one in an earlier tile (calibrated; no reference explains it).
-        // SameBoy (sm83_cpu.c `GB_CONFLICT_LCDC_CGB`) writes both on time,
-        // but a clear glitches the next dot's data read (`tile_sel_glitch`:
-        // the tile number as the data, in that ROM the old tile's bytes),
-        // which the early clear stands for here.
+        // (`LCDC_TILES_LATE`), and on a plane's read dot (the dot before)
+        // glitches that plane (CGB C; Mealybug TILE_SEL notes): a clear
+        // reads the tile index, a set the latch, the last byte read with
+        // 8000-8FFF addressing (`Renderer::tile_sel_glitch`). For a set,
+        // bits 4-7 give the slot + 1 of the last object fetched before tile
+        // j + 1's reads, else 15 with an object stall in tile j or j + 1,
+        // before or after the write (in tile 0: also one among the junk
+        // pixels), else 0. An empty object high plane as the latch is what
+        // the old calibration (a set "on time" next to an object stall)
+        // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7; a latch from
+        // an earlier line isn't modelled, so 15 and 0 keep that
+        // calibration's plane (old: X = 16-17 there and `_win_change` X =
+        // 8-17; new: gambatte `bgtiledata_spx*`). SameBoy (sm83_cpu.c
+        // `GB_CONFLICT_LCDC_CGB`) writes LCDC on time, with a clear
+        // glitching the next dot's data read (`tile_sel_glitch`), which the
+        // early clear stands for here; it has no set glitch in single speed.
         // Only SCY and LCDC.4 reach the data steps: other writes leave
         // `planes` 0 (no redraw, `Renderer::mix_planes`).
-        let clear = self.lcdc & !value & 0x10 != 0;
-        let late = i32::from(reg == 0x40 && (clear || !obj_hit)) * LCDC_TILES_LATE;
+        let late = i32::from(reg == 0x40) * LCDC_TILES_LATE;
         let (mut end, mut planes) = if phase >= FETCH_HIGH + late || !data || win_hit {
             (
                 tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !win_hit),
@@ -1715,12 +1719,18 @@ impl Ppu {
             )
         } else if phase >= FETCH_SAMPLED {
             let mut p = if phase >= FETCH_LOW + late { 2 } else { 3 };
-            if reg == 0x40 && clear {
-                // CGB TILE_SEL glitch: a clear on a plane's read dot makes
-                // the tile index that plane's data (bits 2-3, `Held::planes`).
+            if reg == 0x40 {
+                // CGB TILE_SEL glitch: an LCDC.4 change on a plane's read
+                // dot replaces that plane's data (bits 2-3, `Held::planes`;
+                // bits 4-7 for a set's latch, `Renderer::mix_planes`).
                 let g = u8::from(phase == FETCH_LOW + late - 1)
                     | u8::from(phase == FETCH_HIGH + late - 1) << 1;
-                p = (p & !g) | g << 2;
+                let o = if last != NO_STALL {
+                    last + 1
+                } else {
+                    u8::from(obj_hit) * 15
+                };
+                p = (p & !g) | g << 2 | o << 4;
             }
             (tile + 16, p)
         } else {
@@ -1762,9 +1772,10 @@ impl Ppu {
     /// For [`Ppu::hold_fetch`] at line position `t`, pixel `x` next out, in
     /// the tile from screen x `tile` (j): the stall dots before tile j's
     /// fetch window (from which tile j + 1 is fetched), whether a window
-    /// stall is inside it, and whether an object stall is in tile j or
-    /// j + 1, before or after `t` (for tile 0, also one among the junk
-    /// pixels).
+    /// stall is inside it, whether an object stall is in tile j or j + 1,
+    /// before or after `t` (for tile 0, also one among the junk pixels),
+    /// and the slot of the last object whose stall is before the window
+    /// (fetched before tile j + 1's reads; `NO_STALL`: none).
     ///
     /// Tile j + 1's VRAM reads run at fixed dots from the dot tile j's
     /// first pixel is output, or would be before a stall at that pixel:
@@ -1784,12 +1795,12 @@ impl Ppu {
     /// before it. Cold: mid-mode-3 writes only.
     #[cold]
     #[inline(never)]
-    fn tile_lead(&self, t: i32, x: i32, tile: i32) -> (i32, bool, bool) {
+    fn tile_lead(&self, t: i32, x: i32, tile: i32) -> (i32, bool, bool, u8) {
         let lt = &self.line;
         let first_pixel = i32::from(lt.first_pixel);
         let r = &self.renderer;
         let (win, prev) = (usize::from(lt.win_stall), usize::from(lt.prev_stall()));
-        let (mut before, mut win_hit, mut obj_hit) = (0, false, false);
+        let (mut before, mut win_hit, mut obj_hit, mut last) = (0, false, false, NO_STALL);
         for (i, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls)].iter().enumerate() {
             let sx = i32::from(sx);
             let w = i == win || i == prev;
@@ -1803,13 +1814,16 @@ impl Ppu {
                 !w && i32::from(r.objects.get(usize::from(slot)).2) < 8 - i32::from(lt.fine());
             if sx < tile || (w && sx == tile) || (junk && tile > -8) {
                 before += i32::from(d);
+                if !w {
+                    last = slot;
+                }
             } else {
                 win_hit |= w;
             }
         }
         // In the fine-scroll discard a window stall at pixel 0 is still
         // to come.
-        (before, win_hit && t >= first_pixel, obj_hit)
+        (before, win_hit && t >= first_pixel, obj_hit, last)
     }
 
     /// An SCY (`reg` 0x42) or SCX (0x43) write of `value` at clock `now`:
@@ -2064,6 +2078,7 @@ impl Ppu {
         self.drawn = 0;
         mem.obj_rank.hold[2].end = 0;
         mem.obj_rank.next = 0;
+        mem.obj_rank.sel_latch.1 = 0;
         // The pixels follow the window start the stalls are built with.
         self.renderer.start_line(l as u8, scx, &objs, order, window);
         if n != 0 || window.is_some() {
@@ -2608,7 +2623,7 @@ impl Ppu {
             let Some(slot) = self.renderer.next_object(mem.obj_rank.next) else {
                 break;
             };
-            let (index, y, x) = self.renderer.objects.get(slot);
+            let x = self.renderer.objects.get(slot).2;
             let end = clock - u32::from(8u8.saturating_sub(x));
             if t + OBJ_LOW_READ <= end {
                 break;
@@ -2622,15 +2637,11 @@ impl Ppu {
             // reads, the high plane's byte of the new height's row stands
             // in for the old row's during the fetch (VRAM is the PPU's
             // alone in mode 3).
-            let (tile, flags) = if self.attr_on {
-                self.obj_attr[slot]
-            } else {
-                let b = usize::from(index.min(39)) * 4;
-                (mem.oam[b + 2], mem.oam[b + 3])
-            };
-            let bank = usize::from(self.renderer.cgb && flags & 0x08 != 0) << 13;
-            let old_hi = ((render::object_row(ly, y, tile, flags, self.lcdc) | bank) + 1) & 0x3FFF;
-            let new_hi = ((render::object_row(ly, y, tile, flags, hi) | bank) + 1) & 0x3FFF;
+            let attrs = self.attr_on.then_some(&self.obj_attr);
+            let old_hi = self
+                .renderer
+                .obj_high_addr(&mem.oam, attrs, slot, ly, self.lcdc);
+            let new_hi = self.renderer.obj_high_addr(&mem.oam, attrs, slot, ly, hi);
             let keep = mem.vram[old_hi];
             mem.vram[old_hi] = mem.vram[new_hi];
             let src = Sources {
@@ -4848,6 +4859,61 @@ mod tests {
         write_fetch_reg(&mut r, l + 96 + 16 + FETCH_LOW as u64, 0x40, 0x91);
         r.sync(l + u64::from(LINE));
         assert_eq!(tile3(&r, 40).0, [1; 8]);
+    }
+
+    /// CGB C TILE_SEL glitch, set side: an LCDC.4 set on a bit plane's
+    /// read dot makes the latch (the last byte read with 8000 addressing)
+    /// that plane's data: an object's high plane fetched before the tile's
+    /// reads, or the byte a clear's glitched read took at the old address,
+    /// whichever came later. With neither on the line (not modelled), the
+    /// plane is old next to an object stall in tile j or j + 1, else new.
+    /// Mealybug `m3_lcdc_tile_sel_change2`, `m3_lcdc_tile_sel_win_change2`.
+    #[test]
+    fn tile_data_set_on_a_plane_read_dot_uses_the_latch() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        r.ppu.renderer.cgb = true;
+        r.mem.bg_pal[..8].copy_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0]);
+        r.ppu
+            .resolve_palettes(&mut r.mem, &DmgPalettes::GRAYSCALE, true);
+        // Row 0 of tile 0x55: 9000 color 3; 8000 low 0x33, high 0. Of
+        // tile 0x56 (map column 1) at 8000: low 0xC0. Object tile 2:
+        // low 0, high 0x0F.
+        r.mem.vram[0x1550..0x1560].fill(0xFF);
+        r.mem.vram[0x0550] = 0x33;
+        r.mem.vram[0x0560] = 0xC0;
+        r.mem.vram[0x21] = 0x0F;
+        // (line, object X (0: none), clear on tile 1's low plane read dot,
+        // tile 3's pixels). An object at X = 16 stalls 11 dots at pixel 8.
+        let (n, c1, c2) = ([1, 1, 1, 1, 2, 2, 2, 2], [2, 2, 1, 1, 1, 1, 1, 1], [2; 8]);
+        for (ly, x, clear, want) in [
+            // The object's high plane (0x0F), the high plane new (0).
+            (8u32, 16u8, false, n),
+            // The clear's read of tile 1 at 8000 (0xC0).
+            (16, 0, true, c1),
+            // The object, fetched after the clear's read.
+            (24, 16, true, n),
+            // Its stall in tile j, no latch: the low plane old (9000's).
+            (32, 24, false, c2),
+        ] {
+            let m = 0x1800 + (ly as usize >> 3) * 32;
+            r.mem.vram[m..m + 32].fill(0x55);
+            r.mem.vram[m + 1] = 0x56;
+            let y = if x == 0 { 0 } else { ly as u8 + 16 };
+            r.mem.oam[..4].copy_from_slice(&[y, x, 2, 0]);
+            r.ppu.oam_written();
+            let l = clock(on, 0, ly * LINE);
+            // LCDC.4 clear from the line start, or set and cleared.
+            write_fetch_reg(&mut r, l - 10, 0x40, if clear { 0x91 } else { 0x81 });
+            if clear {
+                write_fetch_reg(&mut r, l + 96 + FETCH_LOW as u64, 0x40, 0x81);
+            }
+            let stall = if x == 16 { 11 } else { 0 };
+            write_fetch_reg(&mut r, l + 96 + 16 + stall + FETCH_LOW as u64, 0x40, 0x91);
+            write_fetch_reg(&mut r, l + 300, 0x40, 0x81);
+            r.sync(l + u64::from(LINE));
+            assert_eq!(tile3(&r, ly as usize).0, want, "line {ly}");
+        }
     }
 
     #[test]

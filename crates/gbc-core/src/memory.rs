@@ -99,6 +99,7 @@ impl Memory {
                     planes: 0,
                 }; 3],
                 next: 0,
+                sel_latch: (0, 0),
             },
             bg_pal: [0; 64],
             obj_pal: [0; 64],
@@ -122,6 +123,7 @@ impl Memory {
         self.obj_buf.fill(0);
         self.obj_rank.rank.fill(0);
         self.obj_rank.next = 0;
+        self.obj_rank.sel_latch = (0, 0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
@@ -151,6 +153,11 @@ pub(crate) struct ObjRank {
     /// object not yet fetched or skipped (`Renderer::fetch_objects`); 0 at
     /// the line start (`Ppu::latch`).
     pub(crate) next: u8,
+    /// CGB TILE_SEL glitch latch as far as modelled: the byte an LCDC.4
+    /// clear's glitched read took on this line and the screen x + 8 of its
+    /// tile (0: none; reset at the line start, `Ppu::latch`); objects from
+    /// that x on were fetched after it (`Renderer::tile_sel_glitch`).
+    pub(crate) sel_latch: (u8, u8),
 }
 
 /// One held part of a line ([`ObjRank::hold`]).
@@ -165,8 +172,9 @@ pub(crate) struct Held {
     /// fetcher read after the write, with the next part's LCDC.4 and SCY:
     /// bit 0 the low plane, bit 1 the high plane (its map entry was read
     /// before; `docs/design/mid-line-ppu.md` step 3). Bits 2 (low) and 3
-    /// (high): planes read on an LCDC.4 clear's dot, the tile index as
-    /// their data (CGB TILE_SEL glitch).
+    /// (high): planes read on an LCDC.4 change's dot (CGB TILE_SEL glitch:
+    /// a clear gives the tile index as their data, a set the latch); bits
+    /// 4-7 for a set's latch (`Ppu::hold_fetch`).
     pub(crate) planes: u8,
 }
 
@@ -216,6 +224,7 @@ mod tests {
         assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
         assert!(obj_rank.hold.iter().all(|&h| h == Held::default()));
         assert_eq!(obj_rank.next, 0);
+        assert_eq!(obj_rank.sel_latch, (0, 0));
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
@@ -223,6 +232,7 @@ mod tests {
             + size_of_val(bg_pairs)
             + size_of_val(&obj_rank.hold)
             + size_of_val(&obj_rank.next)
+            + size_of_val(&obj_rank.sel_latch)
             + size_of::<Apu>()
             + size_of_val(dma_read_clears);
         assert_eq!(
