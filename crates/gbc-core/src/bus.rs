@@ -1679,7 +1679,7 @@ impl Ctx<'_, '_> {
             // M-cycles and the wake-up), so the CPU's M-cycle grid moves by
             // a clock against the PPU's, as on hardware (gambatte
             // `lcd_offset` tests, offsets 1 and 3).
-            self.sys.vdma.switch_end = (now + 0x8000 * m - short as u64) as u32;
+            self.sys.vdma.switch_end = now + 0x8000 * m - short as u64;
             return true;
         }
         if dma_paused {
@@ -1692,7 +1692,7 @@ impl Ctx<'_, '_> {
     /// Whether the speed-switch halt has run its length.
     #[inline]
     pub(crate) fn speed_switch_over(&self) -> bool {
-        (self.clock() as u32).wrapping_sub(self.sys.vdma.switch_end) as i32 >= 0
+        self.clock() >= self.sys.vdma.switch_end
     }
 
     /// As [`Bus::halt_end`], except (gambatte CGB C
@@ -1723,7 +1723,8 @@ impl Ctx<'_, '_> {
     #[inline]
     pub(crate) fn idle_speed_switch(&mut self) {
         let m = self.hot.mcycle as u32;
-        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock() as u32) / m;
+        // The halt is 0x20000 clocks at most: the difference fits.
+        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock()) as u32 / m;
         let n = self.mcycles_to_deadline().min(left);
         self.hot.budget -= (n * m) as i32;
         if self.hot.budget <= 0 {
@@ -1844,7 +1845,7 @@ impl Ctx<'_, '_> {
         let v = &mut self.sys.vdma;
         if v.refetch == hdma::RAN {
             v.refetch = 0;
-            if ((self.hot.clock() as u32).wrapping_sub(v.switch_end) as i32) < 0 {
+            if self.hot.clock() < v.switch_end {
                 return;
             }
         }
@@ -1980,7 +1981,7 @@ impl Ctx<'_, '_> {
         v.stall = full as u16;
         v.refetch = if v.refetch == hdma::REQUESTED {
             v.stall -= 1;
-            v.switch_end = (now as u32).wrapping_add(full * m);
+            v.switch_end = now + u64::from(full * m);
             hdma::RAN
         } else {
             0
@@ -4665,6 +4666,43 @@ mod dma_tests {
                 assert_eq!(ctx.clock(), now + 12);
                 assert_eq!(ctx.sys.vdma.stall, 0);
                 assert_eq!(ctx.sys.vdma.pending, kept, "trigger at +{at}");
+            });
+        }
+    }
+
+    /// The lost-trigger window after a block that a HALT's latched opcode
+    /// waited for (`hdma::RAN`) ends at that block's full stall, however
+    /// long the flag then stays set: nothing clears it until the next
+    /// trigger or HALT, which can be more than 2^31 clocks (8.5 minutes)
+    /// away (review finding A1-04: a 32-bit end made such a trigger look
+    /// as if it came before the end, and its block was dropped).
+    #[test]
+    fn a_stale_ran_flag_loses_no_trigger_however_old() {
+        for (later, kept) in [
+            (0, false),
+            (1 << 31 | 64, true),
+            (1 << 32, true),
+            (3 << 31, true),
+        ] {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                ctx.write(0xFF26, 0x00); // APU off: no frame-sequencer events
+                // As `vram_dma` leaves it after such a block (1 + 8
+                // M-cycles) at this clock.
+                ctx.sys.vdma.refetch = hdma::RAN;
+                ctx.sys.vdma.switch_end = ctx.clock() + 36;
+                // `later` clocks pass (LCD off, nothing else scheduled).
+                ctx.hot.deadline += later;
+                ctx.write(0xFF40, 0x91);
+                ctx.sys.vdma.hblank = true;
+                let now = ctx.clock();
+                ctx.sys.sched.set(EventKind::VramDma, now + 4);
+                ctx.reschedule();
+                ctx.idle();
+                ctx.idle();
+                assert_eq!(ctx.clock(), now + 8);
+                assert_eq!(ctx.sys.vdma.pending, kept, "{later} clocks later");
+                assert_eq!(ctx.sys.vdma.refetch, 0);
             });
         }
     }

@@ -95,14 +95,16 @@ pub(crate) struct VramDma {
     /// stall (a stop event or its target); the next call resumes it
     /// before the CPU runs (ADR 0021, GDMA stall amendment).
     pub(crate) stall: u16,
-    /// Not VRAM DMA state: during the CGB speed-switch halt
-    /// (`Ctx::speed_switch`), the low 32 bits of the clock at which its
-    /// last M-cycle (the wake-up) starts; the halt is far shorter than
-    /// 2^31 clocks, so a wrapping compare is exact. After a [`RAN`] block,
-    /// the end of its full stall (the same way). Stale otherwise. Placed
-    /// in this struct's padding while `Hw` had a size cap (dropped
-    /// 2026-11-24); it belongs in `Sys`.
-    pub(crate) switch_end: u32,
+    /// Not only VRAM DMA state: during the CGB speed-switch halt
+    /// (`Ctx::speed_switch`), the clock at which its last M-cycle (the
+    /// wake-up) starts. After a [`RAN`] block, the end of its full stall.
+    /// Stale otherwise. A full clock, not its low 32 bits: `RAN` can stay
+    /// set for any length of time (until the next trigger or HALT), and
+    /// a wrapped compare then dropped a block (review finding A1-04).
+    /// The two uses cannot collide: the speed switch that sets this is
+    /// followed by `hdma_refetch`, which clears a `RAN` left over. The
+    /// speed-switch use belongs in `Sys`.
+    pub(crate) switch_end: u64,
     /// The mode-0 start clock of the last line whose HBlank trigger was
     /// scheduled or passed, so each line starts at most one block.
     pub(crate) line: u64,
@@ -672,7 +674,7 @@ mod tests {
     fn end_switch_halt(emu: &mut Emulator, at: impl Fn(&Emulator) -> Option<u64>) {
         for _ in 0..200_000 {
             if let Some(w) = at(emu) {
-                emu.hw.sys.vdma.switch_end = w as u32;
+                emu.hw.sys.vdma.switch_end = w;
                 return;
             }
             step(emu);
