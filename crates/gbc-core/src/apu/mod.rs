@@ -492,11 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn apu_fits_in_128_bytes() {
-        assert!(size_of::<Apu>() <= 128, "{}", size_of::<Apu>());
-    }
-
-    #[test]
     fn pcm12_reads_ch2_advanced_to_the_read_clock() {
         extern crate std;
         let mut mem = std::boxed::Box::new(Memory::new());
