@@ -12,6 +12,11 @@
 # deletes the scratch dir and exits with the exe's exit code. Set
 # GBC_AUDIO_STATS=1 and/or GBC_FRAME_STATS=1 to see audio and frame-pacing
 # statistics on stderr.
+#
+# Files (docs/desktop-diagnostics.md): GBC_FRAME_LOG=<linux path> writes the
+# per-frame CSV there (the exe writes it in the scratch dir; it is copied
+# back). --record-input / --frame-hashes <linux path> are copied back the
+# same way, and --replay-input <linux path> is copied in.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -28,8 +33,14 @@ out="$root/target/run-windows/last.png"
 has_frames=0
 has_shot=0
 args=()
+replay_in=""
+record_out=""
+hashes_out=""
 while [ $# -gt 0 ]; do
   case $1 in
+    --replay-input) [ $# -ge 2 ] || usage; replay_in=$2; shift 2 ;;
+    --record-input) [ $# -ge 2 ] || usage; record_out=$(realpath -m "$2"); shift 2 ;;
+    --frame-hashes) [ $# -ge 2 ] || usage; hashes_out=$(realpath -m "$2"); shift 2 ;;
     --out) [ $# -ge 2 ] || usage; out=$(realpath -m "$2"); shift 2 ;;
     --frames) has_frames=1; args+=("$1"); [ $# -ge 2 ] && { args+=("$2"); shift; }; shift ;;
     --screenshot) has_shot=1; args+=("$1"); [ $# -ge 2 ] && { args+=("$2"); shift; }; shift ;;
@@ -38,6 +49,9 @@ while [ $# -gt 0 ]; do
 done
 [ "$has_frames" = 1 ] || { echo "run-windows: --frames N is required (the window must close itself)" >&2; exit 2; }
 [ "$has_shot" = 0 ] || { echo "run-windows: use --out <file> instead of --screenshot" >&2; exit 2; }
+[ -z "$replay_in" ] || [ -f "$replay_in" ] || { echo "run-windows: no such recording: $replay_in" >&2; exit 2; }
+log_out=""
+[ -z "${GBC_FRAME_LOG:-}" ] || log_out=$(realpath -m "$GBC_FRAME_LOG")
 
 exe=$(cargo build -p gbc-desktop --release --target x86_64-pc-windows-gnu \
   --message-format=json-render-diagnostics \
@@ -53,8 +67,17 @@ cp "$exe" "$scratch/gbc-desktop.exe"
 rom_name=$(basename "$rom")
 cp "$rom" "$scratch/$rom_name"
 
-# The GBC_*_STATS variables reach the Windows process only via WSLENV.
-export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS:GBC_FRAME_STATS"
+win() { wslpath -w "$scratch/$1"; }
+if [ -n "$replay_in" ]; then
+  cp "$replay_in" "$scratch/replay.txt"
+  args+=(--replay-input "$(win replay.txt)")
+fi
+[ -z "$record_out" ] || args+=(--record-input "$(win record.txt)")
+[ -z "$hashes_out" ] || args+=(--frame-hashes "$(win hashes.txt)")
+[ -z "$log_out" ] || export GBC_FRAME_LOG="$(win frames.csv)"
+
+# The GBC_* variables reach the Windows process only via WSLENV.
+export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS:GBC_FRAME_STATS:GBC_FRAME_LOG"
 
 set +e
 (cd "$scratch" && ./gbc-desktop.exe "$(wslpath -w "$scratch/$rom_name")" \
@@ -70,4 +93,17 @@ if [ -f "$scratch/shot.png" ]; then
 else
   echo "run-windows: no screenshot was written" >&2
 fi
+copy_back() { # <scratch file> <destination> <what>
+  [ -n "$2" ] || return 0
+  if [ -f "$scratch/$1" ]; then
+    mkdir -p "$(dirname "$2")"
+    cp "$scratch/$1" "$2"
+    echo "run-windows: $3 $2"
+  else
+    echo "run-windows: no $3 was written" >&2
+  fi
+}
+copy_back frames.csv "$log_out" "frame log"
+copy_back record.txt "$record_out" "input recording"
+copy_back hashes.txt "$hashes_out" "frame hashes"
 exit "$code"
