@@ -1115,6 +1115,17 @@ impl Ctx<'_, '_> {
             self.dma_sync(now);
             now + m < self.sys.ppu.dma.end
         };
+        // The old transfer still moves a byte in the next M-cycle, if it
+        // is past its own start delay by then, but already on the new
+        // source's bus and address (gambatte: the FF46 write sets the new
+        // source at once and the old position runs on until the new
+        // start; cgb04c `oamdma_src8000_srcchange0000_busyinc`).
+        let old = self.sys.ppu.dma.start;
+        let tail = if restart && now + m >= old {
+            ((now + m - old) >> m.trailing_zeros()) as u8
+        } else {
+            dma::LEN
+        };
         let start = now + 2 * m;
         let end = start + u64::from(dma::LEN) * m;
         let mut d = OamDma {
@@ -1122,6 +1133,7 @@ impl Ctx<'_, '_> {
             start,
             block_from: if restart { now } else { start },
             end,
+            tail,
             mcycle: m as u8,
             ppu_live: true,
             ..OamDma::new()
@@ -1907,9 +1919,14 @@ pub(crate) fn read<const CPU: bool>(mem: &Memory, sys: &Sys, hot: &Hot, addr: u1
 
 /// The conflict for a CPU access to `addr` (below FE00) at `now` during
 /// the transfer `d`, and the index of the byte being transferred. No
-/// conflict in the start delay.
+/// conflict in the start delay, except in its first M-cycle after a
+/// restart: the old transfer's last byte ([`OamDma::tail`]).
 fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) {
     if now < d.start {
+        if d.tail < dma::LEN && now + mcycle as u64 == d.start {
+            let i = d.tail;
+            return (dma::conflict(d.base, d.base + u16::from(i), addr), i);
+        }
         return (Conflict::None, 0);
     }
     // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
@@ -3589,6 +3606,38 @@ mod dma_tests {
             idle_to(ctx, t0, 20 + 162);
             assert_eq!(ctx.read(0xFE00), 0xA5);
             assert_eq!(ctx.mem.oam[0x9F], 0x9F ^ 0xA5);
+        });
+    }
+
+    /// The M-cycle after a restarting FF46 write: the old transfer moves
+    /// its next byte from the new source, so a CPU access on the new
+    /// source's bus conflicts with that byte (gambatte cgb04c
+    /// `oamdma_src8000_srcchange0000_busyinc`).
+    #[test]
+    fn restart_moves_the_old_byte_from_the_new_source() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 20);
+            ctx.write(0xFF46, 0x40); // M-cycle 20: restart from ROM 4000
+            // M-cycle 21: the old transfer's byte 19, from 4013.
+            assert_eq!(ctx.read(0x0123), 19 ^ 0x3C);
+            // M-cycle 22: the new transfer's byte 0.
+            assert_eq!(ctx.read(0x0123), 0x3C);
+            // Restarted in its own start delay: byte 0 in the next M-cycle.
+            idle_to(ctx, t0, 200);
+            ctx.write(0xFF46, 0xC1); // M-cycle 200
+            ctx.write(0xFF46, 0x40); // 201
+            assert_eq!(ctx.read(0x0123), 0x3C); // 202: byte 0 from 4000
+            assert_eq!(ctx.read(0x0123), 0x3C); // 203: the new byte 0
+        });
+        // A fresh start conflicts with nothing in its start delay.
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            ctx.write(0xFF46, 0x40);
+            assert_eq!(ctx.read(0x0123), 0);
+            assert_eq!(ctx.read(0x0123), 0x3C);
         });
     }
 

@@ -98,4 +98,5 @@ the rest within ±0.6%. gbc-core `.text` +416 B (94,552 -> 94,968);
 VRAM-source transfer) whose first start-delay M-cycle already conflicts
 on the *new* source's bus (gambatte: the old transfer keeps running
 until the new one starts, with the new source's conflict area and
-pointer). Not modelled.
+pointer). Since modelled (2026-11-23, `OamDma::tail`;
+`docs/reference/oam-dma.md`, "Restart").

@@ -51,6 +51,12 @@ pub(crate) struct OamDma {
     pub(crate) halt_to: u64,
     /// Bytes transferred when that halt began.
     pub(crate) halt_dest: u8,
+    /// After a restart: the byte the old transfer moves in the M-cycle
+    /// after the FF46 write (the first of the new start delay), else
+    /// [`LEN`]. That M-cycle's CPU access conflicts as if it were byte
+    /// `tail` of the new transfer (`bus::dma_conflict`; gambatte cgb04c
+    /// `oamdma_src8000_srcchange0000_busyinc`).
+    pub(crate) tail: u8,
     /// The M-cycle length (4, or 2 in double speed) the transfer runs at.
     pub(crate) mcycle: u8,
     /// Set by the FF46 write; cleared by the PPU at the first line start
@@ -153,6 +159,7 @@ impl OamDma {
             halt_from: NEVER,
             halt_to: NEVER,
             halt_dest: 0,
+            tail: LEN,
             mcycle: 4,
             ppu_live: false,
         }

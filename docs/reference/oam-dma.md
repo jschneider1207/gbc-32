@@ -32,13 +32,21 @@ one was not yet in its last M-cycle (SameBoy: `dma_restarting = dest !=
 0xA1 && dest != 0xA0`), CPU OAM reads keep returning FF through the new
 start delay. A write in the old transfer's last M-cycle is a fresh start.
 Mooneye `acceptance/oam_dma_restart`.
-Not modelled: gambatte keeps the old transfer running through the new
-start delay with the *new* source's conflict area, so the CPU access one
-M-cycle after the FF46 write already conflicts on the new bus and reads
-the byte the old transfer is writing (taken from the new source page).
-gambatte cgb04c `oamdma_src8000_srcchange0000_busyinc` pins it: the
-first `INC A` fetched after the restart (from ROM, source 00) is lost;
-we lose only the two at bytes 0-1 and show 1, not 0.
+**The old transfer's last byte.** The FF46 write switches the source at
+once, but the old transfer still moves one more byte, in the M-cycle
+after the write (the first of the new start delay), from the *new*
+source: byte `j` (the old transfer's index then) is read from `new + j`.
+So that M-cycle's CPU access conflicts as if it were byte `j` of the new
+transfer, on the new source's bus (`OamDma::tail`, `bus::dma_conflict`);
+only if the old transfer is past its own start delay by then and not
+finished (`j` < 160). What lands in OAM byte `j` is not modelled (the new
+transfer rewrites it; only the PPU could see it). Source: gambatte cgb04c
+`oamdma_src8000_srcchange0000_busyinc` (a restart from VRAM to ROM page
+00: the `INC A` fetched in that M-cycle reads ROM byte `j` = 00 and is
+lost, as are the two at new bytes 0-1: out 0, where we showed 1);
+gambatte's `Memory` behaves this way (`oamDmaStartPos_ = oamDmaPos_ + 2`
+and the old position runs on with the new source; read for behaviour
+only). SameBoy has no such step.
 
 ## HALT pauses the transfer
 While the CPU is halted the DMA makes no progress, and the halted M-cycles
