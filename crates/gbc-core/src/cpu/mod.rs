@@ -554,8 +554,10 @@ impl Cpu {
     /// `Interrupter::interrupt` (writes at +12 and +16 clocks) agree; an
     /// OAM DMA pins the write M-cycles on CGB C (gambatte cgb04c
     /// `oamdma/oamdma_src0000_busyint0002`). IE is sampled after the high
-    /// byte is pushed and IF after the low byte, so a push that overwrites
-    /// IE (SP = 0) or a change of IF in between can cancel the dispatch;
+    /// byte is pushed and IF after the low byte (a low byte pushed onto IF
+    /// itself: IF before it, [`Bus::push_acknowledge`]), so a push that
+    /// overwrites IE (SP = 0) or a change of IF in between can cancel the
+    /// dispatch;
     /// PC is then 0000 (Mooneye `ie_push`; SameBoy `GB_cpu_run`). The
     /// chosen IF bit is cleared only in the last M-cycle (SameBoy: 2
     /// T-cycles into it), so the same source firing again by then is

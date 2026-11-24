@@ -1902,8 +1902,15 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
+        // A push onto IF itself (SP = FF10) chooses from IF as it was
+        // before the write: the write and the IF read are the same access
+        // (SameBoy `cycle_write_if`, which returns the old IF; gambatte
+        // cgb04c `irq_precedence/if_and_ie_0_vector_4`: SP = FF11 writes
+        // 0x80 to IF and the timer vector still runs).
+        let old = self.sys.iflags;
         self.write_mapped(addr, value);
-        let pending = ie & self.sys.iflags & INT_MASK;
+        let iflags = if addr == 0xFF0F { old } else { self.sys.iflags };
+        let pending = ie & iflags & INT_MASK;
         let bit = pending.isolate_lowest_one();
         if bit & PPU != 0 {
             // Only if a PPU edge can fall there (its deadline).
@@ -2853,6 +2860,29 @@ mod tests {
                 stat, !absorbed,
                 "M-cycle {m}, edge {edge}, last from - {before}"
             );
+        }
+    }
+
+    /// A dispatch's low-byte push onto IF (SP = FF10) chooses the vector
+    /// from IF as it was before that write (SameBoy `cycle_write_if`;
+    /// gambatte cgb04c `irq_precedence/if_and_ie_0_vector_4`). A push
+    /// elsewhere sees IF as it is after the write.
+    #[test]
+    fn dispatch_push_onto_if_chooses_from_the_old_if() {
+        use crate::timer::INT_TIMER;
+        for (addr, pending) in [(0xFF0F, INT_TIMER), (0xC000, 0)] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            ctx.sys.iflags = INT_TIMER;
+            if addr != 0xFF0F {
+                // The same IF change, by another access.
+                ctx.write(0xFF0F, 0x80);
+            }
+            let got = crate::cpu::Bus::push_acknowledge(&mut ctx, addr, 0x80, 0x1F);
+            assert_eq!(got, pending, "push to {addr:04X}");
+            assert_eq!(ctx.sys.iflags, 0, "push to {addr:04X}");
         }
     }
 
