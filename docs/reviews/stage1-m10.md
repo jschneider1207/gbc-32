@@ -48,13 +48,13 @@ been seen failing on the old code; until then it is a reviewer claim.
 |---|---|---|---|
 | A2-01 | high | CGB palette writes dropped while the LCD is off if it was turned off inside mode 3 (`Ppu::drawing` ignores LCD enable) | fixed 86c2f98 (confirmed: read back FF/00 instead of 1F; nothing else shared the hole) |
 | A2-02 | med | STAT IRQ model = two reference models spliced; walk a dot early at 0:4 and 153:12, five compensations | wave 5 (with E3/E4) |
-| A2-03 | med | Mid-line state in three structs, invariants held by `% 11` masks | wave 5 (after budget reform) |
-| A2-04 | low | Delayed LYC IRQ in IF bits 5-6 can be stranded/wiped/leaked | wave 5 (typed `Irq` event, E4) |
+| A2-03 | med | Mid-line state in three structs, invariants held by `% 11` masks | fixed (m10-ppu-state): renderer owns the fetch state; `Stalls` type replaces the masks |
+| A2-04 | low | Delayed LYC IRQ in IF bits 5-6 can be stranded/wiped/leaked | fixed (ADR 0033, timed requests in `Ppu::irq`; three scenarios were real behaviour bugs) |
 | A2-05 | low | LCDC.5 clear early on the WY line loses the WY latch for the frame | fixed 65f00bd (confirmed; SameBoy `wy_check` + Pan Docs) |
-| A2-06 | low | `obj_size_fetch` patches VRAM to pass a parameter (= E10) | wave 5 |
+| A2-06 | low | `obj_size_fetch` patches VRAM to pass a parameter (= E10) | fixed (m10-ppu-state) |
 | A2-07 | low | Write landing at `now - 1` on the mode-3 end dot keeps the old value for pixel 159 | plan |
 | A2-08 | low | Window zero pixel on CGB rests on one Mealybug capture, against SameBoy | rejected: the capture is CGB C hardware, our target (ADR 0003); tagged as single-source (E7) |
-| A2-09 | low | `Memory::clear` skips `obj_rank.hold`, `win_zero`, `dma_read_clears` (= D3) | wave 5 |
+| A2-09 | low | `Memory::clear` skips `obj_rank.hold`, `win_zero`, `dma_read_clears` (= D3) | fixed (m10-ppu-state; test seen failing) |
 | A2-10 | low | TILE_SEL set-glitch falls back to the old calibration when the latch is unknown | plan (oracle, wave 6) |
 | A2-11 | low | `stat_during_dma`, `fix_attrs` `d - 5`, DMG `POST_BOOT_POS` single-source | plan (tag unpinned, E7) |
 | A3-1 | med | 128-clock box filter leaves aliasing on high notes | wave 6: measure first; a fix that costs Ir goes to the human with numbers |
@@ -78,7 +78,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A1-01 | med | Plain STOP mode is a stub (machine keeps running; any button wakes) | fixed (branch m10-stop-mode; ADR 0020 amendment). Open for the human: APU channels keep playing in STOP (SameBoy CGB path) |
 | A1-02 | low | Speed switch runs `boundary()` with stale deadlines; serial bit can shift twice | fixed e8d960e (confirmed: 2 shifts; also a late scheduled input) |
 | A1-04 | low | `VramDma::switch_end` 32-bit, two meanings; stale `RAN` after 8.5-17 min | fixed: `switch_end` is a u64 (confirmed: block dropped 2^31 clocks later) |
-| A1-05 | low | State in unused bits/padding because of the `Hw` cap | wave 5 |
+| A1-05 | low | State in unused bits/padding because of the `Hw` cap | mostly fixed (IF bits, `switch_end`, PPU state); small scalars (inventory theme 1) open |
 | A1-06 | med | Speed switch/STOP timing is a composite of three emulators | wave 5: branch experiment (DIV reset after STOP's 2nd byte) |
 | A1-07 | low | Sub-M-cycle access offsets decided per site (= E4) | wave 5 |
 | A1-08 | low | `idle_speed_switch` spins if the halt end is off the M-cycle grid | fixed 7cc2345 |
@@ -90,7 +90,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | ID | Sev | Finding | Outcome |
 |---|---|---|---|
 | B1 | high | Unserviced TIMA overflows each run a scheduler event: 23.7% of worst-case (measured) | fixed 69247dd: worst-case -23.7%, event-storm -28.0%; lazy only while IF.2 is set and IE.2 clear (re-arming from the acknowledge path cost 720 B in `Cpu::run`) |
-| B2 | high | Serial: one event per bit (~11%, estimate) | wave 4 |
+| B2 | high | Serial: one event per bit (~11%, estimate) | fixed 13f5089-line (m10-serial-lazy): worst-case -13.9%, event-storm -28.5% |
 | B3 | high | 4.02 M x86-Ir line is not a stand-in for 50% of the M7 | human: line stays until an M7 measurement; relative +3% guard is the gate. Better proxies (QEMU thumb counts, i686 valgrind) need an install: Needs human |
 | B4 | high (M7) | u64 time arithmetic on every event/IO path | stage 2 (u32 epoch-relative stamps; needs the clock-offset net, E6) |
 | B5 | med | Scheduler bookkeeping 9-12% inside `boundary` | wave 4 |
@@ -125,7 +125,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 |---|---|---|---|
 | D1 | high | `Hw` cap drives state into wrong owners; cap inconsistent and measured on x86 | wave 1 (cap dropped, human) then wave 5 (moves) |
 | D2 | high | `bus.rs`/`Ctx` god-module, nine seams | wave 5 (after `codegen-units = 1`) |
-| D3 | med | `Memory` as overflow area; `ObjRank` misnamed; `clear()` != `new()` | wave 5 |
+| D3 | med | `Memory` as overflow area; `ObjRank` misnamed; `clear()` != `new()` | fixed (m10-ppu-state) |
 | D4 | med | Speed represented six ways; time units bare integers | wave 5 (`Speed` enum first) |
 | D5 | med | Overflow checks/debug asserts never run on the corpus | fixed fc92df4 (`checked` profile; fuzz gate uses it) |
 | D6 | med | PPU mid-line code shape (184-line fn, packed bytes, tuples) | wave 5/6 (follows E1's decision) |
@@ -151,8 +151,8 @@ been seen failing on the old code; until then it is a reviewer claim.
 | E5 | med | CPU fetch-overlap modes port gambatte's `prefetched_` | stage 2 (touches `Cpu::run`; wants the real-game net) |
 | E6 | med | Net gaps: audio samples, long runs, sync placement, real-game frames | fixed: `check-sync-invariance.sh` (eager-sync and clock-offset features, 30-minute checked run), in the gate. Corpus identical except one known ROM (line-0 mode-2 pulse depends on its deadline placement; goes with E4). Real-game frames: still open |
 | E7 | med | Unpinned / single-ROM behaviours | wave 5 (tag in code + list in docs/reference) |
-| E9 | low | Five hand-written stall-list loops | wave 5 |
-| E10 | low | = A2-06 | wave 5 |
+| E9 | low | Five hand-written stall-list loops | fixed (`ppu/stalls.rs`) |
+| E10 | low | = A2-06 | fixed |
 | E11 | low | = D7 | wave 5 |
 
 ## Log of outcomes
