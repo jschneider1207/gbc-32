@@ -219,15 +219,43 @@ fn collect(dir: &Path, s: &Suite, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `Err` if the ROM fails to read or load. `audio`: the per-call audio
-/// buffer length (0: empty).
-fn fingerprint(
-    path: &Path,
-    end: u64,
-    input: bool,
-    audio: usize,
-    hash_samples: bool,
-) -> Result<u64, String> {
+/// How every run of a fingerprint pass is made.
+#[derive(Clone, Copy, Default)]
+pub struct Opts {
+    /// The per-call audio buffer length (0: empty).
+    pub audio: usize,
+    /// Fold the samples into the hash (needs `audio`).
+    pub hash_samples: bool,
+    /// Power on with the clock at this value (`--clock-offset`, the
+    /// `clock-offset` feature). Every clock that is hashed or passed in is
+    /// taken relative to it, so the lines must equal those of a run from 0.
+    pub clock_offset: u64,
+}
+
+/// Moves the power-on state to clock `offset` (not 0).
+#[cfg(feature = "clock-offset")]
+fn start_clock_at(emu: &mut Emulator<'_>, offset: u64) {
+    emu.start_clock_at(offset);
+}
+
+/// Without the feature the core has no such hook; `fingerprint_main`
+/// refuses `--clock-offset` before any run.
+#[cfg(not(feature = "clock-offset"))]
+fn start_clock_at(_: &mut Emulator<'_>, _: u64) {
+    unreachable!("--clock-offset without the clock-offset feature");
+}
+
+/// Whether this build can honor `--clock-offset`.
+pub const HAS_CLOCK_OFFSET: bool = cfg!(feature = "clock-offset");
+
+/// `Err` if the ROM fails to read or load. `trace`: print one line per
+/// chunk (`--trace`), to find where two builds or offsets part.
+fn fingerprint(path: &Path, end: u64, input: bool, opts: Opts, trace: bool) -> Result<u64, String> {
+    let Opts {
+        audio,
+        hash_samples,
+        clock_offset: base,
+    } = opts;
     let rom = match path.to_str().and_then(|p| p.strip_prefix("synth:")) {
         Some(name) => crate::synth::build(name).ok_or("unknown synthetic ROM")?,
         None => std::fs::read(path).map_err(|e| e.to_string())?,
@@ -241,6 +269,9 @@ fn fingerprint(
     };
     emu.load(&rom, &mut cart_ram, config)
         .map_err(|e| e.to_string())?;
+    if base != 0 {
+        start_clock_at(&mut emu, base);
+    }
     let stop = Events::LD_B_B | Events::SERIAL_TX;
     emu.set_stop_events(stop);
     // The stops a call would have had without audio.
@@ -253,14 +284,14 @@ fn fingerprint(
 
     let mut h = Fnv::new();
     let mut next_input = 0u64;
-    while emu.clock() < end {
+    while emu.clock() - base < end {
         let target = emu.clock() + CHUNK_CLOCKS;
         if input {
             // Queue every change due before the chunk ends; whether the
             // core accepted it is part of the hash.
-            while input_change(next_input).0 < target {
+            while input_change(next_input).0 + base < target {
                 let (clock, buttons) = input_change(next_input);
-                h.byte(u8::from(emu.set_buttons_at(clock, buttons)));
+                h.byte(u8::from(emu.set_buttons_at(clock + base, buttons)));
                 next_input += 1;
             }
         }
@@ -283,7 +314,7 @@ fn fingerprint(
                 break;
             }
         }
-        h.u64(emu.clock());
+        h.u64(emu.clock() - base);
         h.u64(clocks);
         h.bytes(&events.bits().to_le_bytes());
         if events.contains(Events::SERIAL_TX) {
@@ -298,6 +329,39 @@ fn fingerprint(
         h.bytes(&g.pc.to_le_bytes());
         h.peek_range(&emu, 0xFF00..=0xFF7F);
         h.byte(emu.peek(0xFFFF));
+        if trace {
+            // The hash so far, the clock after the chunk (less the offset),
+            // the events, then what usually parts first.
+            println!(
+                "{:016x} {:>10} ev={:04x} pc={:04x} sp={:04x} af={:02x}{:02x} bc={:02x}{:02x} \
+                 de={:02x}{:02x} hl={:02x}{:02x} div={:02x} tima={:02x} if={:02x} ie={:02x} \
+                 lcdc={:02x} stat={:02x} ly={:02x} nr52={:02x} pcm={:02x}{:02x} hdma5={:02x}",
+                h.0,
+                emu.clock() - base,
+                events.bits(),
+                g.pc,
+                g.sp,
+                g.a,
+                g.f,
+                g.b,
+                g.c,
+                g.d,
+                g.e,
+                g.h,
+                g.l,
+                emu.peek(0xFF04),
+                emu.peek(0xFF05),
+                emu.peek(0xFF0F),
+                emu.peek(0xFFFF),
+                emu.peek(0xFF40),
+                emu.peek(0xFF41),
+                emu.peek(0xFF44),
+                emu.peek(0xFF26),
+                emu.peek(0xFF76),
+                emu.peek(0xFF77),
+                emu.peek(0xFF55),
+            );
+        }
     }
     h.peek_range(&emu, 0x8000..=0x9FFF);
     h.peek_range(&emu, 0xC000..=0xDFFF);
@@ -314,9 +378,36 @@ struct Run {
     input: bool,
 }
 
-pub fn run(root: &Path, secs: u64, audio: usize, hash_samples: bool) -> std::process::ExitCode {
+/// `--trace <run>`: one run of the corpus (a path under `root` or
+/// `synth:<name>`, with `#input` for the input pass), a line per chunk.
+/// The run length is that of the corpus entry the path belongs to.
+pub fn trace(root: &Path, secs: u64, opts: Opts, run: &str) -> std::process::ExitCode {
+    let (rel, input) = match run.strip_suffix("#input") {
+        Some(p) => (p, true),
+        None => (run, false),
+    };
+    let (path, div) = if rel.starts_with("synth:") {
+        (PathBuf::from(rel), 1)
+    } else {
+        let div = if rel.starts_with("gambatte") { 8 } else { 1 };
+        (root.join(rel), div)
+    };
+    let end = secs * u64::from(CLOCK_HZ) / div;
+    match fingerprint(&path, end, input, opts, true) {
+        Ok(h) => {
+            println!("{h:016x} {run}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("bench: {run}: {e}");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+pub fn run(root: &Path, secs: u64, opts: Opts) -> std::process::ExitCode {
     let mut runs = Vec::new();
-    if hash_samples {
+    if opts.hash_samples {
         // The worst case one channel at a time too (`@<mask>`).
         let solo = [
             "worst-case@1",
@@ -370,7 +461,7 @@ pub fn run(root: &Path, secs: u64, audio: usize, hash_samples: bool) -> std::pro
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(r) = runs.get(i) else { break };
-                    let h = fingerprint(&r.path, r.end, r.input, audio, hash_samples);
+                    let h = fingerprint(&r.path, r.end, r.input, opts, false);
                     results.lock().expect("lock")[i] = Some(h);
                 }
             });

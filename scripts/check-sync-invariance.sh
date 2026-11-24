@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Invariance checks for the lazy catch-up core (docs/perf.md, "Invariance
+# checks"; ADR 0002, 0011, 0014, 0021 section 3):
+#
+#   1. Sync placement. A bench built with gbc-core's test-only `eager-sync`
+#      feature (every lazy component brought up to the clock at every
+#      M-cycle, before the access) must print the same `--fingerprint`
+#      lines as the product build, without audio and with
+#      `--audio-buffer 7 --hash-samples`.
+#   2. Clock offset. A bench built with the test-only `clock-offset`
+#      feature, powered on with the clock just below 2^31, 2^32, 2^33 and
+#      2^40 (each boundary is crossed during every run), must print the
+#      same lines as the product build run from clock 0.
+#   3. With --long: `bench --long`, a few workloads for 30 emulated
+#      minutes (past 2^32 clocks), must finish without a panic.
+#
+#   scripts/check-sync-invariance.sh [--long] [--long-only]
+#
+# The product build is the plain release bench (the main target dir, as
+# check-bench.sh builds it). The two feature builds and the long run use
+# the `checked` profile (overflow checks and debug assertions on) in their
+# own target dir, target/invariance, so they neither thrash the main build
+# cache nor leave a feature-built `bench` where a measured one is expected.
+# Test ROMs: $TEST_ROMS (default test-roms/). About 4.5 minutes; --long adds
+# about 1. Heavy (8 threads): run it alone.
+#
+# Exit 0 iff every line is identical, apart from the known differences
+# listed below (each must still differ: a stale entry fails too).
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+# Known sync-placement differences: `<run>|<diagnosis>`, one per line.
+# Adding one is a decision, not a fix: say what state depends on when the
+# sync happens. An entry whose run no longer differs fails the check.
+KNOWN_EAGER=(
+  # Single speed, line 0's mode-2 pulse: the walk point is at dot 4 but the
+  # CPU must see its IF request a dot later, which `Ppu::next_event` gets by
+  # putting the deadline one past the point ("only a sync at it ... posts
+  # it"). A sync on the point itself (this ROM's IF read is at an M-cycle
+  # boundary there, 0:4) posts it a dot early, so IF depends on whether
+  # anything synced the PPU at that exact dot. Named in `next_event`'s doc.
+  "gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1_cgb04c_out98.gbc|IF bit 1 at line 0 dot 4 (single speed): the mode-2 pulse is posted by the sync, one dot late by deadline only"
+)
+
+ROMS_DIR=${TEST_ROMS:-test-roms}
+TDIR=target/invariance
+# Clock offsets (multiples of 4): below each boundary by less than the
+# shortest run (gambatte: 1,572,864 clocks), so every run crosses it; two
+# are 4 mod 8 (the APU's 2 MHz phase moves with them).
+OFFSETS=(
+  $(( (1 << 31) - 400004 ))
+  $(( (1 << 32) - 700000 ))
+  $(( (1 << 33) - 1000004 ))
+  $(( (1 << 40) - 1300000 ))
+)
+
+long=0
+short=1
+for a in "$@"; do
+  case "$a" in
+    --long) long=1 ;;
+    --long-only) long=1; short=0 ;;
+    *) echo "usage: $0 [--long] [--long-only]" >&2; exit 2 ;;
+  esac
+done
+
+[ -d "$ROMS_DIR" ] || { echo "check-sync-invariance: $ROMS_DIR missing (run scripts/fetch-test-roms.sh or set TEST_ROMS)" >&2; exit 2; }
+
+# Builds bench with the given cargo arguments and prints the path of the
+# binary cargo just built (never a hard-coded, possibly stale, path).
+build() {
+  local bin
+  bin=$(cargo build -p bench --quiet --message-format=json "$@" \
+    | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
+  [ -n "$bin" ] && [ -x "$bin" ] || { echo "check-sync-invariance: cannot find the bench binary cargo built ($*)" >&2; exit 2; }
+  echo "$bin"
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+# fingerprint <binary> <out> [bench --fingerprint args]: a run that dies
+# (a panic under the checked profile) or loads fewer ROMs fails the check.
+fingerprint() {
+  local bin=$1 out=$2
+  shift 2
+  if ! "$bin" --fingerprint --root "$ROMS_DIR" "$@" > "$out"; then
+    echo "FAIL: $bin --fingerprint $* did not finish (a panic is printed above)" >&2
+    exit 1
+  fi
+  if grep -q '^LOAD-ERROR' "$out"; then
+    echo "FAIL: $(grep -c '^LOAD-ERROR' "$out") ROMs failed to load ($bin $*)" >&2
+    exit 1
+  fi
+}
+
+# compare <label> <reference> <output> [known entries...]: prints the runs
+# whose hash differs. Sets fail=1 for a run that differs and is not known,
+# a known run that does not differ, and a run on one side only.
+compare() {
+  local label=$1 ref=$2 out=$3
+  shift 3
+  local diffs="$tmp/diffs" n=0 known=0 e p
+  awk '
+    { h = $1; p = $0; sub(/^[^ ]* /, "", p) }
+    NR == FNR { old[p] = h; seen[p] = 0; next }
+    { if (!(p in old)) print "ONLY-NEW\t" p
+      else { seen[p] = 1; if (old[p] != h) print "DIFF\t" p "\t" old[p] " -> " h } }
+    END { for (p in seen) if (!seen[p]) print "ONLY-REF\t" p }
+  ' "$ref" "$out" | sort > "$diffs"
+  while IFS=$'\t' read -r kind path hashes; do
+    if [ "$kind" != DIFF ]; then
+      echo "FAIL  $label: $kind $path"
+      fail=1
+      continue
+    fi
+    local why=""
+    for e in "$@"; do
+      [ "${e%%|*}" = "$path" ] && why=${e#*|}
+    done
+    if [ -n "$why" ]; then
+      echo "KNOWN $label: $path  $hashes  ($why)"
+      known=$((known + 1))
+    else
+      echo "DIFF  $label: $path  $hashes"
+      n=$((n + 1))
+      fail=1
+    fi
+  done < "$diffs"
+  for e in "$@"; do
+    p=${e%%|*}
+    if ! grep -qF "DIFF	$p	" "$diffs"; then
+      echo "STALE $label: $p is listed as a known difference but does not differ: remove the entry"
+      fail=1
+    fi
+  done
+  echo "$label: $(wc -l < "$out") runs, $n differ, $known known differences"
+}
+
+if [ "$short" = 1 ]; then
+  echo "check-sync-invariance: building (release; checked + eager-sync; checked + clock-offset)" >&2
+  ref=$(build --release)
+  # The two feature builds share a target dir, so each binary is copied
+  # before the next build replaces it.
+  cp "$(build --profile checked --features eager-sync --target-dir "$TDIR")" "$tmp/bench-eager"
+  cp "$(build --profile checked --features clock-offset --target-dir "$TDIR")" "$tmp/bench-offset"
+
+  AUDIO=(--audio-buffer 7 --hash-samples)
+  fingerprint "$ref" "$tmp/ref.txt"
+  fingerprint "$ref" "$tmp/ref-audio.txt" "${AUDIO[@]}"
+
+  fingerprint "$tmp/bench-eager" "$tmp/eager.txt"
+  compare "eager-sync" "$tmp/ref.txt" "$tmp/eager.txt" "${KNOWN_EAGER[@]}"
+  fingerprint "$tmp/bench-eager" "$tmp/eager-audio.txt" "${AUDIO[@]}"
+  compare "eager-sync, ${AUDIO[*]}" "$tmp/ref-audio.txt" "$tmp/eager-audio.txt" "${KNOWN_EAGER[@]}"
+
+  for off in "${OFFSETS[@]}"; do
+    fingerprint "$tmp/bench-offset" "$tmp/offset.txt" "${AUDIO[@]}" --clock-offset "$off"
+    compare "clock-offset $off, ${AUDIO[*]}" "$tmp/ref-audio.txt" "$tmp/offset.txt"
+  done
+fi
+
+if [ "$long" = 1 ]; then
+  echo "check-sync-invariance: long run (checked profile, no features)" >&2
+  bench=$(build --profile checked --target-dir "$TDIR")
+  if ! "$bench" --long --root "$ROMS_DIR"; then
+    echo "FAIL  long run"
+    fail=1
+  fi
+fi
+
+if [ "$fail" != 0 ]; then
+  echo "check-sync-invariance: FAILED" >&2
+  exit 1
+fi
+echo "check-sync-invariance: ok"

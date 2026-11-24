@@ -1,6 +1,7 @@
 //! Runs one ROM headless for a fixed number of emulated clocks.
 //!
-//! Wall-clock mode: `bench --wall` (wall.rs).
+//! Wall-clock mode: `bench --wall` (wall.rs). Long run: `bench --long`
+//! (long.rs).
 //!
 //! Usage: `bench <rom | synth:<name>> <emulated-seconds>` (synthetic ROMs:
 //! synth.rs), or `bench --fingerprint` (fingerprint.rs). It is meant to run
@@ -20,6 +21,7 @@ use gbc_core::{
 };
 
 mod fingerprint;
+mod long;
 mod synth;
 mod wall;
 
@@ -28,16 +30,17 @@ mod wall;
 /// never splits a call.
 const AUDIO_SLOTS: usize = 1024;
 
-/// `bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N]`.
+/// `bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N
+/// [--hash-samples]] [--clock-offset N] [--trace RUN]`.
 fn fingerprint_main(args: &[String]) -> ExitCode {
     let mut secs = 3u64;
     let mut root = "test-roms".to_string();
-    let mut audio = 0usize;
-    let mut hash_samples = false;
+    let mut opts = fingerprint::Opts::default();
+    let mut trace = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "--hash-samples" {
-            hash_samples = true;
+            opts.hash_samples = true;
             continue;
         }
         let v = it.next();
@@ -51,22 +54,38 @@ fn fingerprint_main(args: &[String]) -> ExitCode {
             // Per-call audio buffers of N samples (the hash must not change:
             // ADR 0021 section 3, fingerprint.rs).
             ("--audio-buffer", Some(v)) if v.parse::<usize>().is_ok_and(|n| n >= 1) => {
-                audio = v.parse().unwrap_or(1);
+                opts.audio = v.parse().unwrap_or(1);
             }
+            // Power on with the clock at N (a multiple of 4; needs the
+            // `clock-offset` feature). The lines must not change
+            // (docs/perf.md "Clock-offset invariance").
+            ("--clock-offset", Some(v)) if v.parse::<u64>().is_ok_and(|n| n % 4 == 0) => {
+                opts.clock_offset = v.parse().unwrap_or(0);
+            }
+            // One run only, a line per chunk (to locate a difference).
+            ("--trace", Some(v)) => trace = Some(v.clone()),
             _ => {
                 eprintln!(
                     "usage: bench --fingerprint [--seconds N (>= 1)] [--root DIR] \
-                     [--audio-buffer N (>= 1) [--hash-samples]]"
+                     [--audio-buffer N (>= 1) [--hash-samples]] \
+                     [--clock-offset N (multiple of 4)] [--trace RUN]"
                 );
                 return ExitCode::from(2);
             }
         }
     }
-    if hash_samples && audio == 0 {
+    if opts.hash_samples && opts.audio == 0 {
         eprintln!("bench: --hash-samples needs --audio-buffer N");
         return ExitCode::from(2);
     }
-    fingerprint::run(Path::new(&root), secs, audio, hash_samples)
+    if opts.clock_offset != 0 && !fingerprint::HAS_CLOCK_OFFSET {
+        eprintln!("bench: --clock-offset needs a build with --features clock-offset");
+        return ExitCode::from(2);
+    }
+    match trace {
+        Some(run) => fingerprint::trace(Path::new(&root), secs, opts, &run),
+        None => fingerprint::run(Path::new(&root), secs, opts),
+    }
 }
 
 /// The measured region: callgrind collects only while this function is on
@@ -101,6 +120,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "--wall") {
         return wall::main(&args[2..]);
+    }
+    if args.get(1).is_some_and(|a| a == "--long") {
+        return long::main(&args[2..]);
     }
     if args.get(1).is_some_and(|a| a == "--fingerprint") {
         return fingerprint_main(&args[2..]);

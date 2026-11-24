@@ -12,3 +12,9 @@ workspace = true
 
 [dependencies]
 gbc-core = { path = "../../crates/gbc-core" }
+
+# Test-only core hooks, for scripts/check-sync-invariance.sh (docs/perf.md
+# "Invariance checks"). Never enabled for a measured or product build.
+[features]
+eager-sync = ["gbc-core/eager-sync"]
+clock-offset = ["gbc-core/clock-offset"]
