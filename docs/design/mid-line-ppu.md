@@ -1027,7 +1027,9 @@ here), with one object per 8-line band at X = 0..17.
   boundary", "previous line's object in another tile") fits both. The CPU
   side is identical on every line (NOP slide, 456-dot lines). SameBoy
   predicts the 129-135 behaviour for those lines too. CGB C and D captures
-  agree, so it isn't a photo artifact.
+  agree, so it isn't a photo artifact. (Explained later by the TILE_SEL
+  set glitch's latch carried over from the previous line, not modelled:
+  "TILE_SEL set glitch" below.)
 - **Tests** (mutation-checked): `bg_fetch_keeps_its_dots_through_an_object_stall`
   (old stall rule; late always / never for sets; junk stall counted for the
   junk tile; object stall only up to the write; no-walk shortcut taken at
@@ -1133,3 +1135,87 @@ per line drawn black where CGB B/C/E show colors 2 3 2 3 ...: low plane
   `synth:worst-case` 478,037,092 (main at the previous step 478,066,560:
   unchanged, the render path is untouched), `cgb-acid2` 689,053,234
   (689,060,632), `synth:cgb-raster` 321,789,726 (321,827,995).
+
+### TILE_SEL set glitch (step G, rest; branch `m9-tile-sel-set`)
+
+Mealybug `m3_lcdc_tile_sel_change2` (95 px after the clear glitch) and
+`m3_lcdc_tile_sel_win_change2` (106 px). Each line (0-63) sets LCDC.4
+(8800 -> 8000 data), clears it 8 dots later, three times 24 dots apart;
+objects at X = 1 or 5 and 10-13 move the writes by one dot per 8-line
+band. 9000-97FF holds only I and J (X and Y copied there), so the BG is
+blank unless a plane comes from 8000.
+
+- **Localised.** Every wrong pixel is in a tile a set reaches (x 16-23,
+  40-47, 64-71), on the bands whose set lands on a read dot (phase 3: the
+  low plane, lines 24-30; phase 5: the high plane, lines 40-46; in the
+  window ROM lines 40-46 and 56-62). That plane is neither the old nor the
+  new data: for the first set, the high plane of the line's last object
+  (`3` rows 1-6: C3 99 F1 ... in lines 25-30); for the second and third,
+  the 8000 byte of the plane the clear 16 dots earlier glitched (`D`, `G`
+  low rows: FE FF ... FE). Rows 0 and 7, where those bytes equal the
+  tile's own, show nothing (lines 24, 31, 47). Not the one-line issue of
+  `m3_lcdc_tile_sel_change` / `_win_change`.
+- **Rule.** Mealybug TILE_SEL notes: a set on a plane's read dot uses
+  "bitplane 1 data from the most recently drawn sprite, if any, or
+  bitplane 1 data from the most recently drawn tile as when TILE_SEL was
+  last reset". SameBoy (`data_for_sel_glitch`, MIT) has it in double speed
+  only (the last high-plane read). The captures fit a latch of the last
+  byte read with 8000 addressing: object reads, and BG reads whose address
+  step saw LCDC.4 set, a clear's glitched read at the old address
+  included; reads with LCDC.4 clear leave it (else the second set would
+  get 9000's empty `E`). An object at OAM X (screen x X - 8) is fetched
+  after the BG reads of the tile at x = X, which the fetcher finishes
+  first (SameBoy), and before those of later tiles.
+- **Model.** `tile_lead` also returns the slot of the last object stall
+  before tile j's fetch window (fetched before tile j + 1's reads);
+  `hold_fetch` puts slot + 1 in `Held::planes` bits 4-7. `ObjRank::sel_latch`
+  holds this line's last clear-glitched read and its tile's x (reset at the
+  line start in `Ppu::latch`). The cold `Renderer::tile_sel_glitch` (out of
+  `mix_planes`) gives the object's high plane (`Renderer::obj_high_addr`,
+  now shared with `obj_size_fetch`) unless the clear's read came later,
+  else the clear's byte.
+- **`LCDC_TILES_LATE` for sets.** The old exception (a set "on time" with
+  an object stall in tile j or j + 1) is gone from the timing: in
+  `m3_lcdc_tile_sel_change` X = 3 and 5-7 it was a set on a read dot whose
+  latch is the (R) junk object's high plane, empty like 9000's tile (the
+  same pixels); at X = 4 late 0 and 1 give the same planes. It survives
+  only as the fallback below.
+- **Not modelled: a latch from an earlier line.** With neither an object
+  nor a clear before the read on the line, the plane is what the old
+  calibration gave: old with an object stall in tile j or j + 1 (bits 4-7
+  = 15: `m3_lcdc_tile_sel_change` X = 16-17, `_win_change` X = 8-17), else
+  new (gambatte `bgtiledata_spx*`, lines without objects). The hardware
+  latch persists: a trial that carried it over (the previous line's last
+  object from an OAM scan, or its clear's byte) passed
+  `m3_lcdc_tile_sel_change` (its line 128 needs line 127's clear byte FF,
+  lines 129-135 line 128's object, empty: the unexplained 8 px of
+  "Mealybug C and D") but cost ~970 B and lost `bgtiledata_spx08/09/0A_1/_3`,
+  whose lines 16-143 need the previous line's last BG read with LCDC.4 set
+  (FF), which it didn't track. `_win_change` line 64 likewise needs line
+  63's set-glitched read to latch the new (8000) byte, which SameBoy's
+  code doesn't do. Also not modelled: BG reads with LCDC.4 set since the
+  last clear, the read in progress at pixel 159/160 and revision
+  differences (Mealybug).
+- **Result.** Full manifest: 2 fail -> pass (the two ROMs, 95 and 106 px
+  -> 0), 0 regressions; `m3_lcdc_tile_sel_change` and `_win_change` stay
+  at 8 px (the earlier-line latch above). `diff-fingerprint.sh main`:
+  exactly the two ROMs differ (4 runs with `#input`).
+- **Test** (mutation-checked: set glitch off; object ignored; clear's byte
+  not latched; object/clear recency ignored; fallback always new; no
+  last-object slot from `tile_lead`; object low plane instead of high; no
+  line-start reset): `tile_data_set_on_a_plane_read_dot_uses_the_latch`.
+  Existing tests unchanged (the set case of
+  `tile_data_clear_on_a_plane_read_dot_uses_the_tile_index` is the
+  no-latch fallback).
+- **Cost.** `.text` 97,106 -> 97,378 B of 97,500 (+272, all cold or
+  per line): `tile_sel_glitch` 204, `obj_high_addr` 122 (`obj_size_fetch`
+  712 -> 624), `mix_planes` +26, `hold_fetch` +16, `Ppu::latch` +8 (the
+  line-start reset), `tile_lead` and `render_held` -8 each. Smaller
+  variants measured: the object search inline in `mix_planes` +358; the
+  whole decision in `hold_fetch` +292-380 (LLVM grew `hold_fetch` by
+  100-150 B); the latch in `Renderer` pushed `Hw` to 872 B (limit 864).
+  Bench (x86 Ir, `check-bench.sh`, before the rebase onto the APU commit):
+  `synth:worst-case` 478,186,727 (previous step 478,037,092: +0.03%,
+  4.003 M Ir per emulated frame, 99.6% of the 4.02 M line), `cgb-acid2`
+  689,230,519 (689,053,234), `synth:cgb-raster` 321,789,917
+  (321,789,726).
