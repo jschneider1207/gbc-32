@@ -177,8 +177,7 @@ pub(crate) fn fmt_flags(
 ) -> core::fmt::Result {
     f.write_str(open)?;
     let mut first = true;
-    let mut i = 0;
-    while let Some(&(name, flag)) = flags.get(i) {
+    for &(name, flag) in flags {
         // `contains`: every bit of the flag is set.
         if bits & flag == flag {
             if !first {
@@ -187,9 +186,6 @@ pub(crate) fn fmt_flags(
             f.write_str(name)?;
             first = false;
         }
-        // Opaque to the optimizer, so it doesn't unroll the loop (several
-        // hundred bytes on thumbv7em for code that is never hot).
-        i = core::hint::black_box(i) + 1;
     }
     let unknown = bits & !all;
     if unknown != 0 {
