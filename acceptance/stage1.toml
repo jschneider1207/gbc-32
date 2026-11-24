@@ -251,7 +251,21 @@ exclude = [
   "same-suite/apu/channel_4/channel_4_lfsr_restart_fast.gb",
   "same-suite/apu/channel_4/channel_4_freq_change.gb",
   "same-suite/apu/channel_4/channel_4_frequency_alignment.gb",
+  "same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb",
 ]
+exit = { ld_b_b = true, timeout_s = 120 }
+checks = [{ fibonacci = true }]
+
+# Signed off (human, 2026-11-23, session 14): needs the CGB C PCM12 read
+# glitch (its left digit; the asm says so). A model of it fitted to this
+# ROM broke 14 passing SameSuite ch1/ch2 ROMs that expect CGB E reads, and
+# no hardware capture pins the glitch down. We keep CGB E reads. Evidence:
+# docs/reference/apu.md (PCM12/PCM34), docs/plan/m9-triage.md group 15.
+[[group]]
+# source: same-suite/game-boy-test-roms-howto.md
+id = "same-suite-apu-pcm-glitch"
+tier = "stretch"
+roms = ["same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb"]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
 
