@@ -361,7 +361,7 @@ impl Apu {
         let env = match reg {
             0x14 => {
                 let ch1 = &mut self.sq[0];
-                let skip = self.sweep.due || fs & 3 == 2 && dist <= 8;
+                let skip = self.sweep.due && self.sweep.check == 0 || fs & 3 == 2 && dist <= 8;
                 self.sweep.trigger(ch1, skip);
                 &mut ch1.env
             }
@@ -446,10 +446,11 @@ mod tests {
     use super::*;
 
     impl Apu {
-        /// A DIV-APU edge with its sweep step at once (no lag).
+        /// A DIV-APU edge with its sweep step and overflow check at once
+        /// (no lag).
         pub(crate) fn edge(&mut self) {
             self.step();
-            if self.sweep.due {
+            while self.sweep.due {
                 self.sweep.clock(&mut self.sq[0]);
             }
         }
@@ -651,7 +652,7 @@ mod tests {
         }
         assert_eq!(apu.sq[0].freq, 0x100, "not yet");
         apu.sweep.clock(&mut apu.sq[0]);
-        assert!(!apu.sweep.due);
+        assert_eq!((apu.sweep.due, apu.sweep.check), (true, 1), "the check");
         assert_eq!(apu.sq[0].freq, 0x180);
         // Period 2: the first sweep step only counts down, at once.
         let mut apu = ch1_playing(0x21, 0x100);
@@ -692,6 +693,15 @@ mod tests {
             "no sweep step next"
         );
         assert_eq!(sweep_timer_after_trigger(3, 4, true), 3, "inside the lag");
+        // Inside the overflow check after a step: the step is done.
+        let mut apu = Apu::new();
+        apu.power_on(0, false);
+        apu.fs.step = 3;
+        (apu.sweep.due, apu.sweep.check) = (true, 3);
+        for (reg, v) in [(0x10, 0x20), (0x12, 0xF0), (0x14, 0x87)] {
+            apu.write(reg, v, 100, false, 104);
+        }
+        assert_eq!(apu.sweep.timer, 2, "inside the check");
         assert_eq!(sweep_timer_after_trigger(3, 8000, false), 2);
     }
 

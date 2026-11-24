@@ -553,8 +553,9 @@ impl Ctx<'_, '_> {
     }
 
     /// Sets the `DivApu` deadline at clock `now`, after a frame-sequencer
-    /// step or a counter rebase: `SWEEP_LAG` clocks on while a sweep step
-    /// is pending (`Sweep::due`; a rebase inside the lag, at most 2 clocks
+    /// step, a sweep event or a counter rebase: `SWEEP_LAG` clocks on while
+    /// a sweep step or overflow-check tick is pending (`Sweep::due`; a
+    /// rebase inside the lag, at most 2 clocks
     /// into it in double speed, moves it by that much), else the next
     /// DIV-APU edge.
     #[inline(never)]
@@ -608,7 +609,8 @@ impl Ctx<'_, '_> {
     }
 
     /// A DIV-APU falling edge (`EventKind::DivApu`, due at `now`), or the
-    /// sweep step `SWEEP_LAG` clocks after one (`Sweep::due`).
+    /// pending sweep event `SWEEP_LAG` clocks after the last one
+    /// (`Sweep::due`: the step, or a tick of its overflow check).
     #[inline(never)]
     fn div_apu_event(&mut self, now: u64) {
         self.apu_sync(now);
@@ -3288,7 +3290,8 @@ mod tests {
     /// The sweep step comes `SWEEP_LAG` (4) clocks after the edge into
     /// step 3: an access at the edge's clock still sees CH1 on (gambatte
     /// cgb04c `ch1_init_reset_sweep_counter_timing_nr52_3`), the `DivApu`
-    /// event runs the step 4 clocks on, then waits for the next edge.
+    /// event runs the step 4 clocks on and its overflow check 4 more on
+    /// (shift 1), then waits for the next edge.
     #[test]
     fn the_sweep_steps_4_clocks_after_the_edge_into_step_3() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
@@ -3316,7 +3319,11 @@ mod tests {
         assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), e3 + 4);
         let _ = run_audio(emu, 4, &mut []);
         assert_eq!(emu.mem.apu.sq[0].freq, 1920);
-        assert_eq!(emu.peek(0xFF26) & 1, 0, "off 4 clocks on");
+        // The overflow check is 1 MHz tick (shift 1) after the step.
+        assert_eq!(emu.peek(0xFF26) & 1, 1, "on until the check");
+        assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), e3 + 8);
+        let _ = run_audio(emu, 4, &mut []);
+        assert_eq!(emu.peek(0xFF26) & 1, 0, "off 8 clocks on");
         assert_eq!(emu.hw.sys.sched.deadline(EventKind::DivApu), e3 + 8192);
     }
 

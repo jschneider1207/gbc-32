@@ -109,7 +109,13 @@ and applies at the next event, the same step). Length runs before the sweep.
   turns the channel off). On sweep steps the timer counts down; at 0 it
   reloads and, if enabled and the period is non-zero, `new = calc()`; if
   `new <= 2047` and `shift != 0` it is stored as shadow and frequency and
-  `calc()` runs again for the overflow check only. `calc()` is `shadow +-
+  `calc()` runs again for the overflow check only, `shift` 1 MHz ticks
+  (4 base clocks each) after the step: until then CH1 plays on at the new
+  frequency (`Sweep::check`, one `DivApu` event per tick; SameBoy
+  `trigger_sweep_calculation` counts `NR10 & 7` down before
+  `sweep_calculation_done`, on every revision; SameSuite `channel_1_sweep`,
+  shift 7: on 7 M-cycles after the step, off 8 after). A check whose shift
+  was written to 0 meanwhile is dropped (SameBoy pauses it). `calc()` is `shadow +-
   (shadow >> shift)`; subtraction sets `negate_used`; over 2047 turns the
   channel off. **Negate quirk:** an NR10 write clearing the negate bit
   after `negate_used` turns the channel off (SameBoy: always, on CGB C and
@@ -374,9 +380,10 @@ gambatte `sound/` and SameSuite APU ROMs:
   alignment corrections; the core loads one full period), its background
   counting while the channel is off, the alignment term when an NR43
   write lands on a reload, and the NR43 write glitch steps.
-- SameBoy's shift-dependent sweep calculation delay (the overflow check
-  and write-back `shift` 1 MHz ticks after the step, PCM12 showing the
-  intermediate frequency) and its CGB-C `nr10_write_glitch`; the 4-clock
-  sweep lag above is the only sweep delay modelled. The DAC fade.
+- SameBoy's sweep delay at the trigger (its trigger overflow check also
+  waits `shift` ticks, plus a reload of 2 or, on CGB C in one 1 MHz
+  phase, 3), its NR10 writes inside the step's check window and its CGB-C
+  `nr10_write_glitch`; the step's delayed overflow check (Sweep above) is
+  modelled. The DAC fade.
 - DMG and AGB behaviours (wave RAM corruption, length counters surviving
   power off, the DMG read window).

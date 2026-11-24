@@ -294,10 +294,14 @@ pub(crate) struct Sweep {
     pub(crate) enabled: bool,
     /// A calculation in negate mode ran since the trigger.
     pub(crate) negate_used: bool,
-    /// A sweep step that ends the timer is pending: the frame sequencer
-    /// stepped to 3 or 7 less than `SWEEP_LAG` clocks ago (`step`); the
-    /// bus runs `clock` at the lag's end.
+    /// A sweep event is pending: a step that ends the timer, the frame
+    /// sequencer having stepped to 3 or 7 less than `SWEEP_LAG` clocks
+    /// ago (`step`), or a 1 MHz tick of the overflow check (`check`); the
+    /// bus runs `clock` `SWEEP_LAG` clocks after the last `DivApu` event.
     pub(crate) due: bool,
+    /// 1 MHz ticks (4 base clocks each) to the overflow check that
+    /// follows a write-back (0: none; `clock`).
+    pub(crate) check: u8,
 }
 
 /// Base clocks from the DIV-APU edge that steps the frame sequencer to 3
@@ -317,6 +321,7 @@ impl Sweep {
         enabled: false,
         negate_used: false,
         due: false,
+        check: 0,
     };
 
     /// NR10 bits 4-6: steps between calculations (0: none).
@@ -399,15 +404,29 @@ impl Sweep {
         }
     }
 
-    /// A sweep step that ends the timer (`due`; the bus calls it
-    /// `SWEEP_LAG` clocks after the edge; any step in tests). At the
-    /// timer's end it reloads and, if enabled with a non-zero period,
+    /// The pending sweep event (`due`; the bus calls it `SWEEP_LAG` clocks
+    /// after the last `DivApu` event; any step in tests). A step that ends
+    /// the timer reloads it and, if enabled with a non-zero period,
     /// calculates; a result within range with a non-zero shift is written
-    /// back to the shadow and the channel frequency, and a second
-    /// calculation runs for its overflow check only. Clears `due`.
+    /// back to the shadow and the channel frequency. A second calculation,
+    /// for its overflow check only, follows `shift` 1 MHz ticks later
+    /// (`check`, one event per tick); until then the channel plays on at
+    /// the new frequency. SameBoy `trigger_sweep_calculation` and
+    /// `sweep_calculation_done` (a countdown of `NR10 & 7`, on every
+    /// revision); SameSuite `channel_1_sweep` (shift 7: CH1 still on 7
+    /// M-cycles after the step, off 8 after). A check with the shift
+    /// written to 0 meanwhile is dropped (SameBoy pauses it).
     #[inline(never)]
     pub(crate) fn clock(&mut self, ch: &mut Square) {
         self.due = false;
+        if self.check != 0 {
+            self.check -= 1;
+            self.due = self.check != 0;
+            if !self.due && self.nr10 & 7 != 0 {
+                self.calc(ch);
+            }
+            return;
+        }
         self.timer = self.timer.wrapping_sub(1);
         if self.timer != 0 {
             return;
@@ -420,7 +439,8 @@ impl Sweep {
         if new <= 2047 && self.nr10 & 7 != 0 {
             self.shadow = new;
             ch.freq = new;
-            self.calc(ch);
+            self.check = self.nr10 & 7;
+            self.due = true;
         }
     }
 }
@@ -672,11 +692,39 @@ mod tests {
 
     #[test]
     fn the_second_calculation_checks_overflow_only() {
-        // 1280 + 640 = 1920 is written back; 1920 + 960 overflows: off.
+        // 1280 + 640 = 1920 is written back; 1920 + 960 overflows: off,
+        // at the check 1 MHz tick (shift 1) later.
         let (mut sw, mut sq) = ch1(0x11, 1280);
         sw.clock(&mut sq);
         assert_eq!((sq.freq, sw.shadow), (1920, 1920));
+        assert!(sq.on, "on until the check");
+        assert_eq!((sw.due, sw.check), (true, 1));
+        sw.clock(&mut sq);
         assert!(!sq.on);
+        assert_eq!((sw.due, sw.check, sw.timer), (false, 0, 1), "no step");
+    }
+
+    #[test]
+    fn the_overflow_check_waits_shift_1_mhz_ticks() {
+        // Shift 7: 0x7F0 + 0xF = 0x7FF is written back; the check
+        // (0x7FF + 0xF) 7 ticks later (SameSuite `channel_1_sweep`).
+        let (mut sw, mut sq) = ch1(0x17, 0x7F0);
+        sw.clock(&mut sq);
+        assert_eq!(sq.freq, 0x7FF);
+        for _ in 0..6 {
+            sw.clock(&mut sq);
+            assert!(sq.on && sw.due);
+        }
+        sw.clock(&mut sq);
+        assert!(!sq.on && !sw.due);
+        // A shift written to 0 meanwhile drops the check.
+        let (mut sw, mut sq) = ch1(0x17, 0x7F0);
+        sw.clock(&mut sq);
+        sw.write(0x10, &mut sq);
+        for _ in 0..7 {
+            sw.clock(&mut sq);
+        }
+        assert!(sq.on && !sw.due);
     }
 
     #[test]
