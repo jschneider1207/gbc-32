@@ -65,7 +65,8 @@ conservative stand-in for SDRAM. The custom-board contract is
 
 The core is a library the platform drives. It never calls out to the
 platform. The concrete API and its rationale are in ADR 0006 (construction:
-ADR 0009; save persistence: ADR 0015); the crate docs in
+ADR 0009; save persistence: ADR 0015; unsupported mappers: ADR 0031); the
+crate docs in
 `crates/gbc-core/src/lib.rs` have desktop and
 MCU usage examples.
 
@@ -91,13 +92,18 @@ Emulator<'a>                       // 'a = lifetime of the Memory and cartridge 
   //            save_dirty(), clear_save_dirty()
 RunResult { events: Events, clocks: u64, audio_samples: usize }
 cart_ram_size(rom) -> Result<usize, LoadErrorKind>
-cart_info(rom) -> Result<CartInfo, LoadErrorKind>  // before load: battery? RTC? RAM size
-CartInfo { ram_size, battery, rtc }, fn has_save()  // has_save = battery && (RAM || RTC)
+cart_info(rom) -> Result<CartInfo, LoadErrorKind>  // before load: mapper? battery? RTC? RAM size
+CartInfo { mapper: MapperKind, ram_size, battery, rtc }, fn has_save()  // has_save = battery && (RAM || RTC)
+MapperKind { RomOnly, Mbc1, Mbc2, Mbc3, Mbc5,       // emulated
+             Mmm01, Mbc6, Mbc7, PocketCamera, Tama5, HuC3, HuC1, Unknown }  // refused at load
+  fn from_cart_type(u8) -> Self, fn is_supported(self) -> bool, fn name(self) -> &'static str
 EjectedCart<'a> { rom, cart_ram, rtc: Option<RtcState>, save_dirty }  // cart_ram untrimmed
   fn save_ram(&self) -> &[u8]                       // the header-sized part (the save file)
   fn into_buffers(self) -> CartBuffers<'a>
 type CartBuffers<'a> = (&'a [u8], &'a mut [u8])     // RAM buffer as passed (untrimmed)
 LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
+LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
+                UnsupportedMapper { mapper: MapperKind, cart_type: u8 } }
 
 ```
 
@@ -112,6 +118,14 @@ LoadError<'a> { kind: LoadErrorKind, rom: &'a [u8], cart_ram: &'a mut [u8] }
   the ROM therefore has to be built so the compiler never merges byte reads
   into an unaligned halfword or word read, and the platform has to map the
   SDRAM as normal, cacheable memory through the MPU.
+- **Mapper:** resolved once at load from the cartridge type (0147), plus
+  the ROM contents for MBC1 multicarts (ADR 0016). A header that names a
+  mapper the core does not emulate (HuC1, HuC3, MBC6, MBC7, MMM01, TAMA5,
+  Pocket Camera) or an unassigned type code is refused:
+  `load`, `cart_ram_size` and `cart_info` return
+  `LoadErrorKind::UnsupportedMapper`, which names the mapper, so a front
+  end can tell the user before it touches a save file (ADR 0031). It
+  never runs as "no MBC".
 - **Cartridge RAM:** a `&'a mut [u8]` owned by the caller, at least
   `cart_ram_size(rom)` bytes (up to 128 KiB). Only the header's size is
   used; `cart_ram()` (the save file) is exactly that long. The caller

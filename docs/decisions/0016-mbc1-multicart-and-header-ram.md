@@ -108,3 +108,8 @@ without the logo; mooneye `emulator-only/mbc1/multicart_rom_8Mb` has the
 real logo in both places and still passes. Test:
 `blank_logo_areas_are_not_a_multicart` (failed before the change). The
 decision itself is unchanged.
+
+## Amendment (2026-11-24): unsupported mappers no longer run
+"They stay 'run as no MBC'" and "Unknown type codes already run as 'no
+MBC'" above are superseded by ADR 0031 (human's direction): such
+cartridges are refused at load.

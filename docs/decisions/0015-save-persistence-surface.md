@@ -103,3 +103,9 @@ too.
   a front-end decision for M7.
 - Not done: HuC3/TAMA5/MBC7 RTC or EEPROM state (those mappers aren't
   emulated); `CartInfo` can grow fields for them (`#[non_exhaustive]`).
+
+## Amendment (2026-11-24)
+"Mappers not emulated yet still report their battery" no longer applies:
+a cartridge with an unsupported mapper does not load and has no
+`CartInfo` (`cart_info` fails with `LoadErrorKind::UnsupportedMapper`,
+ADR 0031, human's direction). `CartInfo` also gained `mapper: MapperKind`.
