@@ -76,14 +76,14 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A4-10 | low | MBC5 rumble bit has no way out of the core | plan (Stage 3 board has no motor decision yet) |
 | A4-11 | low | Test gaps (list in report) | wave 3 where cheap |
 | A1-01 | med | Plain STOP mode is a stub (machine keeps running; any button wakes) | wave 2 |
-| A1-02 | low | Speed switch runs `boundary()` with stale deadlines; serial bit can shift twice | wave 2 (with E8) |
+| A1-02 | low | Speed switch runs `boundary()` with stale deadlines; serial bit can shift twice | fixed e8d960e (confirmed: 2 shifts; also a late scheduled input) |
 | A1-04 | low | `VramDma::switch_end` 32-bit, two meanings; stale `RAN` after 8.5-17 min | fixed: `switch_end` is a u64 (confirmed: block dropped 2^31 clocks later) |
 | A1-05 | low | State in unused bits/padding because of the `Hw` cap | wave 5 |
 | A1-06 | med | Speed switch/STOP timing is a composite of three emulators | wave 5: branch experiment (DIV reset after STOP's 2nd byte) |
 | A1-07 | low | Sub-M-cycle access offsets decided per site (= E4) | wave 5 |
-| A1-08 | low | `idle_speed_switch` spins if the halt end is off the M-cycle grid | wave 2 (`n.max(1)`) |
+| A1-08 | low | `idle_speed_switch` spins if the halt end is off the M-cycle grid | fixed 7cc2345 |
 | A1-09 | low | Stale comments | wave 5 (docs sweep) |
-| E8 | low | Speed switch re-seeks the PPU walk without syncing first | wave 2 |
+| E8 | low | Speed switch re-seeks the PPU walk without syncing first | fixed e4c4713 (confirmed via a late-WY write before the switch) |
 
 ## B. Performance
 
