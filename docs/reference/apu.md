@@ -246,11 +246,26 @@ clocks. Per LFSR step: `divisor * 2^(s+1)` ticks, times 2 base clocks =
   `cycles_left >= counter_countdown` (n fires after n ticks, unlike the
   square/wave `>` with n + 1). The core counts the LFSR step period
   directly in base clocks: `Noise::countdown` = clocks to the next step,
-  reloaded with the period at each step. SameBoy's trigger loads `r * 4 +
-  6` ticks (r = 0: 6) plus alignment-dependent corrections into the
-  divisor countdown, and the free-running counter's phase decides the
-  first edge; the core loads one full period (deferred, ADR 0021 section
-  12).
+  reloaded with the period at each step.
+- **Trigger phase** (`noise.rs` `trigger_delay`; SameBoy
+  `prepare_noise_start`): a trigger keeps the counter and loads the
+  divisor countdown with `r * 4 + 6` ticks (r = 0: 6) plus terms by the
+  alignment `a` (2 MHz ticks since power on, mod 4; in single speed
+  always even, bit 1 = M-cycle parity): r = 0: +1 if `a` odd, +2 in
+  double speed if even (CGB C; 0 on D/E); r > 0: `a` = 1, 2, 3: -1, -2,
+  -3, `a` = 0: -4 for r > 1 except in double speed on CGB C; r = 1
+  exceptions (on and `a` = 1: -5; off and `a` = 3: +1; double speed and
+  `a` = 2: +2 on CGB C; at `a` = 0: -4 only if on with shift 0). The first
+  LFSR step is then the first increment that raises bit `s`: from power
+  on (counter 0) `2^s - 1` increments after the first. The CGB-C
+  branches of SameBoy are the ones used; SameSuite `channel_4_delay` and
+  `channel_4_equivalent_frequencies` (single speed, `a` = 0, where C and
+  E agree) fit it exactly. `channel_4_align` (double speed, r = 0)
+  expects E's even-alignment term (0, not 2): CGB-E result. The power-off
+  state reads as counter 0 (SameBoy's power-on counter). Not modelled:
+  the terms for a counter left counting in the background while the
+  channel is off (the core's counter stops with the channel), a restart
+  within 2 ticks of an increment, and the r = 0 restart LFSR 0x0055.
 - **The counter and NR43 writes** (`noise.rs` `rebase`; SameBoy
   `GB_apu_run`, `GB_apu_write` NR43): the counter is never reset by a
   trigger or an NR43 write (only by APU power off), and NR43 is read at
@@ -267,7 +282,7 @@ clocks. Per LFSR step: `divisor * 2^(s+1)` ticks, times 2 base clocks =
   increment at `countdown`, with at most `pre` earlier increments every
   divisor clocks back from there (`pre` bounds the first, longer gap
   after a write that shortened the divisor). A trigger keeps the counter
-  bits above `s` and sets bit `s` as just risen.
+  bits as they are (Trigger phase above).
 - **NR43 write glitches (not modelled):** SameBoy's `nr43_write` steps
   or corrupts the LFSR when the shift selector passes through an
   intermediate value whose bit differs from the old and new bits
@@ -376,9 +391,8 @@ gambatte `sound/` and SameSuite APU ROMs:
   The single-speed grid phase across switches is fitted, not derived: the
   APU is not ticked differently over the switch (the CPU's position
   against the APU and PPU is ADR 0020's).
-- The noise counter's phase at trigger (SameBoy loads `r * 4 + 6` plus
-  alignment corrections; the core loads one full period), its background
-  counting while the channel is off, the alignment term when an NR43
+- The noise counter's background counting while the channel is off (and
+  the trigger terms that depend on it), the alignment term when an NR43
   write lands on a reload, and the NR43 write glitch steps.
 - SameBoy's sweep delay at the trigger (its trigger overflow check also
   waits `shift` ticks, plus a reload of 2 or, on CGB C in one 1 MHz

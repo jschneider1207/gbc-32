@@ -281,11 +281,11 @@ impl Noise {
     /// (the write lands on an increment), when the new divisor loads.
     /// The next step is then at the first increment that raises the new
     /// bit `s`: within the rest of the old divisor countdown (at most 56
-    /// clocks) plus one new period. A trigger keeps the counter's bits
-    /// above `s` and loads one full period, as before (SameBoy's
-    /// alignment-dependent start is deferred, ADR 0021 section 12).
+    /// clocks) plus one new period. A trigger (`trigger` > 0) keeps the
+    /// counter as it is and has its next increment `trigger` clocks away
+    /// (`trigger_delay`; SameBoy `prepare_noise_start`).
     #[inline(never)]
-    fn rebase(&mut self, nr43: u8, trigger: bool) {
+    fn rebase(&mut self, nr43: u8, trigger: u32) {
         let d = self.divisor();
         // `k` more increments come before the one at `countdown` (at most
         // `pre`), so the counter is now `counter - k - 1` and its next increment is `t`
@@ -295,16 +295,18 @@ impl Noise {
         let mut v = u32::from(self.counter).wrapping_sub(k + 1);
         self.nr43 = nr43;
         let s = u32::from(nr43 >> 4);
-        if trigger {
-            // Bit `s` has just risen: the next rise is a full period away.
-            v = v & !((2 << s) - 1) | 1 << s;
-            t = 0;
+        // `t` is 0 only in the power-off state: its increment (to 0, SameBoy's
+        // power-on counter) has landed.
+        if t == 0 {
+            v = v.wrapping_add(1);
         }
-        // SameBoy `countdown_reloaded` (an increment landed just now; not
-        // the end of a long first gap): the new divisor loads (its
-        // alignment term, `{2, 1, 4, 3}[alignment & 3]` ticks on CGB-C, is
-        // not modelled).
-        if t == 0 || t == d && k < u32::from(self.pre) {
+        if trigger != 0 {
+            t = trigger;
+        } else if t == 0 || t == d && k < u32::from(self.pre) {
+            // SameBoy `countdown_reloaded` (an increment landed just now;
+            // not the end of a long first gap): the new divisor loads (its
+            // alignment term, `{2, 1, 4, 3}[alignment & 3]` ticks on
+            // CGB-C, is not modelled).
             t = self.divisor();
         }
         // Increments after the next one up to the one where bit `s` rises:
@@ -445,10 +447,40 @@ impl Noise {
         i32::from(out[0])
     }
 
+    /// Base clocks from a trigger to the divisor counter's first
+    /// increment, at `al` = 2 MHz ticks since power on mod 4 (SameBoy
+    /// `noise_channel.alignment`), bit 2 set in double speed: `r * 4 + 6`
+    /// ticks (r = 0: 6) and SameBoy `prepare_noise_start`'s CGB-C
+    /// alignment terms (its `model <= GB_MODEL_CGB_C` branches). Not
+    /// modelled: the terms for a counter left running in the background
+    /// (the core's stops with the channel) and the restart within 2 ticks
+    /// of an increment. SameSuite `channel_4_delay` (r = 0) and
+    /// `channel_4_equivalent_frequencies` (r = 0, 1, 2, 4), single speed
+    /// at `al` 0, where C and E agree.
+    fn trigger_delay(&self, al: u8) -> u32 {
+        let r = self.nr43 & 7;
+        let (a, ds, on) = (al & 3, al & 4 != 0, self.on);
+        // Ticks beyond 4r + 1: 5 for r = 0 (6 ticks); for r > 0 at
+        // alignment 1, 2, 3: 4, 3, 2 (SameBoy's 1, 2 or 3 fewer than
+        // 4r + 6), at 0: 1 (4 fewer); the rest are exceptions.
+        let extra = match (r, a) {
+            // Odd: one more; double speed, even: two more (CGB-C).
+            (0, _) => 5 + (a & 1) + 2 * u8::from(ds && a & 1 == 0),
+            (1, 0) => 1 + 4 * u8::from(!on || self.nr43 >> 4 != 0),
+            // CGB-C double speed keeps the 4 ticks for r > 1.
+            (_, 0) => 1 + 4 * u8::from(ds),
+            (1, 1) => 4 - 4 * u8::from(on),
+            (1, 2) if ds => 7,
+            (1, 3) if !on => 6,
+            _ => 5 - a,
+        };
+        2 * (4 * u32::from(r) + 1 + u32::from(extra))
+    }
+
     /// A write to NR41-NR44 (`off` 1-4; others are ignored) with the frame
-    /// sequencer at `fs`.
+    /// sequencer at `fs` and the trigger alignment `al` (`trigger_delay`).
     #[inline(never)]
-    pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8) {
+    pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, al: u8) {
         match off {
             1 => self.len.load(LENGTH_MAX, u16::from(value & 0x3F)),
             2 => {
@@ -459,18 +491,18 @@ impl Noise {
             }
             // The new shift and divisor apply from the running counter,
             // within one new period (`rebase`).
-            3 => self.rebase(value, false),
+            3 => self.rebase(value, 0),
             4 => {
                 if self.len.write_nrx4(LENGTH_MAX, value, fs) {
                     self.on = false;
                 }
                 if value & 0x80 != 0 {
                     // SameBoy NR44: LFSR 0 (output 0 until the first
-                    // step), the envelope reloads. The first step after
-                    // one period (SameBoy's alignment-dependent start is
-                    // deferred, ADR 0021 section 12).
+                    // step), the envelope reloads, the counter runs on.
+                    // `on` is still the state before the trigger (a
+                    // trigger never takes the length-glitch exit above).
                     self.lfsr = 0;
-                    self.rebase(self.nr43, true);
+                    self.rebase(self.nr43, self.trigger_delay(al));
                     self.env.trigger();
                     self.on = self.env.dac();
                 }
@@ -628,32 +660,91 @@ mod tests {
     /// CH4 with its DAC on at volume 15, NR43 = `nr43`, triggered.
     fn playing(nr43: u8) -> Noise {
         let mut ch = Noise::ZERO;
-        ch.write(2, 0xF0, 0);
-        ch.write(3, nr43, 0);
-        ch.write(4, 0x80, 0);
+        ch.write(2, 0xF0, 0, 0);
+        ch.write(3, nr43, 0, 0);
+        ch.write(4, 0x80, 0, 0);
         ch
     }
 
     #[test]
     fn period_is_r_times_16_shifted_with_r_0_as_8() {
-        for (nr43, p) in [
-            (0x00, 8),
-            (0x01, 16),
-            (0x07, 112),
-            (0x30, 64),
-            (0xD7, 112 << 13),
+        // The first step after a trigger from power on (counter 0) at
+        // alignment 0, single speed: the first increment `trigger_delay`
+        // on, then `2^s - 1` more every divisor clocks; then a period.
+        for (nr43, first, p) in [
+            (0x00, 12, 8),
+            (0x01, 20, 16),
+            (0x07, 60, 112),
+            (0x30, 12 + 7 * 4, 64),
+            (0xD7, 60 + 8191 * 56, 112 << 13),
         ] {
-            assert_eq!(playing(nr43).countdown, p, "nr43={nr43:#x}");
+            let mut ch = playing(nr43);
+            assert_eq!(ch.countdown, first, "nr43={nr43:#x}");
+            ch.advance(u64::from(first));
+            assert_eq!(ch.countdown, p, "nr43={nr43:#x}");
         }
-        // 15 steps from 0 to the first 1 at r = 1, s = 1: 32 clocks each.
+        // 15 steps from 0 to the first 1 at r = 1, s = 1: 32 clocks each
+        // after the first at 20 + 8.
         let ch = playing(0x11);
-        assert_eq!(ch.digital_at(15 * 32 - 1), 0);
-        assert_eq!(ch.digital_at(15 * 32), 15);
+        assert_eq!(ch.digital_at(28 + 14 * 32 - 1), 0);
+        assert_eq!(ch.digital_at(28 + 14 * 32), 15);
         // A trigger clears the LFSR.
         let mut ch = ch;
         ch.lfsr = 0x1235;
-        ch.write(4, 0x80, 0);
+        ch.write(4, 0x80, 0, 0);
         assert_eq!(ch.lfsr, 0);
+    }
+
+    /// The first increment after a trigger, base clocks (`trigger_delay`)
+    /// at alignment `al` (bit 2: double speed) with NR43 `nr43`, the
+    /// channel on or off before it.
+    fn first_increment(nr43: u8, al: u8, on: bool) -> u32 {
+        let mut ch = Noise::ZERO;
+        ch.nr43 = nr43;
+        ch.on = on;
+        ch.trigger_delay(al)
+    }
+
+    #[test]
+    fn the_trigger_delay_follows_the_alignment() {
+        // Single speed, alignment 0 (SameSuite `channel_4_delay`,
+        // `channel_4_equivalent_frequencies`): 6 ticks at r = 0, 4r + 6
+        // at r = 1, 4r + 2 above.
+        assert_eq!(first_increment(0x00, 0, false), 12);
+        assert_eq!(first_increment(0x01, 0, false), 20);
+        assert_eq!(first_increment(0x04, 0, false), 36);
+        assert_eq!(first_increment(0x0A, 0, false), 20);
+        // r = 1 on and shift 0: 4 ticks fewer.
+        assert_eq!(first_increment(0x01, 0, true), 12);
+        assert_eq!(first_increment(0x11, 0, true), 20);
+        // Alignment 2 (an odd M-cycle from power on): 2 ticks fewer.
+        assert_eq!(first_increment(0x02, 2, false), 24);
+        // Double speed, r = 0 (SameSuite `channel_4_align`): odd 7 ticks,
+        // even 8 on CGB C (6 on CGB E).
+        assert_eq!(first_increment(0x08, 5, false), 14);
+        assert_eq!(first_increment(0x08, 4, false), 16);
+        // Odd alignments for r > 0: 3 or 1 tick fewer, or r = 1 off at 3: one more.
+        assert_eq!(first_increment(0x02, 3, false), 22);
+        assert_eq!(first_increment(0x02, 1, false), 26);
+        assert_eq!(first_increment(0x01, 3, false), 22);
+        assert_eq!(first_increment(0x01, 1, true), 10);
+        // Double speed, r = 1 at 2: 2 more; r > 1 at 0: no 4 fewer (CGB C).
+        assert_eq!(first_increment(0x01, 6, false), 24);
+        assert_eq!(first_increment(0x02, 4, false), 28);
+    }
+
+    #[test]
+    fn a_trigger_keeps_the_counter() {
+        // r = 0, s = 1: the LFSR steps when counter bit 1 rises. From
+        // power on (counter 0) that is the 2nd increment.
+        let mut ch = playing(0x10);
+        assert_eq!(ch.countdown, 12 + 4);
+        // At the step the counter is 2 (6 after the next step's
+        // increment); a retrigger then steps at the 4th increment (6).
+        ch.advance(16);
+        assert_eq!((ch.counter, ch.countdown), (6, 16));
+        ch.write(4, 0x80, 0, 0);
+        assert_eq!(ch.countdown, 12 + 3 * 4);
     }
 
     #[test]
@@ -679,11 +770,11 @@ mod tests {
         for frozen in [0xF7, 0xE7, 0xD7] {
             let mut ch = playing(0x11);
             ch.advance(5000);
-            ch.write(3, frozen, 0);
+            ch.write(3, frozen, 0, 0);
             ch.advance(12_345);
             let x = ch.lfsr;
             assert_ne!(x, 0x7FFF);
-            ch.write(3, 0x11, 0);
+            ch.write(3, 0x11, 0, 0);
             assert!(ch.countdown <= 56 + 32, "{frozen:#x}: {}", ch.countdown);
             ch.advance(56 + 32);
             assert_ne!(ch.lfsr, x, "{frozen:#x}: no step within 88 clocks");
@@ -692,11 +783,11 @@ mod tests {
         // with it (r 7, s 4: 1792 clocks -> r 7, s 0: 112).
         let mut ch = playing(0x70);
         ch.advance(100);
-        ch.write(3, 0x00, 0);
+        ch.write(3, 0x00, 0, 0);
         assert!(ch.countdown <= 4 + 8, "{}", ch.countdown);
         let mut ch = playing(0x47);
         ch.advance(3);
-        ch.write(3, 0x07, 0);
+        ch.write(3, 0x07, 0, 0);
         assert!(ch.countdown <= 56 + 112, "{}", ch.countdown);
     }
 
@@ -773,7 +864,7 @@ mod tests {
                     x >> 4 & 7
                 };
                 let nr43 = (s << 4 | x & 0xF) as u8;
-                ch.write(3, nr43, 0);
+                ch.write(3, nr43, 0, 0);
                 r.write(nr43);
                 // Writes are at least 2 clocks apart (an M-cycle at double speed).
                 let dt = 2 + xorshift(&mut seed) % 600;
@@ -829,14 +920,14 @@ mod tests {
     fn dac_and_length_turn_the_channel_off() {
         let mut ch = playing(0x00);
         assert!(ch.on);
-        ch.write(2, 0x08, 0); // DAC on (bit 3), volume 0
+        ch.write(2, 0x08, 0, 0); // DAC on (bit 3), volume 0
         assert!(ch.on);
-        ch.write(2, 0x00, 0);
+        ch.write(2, 0x00, 0, 0);
         assert!(!ch.on);
         assert_eq!(ch.integrate1(10), 0, "DAC off: 0");
         let mut ch = playing(0x00);
-        ch.write(1, 0x3F, 0); // length 1
-        ch.write(4, 0x40, 0); // enable, no trigger
+        ch.write(1, 0x3F, 0, 0); // length 1
+        ch.write(4, 0x40, 0, 0); // enable, no trigger
         ch.frame_step(1);
         assert!(!ch.on);
         assert_eq!(ch.integrate1(10), 150, "DAC on, channel off: +15");
@@ -845,8 +936,8 @@ mod tests {
     #[test]
     fn the_envelope_runs_on_step_0() {
         let mut ch = Noise::ZERO;
-        ch.write(2, 0xF1, 0); // 15, down, period 1
-        ch.write(4, 0x80, 0);
+        ch.write(2, 0xF1, 0, 0); // 15, down, period 1
+        ch.write(4, 0x80, 0, 0);
         ch.frame_step(7);
         assert_eq!(ch.env.volume, 15);
         ch.frame_step(0);

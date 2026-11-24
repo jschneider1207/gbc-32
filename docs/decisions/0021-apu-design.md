@@ -559,3 +559,18 @@ an APU share of about 353 k. The human split the budget into two parts:
 writes) and **<= 950 Ir per APU register write**. The 4.02 M worst-case
 line stays the overall guard. Both parts remain optimization targets (plan
 M8).
+
+### 2026-11-23: noise trigger phase and the sweep's delayed overflow check (M9 group 15)
+
+Two section 12 items are now modelled (docs/reference/apu.md, Sweep and
+noise "Trigger phase"). **Sweep:** the overflow check after a write-back
+runs `shift` 1 MHz ticks after the step, one `DivApu` event per tick
+(`Sweep::check`), so the bus is unchanged (SameBoy's countdown, on every
+revision; SameSuite `channel_1_sweep`). **Noise:** a trigger keeps the
+free-running counter and loads SameBoy's `prepare_noise_start` countdown
+with its alignment terms (`Noise::trigger_delay`); the alignment comes
+from `Fs::phase`, now 2 bits. Where SameBoy's terms differ by revision,
+the CGB-C branches are used (ADR 0003): this keeps SameSuite
+`channel_4_align` failing (it expects CGB E's double-speed term) and is
+the one choice here that a CGB E fit would reverse. Not modelled: the
+background counting while CH4 is off and the terms that depend on it.

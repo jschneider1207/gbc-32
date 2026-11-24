@@ -129,8 +129,10 @@ pub(crate) struct Fs {
     /// units without stepping, so `step` stays 1 through both (SameBoy
     /// `GB_SKIP_DIV_EVENT_SKIP`, then `_SKIPPED`); 0, inactive.
     pub(crate) skip: u8,
-    /// SameBoy's 1 MHz phase (`lf_div`) at power on, from the clock: the
-    /// square trigger delay (ADR 0021 section 5, task 1(b)).
+    /// 2 MHz ticks (2 base clocks) of the clock at power on, mod 4: bit 0
+    /// is SameBoy's 1 MHz phase (`lf_div`) for the square trigger delay
+    /// (ADR 0021 section 5, task 1(b)); both bits give the noise
+    /// alignment (`Noise::trigger_delay`).
     pub(crate) phase: u8,
 }
 
@@ -218,7 +220,7 @@ impl Apu {
             power: true,
             step: u8::from(apu_bit_high),
             skip: 2 * u8::from(apu_bit_high),
-            phase: ((now >> 1) & 1) as u8,
+            phase: ((now >> 1) & 3) as u8,
         };
     }
 
@@ -325,8 +327,10 @@ impl Apu {
         }
         // NR10, CH1's trigger after the channel's own, or CH4. One
         // unconditional tail call instead of a test on every exit (code
-        // size).
-        self.write_rest(reg, value, dist);
+        // size). The noise alignment: 2 MHz ticks since power on, mod 4,
+        // and double speed in bit 2.
+        let al = ((now >> 1) as u8).wrapping_sub(self.fs.phase) & 3 | u8::from(double) << 2;
+        self.write_rest(reg, value, dist, al);
     }
 
     /// The rest of a write to FF10-FF25 (`reg`), after `Square::write`,
@@ -347,11 +351,11 @@ impl Apu {
     /// vs `_10` (8 before: doesn't). SameBoy reloads its countdown at the
     /// trigger with no window.
     #[inline(never)]
-    fn write_rest(&mut self, reg: usize, value: u8, dist: u32) {
+    fn write_rest(&mut self, reg: usize, value: u8, dist: u32, al: u8) {
         let fs = self.fs.step;
         match reg {
             0x10 => self.sweep.write(value, &mut self.sq[0]),
-            0x1F..=0x23 => self.noise.write(reg - 0x1F, value, fs),
+            0x1F..=0x23 => self.noise.write(reg - 0x1F, value, fs, al),
             _ => {}
         }
         if value & 0x80 == 0 {
@@ -793,8 +797,9 @@ mod noise_tests {
     use super::*;
     use std::boxed::Box;
 
-    /// A powered APU with CH4 (DAC on, volume 15, NR43 = 0: a step every
-    /// 8 clocks, bit 0 first 1 after 15 steps) triggered at clock 0.
+    /// A powered APU with CH4 (DAC on, volume 15, NR43 = 0: the first step
+    /// 12 clocks on, then one every 8, bit 0 first 1 after 15 steps)
+    /// triggered at clock 0.
     fn ch4_playing() -> Box<Memory> {
         let mut mem = Box::new(Memory::new());
         mem.apu.power_on(0, false);
@@ -809,8 +814,8 @@ mod noise_tests {
     fn nr52_bit_3_and_pcm34_high_nibble_follow_ch4() {
         let mut mem = ch4_playing();
         assert_eq!(mem.apu.nr52(), 0xF8);
-        assert_eq!(read_apu(&mem, 15 * 8 - 1, 0x77), 0x00);
-        assert_eq!(read_apu(&mem, 15 * 8, 0x77), 0xF0);
+        assert_eq!(read_apu(&mem, 12 + 14 * 8 - 1, 0x77), 0x00);
+        assert_eq!(read_apu(&mem, 12 + 14 * 8, 0x77), 0xF0);
         assert_eq!(mem.apu.out.synced, 0, "pure");
         mem.apu.write(0x21, 0x00, 0, false, u64::MAX);
         assert_eq!(mem.apu.nr52(), 0xF0, "DAC off");
@@ -851,8 +856,8 @@ mod noise_tests {
         mem.apu.sync(64 * SAMPLE_PERIOD, &io, &mut buf, &mut len);
         quiet.sync(64 * SAMPLE_PERIOD, &io, &mut [], &mut 0);
         assert_eq!(mem.apu.noise, quiet.noise, "same state without a buffer");
-        // Bit 0 is 0 for the first 120 clocks (+15), then 1 (-15) for 8.
-        assert_eq!(buf[0].left, (120 - 8) * 15 * 8 / 2, "x 64 / 128");
+        // Bit 0 is 0 for the first 124 clocks (+15), then 1 (-15) for 4.
+        assert_eq!(buf[0].left, (124 - 4) * 15 * 8 / 2, "x 64 / 128");
         assert!(buf.iter().any(|s| s.right < 15 * 8 * 64));
     }
 }
