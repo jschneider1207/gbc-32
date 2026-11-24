@@ -136,7 +136,9 @@ impl Huc3RtcState {
         self.days = self.days.wrapping_add(days as u16);
     }
 
-    /// Advances the clock by `clocks` base clocks of emulated time.
+    /// Advances the clock by `clocks` base clocks of emulated time. Out
+    /// of line: the 64-bit divisions are bulky and every caller is cold.
+    #[inline(never)]
     pub(super) fn advance(&mut self, clocks: u64) {
         let minute = u64::from(MINUTE_CLOCKS);
         // `subminute_clocks < minute` (masked), so no overflow.
