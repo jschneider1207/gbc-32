@@ -104,6 +104,15 @@ impl LineObjects {
         self.len as usize
     }
 
+    /// These objects with the count cut to at most `n` (fetch-order
+    /// positions `0..n` are looked at, `Renderer::fetch_next_object`).
+    pub(crate) const fn with_len(mut self, n: u8) -> Self {
+        if n < self.len {
+            self.len = n;
+        }
+        self
+    }
+
     /// The selected objects' X positions (OAM byte 1, screen X + 8) in
     /// OAM order.
     #[cfg(test)]

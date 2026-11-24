@@ -881,6 +881,7 @@ impl Ctx<'_, '_> {
                 let s = &mut *self.sys;
                 if (value ^ s.ppu.lcdc) & 0x04 != 0 {
                     s.ppu.obj_size_write(now, double, self.mem);
+                    s.ppu.obj_size_fetch(at, value, self.mem);
                 }
                 let win = (value ^ s.ppu.lcdc) & 0x20 != 0;
                 s.ppu.write_lcdc(now, value, &mut s.iflags, double);

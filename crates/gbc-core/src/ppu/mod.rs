@@ -429,6 +429,16 @@ const WY_LEAD_DS: i32 = 1;
 /// Stall dots kept by an LCDC.5 clear during the window stall: those
 /// before the write's clock plus this (calibrated, step E2).
 const WINDOW_OFF_LEAD: i32 = 0;
+/// Dots before an object's stall ends at which its fetch reads LCDC.2 for
+/// the low and the high bit plane ([`Ppu::obj_size_fetch`]). SameBoy
+/// (display.c `get_object_line_address`, "Which T-cycle actually reads
+/// this?") reads 3 and 1 dots before; one dot more fits CGB C: Mealybug
+/// `m3_lcdc_obj_size_change` writes 2 dots before a stall's end (low plane
+/// 8x8, high plane 8x16) and at its end (both old), and
+/// `m3_lcdc_obj_size_change_scx` (SCX = 4) 3 dots before one (low old,
+/// high new). As LCDC.4 at the BG data steps (`LCDC_TILES_LATE`).
+const OBJ_LOW_READ: u32 = 4;
+const OBJ_HIGH_READ: u32 = 2;
 /// Line dot (as `at` counts it) from which the line's sticky WY == LY
 /// check has seen WY ([`Ppu::wy_write`]): line 0, other lines. gambatte
 /// (ppu.cpp `weMasterCheck*LineCycle`, behaviour only) samples line 0 at
@@ -2411,6 +2421,85 @@ impl Ppu {
         }
     }
 
+    /// After [`Ppu::flush`], before an LCDC write of `value` at clock `at`
+    /// that changes LCDC.2 in mode 3: the objects whose fetch already read
+    /// their tile row keep the old height. An object's fetch reads LCDC.2
+    /// for each bit plane: for the low one [`OBJ_LOW_READ`] dots and for
+    /// the high one [`OBJ_HIGH_READ`] dots before its stall ends (SameBoy
+    /// display.c, MIT: `get_object_line_address` before each plane's
+    /// `vram_read`), and sees a write landing at or before that dot.
+    /// Without this, every object not yet drawn used the new value.
+    /// An object left of pixel 0 (X < 8) stalls where the line position
+    /// reaches X - 8 (SameBoy `x_for_object_match`; our stall is at pixel
+    /// 0), so its stall ends 8 - X dots before ours: the junk pixels
+    /// between are popped after it. Mealybug `m3_lcdc_obj_size_change*`
+    /// (CGB C: rows mixing the 8x8 low plane with the 8x16 high plane).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn obj_size_fetch(&mut self, at: u64, value: u8, mem: &mut Memory) {
+        // In mode 3 (as `mode3_pixel`).
+        let a = self.at(at);
+        let (t, ly) = (a.t, a.line as u8);
+        let lt = &self.line;
+        if !self.lcd_enabled()
+            || lt.start != at.wrapping_sub(u64::from(t))
+            || t < u32::from(lt.mode3)
+            || t >= u32::from(lt.end)
+        {
+            return;
+        }
+        let (win, prev) = (usize::from(lt.win_stall), usize::from(lt.prev_stall()));
+        let (mut clock, mut px) = (u32::from(lt.first_pixel), 0);
+        for (i, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls)].iter().enumerate() {
+            // As `LineTiming::pixels_before`: `clock` is this stall's end.
+            clock += u32::from(sx).saturating_sub(px);
+            px = px.max(u32::from(sx));
+            clock += u32::from(d);
+            let obj = i - usize::from(i > win) - usize::from(i > prev);
+            if i == win || i == prev || obj < usize::from(mem.obj_rank.next) {
+                continue;
+            }
+            let Some(slot) = self.renderer.next_object(mem.obj_rank.next) else {
+                break;
+            };
+            let (index, y, x) = self.renderer.objects.get(slot);
+            let end = clock - u32::from(8u8.saturating_sub(x));
+            if t + OBJ_LOW_READ <= end {
+                break;
+            }
+            let hi = if t + OBJ_HIGH_READ <= end {
+                value
+            } else {
+                self.lcdc
+            };
+            // Fetched with the old height; after a write between the two
+            // reads, the high plane's byte of the new height's row stands
+            // in for the old row's during the fetch (VRAM is the PPU's
+            // alone in mode 3).
+            let (tile, flags) = if self.attr_on {
+                self.obj_attr[slot]
+            } else {
+                let b = usize::from(index.min(39)) * 4;
+                (mem.oam[b + 2], mem.oam[b + 3])
+            };
+            let bank = usize::from(self.renderer.cgb && flags & 0x08 != 0) << 13;
+            let old_hi = ((render::object_row(ly, y, tile, flags, self.lcdc) | bank) + 1) & 0x3FFF;
+            let new_hi = ((render::object_row(ly, y, tile, flags, hi) | bank) + 1) & 0x3FFF;
+            let keep = mem.vram[old_hi];
+            mem.vram[old_hi] = mem.vram[new_hi];
+            let src = Sources {
+                vram: &mem.vram,
+                oam: &mem.oam,
+                attrs: self.attr_on.then_some(&self.obj_attr),
+                colors: &self.colors,
+                pairs: &mem.bg_pairs,
+            };
+            self.renderer
+                .fetch_next_object(&mut mem.obj_buf, &mut mem.obj_rank, &src, self.lcdc);
+            mem.vram[old_hi] = keep;
+        }
+    }
+
     /// A STAT update at clock `now` (a STAT or LYC write): re-evaluates the
     /// interrupt line with the mode source and comparison of that
     /// position.
@@ -4087,10 +4176,66 @@ mod tests {
         r.ppu.flush(now, &mut r.mem, &mut r.frame);
         r.ppu.hold_fetch(now, &mut r.mem, reg, value, false);
         if reg == 0x40 {
+            if (value ^ r.ppu.lcdc) & 0x04 != 0 {
+                r.ppu.obj_size_fetch(now, value, &mut r.mem);
+            }
             r.ppu.write_lcdc(now, value, &mut r.iflags, false);
         } else {
             r.mem.io[reg] = value;
         }
+    }
+
+    /// Objects whose fetch read their tile row before an LCDC.2 write keep
+    /// the old height, per bit plane ([`OBJ_LOW_READ`], [`OBJ_HIGH_READ`]);
+    /// one left of pixel 0 is fetched 8 - X dots before its stall here
+    /// ends.
+    #[test]
+    fn object_fetch_reads_the_height_per_bit_plane() {
+        let pal = Colors::dmg_compat(&DmgPalettes::GRAYSCALE, 0xE4, 0xE4, 0xE4);
+        let colors = |c: usize| pal.obj[0][c];
+        let (bg, c1, c2) = (pal.bg[0][0], colors(1), colors(2));
+        // `(line, object X, write dot)` -> the object's 8 pixels (or 4 at
+        // X = 4: screen x 0-3) after 8x16 -> 8x8 at that dot. A second
+        // object at X = 100 is fetched after the write: 8x8 (color 1).
+        let run = |ly: u32, x: u8, t: u32| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            r.mem.io[0x48] = 0xE4;
+            r.ppu
+                .resolve_palettes(&mut r.mem, &DmgPalettes::GRAYSCALE, false);
+            r.ppu.lcdc = 0x97;
+            // Row 3 of a Y-flipped object: 8x8 tile 2 row 4 (color 1),
+            // 8x16 tile 3 row 4 (color 2).
+            r.mem.vram[0x28] = 0xFF;
+            r.mem.vram[0x39] = 0xFF;
+            let y = (ly + 16 - 3) as u8;
+            r.mem.oam[..8].copy_from_slice(&[y, x, 2, 0x40, y, 100, 2, 0x40]);
+            r.ppu.oam_written();
+            let l = clock(on, 0, ly * LINE);
+            write_fetch_reg(&mut r, l + u64::from(t), 0x40, 0x93);
+            r.sync(l + u64::from(LINE));
+            let x0 = usize::from(x.max(8) - 8);
+            let row = &r.frame[ly as usize * SCREEN_WIDTH..];
+            assert_eq!(row[92..100], [colors(1); 8], "second object");
+            (r.ppu.line.stalls[0], row[x0..usize::from(x)].to_vec())
+        };
+        // X = 32: 11-dot stall at pixel 24, ending at 96 + 24 + 11 = 131.
+        let cases = [
+            (127, c1), // before both reads: 8x8
+            (128, bg), // low plane 8x16 (0), high 8x8 (0)
+            (129, bg), // still so
+            (130, c2), // after both: 8x16
+        ];
+        for (t, want) in cases {
+            let (stall, px) = run(5, 32, t);
+            assert_eq!(stall, (24, 11));
+            assert_eq!(px, [want; 8], "write at {t}");
+        }
+        // X = 4: 7-dot stall at pixel 0 (96-102), fetched as if it ended
+        // 4 dots earlier, at 99.
+        assert_eq!(run(7, 4, 95), ((0, 7), vec![c1; 4]));
+        assert_eq!(run(7, 4, 96), ((0, 7), vec![bg; 4]));
+        assert_eq!(run(7, 4, 98), ((0, 7), vec![c2; 4]));
     }
 
     /// The first pixel of line `ly` (from 0) with color `c`, after `from`.

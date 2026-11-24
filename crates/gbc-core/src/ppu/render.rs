@@ -736,6 +736,35 @@ impl Renderer {
         obj_rank.next = k as u8;
     }
 
+    /// Fetches the line's next object in fetch order (`ObjRank::next`)
+    /// now, with LCDC `lcdc`: an LCDC.2 write lands after its fetch read
+    /// the tile row (`Ppu::obj_size_fetch`). Cold: only on such writes.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn fetch_next_object(
+        &mut self,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut ObjRank,
+        src: &Sources,
+        lcdc: u8,
+    ) {
+        if self.obj_dirty {
+            *obj_buf = [0; OBJ_BUF_LEN];
+            self.obj_dirty = false;
+        }
+        // `fetch_objects` up to that object only.
+        let all = self.objects;
+        self.objects = all.with_len(obj_rank.next.wrapping_add(1));
+        self.fetch_objects(obj_buf, obj_rank, src, lcdc, usize::MAX);
+        self.objects = all;
+    }
+
+    /// The slot of the object at fetch-order position `next`, if any.
+    pub(crate) fn next_object(&self, next: u8) -> Option<usize> {
+        (usize::from(next) < self.objects.len())
+            .then(|| usize::from(self.order[usize::from(next) % MAX_PER_LINE]) % MAX_PER_LINE)
+    }
+
     /// Decodes one object's row into the object buffer.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)] // Object fields plus the buffers.
@@ -759,17 +788,6 @@ impl Renderer {
                 (src.oam[base + 2], src.oam[base + 3])
             }
         };
-        // LCDC.2 is read at fetch time (SameBoy `get_object_line_address`).
-        // 8x16 objects ignore bit 0 of the tile index (Pan Docs: OAM byte 2).
-        let (mask, tile) = if lcdc & LCDC_OBJ_TALL != 0 {
-            (15, tile & 0xFE)
-        } else {
-            (7, tile)
-        };
-        let mut line = self.ly.wrapping_add(16).wrapping_sub(y) & mask;
-        if flags & ATTR_Y_FLIP != 0 {
-            line ^= mask;
-        }
         // Objects always use 8000-8FFF addressing (Pan Docs: VRAM Tile Data).
         // Palette (buffer bits 2-4), tile data bank and drawing-priority
         // rank. CGB mode (Pan Docs: OAM byte 3): bits 0-2 select OBJ
@@ -793,7 +811,7 @@ impl Renderer {
         } else {
             (u8::from(flags & ATTR_DMG_OBP1 != 0) << 2, 0, 0)
         };
-        let addr = ((usize::from(tile) << 4) + (usize::from(line) << 1)) | bank;
+        let addr = object_row(self.ly, y, tile, flags, lcdc) | bank;
         let (mut lo, mut hi) = (src.vram[addr & 0x3FFF], src.vram[(addr + 1) & 0x3FFF]);
         if flags & ATTR_X_FLIP != 0 {
             lo = lo.reverse_bits();
@@ -831,6 +849,26 @@ impl Renderer {
             *ranks = ((old_rank & !put) | ((u64::from(rank) * BYTES_01) & put)).to_be_bytes();
         }
     }
+}
+
+/// The VRAM address (bank 0) of the low bit plane of line `ly`'s row of an
+/// object with OAM Y `y`, tile index `tile` and attributes `flags`, its
+/// height from LCDC `lcdc`. LCDC.2 is read at the fetch (SameBoy
+/// `get_object_line_address`); 8x16 objects ignore bit 0 of the tile index
+/// (Pan Docs: OAM byte 2). Objects always use 8000-8FFF addressing (Pan
+/// Docs: VRAM Tile Data).
+#[inline(always)]
+pub(crate) fn object_row(ly: u8, y: u8, tile: u8, flags: u8, lcdc: u8) -> usize {
+    let (mask, tile) = if lcdc & LCDC_OBJ_TALL != 0 {
+        (15, tile & 0xFE)
+    } else {
+        (7, tile)
+    };
+    let mut line = ly.wrapping_add(16).wrapping_sub(y) & mask;
+    if flags & ATTR_Y_FLIP != 0 {
+        line ^= mask;
+    }
+    (usize::from(tile) << 4) + (usize::from(line) << 1)
 }
 
 /// How tile fetches read the BG map attributes, fixed per span.
