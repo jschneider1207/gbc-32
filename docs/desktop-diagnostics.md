@@ -2,7 +2,8 @@
 
 Tools for finding out *where* a stutter comes from: the game's own
 motion, our frame loop, or the display. Design and limits: ADR 0024
-(pacing, `GBC_FRAME_STATS`) and ADR 0030 (recordings, frame log).
+(pacing, `GBC_FRAME_STATS`, presentation phase and precise waits) and
+ADR 0030 (recordings, frame log).
 
 | What | How |
 |---|---|
@@ -14,6 +15,14 @@ motion, our frame loop, or the display. Design and limits: ADR 0024
 | unattended run, ignore keys/pads | `--no-input` |
 | summarise a CSV | `elixir scripts/analyze-frame-log.exs <file.csv>` |
 | script a recording without playing | `elixir scripts/synth-input.exs` (see its header) |
+| today's presenting, for an A/B run | `GBC_PRESENT_PHASE=0` (present each picture at once) |
+| no precise waits (A/B, CPU cost) | `GBC_PRECISE_WAIT=0` (wake when the OS wakes us) |
+
+On exit, a window run with `GBC_FRAME_STATS` or `GBC_FRAME_LOG` prints
+one more line: the precise waits (spins, time spun, share of one core),
+the process's CPU time (Windows), and how pictures were presented
+(`timed` by the presenter, `at once` without DWM timing, `redraw events`
+from the OS), then the present-duration estimate.
 
 ## For the human: recording a session (Git Bash on Windows)
 
@@ -85,7 +94,7 @@ started (`Instant`, which is QPC on Windows). Empty = not applicable.
 |---|---|
 | `frame` | frame number: the n-th `run_frame` call since load (same numbering as recordings) |
 | `wake_us` | when the event-loop wake-up that ran this frame began (window only) |
-| `wake_late_us` | how late that wake-up was against the time the loop asked for; empty when woken early by an event (window only) |
+| `wake_late_us` | how late that wake-up started its work against the time the loop aimed for: a frame's or a timed present's due time (the loop wakes 2 ms early and spins the rest; ADR 0024 amendment "presentation phase"), else the plain wake-up time; empty when woken early by an event (window only) |
 | `emu_start_us`, `emu_end_us` | `run_frame` call began / returned |
 | `ready` | 1 = the frame completed a picture (`FRAME_READY`) |
 | `blank` | 1 = the screen is white after it (LCD off, or the first frame after it turned on) |
@@ -130,6 +139,17 @@ and at exit; a crash loses the last batch.
   ceil(r) pictures beyond the beat, plus pictures never presented. Blank
   (LCD-off) frames and pictures followed by one are excluded. Also how
   many of those fell during scrolls, and the present-to-vblank phase.
-- timing: picture, present and emulation intervals; wake-up lateness
+- timing: picture, present and emulation intervals; the *present delay*
+  (picture completed to its present starting: the latency phase-aware
+  presents add, normally 0-5 ms, at most ~8.4 ms); wake-up lateness
   (mean, percentiles, worst 10 s window).
 - a table per 10 s of game time (`--window S` to change).
+
+With phase-aware presents (Windows, ADR 0024 amendment "presentation
+phase") the present-end phase histogram should be empty in its first bin
+(no present returns within ~2.5 ms after a vblank), the 2-refresh count
+should match the beat, and 0-refresh pictures should be rare. Whatever
+remains usually lines up with wake-ups several ms late (`wake_late_us`):
+the host did not run us, which no presenting can fix. To compare with the
+old behaviour on the same build, run once more with `GBC_PRESENT_PHASE=0
+GBC_PRECISE_WAIT=0` (`scripts/run-windows.sh` forwards both).

@@ -147,3 +147,78 @@ The human's in-game hitches (exact multiples of a frame, wake late ~1
 ms, emulated a little above 59.73/s, no multi-frame catch-up) fit the
 same pattern: the extra "emulated" frames are frames cut short when the
 LCD turns back on, not catch-up.
+
+**2026-11-23: presentation phase and precise waits.** The decision
+stands: the game runs at 59.7275 Hz from the audio clock (DRC within
+±0.5%), never at the display's rate. What is new is *when* a finished
+picture is presented, and how precisely the loop wakes.
+
+Measured first (native Windows 11, 59.973 Hz display, LADX route of
+`scripts/inputs/ladx-new-file-slides.txt`, 6,880 frames, frame log):
+pictures were presented 0.2 ms (mean) after completing, so the present
+phase drifted with the 59.97 vs 59.73 Hz beat; for a second or so around
+each beat crossing the presents ended within ~2.5 ms after a vblank, and
+the jitter in when pictures were ready (wake-ups 0.38 ms late on average,
+p99 1.0 ms) flipped them between refreshes: 50 pictures shown never and
+78 twice where the beat explains 28 (54 irregularities/min beyond the
+beat; 115/min on the slides). The present itself is cheap (blit plus
+softbuffer's GDI present: median 0.43 ms, p99 1.9 ms) and the flips came
+from present *timing*, not its duration, so the blit was left alone.
+
+**Phase-aware presents** (`present.rs`, pure, unit-tested; Windows):
+each completed picture (or blank-screen change) is handed to a
+`Presenter` with the DWM refresh grid (`dwm::grid`: DWM's last vblank as
+an `Instant` and the period, a query per picture and per present). The
+present starts inside a window of the refresh interval chosen so that it
+*returns* at least 3 ms after a vblank and 2 ms before the next (start
+2.5-14.2 ms after the vblank for a 0.5 ms present; the present duration
+is a smoothed measurement): at once if the picture is ready inside the
+window, else at the window's next start. At most one present starts per
+refresh interval (per `k` intervals at `k`x the game rate), counted from
+the interval the previous present started in, on the current grid in
+whole periods. That rule is the hysteresis that leaves exactly the beat:
+a picture a little too late for its interval takes the next one and the
+following pictures follow one interval at a time, instead of jitter
+flipping them across the window edge. A picture whose turn would be more
+than half a frame (8.4 ms) away (only after an early picture: the short
+frame when the LCD turns back on, or a stalled loop catching up) takes
+the earliest window instead, replacing the previous picture: one drop
+rather than every picture for the next second or two waiting most of a
+refresh. It applies when DWM timing is available and the refresh rate is
+within -0.5%..+3% of 1x or 2x the game rate (59.4-61.5 Hz, 119-123 Hz);
+otherwise (off Windows, other rates, no compositor timing) every picture
+is presented at once via `request_redraw`, as before. `GBC_PRESENT_PHASE=0`
+forces that. Latency added: normally 0-5 ms (refresh minus window), mean
+about 0.8 ms, capped at 8.4 ms.
+
+**Precise waits** (`wait.rs`, pure deadline logic, unit-tested): a
+frame's due time (audio pacing: when the smoothed fill drops below the
+target, if within the 8 ms wake cap plus the margin; the clock pacer's
+deadline) and a timed present are deadlines. The loop asks winit to wake
+2 ms before the earliest one and spins the rest (`spin_loop` plus
+`yield_now` each turn, at most 2.5 ms); a wake-up later than the margin
+is late as before. `GBC_PRECISE_WAIT=0` turns it off. The frame log's
+`wake_late_us` and `GBC_FRAME_STATS`' wake lateness are now measured
+against the deadline, after the spin; `busy max` includes the spin.
+
+Measured after (same route and display; analysis script with the
+emulated-rate estimate fixed to keep short stalls, which had overstated
+the rate by up to 0.2% and so the beat):
+
+| | before | after |
+|---|---|---|
+| display irregularities beyond the beat, whole route | 54.1/min | 1.1/min |
+| ... slides only (frames 5750-6880) | 115/min | 0/min |
+| pictures shown once / twice / never (whole route) | 6,575 / 78 / 50 + 2 unpresented | 6,678 / 24 / 0 + 2 unpresented |
+| wake lateness mean / p99 / max | 0.38 / 1.02 / 17.5 ms | 0.03 / 0.99 / 24.6 ms |
+| present delay after the picture mean / p99 / max | 0.22 / 0.90 / 5.9 ms | 1.03 / 5.7 / 7.8 ms |
+| Wario Land 3, no input, 2,400 frames | 51.0/min | 1.6/min |
+
+The remaining irregularities all coincide with host stalls (wake-ups
+3-35 ms late), which a second run under heavier host load showed more
+of (8.3/min). CPU: Wario Land 3 used 4.2% of one core with both features
+off and 10.3% with them on (`GetProcessTimes`); the spins take 12-14% of
+wall time but yield to any other ready thread.
+
+Consequences: a VRR display still breaks the fixed-grid assumption (the
+fallback does not detect it); 2x-rate displays are covered by unit tests only.

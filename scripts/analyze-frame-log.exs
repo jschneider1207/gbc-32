@@ -53,8 +53,10 @@ defmodule FrameLog do
       |> Enum.filter(fn [a, b] -> b.frame == a.frame + 1 and a.ready and b.ready and not a.blank and not b.blank end)
       |> Enum.map(fn [a, b] -> b.emu_end_us - a.emu_end_us end)
 
-    # Stalls (startup, a blocked loop) are not the pacing rate.
-    pairs = if pairs == [], do: [], else: Enum.filter(pairs, &(&1 < 2 * median(pairs)))
+    # Long stalls (startup) are not the pacing rate. A shorter stall stays
+    # in: its catch-up frames follow it, and dropping only the long gap
+    # (the filter was 2x the median) overstated the rate by up to 0.2%.
+    pairs = if pairs == [], do: [], else: Enum.filter(pairs, &(&1 < 10 * median(pairs)))
 
     emu_fps = if pairs == [], do: (length(rows) - 1) / max(secs, 1.0e-9), else: 1.0e6 / mean(pairs)
 
@@ -320,6 +322,17 @@ defmodule FrameLog do
 
     if pres != [] do
       IO.puts("  present interval ms: " <> spread(pres))
+    end
+
+    # From a picture's completion to the start of its present: the
+    # latency the loop adds (phase-aware presents wait for a safe phase).
+    delay =
+      rows
+      |> Enum.filter(&(&1.present_start_us != nil and &1.ready))
+      |> Enum.map(&(&1.present_start_us - &1.emu_end_us))
+
+    if delay != [] do
+      IO.puts("  present delay after the picture ms: mean #{fmt(mean(delay) / 1000, 3)} " <> spread(delay))
     end
 
     IO.puts("  emulation per frame ms: " <> spread(emu))
