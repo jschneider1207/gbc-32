@@ -305,20 +305,26 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
 /// Kept by value in [`Ctx`] during a run call and in [`Sys::hot`] between
 /// calls.
 ///
-/// The clock is not counted directly. `budget` counts the base clocks
-/// left until `deadline` (the earlier of `Sys::sched.next()` and the run
-/// call's target), and the tick only subtracts the M-cycle length and
-/// tests the sign; the u64 clock is `deadline - budget`, exact at every
-/// point (ADR 0008, amendments).
+/// The clock is not counted directly. `t_minus` counts the M-cycles left
+/// until `deadline` (the first M-cycle boundary at or after the earlier
+/// of `Sys::sched.next()` and the run call's target), and the tick only
+/// adds one and tests the sign; the u64 clock is `deadline + t_minus *
+/// mcycle`, exact at every point (ADR 0008, amendments).
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub(crate) struct Hot {
-    /// Base clocks until `deadline`; zero or below when it has passed (by
-    /// less than one M-cycle).
-    budget: i32,
-    /// Base clocks per M-cycle: 4, or 2 in CGB double speed.
+    /// The T-minus count: minus the M-cycles until `deadline`, so zero or
+    /// above when it has been reached. It counts up so that the tick's
+    /// test is the sign of the sum (the flags of the increment itself).
+    /// First in `Hot`, and `Hot` first in [`Ctx`] (both `repr(C)`): the
+    /// tick increments the word the CPU's bus pointer points at.
+    t_minus: i32,
+    /// Base clocks per M-cycle: 4, or 2 in CGB double speed. Written
+    /// only by [`Hot::set_mcycle`] (the clock depends on it).
     pub(crate) mcycle: i32,
-    /// The clock at which `budget` reaches 0. At most `i32::MAX` clocks
-    /// ahead of the clock it was set at, so `budget` always fits.
+    /// The clock at which `t_minus` reaches 0: the first M-cycle boundary
+    /// at or after the earliest due clock (or that clock capped,
+    /// [`Hot::set_countdown`]).
     deadline: u64,
     /// FE00 while an OAM DMA transfer runs (from the FF46 write to its
     /// `Dma` deadline), else 0. CPU accesses dispatch on `addr | dma`, so
@@ -332,7 +338,7 @@ pub(crate) struct Hot {
 impl Hot {
     pub(crate) const fn new() -> Self {
         Self {
-            budget: 0,
+            t_minus: 0,
             mcycle: 4,
             deadline: 0,
             dma: 0,
@@ -342,7 +348,40 @@ impl Hot {
     /// Base clocks since the last load or reset.
     #[inline]
     pub(crate) fn clock(&self) -> u64 {
-        self.deadline.wrapping_sub(self.budget as i64 as u64)
+        let ahead = i64::from(self.t_minus) * i64::from(self.mcycle);
+        self.deadline.wrapping_add_signed(ahead)
+    }
+
+    /// Sets the M-cycle length, the clock staying what it is. The
+    /// countdown is left at zero: the caller reschedules, or the next
+    /// tick does.
+    pub(crate) fn set_mcycle(&mut self, mcycle: i32) {
+        debug_assert!(mcycle == 2 || mcycle == 4);
+        self.set_clock(self.clock());
+        self.mcycle = mcycle;
+    }
+
+    /// Sets the clock, with the countdown at zero (the caller
+    /// reschedules, or the next tick does).
+    #[inline]
+    fn set_clock(&mut self, now: u64) {
+        self.deadline = now;
+        self.t_minus = 0;
+    }
+
+    /// Sets the countdown at clock `now` for what is due `ahead` clocks
+    /// later: it reaches zero at the first M-cycle boundary at or after
+    /// that. `ahead` is capped at `i32::MAX` clocks (reaching a capped
+    /// deadline just reschedules), so `t_minus` always fits.
+    #[inline(always)]
+    fn set_countdown(&mut self, now: u64, ahead: u64) {
+        // `mcycle` is 4 or 2: a shift by 2 or 1, not a division (no
+        // divide-by-zero panic path on thumbv7em).
+        debug_assert!(self.mcycle == 2 || self.mcycle == 4);
+        let m = self.mcycle as u32;
+        let n = (ahead.min(i32::MAX as u64) as u32 + (m - 1)) >> (m >> 1);
+        self.t_minus = -(n as i32);
+        self.deadline = now + (u64::from(n) << (m >> 1));
     }
 
     /// This clock with [`Self::dma`] clear: reads through it are
@@ -360,9 +399,11 @@ impl Hot {
 ///
 /// Built with [`Ctx::new`]; dropping it stores [`Ctx::hot`] back into
 /// [`Sys::hot`].
+#[repr(C)]
 pub(crate) struct Ctx<'r, 'a> {
     /// The live per-M-cycle state, by value so the tick doesn't load
-    /// `sys` (copied from and back to `Sys::hot`).
+    /// `sys` (copied from and back to `Sys::hot`). First, so that the
+    /// countdown is at offset 0 ([`Hot::t_minus`]).
     pub(crate) hot: Hot,
     pub(crate) mem: &'r mut Memory,
     pub(crate) sys: &'r mut Sys<'a>,
@@ -430,11 +471,18 @@ impl Ctx<'_, '_> {
     /// countdown. Everything else is an event (ADR 0011).
     #[inline(always)]
     fn tick(&mut self) {
-        let h = &mut self.hot;
-        h.budget -= h.mcycle;
-        if h.budget <= 0 {
+        self.hot.t_minus += 1;
+        if self.hot.t_minus >= 0 {
             self.boundary();
         }
+    }
+
+    /// The clock jumps `clocks` ahead, off the M-cycle grid (the grid
+    /// moves with it): what is due by then runs, and the countdown is set
+    /// for the new grid.
+    fn skip_clocks(&mut self, clocks: u64) {
+        self.hot.set_clock(self.clock() + clocks);
+        self.boundary();
     }
 
     /// A serial byte completed (`done`): the serial interrupt.
@@ -857,26 +905,19 @@ impl Ctx<'_, '_> {
     #[inline(always)]
     fn reschedule_at(&mut self, now: u64) {
         let deadline = self.sys.sched.next().min(self.target);
-        let ahead = deadline.saturating_sub(now).min(i32::MAX as u64);
-        self.hot.deadline = now + ahead;
-        self.hot.budget = ahead as i32;
+        self.hot.set_countdown(now, deadline.saturating_sub(now));
     }
 
     /// Idle M-cycles until the countdown reaches zero (the first M-cycle
-    /// boundary at or after the deadline): `ceil(budget / mcycle)`, and at
-    /// least one.
+    /// boundary at or after the deadline): at least one.
     #[inline]
     fn mcycles_to_deadline(&self) -> u32 {
-        // `mcycle` is 4 or 2: a shift by 2 or 1, not a division (no
-        // divide-by-zero panic path on thumbv7em).
-        debug_assert!(self.hot.mcycle == 2 || self.hot.mcycle == 4);
         // Test builds with eager sync: the skips go one M-cycle at a time.
         #[cfg(feature = "eager-sync")]
         return 1;
         #[cfg(not(feature = "eager-sync"))]
         {
-            let m = self.hot.mcycle as u32;
-            (self.hot.budget.max(1) as u32 + m - 1) >> (m >> 1)
+            self.hot.t_minus.min(-1).unsigned_abs()
         }
     }
 
@@ -1768,7 +1809,7 @@ impl Ctx<'_, '_> {
         if dma_paused {
             self.dma_retime(m);
         }
-        self.hot.mcycle = m as i32;
+        self.hot.set_mcycle(m as i32);
         // (Sets the Ppu deadline for the new walk too: step 3's.)
         self.ppu_speed_changed();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
@@ -1808,10 +1849,7 @@ impl Ctx<'_, '_> {
             // first (the CPU halts at `now`, so after `vdma_stop`): the
             // CPU's M-cycle grid moves by 3 (-1) clocks. What is due in
             // them runs at their end, the first boundary of the new grid.
-            self.hot.budget -= 3;
-            if self.hot.budget <= 0 {
-                self.boundary();
-            }
+            self.skip_clocks(3);
         }
         if !pending {
             // To single speed, Gambatte's PPU gains a clock at the switch
@@ -1881,8 +1919,8 @@ impl Ctx<'_, '_> {
         self.eager_sync();
         let left = self.sys.vdma.switch_end.wrapping_sub(self.clock()) as u32 / m;
         let n = self.mcycles_to_deadline().min(left).max(1);
-        self.hot.budget -= (n * m) as i32;
-        if self.hot.budget <= 0 {
+        self.hot.t_minus += n as i32;
+        if self.hot.t_minus >= 0 {
             self.boundary();
         }
     }
@@ -1906,9 +1944,9 @@ impl Ctx<'_, '_> {
             #[cfg(feature = "eager-sync")]
             self.eager_sync();
             let k = self.mcycles_to_deadline().min(n);
-            self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
+            self.hot.t_minus += k as i32;
             n -= k;
-            if self.hot.budget <= 0 {
+            if self.hot.t_minus >= 0 {
                 // Left after this deadline's M-cycle, for `vdma_hblank`:
                 // an HBlank trigger before the stall's end is lost.
                 self.sys.vdma.stall = n as u16;
@@ -2406,10 +2444,8 @@ impl Bus for Ctx<'_, '_> {
     fn idle_halted(&mut self) {
         #[cfg(feature = "eager-sync")]
         self.eager_sync();
-        let n = self.mcycles_to_deadline();
-        // Up to 2^31 clocks when the countdown is capped: in i64.
-        let h = &mut self.hot;
-        h.budget = (i64::from(h.budget) - i64::from(n) * i64::from(h.mcycle)) as i32;
+        // To zero, or one M-cycle past a countdown already there.
+        self.hot.t_minus += self.mcycles_to_deadline() as i32;
         self.boundary();
     }
 
@@ -2796,7 +2832,7 @@ impl Emulator<'_> {
     pub fn start_clock_at(&mut self, clock: u64) {
         let sys = &mut self.hw.sys;
         assert!(
-            sys.hot.clock() == 0 && sys.hot.budget == 0,
+            sys.hot.clock() == 0 && sys.hot.t_minus == 0,
             "not at power on"
         );
         assert!(clock.is_multiple_of(4), "not a multiple of 4");
@@ -2931,16 +2967,18 @@ mod tests {
         let start = emu.clock();
         let Emulator { mem, hw } = &mut *emu;
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-        // Nothing due: the countdown is capped to fit an i32.
-        assert_eq!((ctx.hot.budget, ctx.clock()), (i32::MAX, start));
+        // Nothing due: the countdown is capped to `i32::MAX` clocks, in
+        // M-cycles (rounded up).
+        const CAPPED: i32 = -(1 << 29);
+        assert_eq!((ctx.hot.t_minus, ctx.clock()), (CAPPED, start));
         // Reaching a (capped) deadline mid-M-cycle just reschedules, and
         // the clock stays exact across it.
-        ctx.hot.budget = 6;
-        ctx.hot.deadline = start + 6;
+        ctx.hot.set_countdown(start, 6);
+        assert_eq!((ctx.hot.t_minus, ctx.clock()), (-2, start));
         ctx.idle();
-        assert_eq!((ctx.hot.budget, ctx.clock()), (2, start + 4));
+        assert_eq!((ctx.hot.t_minus, ctx.clock()), (-1, start + 4));
         ctx.idle();
-        assert_eq!((ctx.hot.budget, ctx.clock()), (i32::MAX, start + 8));
+        assert_eq!((ctx.hot.t_minus, ctx.clock()), (CAPPED, start + 8));
         assert!(!ctx.done);
         drop(ctx);
         assert_eq!(emu.clock(), start + 8);
@@ -2957,7 +2995,7 @@ mod tests {
         ctx.idle();
         assert!(ctx.done);
         assert_eq!(ctx.clock(), now + 16);
-        assert_eq!(ctx.hot.budget, i32::MAX);
+        assert_eq!(ctx.hot.t_minus, CAPPED);
     }
 
     #[test]
@@ -2983,12 +3021,19 @@ mod tests {
             (2, i32::MAX, 1 << 31),
         ] {
             let start = ctx.clock();
-            ctx.hot.mcycle = mcycle;
-            ctx.hot.budget = budget;
-            ctx.hot.deadline = start.wrapping_add_signed(budget.into());
+            ctx.hot.set_mcycle(mcycle);
+            if budget >= 0 {
+                ctx.hot.set_countdown(start, budget as u64);
+            } else {
+                // A deadline passed by less than an M-cycle: the
+                // countdown is at zero (the tick handles it next).
+                ctx.hot.set_clock(start);
+            }
             ctx.idle_halted();
             assert_eq!(ctx.clock() - start, idled, "{mcycle} {budget}");
-            assert_eq!(ctx.hot.budget, i32::MAX, "{mcycle} {budget}");
+            // Renewed: capped at `i32::MAX` clocks, in M-cycles.
+            let capped = (i32::MAX as u32).div_ceil(mcycle as u32) as i32;
+            assert_eq!(ctx.hot.t_minus, -capped, "{mcycle} {budget}");
         }
     }
 
@@ -3277,7 +3322,7 @@ mod tests {
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         // 2-clock M-cycles (`write_ppu` keys double speed on them; the
         // switch's own timing is not under test).
-        ctx.hot.mcycle = 2;
+        ctx.hot.set_mcycle(2);
         ctx.idle();
         assert_eq!(ctx.clock(), line + 145);
         ctx.write(0xFF43, 8);
@@ -3320,7 +3365,7 @@ mod tests {
             let Emulator { mem, hw } = &mut *emu;
             let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
             ctx.write(0xFF41, 0x20);
-            ctx.hot.mcycle = m;
+            ctx.hot.set_mcycle(m);
             ctx.sys.ppu.speed_changed(m == 2);
             while ctx.clock() < start {
                 ctx.idle();
@@ -3359,7 +3404,7 @@ mod tests {
             let _ = emu.run_until(line5 - 40, &mut fb, &mut []);
             let Emulator { mem, hw } = &mut *emu;
             let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-            ctx.hot.mcycle = m;
+            ctx.hot.set_mcycle(m);
             ctx.sys.ppu.speed_changed(m == 2);
             ctx.write(0xFF41, 0x40);
             ctx.write(0xFF43, scx);
@@ -5274,7 +5319,7 @@ mod dma_tests {
             ctx.write(0xFF40, 0x91);
             ctx.write(0xFF41, sel);
             // The switch's own timing is not under test.
-            ctx.hot.mcycle = if double { 2 } else { 4 };
+            ctx.hot.set_mcycle(if double { 2 } else { 4 });
             while ctx.clock() < e + pos - 3 {
                 ctx.idle();
             }

@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn gdma_in_double_speed_takes_16_mcycles_per_block() {
         let emu = setup(0x11, 0x80);
-        emu.hw.sys.hot.mcycle = 2;
+        emu.hw.sys.hot.set_mcycle(2);
         write(emu, 0xFF55, 0x00);
         assert_eq!(step(emu), 2 * (1 + 16 + 1));
     }

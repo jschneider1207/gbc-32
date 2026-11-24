@@ -274,11 +274,13 @@ and audio buffers, the stop events and the target) and calls
 reports the call done (target reached or a stop event raised); the opcode
 dispatch is inlined into that loop. The CPU is generic over the `Bus`
 trait; every `read`/`write`/`idle` is one M-cycle: the access at the
-current clock, then a tick: only an `i32` countdown to the next deadline,
-the earlier of the event table's minimum and the target.
+current clock, then a tick: only an `i32` count of the M-cycles to the
+next deadline (the first M-cycle boundary at or after the earlier of the
+event table's minimum and the target), which the tick increments towards
+zero (`Hot::t_minus`).
 The countdown (`Hot`) is copied into the `Ctx` for the call
 and back into `Sys::hot` when it is dropped, so the tick doesn't go
-through `ctx.sys`; the u64 clock is `deadline - budget`. Scheduled work
+through `ctx.sys`; the u64 clock is `deadline + t_minus * mcycle`. Scheduled work
 lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
 deadline per `EventKind` (`NEVER` = none) and their minimum, maintained
 only when a deadline is set (incrementally: the table is rescanned only
@@ -289,7 +291,7 @@ deterministic), each handler setting its next deadline, then reschedules
 the countdown; register writes that move a deadline (LCDC, SC, DIV, TIMA,
 TMA, TAC, STOP) reschedule too. A halted, stopped, locked-up or powered-off CPU
 idles through `Bus::idle_halted`, which `Ctx` implements as one skip
-straight to the next deadline (`ceil(budget / mcycle)` M-cycles, at least
+straight to the next deadline (`-t_minus` M-cycles, at least
 one, then `boundary`): only a deadline can change `IE & IF`, a stop
 wake-up or the end of the call, so the wake-up lands on the same M-cycle
 as idling one M-cycle at a time. The CGB speed-switch pause skips the same
