@@ -101,6 +101,7 @@ impl Memory {
                 next: 0,
                 sel_latch: (0, 0),
                 sel_end: (0, 0),
+                win_zero: 0,
             },
             bg_pal: [0; 64],
             obj_pal: [0; 64],
@@ -167,6 +168,9 @@ pub(crate) struct ObjRank {
     /// earlier line (before this line's objects); 0, unknown; 0xFF, BG
     /// reads with 8000 addressing since (unknown, after every object).
     pub(crate) sel_end: (u8, u8),
+    /// Screen x + 1 of the window zero pixel due on the current line
+    /// (`Renderer::render_zero`), 0: none.
+    pub(crate) win_zero: u8,
 }
 
 /// One held part of a line ([`ObjRank::hold`]).
@@ -235,6 +239,7 @@ mod tests {
         assert_eq!(obj_rank.next, 0);
         assert_eq!(obj_rank.sel_latch, (0, 0));
         assert_eq!(obj_rank.sel_end, (0, 0));
+        assert_eq!(obj_rank.win_zero, 0);
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
@@ -244,6 +249,7 @@ mod tests {
             + size_of_val(&obj_rank.next)
             + size_of_val(&obj_rank.sel_latch)
             + size_of_val(&obj_rank.sel_end)
+            + size_of_val(&obj_rank.win_zero)
             + size_of::<Apu>()
             + size_of_val(dma_read_clears);
         assert_eq!(

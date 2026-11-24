@@ -69,6 +69,10 @@ const W: usize = SCREEN_WIDTH;
 // Non-CGB mode: BG and window enable. CGB mode: BG/window master priority.
 const LCDC_BG_ON: u8 = 0x01;
 const LCDC_OBJ_ON: u8 = 0x02;
+
+// `Renderer::slow` bits.
+const OBJ_DIRTY: u8 = 1;
+const ZERO_DUE: u8 = 2;
 const LCDC_OBJ_TALL: u8 = 0x04;
 const LCDC_BG_MAP: u8 = 0x08;
 const LCDC_TILES_8000: u8 = 0x10;
@@ -277,11 +281,14 @@ pub(crate) struct Renderer {
     pub(crate) objects: LineObjects,
     /// Slots of `objects` from highest to lowest drawing priority.
     pub(crate) order: [u8; MAX_PER_LINE],
-    /// Object pixels of the line, at screen x + 8: 0 = transparent, else
-    /// bits 0-1 color (1-3), bits 2-4 palette, bit 7 OAM "behind BG".
-    /// `obj_buf` still holds the previous line's objects (cleared by the
-    /// next `render`).
-    obj_dirty: bool,
+    /// Work for [`Renderer::render`] before its spans, one byte so the
+    /// common case is one test: `OBJ_DIRTY`, `obj_buf` (object pixels of
+    /// the line, at screen x + 8: 0 = transparent, else bits 0-1 color
+    /// (1-3), bits 2-4 palette, bit 7 OAM "behind BG") still holds the
+    /// previous line's objects (cleared by the next `render`); `ZERO_DUE`,
+    /// a window zero pixel is due at `ObjRank::win_zero`
+    /// ([`Renderer::render_zero`]; dropped at the frame start).
+    slow: u8,
     /// An object was fetched into `obj_buf` on this line (else it is all
     /// transparent).
     obj_fetched: bool,
@@ -302,7 +309,7 @@ impl Renderer {
             window_skip: 0,
             objects: LineObjects::EMPTY,
             order: [0; MAX_PER_LINE],
-            obj_dirty: false,
+            slow: 0,
             obj_fetched: false,
             cgb: false,
         }
@@ -315,6 +322,8 @@ impl Renderer {
     pub(crate) fn start_frame(&mut self) {
         self.window_line = 0;
         self.wy_triggered = false;
+        // A zero pixel due on a line the LCD going off cut short.
+        self.slow &= OBJ_DIRTY;
     }
 
     /// A WY == LY comparison. Pan Docs: at the start of each line; SameBoy
@@ -414,7 +423,7 @@ impl Renderer {
         self.order = order;
         // The buffer (`Memory::obj_buf`) is all transparent unless an object
         // was fetched; it is cleared by the first `render` of the line.
-        self.obj_dirty |= self.obj_fetched;
+        self.slow |= u8::from(self.obj_fetched);
         self.obj_fetched = false;
     }
 
@@ -464,9 +473,12 @@ impl Renderer {
         if usize::from(obj_rank.hold[2].end) > x0 {
             return self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank);
         }
-        if self.obj_dirty {
+        if self.slow != 0 {
+            if self.slow & ZERO_DUE != 0 {
+                return self.render_zero(row, x0, x1, regs, src, obj_buf, obj_rank);
+            }
             *obj_buf = [0; OBJ_BUF_LEN];
-            self.obj_dirty = false;
+            self.slow = 0;
         }
         let lcdc = regs.lcdc;
 
@@ -578,6 +590,70 @@ impl Renderer {
         }
         self.render(row, x0, x1, regs, src, obj_buf, obj_rank);
         obj_rank.hold = hold;
+    }
+
+    /// Whether screen x `z` is the first pixel of a window tile after the
+    /// window's first one, on the window's grid as it is (or will be, once
+    /// started) drawn on this line ([`Renderer::set_zero`]).
+    pub(crate) fn window_tile_edge(&self, z: u8) -> bool {
+        let start = self.window_start();
+        let skip = if self.window_active {
+            self.window_skip
+        } else {
+            self.trigger_skip()
+        };
+        self.win_wx != 0 && z > start && (z - start).wrapping_add(skip) & 7 == 0
+    }
+
+    /// A window zero pixel is due at screen x `z` (`None`: none is), see
+    /// [`Renderer::render_zero`]; `Ppu::window_zero` decides it.
+    pub(crate) fn set_zero(&mut self, obj_rank: &mut ObjRank, z: Option<u8>) {
+        obj_rank.win_zero = z.map_or(0, |z| z + 1);
+        self.slow |= ZERO_DUE;
+    }
+
+    /// [`Renderer::render`] while a window zero pixel is due at `win_zero`
+    /// (`ZERO_DUE`): the pixels before it, then, if the window is still
+    /// drawn there from an earlier start, a color-0 pixel of BG palette 0 (objects mixed over it
+    /// as over any color 0) that delays the window's pixels by one, then
+    /// the rest. The window pixel due at the zero pixel comes out one dot
+    /// later and the line's last one is lost: the FIFO isn't popped for it
+    /// (SameBoy display.c `insert_bg_pixel`, "Insert a pixel right at the
+    /// FIFO's end"). Out of line and cold: only after a WX write in mode 3.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn render_zero(
+        &mut self,
+        row: &mut [u16; W],
+        x0: usize,
+        x1: usize,
+        regs: &Regs,
+        src: &Sources,
+        obj_buf: &mut [u8; OBJ_BUF_LEN],
+        obj_rank: &mut ObjRank,
+    ) {
+        self.slow &= !ZERO_DUE;
+        // The zero pixel's x + 1 (0: none).
+        let z1 = usize::from(obj_rank.win_zero);
+        // Up to it as usual first: its objects are fetched.
+        let cut = z1.min(x1).max(x0);
+        self.render(row, x0, cut, regs, src, obj_buf, obj_rank);
+        if z1 > x1 {
+            // Not reached yet (the rest is empty).
+            self.slow |= ZERO_DUE;
+        } else if z1 > x0 {
+            obj_rank.win_zero = 0;
+            // Not at a (re)start: the window's first tile is still fetched.
+            if self.window_active && z1 > usize::from(self.window_start()) + 1 {
+                if let (Some(p), Some(&o)) = (row.get_mut(z1 - 1), obj_buf.get(z1 + 7)) {
+                    let o = if regs.lcdc & LCDC_OBJ_ON != 0 { o } else { 0 };
+                    *p = mix(0, o, 0, &src.colors.bg[0], src.colors);
+                }
+                self.window_skip = self.window_skip.wrapping_sub(1);
+            }
+        }
+        self.render(row, cut, x1, regs, src, obj_buf, obj_rank);
     }
 
     /// Redraws pixels `[x0, x1)` of one BG or window tile, just drawn with
@@ -895,9 +971,9 @@ impl Renderer {
         src: &Sources,
         lcdc: u8,
     ) {
-        if self.obj_dirty {
+        if self.slow & OBJ_DIRTY != 0 {
             *obj_buf = [0; OBJ_BUF_LEN];
-            self.obj_dirty = false;
+            self.slow &= !OBJ_DIRTY;
         }
         // `fetch_objects` up to that object only.
         let all = self.objects;
@@ -1478,6 +1554,7 @@ mod tests {
                     next: 0,
                     sel_latch: (0, 0),
                     sel_end: (0, 0),
+                    win_zero: 0,
                 },
             }
         }
@@ -2278,6 +2355,7 @@ mod tests {
                     next: 0,
                     sel_latch: (0, 0),
                     sel_end: (0, 0),
+                    win_zero: 0,
                 },
             };
             split.r.start_frame();

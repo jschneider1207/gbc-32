@@ -2289,6 +2289,7 @@ impl Ppu {
         let old = self.renderer.window_wx().unwrap_or(0);
         let at = self.window_stall_at();
         if decided(at, WINDOW_LEAD - adj(old)) {
+            self.window_zero(mem);
             // CGB: LCDC.5 clear during the stall ends it; its remaining
             // dots output pixels (gambatte ppu.cpp `StartWindowDraw::inc`,
             // CGB only; `window/late_disable*_1` cgb04c out0, dmg08 out3).
@@ -2323,6 +2324,34 @@ impl Ppu {
         }
         self.window_cuts_holds(mem);
         self.end_moved();
+    }
+
+    /// After a window write (flushed) once the window has started:
+    /// the window zero pixel. While the window is drawn, WX == x + 7 at
+    /// the dot the first pixel x of a window tile (not the first) is
+    /// output, the fetcher about to read the next tile's map entry, outputs
+    /// a color-0 pixel there instead and delays the window's pixels by one
+    /// ([`Renderer::render_zero`]). SameBoy display.c (MIT) has it as
+    /// `insert_bg_pixel` (WX matched with `wx_triggered`, the fetcher at
+    /// GET_TILE_T1 and 8 pixels in the FIFO) on DMG only; the CGB C
+    /// captures show it too: Mealybug `m3_wx_4_change_sprites` ("window
+    /// reactivation zero pixels", WX = LY written while the window drawn
+    /// from WX = 4 is on screen: one color-0 pixel at x = LY - 7 on the
+    /// lines where that is a window tile's first pixel, and an object with
+    /// the priority bit shows through it). The live WX is compared there,
+    /// so a write counts for the pixels not drawn yet (`drawn`, as the
+    /// flush left it; SameBoy's WX lands one dot after the access, which
+    /// the ROMs don't pin) and a later one before that pixel takes it
+    /// back. Calibration: the zero pixel counted from 0-5 pixels after
+    /// `drawn` gives the same manifest (its WX = LY write lands at pixel 0
+    /// on line 12), from 6 on loses it; the WX = 80 write takes back line
+    /// 100's (x = 93), not line 92's (x = 85).
+    #[cold]
+    #[inline(never)]
+    fn window_zero(&mut self, mem: &mut Memory) {
+        let z = mem.io[0x4B].wrapping_sub(7);
+        let due = z >= self.drawn && z < 160 && self.renderer.window_tile_edge(z);
+        self.renderer.set_zero(&mut mem.obj_rank, due.then_some(z));
     }
 
     /// The window starts again on the line (SameBoy display.c: once a
@@ -4250,14 +4279,17 @@ mod tests {
         // (b) During the stall (from dot 96 + 64 = 160): LCDC.5 cleared (and
         // set again in mode 0): the BG on line 5, row 5 counted, so line 6
         // draws row 6, and the stall keeps its 2 dots before the write
-        // (CGB, step E2); WX moved to x = 72: the window still starts at 64
-        // (line 6: at 72, row 6).
+        // (CGB, step E2); WX moved to x = 71: the window still starts at 64
+        // (line 6: at 71, row 6). To x = 72, the first pixel of the
+        // window's second tile: also a color-0 pixel there
+        // (`Ppu::window_zero`).
         let off = 0xF1 & !0x20;
         assert_eq!(
             run(0, &[(162, 0x40, off), (300, 0x40, 0xF1)]),
             (Some(256 + 2), 1, 1, 4)
         );
-        assert_eq!(run(0, &[(162, 0x4B, 0x4F)]), (Some(256 + 6), 2, 2, 4));
+        assert_eq!(run(0, &[(162, 0x4B, 0x4E)]), (Some(256 + 6), 2, 2, 4));
+        assert_eq!(run(0, &[(162, 0x4B, 0x4F)]), (Some(256 + 6), 2, 1, 4));
     }
 
     /// LCDC.5 cleared while the window is drawn switches to the BG at the
@@ -4327,6 +4359,59 @@ mod tests {
         assert_eq!(run(162), (Some(256 + 12), [3, 4, 4, 4, 3], 2));
         // Set at x = 33, before the fetch of 44: the window goes on.
         assert_eq!(run(135), (Some(256 + 6), [3, 3, 3, 3, 3], 4));
+    }
+
+    /// WX moved to x + 7 while the window is drawn, x the first pixel of a
+    /// window tile not yet out: a color-0 pixel at x, the window's pixels
+    /// one later from there, mode 3 as long (Mealybug
+    /// `m3_wx_4_change_sprites` CGB C; SameBoy `insert_bg_pixel`). A later
+    /// WX write before x takes it back.
+    #[test]
+    fn wx_at_a_window_tile_s_first_pixel_inserts_a_zero_pixel() {
+        // Window at x = 4 (WX 0x0B), map 9C00 tile 1: color 3 at each
+        // tile's first pixel, else 0 (frame values 4 and 1); window tiles
+        // start at x = 4 + 8k. Line 5: pixel x >= 4 is out at dot 102 + x.
+        // `WX writes (dot, value; 0: a flush only, as for a palette
+        // write)` -> (mode-3 end, line 5 x = 27..=29, 36, 37).
+        let run = |writes: &[(u32, u8)]| {
+            let lcd_on = 1000;
+            let mut r = fetch_rig(lcd_on);
+            for row in 0..8 {
+                r.mem.vram[16 + 2 * row] = 0x80;
+                r.mem.vram[17 + 2 * row] = 0x80;
+            }
+            r.ppu.lcdc = 0xF1;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = 0x0B;
+            let l5 = clock(lcd_on, 0, 5 * LINE);
+            for &(t, v) in writes {
+                let now = l5 + u64::from(t);
+                r.sync(now);
+                r.ppu.flush(now, &mut r.mem, &mut r.frame);
+                if v != 0 {
+                    r.mem.io[0x4B] = v;
+                    r.ppu.window_write(now, &mut r.mem, Some(WX_ON_LEAD));
+                }
+            }
+            r.sync(l5 + 455);
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            r.sync(l5 + 2 * u64::from(LINE));
+            let px = |x: usize| r.frame[5 * SCREEN_WIDTH + x];
+            (end, [px(27), px(28), px(29), px(36), px(37)])
+        };
+        let plain = (Some(256 + 6), [1, 4, 1, 4, 1]);
+        assert_eq!(run(&[]), plain);
+        // WX = 0x23 (x = 28) written at x = 20, and at x = 28 itself.
+        let zero = (Some(256 + 6), [1, 1, 4, 1, 4]);
+        assert_eq!(run(&[(122, 0x23)]), zero);
+        assert_eq!(run(&[(130, 0x23)]), zero);
+        // Still due after the pixels up to x = 24 are drawn.
+        assert_eq!(run(&[(122, 0x23), (126, 0)]), zero);
+        // Once x = 28 is out: too late.
+        assert_eq!(run(&[(131, 0x23)]), plain);
+        // Not a tile's first pixel (x = 29), or moved on before x = 28.
+        assert_eq!(run(&[(122, 0x24)]), plain);
+        assert_eq!(run(&[(122, 0x23), (126, 0x50)]), plain);
     }
 
     /// After a re-trigger the earlier start keeps its stall as it ran
