@@ -68,11 +68,15 @@ in git):
   amendment) a timer nobody takes costs no events at all. Now IE = STAT
   and timer, TMA=E0 at TAC=05 (524 kHz in double speed): an overflow
   every 256 base clocks, **16,384 Hz, 274.3 timer IRQs a frame** (about
-  two per line), each serviced by a 13-byte handler at 0x50 that bumps a
-  16-bit WRAM counter at C002 (PUSH AF/HL, INC, POP, RETI: 32 M-cycles
-  with the dispatch, about 25% of the CPU). The rate is twice
-  `synth:apu-writes`' 8 kHz PCM, the high end of a game's timer-driven
-  sample or sound driver; TMA=FF would keep the CPU in the handler. The
+  two per line), each serviced by a PCM sample player at 0x50: it
+  advances a 16-bit sample counter at C002 (its low byte indexes a
+  256-byte table at 4000, a 4-bit triangle wave), loads the sample and
+  writes it to NR50, the master volume, the usual way to play 4-bit PCM
+  on the Game Boy (as `synth:apu-writes` does); 42 M-cycles with the
+  dispatch, about 33% of the CPU. `@0` (no APU at all) plays to HRAM
+  FF80 instead. The rate is twice `synth:apu-writes`' 8 kHz, the high
+  end for such a driver, affordable in double speed; TMA=FF would keep
+  the CPU in the handler. The
   STAT handler moved to 0x68 behind a `JP` at 0x48 (4 M-cycles more per
   STAT IRQ) to free the timer vector. The per-line SCX write now detects
   a new line by LY (mode 3 on an LY other than the last one written)
@@ -80,16 +84,19 @@ in git):
   taking most of a heavy line's modes 0 and 2, the mode poll saw no
   change on ~27 lines a frame (117 SCX writes instead of 144). It still
   writes once per visible line, 18-42 M-cycles into mode 3
-  (`hold_fetch` 17,077 calls in 2 s, 143 a frame). Everything else is
-  unchanged. Ir (2 s): 276,111,793 -> **271,698,253 (-1.6%)**, 2.311 ->
-  **2.274 M Ir per frame, 56.6% of the 4.02 M line**. The same program
-  with IE = STAT only (the new TMA and poll, no timer IRQ) is
-  275,164,860: servicing 274 IRQs a frame *lowers* Ir by 3.47 M (-1.3%),
-  because the handler's 32 M-cycles replace poll-loop iterations whose
-  I/O reads (STAT, LY, SC, HDMA5) cost more per M-cycle than the
-  dispatch and the handler's WRAM increment. So interrupt dispatch is
-  now counted against the line, but it is not where the worst case's
-  cost is.
+  (`hold_fetch` 143 a frame). Everything else is unchanged. APU writes
+  per frame: 414 (`Apu::write`, 49,459 in 2 s: 274 samples plus the
+  STAT handler's ~142 NR50 toggles). Ir (2 s): 276,111,793 ->
+  **289,297,010 (+4.8%)**, 2.311 -> **2.422 M Ir per frame, 60.2% of
+  the 4.02 M line**. The same program with IE = STAT only (the new TMA
+  and poll, no timer IRQ) is 275,164,860 (2.304 M). A first version
+  whose handler only bumped the counter (32 M-cycles) measured
+  271,698,253, *below* both: its cheap cycles displaced poll-loop
+  iterations whose I/O reads (STAT, LY, SC, HDMA5) cost more per
+  M-cycle. A handler that does a sample driver's work (a table load and
+  an APU write) costs a net 435 Ir per IRQ over the polling it
+  displaces ((289.30 - 275.16) M / 32,499 IRQs), so the timer IRQ now
+  raises the bound, as it should.
 - `synth:cgb-raster` (2 s): a CGB palette raster ("hi-color") effect in
   double speed. BG only (LCDC=91), one tile with all four colors, map
   attributes selecting palette (column & 7) so all 8 BG palettes are on

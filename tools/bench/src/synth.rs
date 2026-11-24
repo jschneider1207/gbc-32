@@ -110,12 +110,18 @@ const HALT_IRQ: &[u8] = &[
 /// The timer interrupt is serviced too (IE = STAT and timer): TIMA counts
 /// at 262 kHz nominal, 524 kHz in double speed, from TMA=E0, so it
 /// overflows every 256 base clocks: 16,384 Hz, 274.3 a frame, about two
-/// per line. That is twice `synth:apu-writes`' 8 kHz PCM rate, the high
-/// end of what a game's timer-driven sample or sound driver asks for; a
-/// TMA of FF (an overflow every 8 clocks, as in `synth:event-storm`) would
-/// keep the CPU in the handler. The handler at 0x50 ([`TIMER_HANDLER`])
-/// bumps a 16-bit WRAM counter; the STAT handler moved behind a `JP` at
-/// 0x48 to make room for it ([`STAT_JP`]).
+/// per line. The handler at 0x50 ([`timer_handler`]) is a PCM sample
+/// player: it advances a 16-bit sample counter in WRAM (C002, low byte =
+/// position in a 256-byte table at 4000, [`PCM_TABLE`]), loads the next
+/// sample and writes it to NR50, the master volume: the usual way to play
+/// 4-bit PCM on the Game Boy with no DAC of its own (every channel held
+/// at a constant level, the samples scaling their sum), as
+/// `synth:apu-writes` does. 16,384 Hz is twice that bench's 8 kHz, the
+/// high end for such a driver, and a CGB game in double speed can afford
+/// it (the handler is 42 M-cycles with the dispatch, 33% of the CPU);
+/// a TMA of FF (an overflow every 8 clocks, as in `synth:event-storm`)
+/// would keep the CPU in the handler. The STAT handler moved behind a `JP`
+/// at 0x48 to make room for it ([`STAT_JP`]).
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
@@ -499,12 +505,39 @@ const STAT_JP: &[u8] = &[0xC3, STAT_HANDLER_AT as u8, 0x00];
 /// PUSH HL; LD HL,C000; INC (HL); POP HL; POP AF; RETI.
 const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0xD9];
 
-/// The worst-case timer handler at 0x50 (13 bytes, up to 0x5C): bumps the
-/// 16-bit counter at C002 (little-endian). PUSH AF; PUSH HL; LD HL,C002;
-/// INC (HL); JR NZ,done; INC L; INC (HL); done: POP HL; POP AF; RETI.
-const TIMER_HANDLER: &[u8] = &[
-    0xF5, 0xE5, 0x21, 0x02, 0xC0, 0x34, 0x20, 0x02, 0x2C, 0x34, 0xE1, 0xF1, 0xD9,
-];
+/// The worst-case timer handler at 0x50 (20 bytes, up to 0x63; the
+/// joypad vector at 0x60 is unused), for HRAM address `reg`: bumps the
+/// 16-bit counter at C002 (little-endian), then plays sample (low byte)
+/// of [`PCM_TABLE`] to `reg`. PUSH AF; PUSH HL; LD HL,C002; INC (HL);
+/// LD A,(HL); JR NZ,play; INC L; INC (HL); play: LD L,A; LD H,40;
+/// LD A,(HL); LDH (reg),A; POP HL; POP AF; RETI. `synth:worst-case` plays
+/// to NR50; `@0` (no APU at all) to HRAM FF80.
+const fn timer_handler(reg: u8) -> [u8; 20] {
+    [
+        0xF5, 0xE5, 0x21, 0x02, 0xC0, 0x34, 0x7E, 0x20, 0x02, 0x2C, 0x34, 0x6F, 0x26, 0x40, 0x7E,
+        0xE0, reg, 0xE1, 0xF1, 0xD9,
+    ]
+}
+const TIMER_HANDLER_NR50: [u8; 20] = timer_handler(0x24);
+const TIMER_HANDLER_HRAM: [u8; 20] = timer_handler(0x80);
+
+/// Where [`PCM_TABLE`] lives (bank 1 of the 32 KiB ROM).
+const PCM_TABLE_AT: usize = 0x4000;
+
+/// The worst-case PCM samples as NR50 values: a 4-bit triangle wave
+/// (period 16 samples, 1,024 Hz at 16 kHz) at levels 0-7, the same on
+/// both sides (Pan Docs FF24: bits 4-6 left, 0-2 right, VIN off).
+const PCM_TABLE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        let p = (i & 15) as u8;
+        let s = if p < 8 { p } else { 15 - p };
+        t[i] = s << 4 | s;
+        i += 1;
+    }
+    t
+};
 
 /// The worst-case STAT handler with the channels on (15 bytes):
 /// [`STAT_HANDLER`] plus LDH A,(NR50); XOR 07; LDH (NR50),A before the
@@ -563,14 +596,14 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
         None => (name == "worst-case").then_some(0xF),
     };
     let worst = mask.map(worst_case).unwrap_or_default();
-    let stat = if mask == Some(0) {
-        STAT_HANDLER
+    let (stat, timer): (&[u8], &[u8]) = if mask == Some(0) {
+        (STAT_HANDLER, &TIMER_HANDLER_HRAM)
     } else {
-        STAT_HANDLER_NR50
+        (STAT_HANDLER_NR50, &TIMER_HANDLER_NR50)
     };
     let pcm = apu_writes();
-    // The code (at 0x150), and (address, bytes) pieces below 0x100: the
-    // interrupt vectors and handlers.
+    // The code (at 0x150), and (address, bytes) pieces outside it: the
+    // interrupt vectors and handlers below 0x100, data from 0x4000.
     let (code, low): (&[u8], Vec<(usize, &[u8])>) = match name {
         "event-storm" => (EVENT_STORM, vec![]),
         "dma-storm" => (DMA_STORM, vec![]),
@@ -579,8 +612,9 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
             &worst,
             vec![
                 (0x48, STAT_JP),
-                (0x50, TIMER_HANDLER),
+                (0x50, timer),
                 (STAT_HANDLER_AT, stat),
+                (PCM_TABLE_AT, &PCM_TABLE),
             ],
         ),
         "apu-writes" => (&pcm, vec![(0x50, &PCM_HANDLER)]),
@@ -600,8 +634,8 @@ fn image(title: &str, cgb_flag: u8, code: &[u8], low: &[(usize, &[u8])]) -> Vec<
     for &(at, bytes) in low {
         let dst = &mut rom[at..at + bytes.len()];
         assert!(
-            at + bytes.len() <= 0x100,
-            "{title}: {at:#x} runs into the header"
+            at + bytes.len() <= 0x100 || at >= 0x4000,
+            "{title}: {at:#x} runs into the header or code"
         );
         assert!(dst.iter().all(|&b| b == 0), "{title}: {at:#x} overlaps");
         dst.copy_from_slice(bytes);
@@ -754,11 +788,38 @@ mod tests {
         // The vectors: STAT jumps past the timer handler.
         let rom = build("worst-case").unwrap();
         assert_eq!(rom[0x48..0x4B], *STAT_JP);
-        assert_eq!(rom[0x50..0x50 + TIMER_HANDLER.len()], *TIMER_HANDLER);
+        assert_eq!(rom[0x50..0x64], TIMER_HANDLER_NR50);
+        assert_eq!(
+            build("worst-case@0").unwrap()[0x50..0x64],
+            TIMER_HANDLER_HRAM
+        );
         assert_eq!(
             rom[0x68..0x68 + STAT_HANDLER_NR50.len()],
             *STAT_HANDLER_NR50
         );
+    }
+
+    #[test]
+    fn worst_case_plays_pcm_through_nr50() {
+        // At 16 points 1,000 clocks apart (about 4 samples): NR50's left
+        // volume is the sample the counter at C002 points to (or the one
+        // before, if the run stopped inside the handler); the right volume
+        // is that, or that XOR 7 after the STAT handler's toggle.
+        let at = u64::from(CLOCK_HZ) / 10;
+        let mut seen = [false; 8];
+        for k in 0..16 {
+            let r = run("worst-case", at + k * 1_000, &[0xC002, 0xFF24]);
+            let (pos, nr50) = (r[0], r[1]);
+            let s = |p: u8| PCM_TABLE[usize::from(p)] >> 4;
+            let (left, right) = (nr50 >> 4 & 7, nr50 & 7);
+            let ok = |s: u8| left == s && (right == s || right == s ^ 7);
+            assert!(
+                ok(s(pos)) || ok(s(pos.wrapping_sub(1))),
+                "{k}: {pos} {nr50:#04x}"
+            );
+            seen[usize::from(left)] = true;
+        }
+        assert!(seen.iter().filter(|&&b| b).count() >= 4, "{seen:?}");
     }
 
     #[test]
@@ -780,8 +841,9 @@ mod tests {
             u64::from(CLOCK_HZ) / 2,
             &[0xFF24, 0xFF25, 0xFF26],
         );
-        // NR50: the STAT handler toggles the right volume (7 or 0).
-        assert_eq!([r[0] | 7, r[1], r[2]], [0x77, 0xFF, 0xFF]);
+        // NR50 (the PCM samples, worst_case_plays_pcm_through_nr50): VIN
+        // off.
+        assert_eq!([r[0] & 0x88, r[1], r[2]], [0x00, 0xFF, 0xFF]);
         // Masks: one channel each, and none at all (the plain program).
         for ch in 0..4u8 {
             let r = run(&format!("worst-case@{:X}", 1 << ch), 70_224, &[0xFF26]);
