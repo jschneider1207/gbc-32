@@ -69,15 +69,15 @@ const W: usize = SCREEN_WIDTH;
 // Non-CGB mode: BG and window enable. CGB mode: BG/window master priority.
 const LCDC_BG_ON: u8 = 0x01;
 const LCDC_OBJ_ON: u8 = 0x02;
-
-// `Renderer::slow` bits.
-const OBJ_DIRTY: u8 = 1;
-const ZERO_DUE: u8 = 2;
 const LCDC_OBJ_TALL: u8 = 0x04;
 const LCDC_BG_MAP: u8 = 0x08;
 const LCDC_TILES_8000: u8 = 0x10;
 const LCDC_WIN_ON: u8 = 0x20;
 const LCDC_WIN_MAP: u8 = 0x40;
+
+// `Renderer::slow` bits.
+const OBJ_DIRTY: u8 = 1;
+const ZERO_DUE: u8 = 2;
 
 /// Calibration of the BG tile column (see [`bg_column`]): the fetch of
 /// the tile whose first pixel is screen x `X` reads map column
