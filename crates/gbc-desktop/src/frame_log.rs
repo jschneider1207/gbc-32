@@ -550,7 +550,8 @@ mod tests {
         }
         // A flat picture: every shift matches; reads as still.
         let flat: Box<Frame> = Box::new([5; W * H]);
-        assert_eq!(motion(&flat, &flat).dx, 0);
+        let m = motion(&flat, &flat);
+        assert_eq!((m.dx, m.dy), (0, 0));
     }
 
     #[test]
