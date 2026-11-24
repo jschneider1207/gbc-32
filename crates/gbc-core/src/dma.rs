@@ -51,11 +51,13 @@ pub(crate) struct OamDma {
     pub(crate) halt_to: u64,
     /// Bytes transferred when that halt began.
     pub(crate) halt_dest: u8,
-    /// After a restart: the byte the old transfer moves in the M-cycle
-    /// after the FF46 write (the first of the new start delay), else
-    /// [`LEN`]. That M-cycle's CPU access conflicts as if it were byte
-    /// `tail` of the new transfer (`bus::dma_conflict`; gambatte cgb04c
-    /// `oamdma_src8000_srcchange0000_busyinc`).
+    /// After a restart, until the new transfer's start: the byte the old
+    /// transfer moves in the M-cycle after the FF46 write (the first of
+    /// the new start delay), else [`LEN`]. That M-cycle's CPU access
+    /// conflicts as if it were byte `tail` of the new transfer (gambatte
+    /// cgb04c `oamdma_src8000_srcchange0000_busyinc`): meanwhile `start`
+    /// and `copied` describe such a transfer (`Ctx::oam_dma`,
+    /// `Ctx::dma_tail_end`).
     pub(crate) tail: u8,
     /// The M-cycle length (4, or 2 in double speed) the transfer runs at.
     pub(crate) mcycle: u8,
@@ -188,6 +190,11 @@ impl OamDma {
         }
         if self.halt_from < c && c <= self.halt_to {
             return (PpuView::Halted, self.halt_dest);
+        }
+        // A restart's stand-in `start` (`tail`) lasts up to the real
+        // start, by which the PPU sees byte 0 written.
+        if self.tail < LEN {
+            return (PpuView::Running, 1);
         }
         // Byte `i` is written at `start + i * mcycle - PPU_LEAD` and seen
         // after it (`start` has moved out past any earlier halt).

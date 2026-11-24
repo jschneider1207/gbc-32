@@ -720,8 +720,12 @@ impl Ctx<'_, '_> {
                 EventKind::Ppu => self.sync_ppu(),
                 EventKind::Input => self.apply_inputs(now),
                 EventKind::Dma => {
-                    self.dma_sync(now);
-                    self.hot.dma = 0;
+                    if self.sys.ppu.dma.tail < dma::LEN {
+                        self.dma_tail_end();
+                    } else {
+                        self.dma_sync(now);
+                        self.hot.dma = 0;
+                    }
                 }
                 EventKind::VramDma => self.vdma_hblank(),
                 EventKind::DivApu => self.div_apu_event(now),
@@ -1108,6 +1112,9 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn oam_dma(&mut self, value: u8) {
         let now = self.clock();
+        if self.sys.ppu.dma.tail < dma::LEN {
+            self.dma_tail_end();
+        }
         self.dma_ppu_event(now);
         self.mem.io[0x46] = value;
         let m = self.hot.mcycle as u64;
@@ -1121,11 +1128,6 @@ impl Ctx<'_, '_> {
         // source at once and the old position runs on until the new
         // start; cgb04c `oamdma_src8000_srcchange0000_busyinc`).
         let old = self.sys.ppu.dma.start;
-        let tail = if restart && now + m >= old {
-            ((now + m - old) >> m.trailing_zeros()) as u8
-        } else {
-            dma::LEN
-        };
         let start = now + 2 * m;
         let end = start + u64::from(dma::LEN) * m;
         let mut d = OamDma {
@@ -1133,17 +1135,43 @@ impl Ctx<'_, '_> {
             start,
             block_from: if restart { now } else { start },
             end,
-            tail,
             mcycle: m as u8,
             ppu_live: true,
             ..OamDma::new()
         };
         d.set_ppu_window();
+        let mut deadline = end;
+        if restart && now + m >= old {
+            // Until the `Dma` deadline at the real `start`
+            // (`dma_tail_end`), `start` is that of a transfer at byte
+            // `tail` in the next M-cycle, so the CPU's conflict path
+            // (`dma_conflict`) needs no test for it; `copied` keeps the
+            // lazy copy from moving bytes meanwhile.
+            let tail = ((now + m - old) >> m.trailing_zeros()) as u8;
+            d.tail = tail;
+            d.start = now + m - u64::from(tail) * m;
+            d.copied = tail + 1;
+            deadline = start;
+        }
         self.sys.ppu.dma = d;
         self.mem.oam_dma_old = self.mem.oam;
         self.hot.dma = 0xFE00;
-        self.sys.sched.set(EventKind::Dma, end);
+        self.sys.sched.set(EventKind::Dma, deadline);
         self.reschedule();
+    }
+
+    /// The `Dma` deadline at a restarted transfer's real start (or
+    /// anything that needs the real state before it): undoes the restart
+    /// tail's stand-in `start` (see [`Self::oam_dma`]). Cold.
+    #[cold]
+    #[inline(never)]
+    fn dma_tail_end(&mut self) {
+        let d = &mut self.sys.ppu.dma;
+        let m = u64::from(d.mcycle);
+        d.start += (u64::from(d.tail) + 1) * m;
+        d.copied = 0;
+        d.tail = dma::LEN;
+        self.sys.sched.set(EventKind::Dma, d.end);
     }
 
     /// Before the OAM DMA state changes at `now` (an FF46 write, a halt
@@ -1744,6 +1772,9 @@ impl Ctx<'_, '_> {
     #[cold]
     #[inline(never)]
     fn oam_dma_during_vdma(&mut self, now: u64, dest0: u16, blocks: u32) {
+        if self.sys.ppu.dma.tail < dma::LEN {
+            self.dma_tail_end();
+        }
         let d = self.sys.ppu.dma;
         // Halted (paused): no steps.
         if d.paused != NEVER {
@@ -1987,14 +2018,12 @@ pub(crate) fn read<const CPU: bool>(mem: &Memory, sys: &Sys, hot: &Hot, addr: u1
 
 /// The conflict for a CPU access to `addr` (below FE00) at `now` during
 /// the transfer `d`, and the index of the byte being transferred. No
-/// conflict in the start delay, except in its first M-cycle after a
-/// restart: the old transfer's last byte ([`OamDma::tail`]).
+/// conflict in the start delay. (The restart tail, [`OamDma::tail`], is
+/// in `d` as a transfer that started earlier: nothing here for it, as
+/// any test here cost every read during a transfer up to 3% Ir on
+/// `synth:dma-storm`, measured.)
 fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) {
     if now < d.start {
-        if d.tail < dma::LEN && now + mcycle as u64 == d.start {
-            let i = d.tail;
-            return (dma::conflict(d.base, d.base + u16::from(i), addr), i);
-        }
         return (Conflict::None, 0);
     }
     // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
@@ -3693,6 +3722,12 @@ mod dma_tests {
             assert_eq!(ctx.read(0x0123), 19 ^ 0x3C);
             // M-cycle 22: the new transfer's byte 0.
             assert_eq!(ctx.read(0x0123), 0x3C);
+            // The new transfer copies all 160 bytes from 4000 as usual.
+            idle_to(ctx, t0, 190);
+            assert_eq!(ctx.hot.dma, 0);
+            for i in 0..0xA0 {
+                assert_eq!(ctx.mem.oam[i], i as u8 ^ 0x3C, "{i:#x}");
+            }
             // Restarted in its own start delay: byte 0 in the next M-cycle.
             idle_to(ctx, t0, 200);
             ctx.write(0xFF46, 0xC1); // M-cycle 200

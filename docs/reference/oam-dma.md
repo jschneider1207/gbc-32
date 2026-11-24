@@ -38,7 +38,7 @@ once, but the old transfer still moves one more byte, in the M-cycle
 after the write (the first of the new start delay), from the *new*
 source: byte `j` (the old transfer's index then) is read from `new + j`.
 So that M-cycle's CPU access conflicts as if it were byte `j` of the new
-transfer, on the new source's bus (`OamDma::tail`, `bus::dma_conflict`);
+transfer, on the new source's bus (`OamDma::tail`);
 only if the old transfer is past its own start delay by then and not
 finished (`j` < 160). What lands in OAM byte `j` is not modelled (the new
 transfer rewrites it; only the PPU could see it). Source: gambatte cgb04c
@@ -48,6 +48,12 @@ lost, as are the two at new bytes 0-1: out 0, where we showed 1);
 gambatte's `Memory` behaves this way (`oamDmaStartPos_ = oamDmaPos_ + 2`
 and the old position runs on with the new source; read for behaviour
 only). SameBoy has no such step.
+Implementation: from the FF46 write to the real start (a `Dma` deadline,
+`Ctx::dma_tail_end`), `start` is a stand-in that puts byte `j` in the next
+M-cycle and `copied` is `j + 1`, so the CPU's conflict path needs no test
+of its own (a test there cost up to 3% Ir on `synth:dma-storm`); the
+PPU's view (`OamDma::ppu_at`) and the VRAM DMA interplay take the real
+state.
 
 ## HALT pauses the transfer
 While the CPU is halted the DMA makes no progress, and the halted M-cycles
