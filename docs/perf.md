@@ -422,17 +422,23 @@ per call.
 
 ## Code-size budgets
 
-Rules as of 2026-11-24 (human, STATUS "Decided in session 16"; M10 review
-C2-C4, D1). The scarce resource on the MCU is the 64 KiB ITCM, not flash
-(1-2 MB), so what gates is what goes in ITCM:
+Rules as of 2026-11-24 (human: the caps are the ones valid for the final
+MCU, the STM32H735IGK6, not for the dev board; the Stage 2 NUCLEO-H753ZI
+may run slower as a result, it is a temporary step). On the H735 all of
+gbc-core runs from a 128 KiB ITCM ("ITCM placement plan" below), so the
+one size constraint is the total. No single function has a cap: per-function
+caps kept bending the code (a fix chose a slower form to stay 1 byte under
+`write_ppu`'s cap; `Apu::write` sat at 322 of 322 B) for a limit that the
+final chip does not have.
 
 | Check | Gates? | Where |
 |---|---|---|
-| ITCM set fits 56 KiB; every glob matches; callee closure | yes | `scripts/check-itcm-set.sh`, `perf/itcm-sections.txt` ("ITCM placement plan (M8)" below) |
-| Per-function budget of a function in the ITCM set | yes | `scripts/check-code-size.sh`, plain lines of `perf/code-size-budgets.txt` |
+| Total `.text` of gbc-core <= 122,880 B (H735: 128 KiB ITCM minus an 8 KiB platform reserve; provisional) | yes | `scripts/check-code-size.sh`, the `122880 (total .text)` line of `perf/code-size-budgets.txt` |
 | Ir per bench at most 3% over baseline | yes | `scripts/check-bench.sh` ("Instruction-count benchmark" below) |
-| Per-function size of a function that stays in flash | no, printed | `report` lines of `perf/code-size-budgets.txt` |
-| Total `.text` of gbc-core | no, printed | `report 99000 (total .text)` |
+| Every glob of the Stage 2 placement list matches a function | yes | `scripts/check-itcm-set.sh`, `perf/itcm-sections.txt` |
+| ROM reads are byte loads (ADR 0027) | yes | `scripts/check-rom-loads.sh` |
+| Per-function size (size, the old cap, % of it) | no, printed; a missing symbol is a `WARN` | `report` lines of `perf/code-size-budgets.txt` |
+| H753 ITCM set fits 56 KiB; its callee closure | no, printed with a `WARN` line | `scripts/check-itcm-set.sh` |
 | `size_of` `Emulator` (`Hw` plus a pointer) and `Memory` on thumbv7em | no, printed | `scripts/check-code-size.sh` |
 
 There is no cap on `size_of::<Hw>()` any more (it was 864 B, asserted by
@@ -440,51 +446,62 @@ a host test on the x86-64 layout; ADR 0006 amendment of 2026-11-24).
 
 Run: `scripts/check-code-size.sh` (about 1 s warm, a few seconds cold).
 `perf/code-size-budgets.txt` has two kinds of line:
-- `<bytes> <exact demangled symbol>` gates. Exit is non-zero if the symbol
-  is over budget or is not found (renamed or inlined away: update the
-  file, never drop the line to pass). The function must be in the ITCM
-  set: a gating line for a function outside it fails, and so does a
-  `report` line for a function inside it, so the split cannot drift from
-  `perf/itcm-sections.txt`. Every function in the set of 128 B or more
-  has a line (54 lines now; the script does not enforce the coverage).
-- `report <bytes> <symbol>` prints size, the old budget and % used, marks
-  a size above it "over, report only" and a missing symbol "MISSING
-  (report only)", and never fails. `(total .text)` must be a `report`
-  line.
+- `<bytes> (total .text)`, exactly one: **the gate**. Exit is non-zero if
+  the total is over it, or if the line is missing, doubled or marked
+  `report`. The figure comes from the final-chip arithmetic in "ITCM
+  placement plan" below; raising it needs the human.
+- `report <bytes> <symbol>` for every per-function line: prints the size,
+  the figure (the cap the line had while it gated) and % of it, marks a
+  size above it "over, report only", and prints a `WARN` for a symbol that
+  is not found (renamed or inlined away: update the line). It never fails.
+  A per-function line without `report` fails, so a cap cannot creep back
+  in unnoticed. Growth shows in review; lower a figure when a function
+  shrinks for good.
 
 Measurement: `RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core
 --release --target thumbv7em-none-eabihf --target-dir target/codesize`
 (release is pinned to `codegen-units = 1` in `Cargo.toml`, the build the
 firmware will use; no LTO, there is no firmware crate to link yet), then
 `nm -S --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
-on the object in the rlib, once with `-C` for the names in the budgets
-file and once without for the mangled names the ITCM globs match.
+on the object in the rlib, with `-C` for the names in the budgets file.
 `(total .text)` is the sum of every `.text*` section (`size -A`),
 alignment padding included; the total without padding is not printed,
 because counting the `nop`s needs an ARM disassembler and none is
 installed (the M10 review measured 5.8 KB of padding with one). The struct
 sizes come from a three-line probe crate, compiled by `rustc` against the
-rlib, whose statics are `[u8; size_of::<T>()]`.
+rlib, whose statics are `[u8; size_of::<T>()]`. The rlib total counts
+functions the firmware's link may drop and none of the `core` or
+`compiler_builtins` code the core calls; that is why the gate stays
+provisional until the firmware ELF can be measured.
 
 Sizes on 2026-11-24 (the script prints all of them): total `.text`
-94,960 B; `Emulator` 824 B, `Memory` 50,960 B. Largest gating lines:
+97,136 B, 79% of 122,880 (margin 25,744 B); `Emulator` 848 B, `Memory`
+50,968 B. Largest per-function lines (report only):
 
-| Symbol | Size (B) | Budget (B) |
+| Symbol | Size (B) | Old cap (B) |
 |---|---|---|
 | `cpu::Cpu::run` | 24512 | 25738 |
 | `cpu::Cpu::execute_cb` | 6892 | 7237 |
 | `ppu::Ppu::latch` | 1710 | 1796 |
-| `bus::Ctx::write_ppu` | 1488 | 1563 |
+| `bus::Ctx::write_ppu` | 1520 | 1563 |
 | `ppu::render::Renderer::render` | 1192 | 1252 |
 | `apu::noise::Noise::integrate` | 1134 | 1191 |
-| `bus::Ctx::boundary` | 1126 | 1183 |
+| `bus::Ctx::boundary` | 1052 | 1183 |
 | `ppu::render::fill_mixed` | 1030 | 1050 |
 | `ppu::Ppu::sync` | 930 | 960 |
+| `Emulator::load` | 876 | 890 |
 | `bus::read_high` | 824 | 866 |
 | `ppu::Ppu::set_stalls` | 824 | 866 |
-| `ppu::render::fill_plain` | 776 | 815 |
 
-OAM DMA (M2): every CPU access ORs `Hot::dma` (FE00 during a transfer)
+Mutation-checked 2026-11-24 (scratch copies of the budgets file through
+`CODE_SIZE_BUDGETS_FILE`): a total figure of 97,000 B (below the measured
+97,136) exits 1 with `OVER BUDGET`, and 97,136 exits 0; `report 20000`
+on `Cpu::run` exits 0 with "over, report only"; a misspelt symbol exits 0
+with a `WARN`; a per-function line without `report` exits 1; `report` on
+the total line exits 1.
+
+History, M2 (the per-function caps of that time). OAM DMA (M2): every CPU
+access ORs `Hot::dma` (FE00 during a transfer)
 into its region dispatch, so a transfer sends every address to the
 E000-FFFF arm, the only one that tests the flag (`read_high`, and the last
 arms of the out-of-line `write_mapped`). Echo RAM moved out of the inlined
@@ -504,14 +521,8 @@ layouts (check-bench Ir vs the pre-DMA baseline; `run` on thumbv7em):
 
 Earlier 7bdaee2 measurements: a flag test with an out-of-line call per
 read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
-50,376 B. With the chosen layout `run` is back under the pre-DMA
-30,920 B; its budget is now 30,000 B (`perf/code-size-budgets.txt`).
-
-Rule: a gating budget is the measured size plus 5%, rounded up. Raising
-one is committed with the change that needs it, with the measured size and
-the reason in the commit body; when a function shrinks for good, lower its
-line. A function that enters the ITCM set gets a gating line (if it is
-128 B or more); one that leaves becomes a `report` line or is dropped.
+50,376 B. With the chosen layout `run` was back under the pre-DMA
+30,920 B; its cap then became 30,000 B.
 
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
@@ -537,25 +548,128 @@ to 8 bytes. Removing it is a build-flag choice (an LLVM alignment
 option) whose cost on the real M7 fetch path callgrind can't show; it
 needs an MCU measurement and the human.
 
-## ITCM placement plan (M8)
+## ITCM placement plan
+
+Two plans, one per MCU. The final chip's plan is the one the gates enforce
+(human, 2026-11-24: the caps are the final MCU's; the dev board may run
+slower, it is a temporary step). ADR 0026 (Proposed, amended 2026-11-24)
+has the decision and its reasons.
+
+### Final chip: STM32H735IGK6 (Stage 3+)
+
+**Memory facts** (RM0468 Rev 3, DS13312 Rev 4 and ES0491 Rev 9, all in
+`../gbc-32-hardware/datasheets/`):
+- RAM (RM0468 §2.4 "Embedded SRAM"; DS13312 §3.3.2): 128 KiB AXI SRAM,
+  64 KiB ITCM, 128 KiB DTCM, plus **192 KiB that is either ITCM or AXI
+  SRAM, in 64 KiB steps**; SRAM1 and SRAM2 (16 KiB each, D2), SRAM4
+  (16 KiB, D3), 4 KiB backup SRAM. ITCM and DTCM are zero-wait; they are
+  reachable by the CPU and by the MDMA (through the M7's AHBS), not by
+  DMA1/2 (DS13312 §3.3.2).
+- The split is the option byte `TCM_AXI_SHARED[1:0]` in
+  `FLASH_OPTSR2_PRG` (RM0468 §4.9.25; the current value reads back in
+  `FLASH_OPTSR2_CUR`, §4.9.24, and in `SYSCFG_UR17.TCM_AXI_SHARED_CFG`,
+  §12.4.25). RM0468 §2.4 Table 8:
+
+  | `TCM_AXI_SHARED` | ITCM | ITCM range | AXI SRAM | AXI range |
+  |---|---|---|---|---|
+  | 00 (default) | 64 KiB | 0x0000_0000-0x0000_FFFF | 320 KiB | 0x2400_0000-0x2404_FFFF |
+  | 01 | 128 KiB | 0x0000_0000-0x0001_FFFF | 256 KiB | 0x2400_0000-0x2403_FFFF |
+  | 10 | 192 KiB | 0x0000_0000-0x0002_FFFF | 192 KiB | 0x2400_0000-0x2402_FFFF |
+  | 11 | 256 KiB | 0x0000_0000-0x0003_FFFF | 128 KiB | 0x2400_0000-0x2401_FFFF |
+
+- ES0491 §2.3.1: with `TCM_AXI_SHARED` = 10, MDMA writes to the reserved
+  0x0003_0000-0x0003_FFFF are dropped without a bus error. Only matters
+  for the 192 KiB setting, and only for a bad address.
+- L1 caches 32 KiB I + 32 KiB D (DS13312 §3.1). CPU 520 MHz at VOS0,
+  550 MHz with `CPU_FREQ_BOOST` (DS13312 Table 13), which turns off the
+  ITCM/DTCM ECC (RM0468 §2.4 "Error code correction"; `SYSCFG_UR18`,
+  §12.4.26).
+
+**What has to live where.** Numbers from `check-code-size.sh` on
+2026-11-24 and the core's public types (ADR 0006):
+- ITCM: all of gbc-core, 97,136 B of `.text` (rlib, padding included),
+  plus a platform reserve of 8 KiB (8,192 B: the audio/display DMA and
+  SysTick ISRs, the frame blit, the `compiler_builtins` the core calls
+  (`__aeabi_memcpy*`, `__aeabi_memclr*`), linker veneers). The reserve is
+  the same assumption as for the H753; nothing yet justifies another
+  figure. Launcher, menu, eMMC and USB code runs from flash.
+- DTCM (128 KiB, fixed): the stack, `Emulator` 848 B, `Memory` 50,968 B
+  (WRAM, VRAM, OAM) and the tables `SPREAD`, `ATTR_FETCH`, `POP8`
+  (2,304 B): 54,120 B plus the stack.
+- AXI SRAM (DMA has to reach these, so not DTCM): two frames,
+  2 x 46,080 B (`Frame` is `[u16; 160 * 144]`) = 92,160 B; the audio
+  buffers, at most 8,192 B (32,768 Hz is 549 `StereoSample`s of 4 B per
+  frame, 2,196 B; double-buffered 4,392 B, rounded up); cartridge RAM up to
+  131,072 B (MBC5). Total 231,424 B (226 KiB).
+
+**128 vs 192 KiB of ITCM:**
+
+| ITCM | gbc-core share (ITCM - 8,192) | gbc-core now | AXI SRAM | AXI left after 231,424 B |
+|---|---|---|---|---|
+| 128 KiB (01) | 122,880 B | 97,136 B, 79%, margin 25,744 B | 262,144 B | 30,720 B |
+| 192 KiB (10) | 188,416 B | 97,136 B, 52%, margin 91,280 B | 196,608 B | -34,816 B: does not fit |
+
+**Recommendation: 128 KiB** (`TCM_AXI_SHARED` = 01). It already holds the
+whole core with 21% to spare, and leaves 30 KiB of AXI SRAM (plus 48 KiB
+of SRAM1/2/4) for the launcher, eMMC/FAT and USB buffers. At 192 KiB the
+worst-case cartridge RAM and double-buffered frames no longer fit in AXI
+SRAM (it would take a single frame buffer, or cart RAM moved elsewhere),
+to buy ITCM the core does not need. Not covered by either: a full-panel
+LTDC frame buffer (320 x 240 RGB565 is 153,600 B) does not fit in AXI
+SRAM next to 128 KiB of cart RAM with any split; the display is still
+undecided, and such a buffer would go in external RAM.
+
+**The gate** (`scripts/check-code-size.sh`, the only size gate):
+gbc-core total `.text` <= 131,072 - 8,192 = **122,880 B**. Provisional:
+it is measured on the rlib (no LTO; it counts functions the link may drop
+and none of the `core`/`compiler_builtins` code the core calls). When the
+H735 firmware crate exists, measure the linked ELF's `.itcm` instead and
+revisit the figure with the human.
+
+**Consequences.** No hot set and no per-function caps on this chip: every
+gbc-core function is zero-wait, and the 32 KiB I-cache serves only
+platform code. The D-cache serves the ROM, which sits in HyperRAM on
+OCTOSPI (human decision 2026-11-24; hardware ADR 0001 pending update).
+Linker rule: every gbc-core `.text*` input section goes to `.itcm` (by
+archive member, `*libgbc_core*.rlib:*(.text .text.*)`, or with LTO by the
+`8gbc_core` path segment); the post-link check then requires every
+gbc-core function in [0x0000_0000, 0x0002_0000) and reports the veneer
+count.
+
+**The 4.02 M Ir line** (the M8 bar for `synth:worst-case`, "Instruction-
+count benchmark" and the APU budget above) was derived as 50% of an H753
+frame at 480 MHz: 480 MHz / 59.73 fps / 2 = 4.02 M cycles. On the H735 at
+520 MHz, 50% of a frame is 4.35 M cycles (4.60 M at 550 MHz). The 4.02 M
+line stays as the stricter figure; no Ir gate changes.
+
+### Dev board: NUCLEO-H753ZI (Stage 2 only)
+
+This plan places part of the core in the H753's fixed 64 KiB ITCM. Since
+2026-11-24 its fit and callee closure are reported, not gated
+(`scripts/check-itcm-set.sh` prints a `WARN` line and exits 0); a glob
+that matches nothing still fails, because the Stage 2 linker rules are
+generated from the list. If the set outgrows the budget, the Stage 2 build
+drops functions in the order given under "H753 placement" below and runs
+somewhat slower; that is accepted.
 
 Measured 2026-11-24 on the same build as `check-code-size.sh`
 (thumbv7em-none-eabihf, release with `codegen-units = 1` as pinned in
 `Cargo.toml`, `-C target-cpu=cortex-m7`, no LTO), section sizes from
-`size -A` on the rlib object. The decision and
-its reasons are ADR 0026 (Proposed). Memory facts: RM0433 (H753) ITCM 64 KB
+`size -A` on the rlib object. Memory facts: RM0433 (H753) ITCM 64 KB
 at 0x0000_0000 and DTCM 128 KB at 0x2000_0000, both zero-wait and not
 cached; flash at 240 MHz AXI needs 4 wait states (5 flash clocks per
 256-bit flash word, RM0433 Table 17), so an I-cache miss to flash costs
 about 10+ CPU cycles at 480 MHz before bus latency. The H753 L1 I-cache is
-16 KiB. H735: ITCM configurable to 128/192/256 KB (`TCM_AXI_SHARED`, RM0468).
+16 KiB.
 
 **Totals.** gbc-core `.text` 94,960 B (all `.text*` sections, 224
 functions, 54 of them `#[cold]` in `.text.unlikely.*`, 15,696 B),
 `.rodata` 3,865 B. `run` + `execute_cb` = 24,512 + 6,892 = 31,404 B.
+(Since then `.text` is 97,136 B; the set is 55,072 B, 64 globs, margin
+2,272 B. `check-itcm-set.sh` prints the current figures.)
 
-**The ITCM set** (`perf/itcm-sections.txt`, 63 globs, 68 functions), by
-tier:
+**The ITCM set** (`perf/itcm-sections.txt`, 63 globs, 68 functions at the
+time of the table), by tier:
 
 | Tier | Contents | Size (B) |
 |---|---|---|
@@ -591,23 +705,23 @@ set calls: `__aeabi_memcpy*`, `__aeabi_memclr*`, plus linker veneers). The vecto
    stays in flash too: its three callers (`noise::long_steps`,
    `apu::rem_long`, `Ctx::oam_dma_during_vdma`) are all `#[cold]`.
 
-If the firmware build (LTO) makes the ITCM set larger
-than 56 KiB, take things out in reverse order: the per-line object path,
-then the plain tile path, then `write_ppu`, then the APU set. Measure the
+If the set (or the Stage 2 firmware build, with LTO) is larger than
+56 KiB, take things out in reverse order: the per-line object path, then
+the plain tile path, then `write_ppu`, then the APU set. Measure the
 firmware ELF, not the rlib, because LTO changes inlining.
 
 **DTCM** (128 KB, zero wait states, reachable by the CPU and MDMA only, not
-DMA1/2): the stack, `Hw`/`Emulator` (824 B), `Memory` (50,960 B: WRAM,
+DMA1/2): the stack, `Hw`/`Emulator` (848 B), `Memory` (50,968 B: WRAM,
 VRAM, OAM) and the read-only tables `SPREAD` 1,024 B, `ATTR_FETCH` 1,024 B
 and `POP8` 256 B (2,304 B, copied from flash at boot like `.itcm`). Frame
 and audio buffers go in AXI SRAM, because the LCD and SAI DMA must reach
-them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5). `check-code-size.sh` prints both sizes for thumbv7em.
+them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5).
+`check-code-size.sh` prints both sizes for thumbv7em. The same split
+applies on the H735 (above).
 
-**H735 (Stage 3).** Configure 128 KB of ITCM. The set plus the warm `FLASH_OK`
-functions (~64 KB) plus the front end fit with room to spare; 192 KB would hold all of
-gbc-core. The I-cache (32 KiB) then only serves cold code.
+### Mechanism (both chips)
 
-**Mechanism.** gbc-core cannot name its own sections. In edition 2024
+gbc-core cannot name its own sections. In edition 2024
 `link_section` is an unsafe attribute (`#[unsafe(link_section = "...")]`),
 and `#![forbid(unsafe_code)]` also rejects it. So placement happens only at
 link time in the front end. rustc emits one section per function
@@ -615,7 +729,9 @@ link time in the front end. rustc emits one section per function
 `.text._RINvMs0_NtCsdUUKRCLjrj6_8gbc_core3cpuNtB6_3Cpu3runNtNtB8_3bus3CtxEB8_`).
 The crate hash (`CsdUUKRCLjrj6_`) changes with the compiler and the build,
 so the patterns match on the length-prefixed path segments only. A sample
-fragment for the front end's `memory.x` (cortex-m-rt):
+fragment for the Stage 2 front end's `memory.x` (cortex-m-rt; on the H735
+the gbc-core lines become one rule for all of gbc-core and `ITCM` is
+128K):
 
 ```ld
 MEMORY {
@@ -664,51 +780,52 @@ flash before `main` calls into the core (front-end `unsafe` with a
 (and back) are beyond Thumb `BL` range (±16 MB), so the linker inserts
 veneers. That is fine on cold edges, and the post-link check counts them.
 
-**Check, so renames and inlining can't silently drop a function from ITCM.**
-There is one source of truth, `perf/itcm-sections.txt`, with
+**Checks, so renames and inlining can't silently drop a function from ITCM.**
+On the H735 the rule covers all of gbc-core, so only the total
+(`check-code-size.sh`) and the post-link check apply. For the H753 list
+there is one source of truth, `perf/itcm-sections.txt`, with
 `<glob>  # <demangled name>` per line. The front end's `build.rs` generates
 the `.itcm` rule list from it, so the script and the check cannot drift.
 Then two checks:
 - *Pre-link (rlib): `scripts/check-itcm-set.sh`, in `gate-stage1.sh`.*
-  Three hard failures:
-  - a glob that matches no `.text.*` section of the rlib (MISSING: the
-    function was renamed or inlined away, so fix the list). Each glob is
-    tested with the shell's `[[ == ]]` pattern, which has the same `*`
-    semantics as the linker's.
-  - the matched total over `ITCM_BUDGET_BYTES` (56 KiB).
+  Hard failures (exit 1): a glob that matches no `.text.*` section of the
+  rlib (MISSING: the function was renamed or inlined away, so fix the
+  list; each glob is tested with the shell's `[[ == ]]` pattern, which has
+  the same `*` semantics as the linker's), a `FLASH_OK` line without a
+  reason, and a relocation parse that finds fewer than 50 calls. Reported
+  with a `WARN` line, exit 0 (since 2026-11-24):
+  - the matched total over `ITCM_BUDGET_BYTES` (56 KiB);
   - *callee closure*: a direct call or tail call from a function in the set
     (an `R_ARM_THM_CALL` or `R_ARM_THM_JUMP*` relocation in its
     `.rel.text.*` section, read with `readelf -r`) to a gbc-core function
     that is not in the set, not `#[cold]` (`.text.unlikely.*`), and not on
-    a `FLASH_OK <glob>  # <reason>` line of the same file. A `FLASH_OK`
-    line without a reason, or one that no longer matches such a callee,
-    fails too. So a hot helper that LLVM (or an edit) moves out of line
-    cannot land in flash unnoticed. Not seen by it: calls through function
-    pointers (the core has none on these paths) and callees outside the
-    rlib (`__aeabi_mem*`, core's panic paths).
+    a `FLASH_OK <glob>  # <reason>` line of the same file; and a
+    `FLASH_OK` line that no longer matches such a callee. Not seen by it:
+    calls through function pointers (the core has none on these paths) and
+    callees outside the rlib (`__aeabi_mem*`, core's panic paths).
 
-  Mutation-checked 2026-11-24: removing the `Ppu::cpu_blocked` glob,
-  removing a `FLASH_OK` line, adding a stale one, deleting a reason, and a
-  relocation parse that finds nothing each fail; earlier, a typo in a glob
-  and a budget of 55,000.
+  Mutation-checked 2026-11-24 (scratch copies through `ITCM_SET_FILE`):
+  a misspelt `Ppu::cpu_blocked` glob exits 1; `ITCM_BUDGET_BYTES=50000`
+  exits 0 with "WARN: H753 ITCM set is over its 50000 B budget by
+  5072 B"; removing the `cpu_blocked` glob exits 0 with a closure `WARN`
+  naming the callee; a stale `FLASH_OK` line exits 0 with a `WARN`; a
+  `FLASH_OK` line without a reason exits 1.
 - *Post-link (firmware ELF, Stage 2):* every demangled name in the file must
   exist in `nm -C` of the ELF and have an address in
   `[0x0000_0000, 0x0001_0000)`. A name inlined away under LTO fails, so
   update the file. The check also reports `.itcm` size against 64 KiB and the
   number of long-branch thunks (`__*_veneer` with GNU ld,
   `__Thumbv7ABSLongThunk_*` with lld), and fails if `.itcm` overflows (the linker
-  also does this).
+  also does this). The H735 version checks every gbc-core function against
+  `[0x0000_0000, 0x0002_0000)`.
 
-**Is a <= 40 KB target for `execute`/`execute_cb` still needed?** No, as a
-separate goal. They are 31,404 B now. With the
-interpreter in ITCM, its I-cache footprint (the M2 "2.6x the I-cache"
-concern) no longer matters, because TCM fetches bypass the cache. The
-binding constraint is the H753 ITCM total: 54,974 of 57,344 B, which
-`check-itcm-set.sh` gates. The per-function budgets of the functions in
-the set (`perf/code-size-budgets.txt`) keep one function's growth from
-eating the 2,370 B margin unseen.
-
-On the H735 with 128 KB ITCM the question goes away.
+**Is a <= 40 KB target for `execute`/`execute_cb` still needed?** No. They
+are 31,404 B now. With the interpreter in ITCM, its I-cache footprint (the
+M2 "2.6x the I-cache" concern) no longer matters, because TCM fetches
+bypass the cache. On the final chip the whole core is in ITCM and the
+binding constraint is the total, 97,136 of 122,880 B, which
+`check-code-size.sh` gates. On the H753 the set total (55,072 of
+57,344 B) is reported, not gated.
 
 ## Instruction-count benchmark
 
