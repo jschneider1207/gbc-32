@@ -103,3 +103,34 @@ speed". +4 ROMs, no regressions. +438 B `.text` (`next_point` walks VBlank
 lines with an out-of-line `step_vblank` to stay within `seek`'s budget;
 `next_event` no longer skips the `point_irq` call at `Latch`, for its
 budget), cgb-acid2 +0.35% Ir, worst-case +0.05%.
+
+## Amendment (2026-11-23): IF writes and the LYC-write request
+
+The gambatte-over-SameBoy rule, with SameBoy where it is the finer
+model, extends to when IF changes against PPU interrupts:
+
+- An IF write lands one dot after its access (SameBoy
+  `GB_CONFLICT_WRITE_CPU`). In single speed it doesn't see line 153's
+  LYC=0 point or line 0's mode-2 pulse at that dot: those walk points
+  are a dot before gambatte's events (13 and 5), which only the
+  double-speed walk follows; the STAT and LYC write views still assume
+  the single-speed points.
+- CGB single speed: a LYC write's STAT request reaches IF 5 dots after
+  the access (gambatte `memevent_oneshot_statirq`, `cc + 5`), one
+  M-cycle later than the write's own boundary. It waits in IF's unused
+  bits 5-6, because `Hw` is at its size limit.
+- A STAT write's phase 2 on line 0's single-speed pulse sees the
+  mode-1 source still holding the line (same one-dot gap to gambatte),
+  after the pulse has run for a newly selected mode 2.
+- A dispatch push onto IF chooses from IF as it was before the write
+  (SameBoy `cycle_write_if`), out of line: inside the inlined dispatch
+  it cost ~1.5% Ir in every bench ROM through `Cpu::run`'s codegen.
+
+The single-speed walk points themselves stay (moving them regressed
+`lycEnable/lyc0_ff4{1,5}_disable_2` and the `m2enable/*ly0*` rows).
+Details and ROMs: `docs/reference/stat-irq.md`, "IF writes, the
+LYC-write request, line 0 and the dispatch's IF push". +6 ROMs
+(`m2int_m0irq_scx3_ifw_{2,4,ds_2}`, `lyc_ff45_trigger_delay_2`,
+`lycstatwirq_trigger_ly00_10_50_1`, `if_and_ie_0_vector_4`), no
+regressions. +898 B `.text` (96,550 of 97,500); cgb-acid2 +0.28% Ir
+(686.27 M), worst-case +0.04% (476.78 M).
