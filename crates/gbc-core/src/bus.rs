@@ -611,7 +611,7 @@ impl Ctx<'_, '_> {
     /// Writes to SB, SC, DIV, TIMA, TMA and TAC (by the low 7 address
     /// bits): they need the system counter, and all but SB move the Timer
     /// or the Serial deadline. Out of line so the register logic stays
-    /// off `write_high` (ADR 0011).
+    /// off `write_mapped` (ADR 0011).
     #[inline(never)]
     fn write_timer_io(&mut self, reg: usize, value: u8) {
         let now = self.clock();
@@ -868,7 +868,7 @@ impl Ctx<'_, '_> {
     /// to the access first, then the write applies (ADR 0021 section 3).
     /// While the APU is off, FF10-FF25 ignore writes on CGB, the NRx1
     /// lengths included (SameBoy `GB_apu_write`: only DMG accepts them);
-    /// NR52 and wave RAM stay writable. Out of line, off `write_high`.
+    /// NR52 and wave RAM stay writable. Out of line, off `write_mapped`.
     #[inline(never)]
     fn write_apu(&mut self, reg: usize, value: u8) {
         let now = self.clock();
@@ -1286,22 +1286,32 @@ impl Ctx<'_, '_> {
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
-    /// During an OAM DMA transfer every address takes the last arm
-    /// ([`Hot::dma`]), where the flag test sends it to the conflict path,
-    /// off the RAM fast path.
+    /// During an OAM DMA transfer every address takes the E000-FFFF
+    /// branch ([`Hot::dma`]), where the flag test sends it to the
+    /// conflict path, off the RAM fast path.
+    ///
+    /// Out of line, one copy for the CPU's writes: inlined whole into
+    /// `Cpu::run` it is +10.6 KB (over the `.text` gate), and with only
+    /// the C000-DFFF store inlined at every write +3.3 KB for -0.8% on
+    /// cpu_instrs and +0.7% on `synth:dma-storm` (measured; docs/perf.md
+    /// "CPU write path").
     #[inline(never)]
     pub(crate) fn write_mapped(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         // The tests in the order of how often real code takes them: WRAM
-        // (the stack), then FF00-FFFF, then the rest.
+        // (the stack), then FF00-FFFF, then the rest. FF00-FFFF is
+        // dispatched here (`write_ff`), not through one more call.
         let key = addr | self.hot.dma;
         if key >> 13 == 6 {
             *wram_mut(self.mem, self.sys, a) = value;
         } else if key >= 0xE000 {
             if self.hot.dma != 0 {
                 self.write_during_dma(addr, value)
+            } else if addr >= 0xFF00 {
+                // HRAM is stored here; I/O and IE are calls.
+                self.write_ff(addr, value)
             } else if addr >= 0xFE00 {
-                self.write_high(addr, value)
+                self.write_oam(addr, value)
             } else {
                 *wram_mut(self.mem, self.sys, a) = value;
             }
@@ -1314,31 +1324,18 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// [`Self::write_mapped`] without the conflict path, for
-    /// [`Self::write_during_dma`].
+    /// [`Self::write_mapped`] below FE00 without the conflict path, for
+    /// [`Self::write_during_dma`] (which handles FE00-FFFF itself).
     #[inline(always)]
     fn write_to(&mut self, addr: u16, value: u8) {
+        debug_assert!(addr < 0xFE00);
         let a = usize::from(addr);
         match addr >> 13 {
             0..=3 => self.sys.cart.write_rom(addr, value, self.hot.clock()),
             4 => self.write_vram(addr, value),
             5 => self.sys.cart.write_ram(addr, value, self.hot.clock()),
-            6 => *wram_mut(self.mem, self.sys, a) = value,
-            _ if addr < 0xFE00 => *wram_mut(self.mem, self.sys, a) = value,
-            _ => self.write_high(addr, value),
-        }
-    }
-
-    /// FE00-FFFF.
-    #[inline(never)]
-    fn write_high(&mut self, addr: u16, value: u8) {
-        let a = usize::from(addr);
-        match addr {
-            0xFE00..=0xFEFF => self.write_oam(addr, value),
-            0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
-            0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
-            0xFFFF => self.write_ie(value),
-            _ => {}
+            // C000-DFFF and its echo.
+            _ => *wram_mut(self.mem, self.sys, a) = value,
         }
     }
 
@@ -1379,7 +1376,10 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// FF00-FFFF, as `write_high` without a transfer.
+    /// FF00-FFFF: I/O, HRAM (stored here, in the caller) and IE. Also
+    /// what a write there does during a transfer
+    /// ([`Self::write_during_dma`]).
+    #[inline(always)]
     fn write_ff(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
         match addr {

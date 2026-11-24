@@ -39,7 +39,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3bus9read_vram*                              # bus::read_vram
 .text._R*8gbc_core3bus8read_oam*                               # bus::read_oam
 .text._R*8gbc_core3bus*3Ctx12write_mapped*                     # Ctx::write_mapped
-.text._R*8gbc_core3bus*3Ctx10write_high*                       # Ctx::write_high
 .text._R*8gbc_core3bus*3Ctx8write_io*                          # Ctx::write_io
 .text._R*8gbc_core3bus*3Ctx10write_vram*                       # Ctx::write_vram
 .text._R*8gbc_core3bus*3Ctx9write_oam*                         # Ctx::write_oam

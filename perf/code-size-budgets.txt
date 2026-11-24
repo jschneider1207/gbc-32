@@ -35,7 +35,6 @@
 # Functions in the H753 (Stage 2) ITCM set, perf/itcm-sections.txt.
 report 25738 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
 report 7237 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
-report 90 <gbc_core::bus::Ctx>::write_high
 report 712 <gbc_core::bus::Ctx>::write_io
 report 866 gbc_core::bus::read_high
 report 204 <gbc_core::bus::Ctx>::sync_ppu

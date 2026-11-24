@@ -593,6 +593,35 @@ read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
 50,376 B. With the chosen layout `run` was back under the pre-DMA
 30,920 B; its cap then became 30,000 B.
 
+### CPU write path (M10, review B8 / inventory A1)
+
+`Ctx::write_mapped` is still one out-of-line function, but its tests now
+run in the order real code takes them (C000-DFFF first, then E000-FFFF,
+then VRAM, cartridge RAM, ROM), and FF00-FFFF is dispatched in it
+(`write_ff` inlined: HRAM stored there, `write_io` and `write_ie`
+called from there) instead of through a second call to `write_high`, which is gone.
+The forms measured on 406c60b (check-bench Ir against the baseline of
+70284ec; total gbc-core `.text` on thumbv7em, 113,154 B before; each row
+is the whole change against that base, not a step on the row above):
+
+| Form | cpu_instrs | cgb_sound | cgb-acid2 | event-storm | dma-storm | halt-irq | worst-case | cgb-raster | apu-writes | `.text` (B) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1: tests reordered, WRAM first | -0.68% | -0.15% | 0.00% | -0.11% | -0.18% | -0.24% | -0.17% | -0.43% | -0.12% | -12 |
+| 2: 1 + FF00-FFFF dispatched in `write_mapped` (chosen) | -1.65% | -0.17% | -0.03% | -0.38% | -0.20% | -0.96% | -0.56% | -1.51% | -0.47% | -16 |
+| A1 middle form alone: C000-DFFF store inlined in `Bus::write`, the rest a call | -1.11% | -0.39% | +0.01% | -0.05% | +0.70% | +0.36% | +0.05% | -0.21% | +0.10% | +3,296 |
+| 2 + the middle form | -2.41% | -0.41% | 0.00% | -0.44% | +0.49% | -0.60% | -0.48% | -1.72% | -0.36% | +3,280 |
+| A1 whole: `write_mapped` `#[inline(always)]` | -2.37% | -0.14% | -0.03% | -0.77% | -0.06% | +0.54% | -0.37% | -3.03% | -0.10% | +10,600 (over the gate) |
+| B8 for reads: WRAM bank by value in `Hot`, branch-free index (`low13 + bit12 * (bank - 1) * 0x1000`) | +6.74% | +6.59% | +0.01% | 0.00% | +4.31% | +0.17% | +0.06% | +0.01% | +0.05% | -18 |
+
+The middle form adds 3,152 B to `Cpu::run` (25,414 -> 28,566 B; it has
+a copy at every write site) and on top of form 2 buys 0.8% on
+cpu_instrs and 0.2% on two more lines while three get slower: not taken.
+The whole inline is what the middle form plus form 2 already give, for
+three times the bytes. The branch-free WRAM index left `Cpu::run` at the
+same 25,414 B on thumbv7em (no bytes to win there) and costs two more
+x86 instructions on every bank 0 read, which is most of what cpu_instrs
+executes; the branch stays.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change
@@ -742,7 +771,7 @@ time of the table), by tier:
 
 | Tier | Contents | Size (B) |
 |---|---|---|
-| A: per instruction/access | `Cpu::run`, `execute_cb`, `checked_fetch`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`, `run_ppu_to_call`; `Ppu::cpu_blocked`; `Cart::{read_ram, read_rtc}`; `halt_begin/end`, `idle_halted`; `Schedule::set`, `Timer::schedule_overflow` | 36,834 |
+| A: per instruction/access | `Cpu::run`, `execute_cb`, `checked_fetch`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`, `run_ppu_to_call`; `Ppu::cpu_blocked`; `Cart::{read_ram, read_rtc}`; `halt_begin/end`, `idle_halted`; `Schedule::set`, `Timer::schedule_overflow` | 36,834 |
 | B: PPU, per event | `Ppu::{sync, next_event, point_irq, draw, flush, stat, ly, check_wy_at}`, `Ctx::write_ppu`, `cgb_color` | 4,722 |
 | B: PPU, plain tile path | `Renderer::render`, `fill_plain`, `fill_partial::<false>`, `partial_tile::<false>` | 2,348 |
 | B: PPU, per line with objects | `Ppu::{latch, set_stalls}`, `LineTiming::finish`, `Renderer::fetch_objects`, `fill_mixed`, `fill_partial::<true>`, `partial_tile::<true>` | 4,720 |
