@@ -164,7 +164,9 @@ pub(crate) struct Held {
     /// The bit planes of the part's last tile (`[end - 8, end)`) that the
     /// fetcher read after the write, with the next part's LCDC.4 and SCY:
     /// bit 0 the low plane, bit 1 the high plane (its map entry was read
-    /// before; `docs/design/mid-line-ppu.md` step 3).
+    /// before; `docs/design/mid-line-ppu.md` step 3). Bits 2 (low) and 3
+    /// (high): planes read on an LCDC.4 clear's dot, the tile index as
+    /// their data (CGB TILE_SEL glitch).
     pub(crate) planes: u8,
 }
 

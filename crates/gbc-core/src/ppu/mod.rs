@@ -1714,7 +1714,15 @@ impl Ppu {
                 0,
             )
         } else if phase >= FETCH_SAMPLED {
-            (tile + 16, if phase >= FETCH_LOW + late { 2 } else { 3 })
+            let mut p = if phase >= FETCH_LOW + late { 2 } else { 3 };
+            if reg == 0x40 && clear {
+                // CGB TILE_SEL glitch: a clear on a plane's read dot makes
+                // the tile index that plane's data (bits 2-3, `Held::planes`).
+                let g = u8::from(phase == FETCH_LOW + late - 1)
+                    | u8::from(phase == FETCH_HIGH + late - 1) << 1;
+                p = (p & !g) | g << 2;
+            }
+            (tile + 16, p)
         } else {
             (tile + 8, 0)
         };
@@ -4776,8 +4784,9 @@ mod tests {
             (1u32, 0u64, [4u16; 8]),
             // Map entry read, no plane: both planes new.
             (2, FETCH_SAMPLED as u64, [4; 8]),
-            // The LCDC.4 change reaches the low plane a dot late: none read.
-            (3, FETCH_LOW as u64, [4; 8]),
+            // The clear on the low plane's read dot: the tile index (0) is
+            // its data, the high plane new (TILE_SEL glitch): color 2.
+            (3, FETCH_LOW as u64, [3; 8]),
             // Low plane read with 8000 (0), high plane with 9000 (1):
             // color 2.
             (4, (FETCH_LOW + LCDC_TILES_LATE) as u64, [3; 8]),
@@ -4790,6 +4799,55 @@ mod tests {
             r.sync(l + u64::from(LINE));
             assert_eq!(tile3(&r, ly as usize), (want, 4), "line {ly}");
         }
+    }
+
+    /// CGB C TILE_SEL glitch: an LCDC.4 clear on a bit plane's read dot
+    /// makes the tile index that plane's data, X-flipped by the attribute,
+    /// except for an index >= 0x80 (the same address in both data areas).
+    /// AGE `m3-bg-lcdc` (low plane), `cgb-acid-hell` (high plane).
+    #[test]
+    fn tile_data_clear_on_a_plane_read_dot_uses_the_tile_index() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        r.ppu.renderer.cgb = true;
+        r.mem.bg_pal[..8].copy_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0]);
+        r.ppu
+            .resolve_palettes(&mut r.mem, &DmgPalettes::GRAYSCALE, true);
+        // Tile 0x55: color 0 at 8000, color 3 at 9000. Tile 0xD5 (8D50 in
+        // both areas): color 1.
+        r.mem.vram[0x1550..0x1560].fill(0xFF);
+        for row in (0x0D50..0x0D60).step_by(2) {
+            r.mem.vram[row] = 0xFF;
+        }
+        // (line, map index, attribute, write dot in tile 3's fetch, tile 3).
+        let (a, b) = (3, 4);
+        for (ly, index, attr, p, want) in [
+            // Low plane 0x55 (0 1 0 1 ...), high plane 9000's: 2 3 2 3 ...
+            (8u32, 0x55, 0, FETCH_LOW, [a, b, a, b, a, b, a, b]),
+            // Low plane 8000's (0), high plane 0x55: 0 2 0 2 ...
+            (16, 0x55, 0, FETCH_HIGH, [1, a, 1, a, 1, a, 1, a]),
+            // X flip: 0x55 read backwards, 3 2 3 2 ...
+            (24, 0x55, 0x20, FETCH_LOW, [b, a, b, a, b, a, b, a]),
+            // Index 0xD5: no glitch, color 1.
+            (32, 0xD5, 0, FETCH_LOW, [2; 8]),
+        ] {
+            let m = 0x1800 + (ly as usize >> 3) * 32;
+            r.mem.vram[m..m + 32].fill(index);
+            r.mem.vram[0x2000 + m..0x2000 + m + 32].fill(attr);
+            let l = clock(on, 0, ly * LINE);
+            write_fetch_reg(&mut r, l + 96 + 16 + p as u64, 0x40, 0x81);
+            write_fetch_reg(&mut r, l + 300, 0x40, 0x91);
+            r.sync(l + u64::from(LINE));
+            assert_eq!(tile3(&r, ly as usize).0, want, "line {ly}");
+        }
+        // A set on the low plane's read dot: no glitch, both planes new
+        // (8000's tile 0x55, color 0).
+        r.mem.vram[0x1800 + 5 * 32..][..32].fill(0x55);
+        let l = clock(on, 0, 40 * LINE);
+        write_fetch_reg(&mut r, l - 10, 0x40, 0x81);
+        write_fetch_reg(&mut r, l + 96 + 16 + FETCH_LOW as u64, 0x40, 0x91);
+        r.sync(l + u64::from(LINE));
+        assert_eq!(tile3(&r, 40).0, [1; 8]);
     }
 
     #[test]

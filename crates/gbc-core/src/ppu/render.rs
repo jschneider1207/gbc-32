@@ -637,8 +637,19 @@ impl Renderer {
         let (old, attr) = fetch(y, lcdc);
         let (new, _) = fetch(y_next, next.lcdc);
         // Decoded rows: the low plane in the even bits ([`decode`]).
-        let m = (u16::from(planes & 1) * 0x5555) | (u16::from(planes >> 1) * 0xAAAA);
-        let w = ((old & !m) | (new & m)) << (2 * (col & 7));
+        let mask = |p: u8| (u16::from(p & 1) * 0x5555) | (u16::from(p >> 1 & 1) * 0xAAAA);
+        let (m, g) = (mask(planes), mask(planes >> 2));
+        // The glitched planes: the tile index as data, X flip applied at
+        // the push (SameBoy `data_for_tile_sel_glitch`, MIT; Mealybug
+        // TILE_SEL notes). Not for an index >= 0x80: both data areas map
+        // it to 8800-8FFF, the read address doesn't change.
+        let index = src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
+        let glitch = if index < 0x80 {
+            SPREAD[usize::from(attr & BG_ATTR_X_FLIP != 0)][usize::from(index)] * 3
+        } else {
+            old
+        };
+        let w = ((old & !m & !g) | (new & m) | (glitch & g)) << (2 * (col & 7));
         // One instance (mixed with no object pixels when none are shown):
         // calling the plain one too grows it past its size budget.
         let obj = if lcdc & LCDC_OBJ_ON != 0 && self.obj_fetched {
