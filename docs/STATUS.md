@@ -159,6 +159,24 @@ Open:
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
+Decided in session 16 (2026-11-24, M10 review), human:
+- `stage1-m9` tagged at 49c0756 on the human's instruction ("Tag m9"); the
+  M10 whole-tree review stands in for the M9 milestone review. Open M9
+  plan tasks (M8 review lows, real-game checklist) carry over.
+- Budget reform ("Reform"): keep the ITCM hot-set fit, the hot-function
+  caps and the relative +3% Ir guard as gates; drop the `Hw` size cap;
+  total `.text` and cold-function caps become reported numbers, not gates.
+  State parked in the wrong struct because of the caps moves back.
+- Release profile pinned to `codegen-units = 1` ("Pin to 1"): one
+  re-baseline of bench, size and ITCM lists, numbers in the commit.
+- `synth:worst-case` gains a serviced timer interrupt (IE=timer + RETI
+  handler) once the unobservable timer/serial events are gone ("Add
+  serviced IRQ"); baseline re-recorded. The absolute 4.02 M line stays
+  until a real M7 measurement.
+- Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
+  change) on top of a safe failure for every other unsupported mapper
+  (caller-visible, no RAM). MBC7 and the rest stay out.
+
 Decided in session 15 (2026-11-23), human:
 - gbc-core total `.text` budget 97,500 -> 99,000 B ("Raise .text to
   99,000, try") for the last 3 Mealybug ROMs; leftovers come back for
