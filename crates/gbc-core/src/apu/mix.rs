@@ -231,7 +231,10 @@ impl Apu {
         };
         self.out.synced = now;
         if audio.is_empty() {
-            debug_assert_eq!(self.spans.len, 0);
+            // Nothing is listed here (a run call has a buffer or none, and
+            // ends with a sync); if something were, the channels would
+            // first have to catch up with it.
+            self.flush(io, audio, len);
             self.advance(dt, io);
             self.out.live = false;
             return;
