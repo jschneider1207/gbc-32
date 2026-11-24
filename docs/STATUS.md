@@ -117,10 +117,6 @@ Open (M10, session 16):
 - **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
   0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
-- **STOP mode audio** (A1-01): in STOP the APU channel generators keep
-  playing their tone (frame sequencer frozen), as SameBoy does on CGB; no
-  hardware test decides whether a CGB goes silent. Recorded as open in the
-  ADR 0020 amendment.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
 - **Hardware repo** (C11): `docs/firmware-interface.md` says "~200 KiB
@@ -181,6 +177,9 @@ Decided in session 16 (2026-11-24, M10 review), human:
   handler) once the unobservable timer/serial events are gone ("Add
   serviced IRQ"); baseline re-recorded. The absolute 4.02 M line stays
   until a real M7 measurement.
+- STOP mode as implemented (ADR 0020 amendment, 6f228f9), including the
+  APU channels holding their tone while stopped (SameBoy CGB path):
+  "Thats fine for stop."
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.
