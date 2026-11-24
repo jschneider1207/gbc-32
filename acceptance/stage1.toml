@@ -336,6 +336,32 @@ checks = [{ screenshot = "cgb-acid-hell/cgb-acid-hell.png" }]
 id = "mealybug"
 tier = "stretch"
 roms = ["mealybug-tearoom-tests/ppu/*.gb"]
+exclude = [
+  "mealybug-tearoom-tests/ppu/m3_lcdc_win_en_change_multiple_wx.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_4_change.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_5_change.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_6_change.gb",
+  "mealybug-tearoom-tests/ppu/win_without_bg.gb",
+]
+exit = { ld_b_b = true, timeout_s = 10 }
+checks = [{ screenshot = "{dir}/{stem}_cgb_c.png" }]
+
+# Signed off (human, 2026-11-23, session 14): upstream ships no CPU CGB C
+# reference for these (DMG-only images, or none for win_without_bg), and
+# the suite says DMG and CGB results differ. They keep running, so a crash,
+# timeout or lockup still shows; the screenshot check stays as above and
+# is used if a CGB C reference ever appears.
+[[group]]
+# source: mealybug-tearoom-tests/game-boy-test-roms-howto.md
+id = "mealybug-no-cgb-reference"
+tier = "stretch"
+roms = [
+  "mealybug-tearoom-tests/ppu/m3_lcdc_win_en_change_multiple_wx.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_4_change.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_5_change.gb",
+  "mealybug-tearoom-tests/ppu/m3_wx_6_change.gb",
+  "mealybug-tearoom-tests/ppu/win_without_bg.gb",
+]
 exit = { ld_b_b = true, timeout_s = 10 }
 checks = [{ screenshot = "{dir}/{stem}_cgb_c.png" }]
 
