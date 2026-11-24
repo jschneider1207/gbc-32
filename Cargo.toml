@@ -24,3 +24,12 @@ debug = "line-tables-only"
 # SHA-256 would add seconds to the dev loop.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Release optimizations with integer-overflow checks and `debug_assert!`s on:
+# the gate's fuzz pass runs under it (scripts/check-fuzz.sh), so an
+# arithmetic slip panics there instead of wrapping silently in release.
+# `cargo <cmd> --profile checked`; output in target/checked/.
+[profile.checked]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true

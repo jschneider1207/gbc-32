@@ -2,16 +2,18 @@
 
 Every untrusted input to `gbc-core` is fuzzed through the public API:
 ROM bytes (header fields and the code the CPU executes), the save RAM buffer
-(length and contents), `set_rtc_state` with arbitrary field values, and
-button input. The property: no panic and no hang (a run call that stops
+(length and contents), RTC restore as a front end does it (raw, unmasked
+field values from a save file through `RtcState::advance_seconds` with up
+to `u64::MAX` elapsed seconds, then `set_rtc_state`; again mid-run from
+`rtc_state()`), and button input. The property: no panic and no hang (a run call that stops
 making progress trips an assertion) for any input.
 
 ## Targets
 
 `tools/fuzz/src/lib.rs`. Each takes `&[u8]`: 64 control bytes (ROM length,
 header bytes 0x143/0x147/0x148/0x149, save buffer length and fill, run
-length, RTC state, stop events, audio buffer size), then code placed at
-0x150 of the ROM. Missing control bytes read as 0; buttons and run chunk
+length, RTC state, stop events, audio buffer size, RTC seconds to
+advance), then code placed at 0x150 of the ROM. Missing control bytes read as 0; buttons and run chunk
 sizes cycle through the body. Each input loads, runs with button changes,
 resets, loads a second cartridge over the first, ejects and reloads.
 
@@ -27,14 +29,19 @@ scripts/check-fuzz.sh [--seed N] [--count N]
 
 Runs every target over `tools/fuzz/corpus/<target>/` and then over `--count`
 (default 5000) generated inputs per target from a fixed seed (SplitMix64;
-same arguments give the same inputs). About 8 s in release. A panic prints
-the target and input id, writes the input to `target/fuzz-failures/` and
-exits 1. To reproduce: copy the file into `tools/fuzz/corpus/<target>/`, or
-run with `--corpus` pointing at a directory holding it.
+same arguments give the same inputs). About 9 s. It builds with the
+`checked` profile (`Cargo.toml`: release optimizations plus integer-overflow
+checks and `debug_assert!`s), so an arithmetic slip that release would wrap
+silently panics here; that costs about 4% over `--release` (8.2 s -> 8.5 s).
+A panic prints the target and input id, writes the input to
+`target/fuzz-failures/` and exits 1. To reproduce: copy the file into
+`tools/fuzz/corpus/<target>/`, or run with `--corpus` pointing at a
+directory holding it.
 
-Release builds have no overflow checks; for a deeper pass that has them run
-the debug binary: `cargo run -p fuzz --bin fuzz-pass -- --count 1500`
-(about 15 s).
+For a longer pass: `cargo run --profile checked -p fuzz --bin fuzz-pass --
+--count 50000`. The profile works for any other workload too, e.g.
+`cargo run --profile checked -p bench -- --fingerprint` or
+`cargo test --profile checked -p gbc-core`.
 
 ## Coverage-guided (off the gate)
 

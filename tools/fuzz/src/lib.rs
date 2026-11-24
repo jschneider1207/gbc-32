@@ -73,6 +73,9 @@ impl Reader<'_> {
     fn u32(&mut self) -> u32 {
         u32::from(self.u16()) | u32::from(self.u16()) << 16
     }
+    fn u64(&mut self) -> u64 {
+        u64::from(self.u32()) | u64::from(self.u32()) << 32
+    }
     fn bool(&mut self) -> bool {
         self.u8() & 1 != 0
     }
@@ -112,6 +115,19 @@ fn rtc_state(r: &mut Reader) -> RtcState {
         latched: rtc_time(r),
         // Often out of range on purpose (set_rtc_state clamps it).
         subsecond_clocks: r.u32(),
+    }
+}
+
+/// Wall-clock seconds a front end adds to a restored RTC
+/// (`RtcState::advance_seconds`): none, hours, around the 512-day
+/// overflow, or any `u64` (up to `u64::MAX`).
+fn rtc_seconds(r: &mut Reader) -> u64 {
+    let (mode, raw) = (r.u8(), r.u64());
+    match mode % 4 {
+        0 => 0,
+        1 => raw % 0x1_0000,
+        2 => raw % (2 * 512 * 86_400),
+        _ => raw,
     }
 }
 
@@ -234,6 +250,7 @@ fn scenario(data: &[u8], profile: Profile) {
     let rtc = rtc_state(&mut r);
     let stop = Events::from_bits_truncate(r.u16());
     let audio_len = [0, 1, 7, 512][usize::from(r.u8() % 4)];
+    let rtc_secs = rtc_seconds(&mut r);
 
     let rom2 = vec![0u8; 0x8000];
     let mut ram2 = [0u8; 0];
@@ -247,7 +264,7 @@ fn scenario(data: &[u8], profile: Profile) {
     emu.set_buttons(Buttons::from_bits_truncate(0xFF));
     emu.reset();
     let _ = emu.rtc_state();
-    emu.set_rtc_state(rtc);
+    emu.set_rtc_state(rtc.advance_seconds(rtc_secs));
     assert!(emu.eject().is_none());
 
     let rom: &[u8] = &rom;
@@ -272,13 +289,18 @@ fn scenario(data: &[u8], profile: Profile) {
             }
         }
         assert_eq!(emu.cart_ram().len(), needed);
-        emu.set_rtc_state(rtc);
+        // A front end's restore: the saved state as read from a file, raw
+        // (unmasked), advanced by the wall-clock time since the save.
+        emu.set_rtc_state(rtc.advance_seconds(rtc_secs));
         emu.set_stop_events(stop);
         if r.bool() {
             emu.set_dmg_palettes(DmgPalettes::default());
         }
         run(&mut emu, &mut rr, cycles, &mut frame, &mut audio);
-        let _ = emu.rtc_state();
+        // Save and restore mid-run, with time passing in between.
+        if let Some(saved) = emu.rtc_state() {
+            emu.set_rtc_state(saved.advance_seconds(rtc_secs));
+        }
         let _ = (emu.registers(), emu.serial_byte(), emu.lcd_enabled());
         let _ = (emu.screen_blank(), emu.cpu_locked(), emu.cart_ram().len());
         let _ = (emu.cart_info(), emu.save_dirty());
@@ -367,6 +389,11 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
     // Patch mask: usually let the control bytes set the header.
     if rng.below(8) != 0 {
         v[9] = 0;
+    }
+    // RTC advance (offsets 43..52): sometimes u64::MAX seconds.
+    if rng.below(8) == 0 {
+        v[43] = 3;
+        v[44..52].fill(0xFF);
     }
     // Cycles field (offset 20): cap some inputs short.
     if rng.below(3) == 0 {
