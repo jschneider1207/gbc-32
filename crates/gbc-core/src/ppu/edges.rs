@@ -395,10 +395,29 @@ const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
 /// `lcd_offset/offset3_lyc99int_m2irq_count_1` (M-cycle boundaries at
 /// `t = 0 mod 4`, the one CPU phase with a boundary on the point: its IF
 /// read at 0:4 must not see the pulse; `_2`, at 0:8, does) and
-/// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`. (Line 153's LYC=0 point, also
-/// a dot early, requests at once: no ROM needs the delay there, and
-/// `Ppu::early_point` covers its IF writes.)
+/// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`. (Line 153's LYC=0 point is a
+/// dot early in the same way: [`L153_ZERO_IRQ`].)
 pub(crate) const LY0_PULSE_IRQ: u64 = 1;
+
+/// Single speed: the interrupt request of line 153's comparison against
+/// 0 reaches IF this many dots after its walk point ([`L153_ZERO`],
+/// t = 12), at gambatte's event (behaviour only, `lyc_irq.cpp`: the
+/// LYC = 0 interrupt is scheduled at line 153 cycle 6 in both speeds, our
+/// t = 13, where the double-speed walk has the point itself,
+/// [`l153_zero_walk`]; every other LYC interrupt at its line's cycle -2,
+/// our [`CMP_WALK`]). SameBoy compares at 12 (`display.c`, line 153:
+/// `ly_for_comparison = 0` after 2 + 4 + 2 + 4 dots), which is where the
+/// STAT line and the write views change here too; as for the pulse
+/// ([`LY0_PULSE_IRQ`]), only IF follows a dot later: an IF read or
+/// interrupt check at an M-cycle boundary on the point doesn't see the
+/// request, an IF write landing on the point doesn't clear it, and a
+/// dispatch whose acknowledge is on the point doesn't absorb it. CGB04C
+/// `ly0/lycint152_lyc0irq_ifw_1` (IF written with the access at 153:11,
+/// landing on the point: the interrupt still comes; `_2`, 4 dots later:
+/// cleared) rules out IF having the request at 12. The default CPU phase
+/// (M-cycle boundaries at `t = 3 mod 4`) has no boundary on the point; no
+/// ROM we have reads IF or checks interrupts there at another phase.
+pub(crate) const L153_ZERO_IRQ: u64 = 1;
 
 /// Line 153: the walk's comparison against 0 (`Pt::L153Zero`), double
 /// speed one dot after [`L153_ZERO`] (the read and write views keep
@@ -406,7 +425,9 @@ pub(crate) const LY0_PULSE_IRQ: u64 = 1;
 /// LYC=0 interrupt at line 153 cycle 6, our `t = 13`, as line 0's mode-2
 /// interrupt ([`ly0_pt`]). CGB04C `ly0/lycint152_lyc0irq_late_retrigger_ds_1`
 /// (the dispatch clears IF at 153:12, the LYC=0 request comes after it;
-/// `_ds_2` clears at 153:14). Single speed keeps 12 (no ROM tells).
+/// `_ds_2` clears at 153:14). Single speed keeps 12 for the walk (the
+/// write views are calibrated on it) and delays the request
+/// ([`L153_ZERO_IRQ`]).
 #[inline(always)]
 pub(crate) const fn l153_zero_walk(double: bool) -> u32 {
     L153_ZERO + double as u32

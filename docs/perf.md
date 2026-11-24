@@ -369,6 +369,9 @@ total `.text` 109,330 -> 111,680 B (+2,350):
 
 (Each row against the row before; the others of the nine: cgb_sound
 -0.56%, apu-writes -0.78%, event-storm -0.31%, dma-storm -0.30% in all.)
+Then line 153's LYC=0 request as a timed one (a behaviour change,
+`docs/reference/stat-irq.md`): cgb-acid2 +0.01%, the rest 0.00%; `.text`
+111,552 B (-128: `Ppu::early_point` and its case in `write_if` go).
 
 To check the ITCM report after these: `walk_to` is `run_points::<false>`
 (2,058 B) and `run_points::<true>` (578 B) now, and `point_irq` is

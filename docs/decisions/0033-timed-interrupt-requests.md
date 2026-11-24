@@ -88,3 +88,15 @@ behaviour change for an IF read or interrupt check on 153:12 with no ROM
   97,136 -> 97,510 B; `size_of::<Emulator>()` 848 -> 872 B (thumbv7em).
   With the post inside the palette writes' inlined sync, cgb-raster was
   +0.75%, hence `walk_to`.
+
+## Update (2026-11-24)
+Line 153's LYC=0 point uses the same request now (review L5): walked at
+12, its request reaches IF at 13 (`edges::L153_ZERO_IRQ`;
+`docs/reference/stat-irq.md`). `Ppu::early_point`'s IF-write case and
+its branch in `Ctx::write_if` are gone; what is left of it is
+`Ppu::on_ly0_pulse`, for a STAT write's phase 2 on the pulse. Unit tests
+`bus::tests::line_153_lyc_0_request_reaches_if_a_dot_after_its_point_however_synced`
+and `ppu::tests::single_speed_line_153_lyc_0_request_is_a_dot_after_its_point`,
+seen failing without the delay. The fingerprint of all 4,020 runs is
+unchanged (no ROM has an M-cycle boundary on 153:12 that looks at IF).
+The decision above is unchanged.

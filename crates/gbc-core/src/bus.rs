@@ -1187,13 +1187,13 @@ impl Ctx<'_, '_> {
                 let at = now + edges::STAT_PHASE2.delay(double);
                 // Single speed, phase 2 on line 0's mode-2 pulse: mode 1
                 // still holds the line there (gambatte's line 0 starts a dot
-                // later, `Ppu::early_point`), so a write that keeps it up
+                // later, `Ppu::on_ly0_pulse`), so a write that keeps it up
                 // requests nothing. The pulse itself runs first (a mode 2
                 // the write selects is past it). CGB04C
                 // `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1` (`10 ->
                 // 50`, LYC = 0: E0), `m2enable/late_enable_m1disable_ly0_2`.
                 // (Synced to `now`, the dot before, for phase 1.)
-                let pulse = self.sys.ppu.early_point(at, double) == ppu::EARLY_PULSE;
+                let pulse = self.sys.ppu.on_ly0_pulse(at, double);
                 let high = self.sys.ppu.stat_line_high();
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
@@ -1419,14 +1419,7 @@ impl Ctx<'_, '_> {
     fn write_if(&mut self, value: u8) {
         let at = self.clock() + 1;
         if self.sys.sched.deadline(EventKind::Ppu) <= at {
-            if self.sys.ppu.early_point(at, self.hot.mcycle == 2) != ppu::EARLY_ZERO {
-                self.sync_ppu_to(at);
-            } else {
-                // Line 153's LYC=0 point at `at` counts as still ahead; a
-                // timed request due by `at` is in IF all the same.
-                let s = &mut *self.sys;
-                s.ppu.post_irqs(at, &mut s.iflags);
-            }
+            self.sync_ppu_to(at);
         }
         let s = &mut *self.sys;
         let old = s.iflags;
@@ -3612,10 +3605,11 @@ mod tests {
     /// An IF write lands one dot after its access (SameBoy
     /// `GB_CONFLICT_WRITE_CPU`): it clears a mode-0 interrupt requested
     /// up to that dot, not one after it (CGB04C
-    /// `m2int_m0irq/m2int_m0irq_scx3_ifw_*`). Single speed, line 153's
-    /// LYC=0 point and line 0's mode-2 pulse (one dot past an M-cycle
-    /// boundary here) count as a dot later: an IF write accessed the dot
-    /// before them doesn't clear them (`ly0/lycint152_lyc0irq_ifw_1`,
+    /// `m2int_m0irq/m2int_m0irq_scx3_ifw_*`). Single speed, the requests
+    /// of line 153's LYC=0 point and line 0's mode-2 pulse (one dot past
+    /// an M-cycle boundary here) reach IF a dot later: an IF write
+    /// accessed the dot before them doesn't clear them
+    /// (`ly0/lycint152_lyc0irq_ifw_1`,
     /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`).
     #[test]
     fn if_write_lands_one_dot_after_its_access() {
@@ -3720,6 +3714,44 @@ mod tests {
                 assert_eq!(ctx.sys.sched.deadline(EventKind::Ppu), line0 + 5);
             }
             ctx.sync_ppu_to(line0 + 5);
+            assert_eq!(ctx.sys.iflags & STAT, STAT, "{syncs:?}");
+        }
+    }
+
+    /// Single speed, line 153's comparison against 0 (walk point t = 12):
+    /// its interrupt request reaches IF at t = 13 however the PPU was
+    /// synced before, also by a sync on the point itself, which leaves the
+    /// PPU deadline on the request's clock (gambatte's LYC = 0 event is at
+    /// our t = 13, `edges::L153_ZERO_IRQ`). An IF read or interrupt check
+    /// at an M-cycle boundary on 153:12 so doesn't see it, and a dispatch
+    /// that acknowledges another interrupt there leaves it to come.
+    #[test]
+    fn line_153_lyc_0_request_reaches_if_a_dot_after_its_point_however_synced() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let line153 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 153 * 456;
+        // Dots of line 153 the PPU is synced to before dot 13.
+        for syncs in [&[][..], &[12], &[11, 12], &[9, 10, 11, 12]] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let _ = emu.run_until(line153 - 500, &mut fb, &mut []);
+            write(emu, 0xFF45, 0);
+            write(emu, 0xFF41, 0x40);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            while ctx.clock() < line153 - 1 {
+                ctx.idle();
+            }
+            assert_eq!(ctx.clock(), line153 - 1);
+            ctx.sys.iflags = 0;
+            for &t in syncs {
+                ctx.sync_ppu_to(line153 + t);
+                assert_eq!(ctx.sys.iflags & STAT, 0, "{syncs:?}: synced to dot {t}");
+            }
+            if syncs.last() == Some(&12) {
+                assert!(ctx.sys.ppu.stat_line_high());
+                assert_eq!(ctx.sys.sched.deadline(EventKind::Ppu), line153 + 13);
+            }
+            ctx.sync_ppu_to(line153 + 13);
             assert_eq!(ctx.sys.iflags & STAT, STAT, "{syncs:?}");
         }
     }

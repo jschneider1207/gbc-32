@@ -645,10 +645,6 @@ const fn entry_pos(i: u8) -> u64 {
     4 + 2 * i as u64
 }
 
-/// [`Ppu::early_point`]: line 153's LYC=0 point, line 0's mode-2 pulse.
-pub(crate) const EARLY_ZERO: u8 = 1;
-pub(crate) const EARLY_PULSE: u8 = 2;
-
 /// Where a clock falls: line, line position, and whether line 0 is the
 /// short first line after LCD enable.
 #[derive(Clone, Copy)]
@@ -916,26 +912,16 @@ impl Ppu {
         if v & 3 == 2 { v & !3 } else { v }
     }
 
-    /// Which single-speed walk point a dot early against gambatte is at
-    /// `at`: [`EARLY_ZERO`] (line 153's comparison against 0, t = 12),
-    /// [`EARLY_PULSE`] (line 0's mode-2 pulse, t = 4), or 0. gambatte
-    /// (behaviour only, `lyc_irq.cpp`, `video.cpp`
-    /// `mode2_irq_line_cycle_ly0`) has those events a dot later, our
-    /// `t = 13` and `5`, as our double-speed walk ([`edges::l153_zero_walk`],
-    /// [`edges::ly0_pulse`]); the single-speed walk keeps 12 and 4, which
-    /// the STAT and LYC write views assume. The pulse's interrupt request
-    /// reaches IF at gambatte's dot all the same ([`edges::LY0_PULSE_IRQ`]),
-    /// so an IF write landing on the pulse doesn't clear it; line 153's
-    /// point requests at once. A CPU write landing on one (one dot after
-    /// its access) sees it as still ahead:
-    /// - an IF write landing on line 153's point doesn't clear its
-    ///   interrupt (`Ctx::write_if`; CGB04C
-    ///   `ly0/lycint152_lyc0irq_ifw_1`, accessed a dot before the point:
-    ///   interrupt; `_2`, 4 dots later: none);
-    /// - a STAT write's phase 2 on the pulse sees line 0's mode-1 source
-    ///   still holding the line (`Ctx::write_ppu`).
-    pub(crate) fn early_point(&self, at: u64, double: bool) -> u8 {
-        const ZERO: u32 = 153 * LINE + edges::l153_zero_walk(false);
+    /// Single speed: clock `at` is on line 0's mode-2 pulse (its walk
+    /// point, t = 4). gambatte (behaviour only, `video.cpp`
+    /// `mode2_irq_line_cycle_ly0`) has that event a dot later, our t = 5,
+    /// as our double-speed walk ([`edges::ly0_pulse`]); the single-speed
+    /// walk keeps 4, which the STAT and LYC write views assume, and the
+    /// pulse's interrupt request reaches IF at gambatte's dot
+    /// ([`edges::LY0_PULSE_IRQ`]). A STAT write's phase 2 landing on the
+    /// pulse (one dot after its access) sees line 0's mode-1 source still
+    /// holding the line (`Ctx::write_ppu`).
+    pub(crate) fn on_ly0_pulse(&self, at: u64, double: bool) -> bool {
         const PULSE: u32 = edges::ly0_pulse(false);
         // As `at` (frame position; line 0 of the first frame has no pulse),
         // without its division.
@@ -945,15 +931,7 @@ impl Ppu {
             p -= FRAME;
             first = false;
         }
-        if double || !self.lcd_enabled() {
-            0
-        } else if p == ZERO {
-            EARLY_ZERO
-        } else if p == PULSE && !first {
-            EARLY_PULSE
-        } else {
-            0
-        }
+        !double && self.lcd_enabled() && p == PULSE && !first
     }
 
     /// The STAT interrupt line is high.
@@ -1419,9 +1397,10 @@ impl Ppu {
     ///
     /// Also the clock of the earliest timed interrupt request, if before
     /// that ([`Self::request_irq`]): the sync at it posts the request.
-    /// (Single speed, line 0's mode-2 pulse is such a request, made at its
-    /// walk point for one dot later, [`edges::LY0_PULSE_IRQ`]: the deadline
-    /// is the point, and a sync on it makes the next deadline the
+    /// (Single speed, line 0's mode-2 pulse and line 153's comparison
+    /// against 0 are such requests, made at their walk points for one dot
+    /// later, [`edges::LY0_PULSE_IRQ`] and [`edges::L153_ZERO_IRQ`]: the
+    /// deadline is the point, and a sync on it makes the next deadline the
     /// request's clock.)
     pub(crate) fn next_event(&self, double: bool) -> u64 {
         self.next_walk_event(double).min(self.irq.next())
@@ -1564,14 +1543,17 @@ impl Ppu {
             if !QUIET && !matches!(c.pt, Pt::Latch | Pt::End) {
                 let mut line = self.line_irq;
                 if self.point_irq(&mut line, c.pt, l, double) {
-                    // (By position: in single speed only line 0's mode-2
-                    // pulse is there; cheaper than testing the point and
-                    // line.) Its request reaches IF a dot later
-                    // ([`edges::LY0_PULSE_IRQ`]).
-                    const PULSE: u32 = edges::ly0_pulse(false);
-                    if !double && c.pos == PULSE {
-                        let at = self.synced + edges::LY0_PULSE_IRQ;
-                        self.irq.request(at, INT_STAT, iflags);
+                    // Single speed: the requests of line 0's mode-2 pulse
+                    // and of line 153's comparison against 0 reach IF a
+                    // dot after their walk points.
+                    let delay = match c.pt {
+                        _ if double => 0,
+                        Pt::Ly4 if l == 0 => edges::LY0_PULSE_IRQ,
+                        Pt::L153Zero => edges::L153_ZERO_IRQ,
+                        _ => 0,
+                    };
+                    if delay != 0 {
+                        self.irq.request(self.synced + delay, INT_STAT, iflags);
                     } else {
                         *iflags |= INT_STAT;
                     }
@@ -3672,6 +3654,39 @@ mod tests {
         }
     }
 
+    /// Single speed: line 153's comparison against 0 runs at its walk
+    /// point (t = 12: the STAT line and the write views change there), and
+    /// its request reaches IF a dot later (`edges::L153_ZERO_IRQ`), also
+    /// when a sync stopped on the point. Double speed: the point is at 13
+    /// and requests at once.
+    #[test]
+    fn single_speed_line_153_lyc_0_request_is_a_dot_after_its_point() {
+        let on = 1000;
+        let l153 = clock(on, 0, 153 * LINE);
+        for stop_on_point in [false, true] {
+            let mut r = Rig::on_at(on, SEL_LYC, 0);
+            r.irqs(l153);
+            r.iflags = 0;
+            assert_eq!(r.ppu.next_event(false), l153 + 12);
+            if stop_on_point {
+                r.sync(l153 + 12);
+                assert_eq!(r.iflags, 0);
+                assert!(r.ppu.stat_line_high());
+                assert_eq!(r.ppu.next_event(false), l153 + 13);
+            }
+            r.sync(l153 + 13);
+            assert_eq!(r.iflags, INT_STAT);
+            assert!(r.ppu.next_event(false) > l153 + 13);
+        }
+        let mut r = Rig::on_at(on, SEL_LYC, 0);
+        r.ppu.speed_changed(true);
+        r.irqs_at_speed(l153, true);
+        r.iflags = 0;
+        assert_eq!(r.ppu.next_event(true), l153 + 13);
+        r.sync_at_speed(l153 + 13, true);
+        assert_eq!(r.iflags, INT_STAT);
+    }
+
     /// Design step 1 (docs/design/lcd-offset-phase.md 3.2): single speed,
     /// the walk compares at `t = 5`; a write at `t = 4` sees that dot
     /// through its own view.
@@ -3802,12 +3817,13 @@ mod tests {
             (r.ppu.ly(l153 + 7, true), r.ppu.ly(l153 + 8, true)),
             (153, 0)
         );
-        // LYC = 0 matches from t = 12 of line 153, through line 0.
+        // LYC = 0 matches from t = 12 of line 153, through line 0 (the
+        // request reaches IF a dot later, `edges::L153_ZERO_IRQ`).
         let mut r = Rig::on_at(on, SEL_LYC, 0);
         r.irqs(clock(on, 0, 100 * LINE));
         let irqs = r.irqs(clock(on, 1, 2 * LINE));
         let stat = irqs.iter().find(|i| i.1 & INT_STAT != 0);
-        assert_eq!(stat, Some(&(l153 + 12, INT_STAT)));
+        assert_eq!(stat, Some(&(l153 + 13, INT_STAT)));
         let stat = r.stat(clock(on, 1, 200));
         assert_eq!(stat & 4, 4);
     }
@@ -3816,7 +3832,8 @@ mod tests {
     /// blocked by the mode-1 select, whose source ends at `t = 4`; LYC = 0
     /// matches for the walk from line 153's `t = 13` (single speed 12).
     /// [`edges::ly0_pt`], [`edges::l153_zero_walk`]. The CPU sees the
-    /// single-speed pulse a dot late, at 5 too (`Ppu::next_event`).
+    /// single-speed pulse and LYC = 0 request a dot late, at 5 and 13 too
+    /// (`Ppu::next_event`).
     #[test]
     fn double_speed_line_0_points() {
         let on = 1000;
@@ -3838,7 +3855,7 @@ mod tests {
         assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, true), []);
         assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, false), []);
         assert_eq!(stat(SEL_LYC, 0, true), [l153 + 13]);
-        assert_eq!(stat(SEL_LYC, 0, false), [l153 + 12]);
+        assert_eq!(stat(SEL_LYC, 0, false), [l153 + 13]);
         // The mode-1 source ends at `t = 4`: an LYC = 0 match written there
         // (LYC selected, at the access in double speed) interrupts.
         let mut r = Rig::on_at(on, SEL_MODE1 | SEL_LYC, 0xFF);

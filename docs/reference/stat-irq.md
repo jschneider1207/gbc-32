@@ -147,10 +147,23 @@ IF one dot later, at 5, as a timed request (`edges::LY0_PULSE_IRQ`; see
 synced. By the move rule only CPU offset 3 (M-cycle boundaries at
 `t = 0 mod 4`) has a boundary on dot 4: its IF read at 0:4 doesn't see
 the pulse (`offset3_lyc99int_m2irq_count_1`, E0; `_2` reads at 0:8). Full
-manifest +1 / -0 when the delay was introduced. Line 153's LYC=0 point
-(12, gambatte 13) got the same delay in a trial with the same results (no
-ROM needs it); not done: an IF read or interrupt check on 153:12 sees it
-at once, and `Ppu::early_point` covers IF writes on it.
+manifest +1 / -0 when the delay was introduced.
+
+Line 153's LYC=0 point (walked at 12) has the same delay: its request
+reaches IF at 13 (`edges::L153_ZERO_IRQ`), gambatte's event (`lyc_irq.cpp`,
+behaviour only: the LYC = 0 interrupt at line 153 cycle 6 in both speeds,
+every other LYC interrupt at its line's cycle -2, our `CMP_WALK`). SameBoy
+(`display.c`, line 153) sets `ly_for_comparison = 0` and updates STAT at
+our 12 in single speed, which is where the walk keeps the line change; for
+IF, CGB04C `ly0/lycint152_lyc0irq_ifw_1` (an IF write landing on 153:12
+does not clear the request; `_2`, landing on 153:16, does) rules 12 out
+and fits 13. So an IF read or interrupt check at an M-cycle boundary on
+153:12 doesn't see the request, and a dispatch whose acknowledge is there
+doesn't absorb it. Only a CPU phase with boundaries at `t = 0 mod 4` (IF
+read, interrupt check) or `t = 2 mod 4` (acknowledge) can tell; no ROM we
+have does (the fingerprint of all 4,020 runs is unchanged), so the read
+side rests on gambatte's model and on the pulse's ROM above, not on a
+capture of its own.
 
 ## VBlank LYC interrupts and LYC writes (single speed)
 
@@ -218,8 +231,8 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 - Single speed, line 153's LYC=0 point (t = 12) and line 0's mode-2
   pulse (t = 4) are a dot before gambatte's events (our 13 and 5, which
   the double-speed walk uses), so the IF write doesn't see them at the
-  dot after its access (line 153's point: `Ppu::early_point`; the pulse:
-  its request reaches IF at 5, a timed request). CGB04C
+  dot after its access (their requests reach IF at 13 and 5: timed
+  requests). CGB04C
   `ly0/lycint152_lyc0irq_ifw_1`, `lyc153int_m2irq/lyc153int_m2irq_ifw_1`
   (access a dot before the point: interrupt). Moving the single-speed
   walk points to 13 and 5 instead regressed
@@ -261,9 +274,10 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 
 A request whose IF bit is set at a later clock than the walk point or
 write that makes it is explicit state: "IF bits B are set at clock T"
-(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0033). Two rules
-use it, both single speed: the LYC-write request (T = landing + 5) and
-line 0's mode-2 pulse (T = point + 1).
+(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0033). Three
+rules use it, all single speed: the LYC-write request (T = landing + 5),
+line 0's mode-2 pulse and line 153's comparison against 0 (T = point + 1
+each).
 
 - Posting: `Ppu::next_event` is the earlier of the walk's next event and
   T, so the `EventKind::Ppu` deadline covers it, and every `Ppu::sync`
@@ -282,18 +296,23 @@ line 0's mode-2 pulse (T = point + 1).
   `LCD::lcdcChange` sets every LCD event, `memevent_oneshot_statirq`
   included, to `disabled_time`). Nothing else cancels one: a later STAT,
   LYC or other PPU write only reschedules the PPU.
-- At most two wait at once (a LYC write landing on 0:4 with the pulse).
+- At most two wait at once (a LYC write's with the pulse's, or with line
+  153's: LYC writes are at least two M-cycles apart, and the two walk
+  points 447 dots).
 
 ## Open
 
 - The single-speed walk's line-153 LYC=0 point (t = 12) and line-0
-  mode-2 pulse (t = 4) are a dot before gambatte's events. The pulse's
-  request reaches IF at 5 (a timed request), and a STAT write's phase 2
-  on the pulse still works around the walk point (`Ppu::early_point`,
-  `Ctx::write_ppu`); line 153's point has only the IF-write workaround
-  (`Ppu::early_point`), and its request could become a timed one too (a
-  behaviour change for an IF read or interrupt check on 153:12; no ROM).
-  Moving the points (to 13 and 5, as in double
-  (`lyc_irq.cpp` `regChange`) for the line-153 STAT/LYC write views
-  first (`lycEnable/lyc0_ff4{1,5}_disable_2`, `m2enable/*ly0*` single
-  speed rows).
+  mode-2 pulse (t = 4) are a dot before gambatte's events. Their requests
+  reach IF at gambatte's dots (13 and 5, timed requests), so IF is right;
+  what remains is the walk point itself, where the STAT line changes: a
+  STAT write's phase 2 on the pulse still works around it
+  (`Ppu::on_ly0_pulse`, `Ctx::write_ppu`). Moving the points (to 13 and
+  5, as in double speed) needs gambatte's select and LYC latch
+  (`lyc_irq.cpp` `regChange`) for the line-153 and line-0 STAT/LYC write
+  views first (`lycEnable/lyc0_ff4{1,5}_disable_2`, `m2enable/*ly0*`
+  single speed rows).
+- No ROM reads IF or checks interrupts on 153:12 at a CPU phase with a
+  boundary there (see "Line 0 and line 153's LYC=0" above): a capture of
+  `lycint152_lyc0irq`-style rows at lcd offset 3 would settle the read
+  side directly.
