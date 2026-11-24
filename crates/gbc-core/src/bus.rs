@@ -225,21 +225,23 @@ impl Sys<'_> {
 /// Cold: once per reset.
 #[inline(never)]
 fn boot_logo(vram: &mut [u8; 0x4000], rom: Rom<'_>) {
-    const TRADEMARK: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
-    for i in 0..48 {
-        let b = rom.get(0x104 + i).unwrap_or(0);
-        for (half, nibble) in [b >> 4, b & 0x0F].into_iter().enumerate() {
-            // Bit k of the nibble to bits 2k and 2k+1.
-            let n = u16::from(nibble);
-            let d = ((n & 1) | (n & 2) << 1 | (n & 4) << 2 | (n & 8) << 3) * 3;
-            let row = 0x10 + i * 8 + half * 4;
-            vram[row] = d as u8;
-            vram[row + 2] = d as u8;
-        }
+    // Tile 0x19, plane 1 zero.
+    const TRADEMARK: [u8; 16] = [
+        0x3C, 0, 0x42, 0, 0xB9, 0, 0xA5, 0, 0xB9, 0, 0xA5, 0, 0x42, 0, 0x3C, 0,
+    ];
+    // A nibble with bit k doubled to bits 2k and 2k + 1.
+    const DOUBLED: [u8; 16] = [
+        0x00, 0x03, 0x0C, 0x0F, 0x30, 0x33, 0x3C, 0x3F, 0xC0, 0xC3, 0xCC, 0xCF, 0xF0, 0xF3, 0xFC,
+        0xFF,
+    ];
+    // Each nibble (a row of 4 pixels) is two rows of tile data.
+    for i in 0..96 {
+        let b = rom.get(0x104 + i / 2).unwrap_or(0);
+        let d = DOUBLED[usize::from(if i & 1 == 0 { b >> 4 } else { b & 0x0F })];
+        vram[0x10 + 4 * i] = d;
+        vram[0x12 + 4 * i] = d;
     }
-    for (k, &b) in TRADEMARK.iter().enumerate() {
-        vram[0x190 + 2 * k] = b;
-    }
+    vram[0x190..0x1A0].copy_from_slice(&TRADEMARK);
 }
 
 /// The index step of a BCPD/OCPD write in CGB mode: returns the palette RAM
