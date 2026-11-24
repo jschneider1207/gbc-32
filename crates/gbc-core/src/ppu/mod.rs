@@ -1690,6 +1690,9 @@ impl Ppu {
             phase += win_dots;
             tile -= 8;
         }
+        if reg == 0x40 && data {
+            self.tile_sel_latch(mem, tile, phase, win_hit);
+        }
         // Tile j + 1 (from `tile + 8`): fetched with the old values, its
         // map entry only (`planes`: the planes still to read), or not yet.
         // An LCDC.4 change reaches the data steps one dot early
@@ -1702,10 +1705,13 @@ impl Ppu {
         // before or after the write (in tile 0: also one among the junk
         // pixels), else 0. An empty object high plane as the latch is what
         // the old calibration (a set "on time" next to an object stall)
-        // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7; a latch from
-        // an earlier line isn't modelled, so 15 and 0 keep that
-        // calibration's plane (old: X = 16-17 there and `_win_change` X =
-        // 8-17; new: gambatte `bgtiledata_spx*`). SameBoy (sm83_cpu.c
+        // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7. With the
+        // latch unknown (`ObjRank::sel_end`: BG reads with 8000 addressing
+        // to an earlier line's end), 15 and 0 keep that calibration's
+        // plane (old, else new); the lines it was fitted to (Mealybug
+        // `m3_lcdc_tile_sel_change` X = 16-17, `_win_change` X = 8-17,
+        // gambatte `bgtiledata_spx*`) now take the latch an earlier line
+        // left (`Ppu::tile_sel_latch`). SameBoy (sm83_cpu.c
         // `GB_CONFLICT_LCDC_CGB`) writes LCDC on time, with a clear
         // glitching the next dot's data read (`tile_sel_glitch`), which the
         // early clear stands for here; it has no set glitch in single speed.
@@ -1767,6 +1773,40 @@ impl Ppu {
             *hold = [hold[1], last, seg];
         }
         true
+    }
+
+    /// For [`Ppu::hold_fetch`], an LCDC.4 change in mode 3 with tile j at
+    /// screen x `tile`, `phase` dots into tile j's fetch window (`win_hit`:
+    /// a window stall in it, tile j + 1 fetched): the CGB TILE_SEL glitch
+    /// latch, the last byte read with 8000-8FFF addressing (Mealybug
+    /// TILE_SEL notes: "bitplane 1 data from the most recently drawn
+    /// sprite ... or tile as when TILE_SEL was last reset"; reads with
+    /// 8800-97FF addressing leave it). A clear latches the BG/window read
+    /// on or before its dot (tile j + 1's planes from their read dots, a
+    /// glitched read at the old address included; else tile j's high
+    /// plane), objects fetched later than it replace it
+    /// (`Renderer::tile_sel_glitch`, `Renderer::carry_sel`). A set's glitched
+    /// read takes the latch as of the set (`ObjRank::sel_latch`); from
+    /// then on BG reads with 8000 addressing replace it (unknown: 0xFF).
+    #[inline(always)]
+    fn tile_sel_latch(&mut self, mem: &mut Memory, tile: i32, phase: i32, win_hit: bool) {
+        let r = &mut mem.obj_rank;
+        if self.lcdc & 0x10 == 0 {
+            r.sel_latch = r.sel_end;
+            r.sel_end.1 = 0xFF;
+            return;
+        }
+        let (x, plane) = if phase >= FETCH_LOW + LCDC_TILES_LATE - 1 || win_hit {
+            let high = phase >= FETCH_HIGH + LCDC_TILES_LATE - 1 || win_hit;
+            (tile + 8, usize::from(high))
+        } else {
+            (tile, 1)
+        };
+        let (scx, scy) = (mem.io[0x43], mem.io[0x42]);
+        let byte = self
+            .renderer
+            .tile_byte_8000(&mem.vram, x as u8, self.lcdc, scx, scy, plane);
+        mem.obj_rank.sel_end = (byte, (x + 8).max(1) as u8);
     }
 
     /// For [`Ppu::hold_fetch`] at line position `t`, pixel `x` next out, in
@@ -2078,7 +2118,13 @@ impl Ppu {
         self.drawn = 0;
         mem.obj_rank.hold[2].end = 0;
         mem.obj_rank.next = 0;
-        mem.obj_rank.sel_latch.1 = 0;
+        // Before the renderer starts the line: the TILE_SEL glitch latch
+        // (no call while LCDC.4 stays set).
+        if mem.obj_rank.sel_end.1 != 0xFF || self.lcdc & 0x10 == 0 {
+            let latch = &mut mem.obj_rank.sel_end;
+            self.renderer
+                .carry_sel(&mem.oam, &mem.vram, self.lcdc, latch);
+        }
         // The pixels follow the window start the stalls are built with.
         self.renderer.start_line(l as u8, scx, &objs, order, window);
         if n != 0 || window.is_some() {
@@ -4913,6 +4959,80 @@ mod tests {
             write_fetch_reg(&mut r, l + 300, 0x40, 0x81);
             r.sync(l + u64::from(LINE));
             assert_eq!(tile3(&r, ly as usize).0, want, "line {ly}");
+        }
+    }
+
+    /// CGB C TILE_SEL glitch latch across lines and non-glitched clears:
+    /// a set on a plane's read dot with no object or clear before it on
+    /// the line takes the last byte read with 8000 addressing on an
+    /// earlier line: the BG read before that line's LCDC.4 clear, or an
+    /// object fetched after it; unknown (the calibrated fallback, here
+    /// new) when that line read with 8000 addressing to its end. Mealybug
+    /// `m3_lcdc_tile_sel_change` line 128, `m3_lcdc_tile_sel_win_change`
+    /// line 64.
+    #[test]
+    fn tile_sel_latch_carries_over_from_earlier_lines() {
+        let on = 1000;
+        let mut r = fetch_rig(on);
+        r.ppu.renderer.cgb = true;
+        r.mem.bg_pal[..8].copy_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0]);
+        r.ppu
+            .resolve_palettes(&mut r.mem, &DmgPalettes::GRAYSCALE, true);
+        // Tile 0x55: 9000 color 3; 8000 low 0x33, high 0. Tile 0x56 at
+        // 8000: high 0x0F. Object tile 2: high 0xF0.
+        r.mem.vram[0x1550..0x1560].fill(0xFF);
+        for row in 0..8 {
+            r.mem.vram[0x0550 + 2 * row] = 0x33;
+            r.mem.vram[0x0561 + 2 * row] = 0x0F;
+            r.mem.vram[0x21 + 2 * row] = 0xF0;
+        }
+        // Tile 3 with its low plane from the latch (high plane new, 0).
+        let (bg, obj, new) = (
+            [1, 1, 1, 1, 2, 2, 2, 2],
+            [2, 2, 2, 2, 1, 1, 1, 1],
+            [1, 1, 2, 2, 1, 1, 2, 2],
+        );
+        // Dots: 102, an LCDC.4 clear after tile 1's high plane read (no
+        // stall); 115, a set on tile 3's low plane read dot; 300, HBlank.
+        let (set, clear, hblank) = (96 + 16 + FETCH_LOW, 96 + FETCH_HIGH + LCDC_TILES_LATE, 300);
+        // (line, its LCDC.4 clear's dot, then a set off the read dots and
+        // a clear in HBlank, the set's line offset, object X on lines
+        // ly - 7 to ly (0: none), map column of tile 0x56, tile 3 on the
+        // set's line). LCDC.4 is set from line ly's start.
+        for (ly, clear_at, reset, dl, x, col, want) in [
+            // Line 8's clear latched tile 1's high plane (0x0F).
+            (8u32, clear, false, 1u32, 0u8, 1usize, bg),
+            // An object fetched after that read (0xF0).
+            (16, clear, false, 1, 40, 1, obj),
+            // The same latch through a line without 8000 reads.
+            (24, clear, false, 2, 0, 1, bg),
+            // Line 32 read with 8000 to its end: unknown.
+            (32, hblank, false, 1, 0, 1, new),
+            // On the line: the clear off the read dots, then the set.
+            (40, clear, false, 0, 0, 1, bg),
+            // An object fetched before the read (X = 24: 11 dots at pixel
+            // 16; the clear after tile 5's high plane read).
+            (48, clear + 43, false, 1, 24, 5, bg),
+            // A set in mode 3 after the clear: 8000 reads to the end again.
+            (56, clear, true, 1, 0, 1, new),
+        ] {
+            let m = 0x1800 + (ly as usize >> 3) * 32;
+            r.mem.vram[m..m + 32].fill(0x55);
+            r.mem.vram[m + col] = 0x56;
+            let y = if x == 0 { 0 } else { ly as u8 + 16 - 7 };
+            r.mem.oam[..4].copy_from_slice(&[y, x, 2, 0]);
+            r.ppu.oam_written();
+            let at = |l: u32, dot: i32| clock(on, 0, l * LINE).wrapping_add_signed(i64::from(dot));
+            write_fetch_reg(&mut r, at(ly, -10), 0x40, 0x91);
+            write_fetch_reg(&mut r, at(ly, clear_at), 0x40, 0x81);
+            if reset {
+                write_fetch_reg(&mut r, at(ly, set - 2), 0x40, 0x91);
+                write_fetch_reg(&mut r, at(ly, hblank), 0x40, 0x81);
+            }
+            write_fetch_reg(&mut r, at(ly + dl, set), 0x40, 0x91);
+            write_fetch_reg(&mut r, at(ly + dl, hblank), 0x40, 0x81);
+            r.sync(at(ly + dl + 1, 0));
+            assert_eq!(tile3(&r, (ly + dl) as usize).0, want, "line {}", ly + dl);
         }
     }
 

@@ -100,6 +100,7 @@ impl Memory {
                 }; 3],
                 next: 0,
                 sel_latch: (0, 0),
+                sel_end: (0, 0),
             },
             bg_pal: [0; 64],
             obj_pal: [0; 64],
@@ -124,6 +125,7 @@ impl Memory {
         self.obj_rank.rank.fill(0);
         self.obj_rank.next = 0;
         self.obj_rank.sel_latch = (0, 0);
+        self.obj_rank.sel_end = (0, 0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
@@ -153,11 +155,18 @@ pub(crate) struct ObjRank {
     /// object not yet fetched or skipped (`Renderer::fetch_objects`); 0 at
     /// the line start (`Ppu::latch`).
     pub(crate) next: u8,
-    /// CGB TILE_SEL glitch latch as far as modelled: the byte an LCDC.4
-    /// clear's glitched read took on this line and the screen x + 8 of its
-    /// tile (0: none; reset at the line start, `Ppu::latch`); objects from
-    /// that x on were fetched after it (`Renderer::tile_sel_glitch`).
+    /// CGB TILE_SEL glitch latch (the last byte the PPU read with 8000-8FFF
+    /// addressing) as far as modelled: `sel_end` as of the last LCDC.4 set
+    /// in mode 3, for that set's glitched read (`Renderer::tile_sel_glitch`;
+    /// a later clear changes `sel_end` before the tile is drawn).
     pub(crate) sel_latch: (u8, u8),
+    /// The latch now, as (byte, key) (`Ppu::hold_fetch`, `Renderer::carry_sel`):
+    /// key 8-175, the BG or window read of the tile at screen x key - 8
+    /// on this line, the last with 8000 addressing before an LCDC.4 clear
+    /// (objects from that x on were fetched after it); 1, a read on an
+    /// earlier line (before this line's objects); 0, unknown; 0xFF, BG
+    /// reads with 8000 addressing since (unknown, after every object).
+    pub(crate) sel_end: (u8, u8),
 }
 
 /// One held part of a line ([`ObjRank::hold`]).
@@ -225,6 +234,7 @@ mod tests {
         assert!(obj_rank.hold.iter().all(|&h| h == Held::default()));
         assert_eq!(obj_rank.next, 0);
         assert_eq!(obj_rank.sel_latch, (0, 0));
+        assert_eq!(obj_rank.sel_end, (0, 0));
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
@@ -233,6 +243,7 @@ mod tests {
             + size_of_val(&obj_rank.hold)
             + size_of_val(&obj_rank.next)
             + size_of_val(&obj_rank.sel_latch)
+            + size_of_val(&obj_rank.sel_end)
             + size_of::<Apu>()
             + size_of_val(dma_read_clears);
         assert_eq!(

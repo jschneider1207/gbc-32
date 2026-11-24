@@ -433,6 +433,7 @@ impl Renderer {
     /// The slot of the line's last object fetch: the last object in
     /// priority (fetch) order on screen horizontally (X < 168; objects at
     /// X >= 168 are never fetched). CGB: fetched even with LCDC.1 clear.
+    #[inline(never)]
     pub(crate) fn last_fetched(&self) -> Option<usize> {
         self.order[..self.objects.len()]
             .iter()
@@ -570,7 +571,7 @@ impl Renderer {
             let from = x0.max(end.saturating_sub(8));
             if h.planes != 0 && from < to {
                 let next = hold.get(i + 1).map_or(*regs, regs_of);
-                let latch = &mut obj_rank.sel_latch;
+                let latch = obj_rank.sel_latch;
                 self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src, latch);
             }
             x0 = to;
@@ -598,7 +599,7 @@ impl Renderer {
         next: &Regs,
         planes: u8,
         src: &Sources,
-        latch: &mut (u8, u8),
+        latch: (u8, u8),
     ) {
         let lcdc = held.lcdc;
         let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
@@ -644,8 +645,7 @@ impl Renderer {
         let glitch = if g != 0 {
             let index =
                 src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
-            let tile_x = (x0 as u8).wrapping_sub(col & 7);
-            self.tile_sel_glitch(src, latch, lcdc, planes, index, attr, y, tile_x, old, new)
+            self.tile_sel_glitch(src, latch, lcdc, planes, index, attr, old, new)
         } else {
             0
         };
@@ -669,51 +669,116 @@ impl Renderer {
     /// The data is a byte, X-flipped at the push:
     /// - a clear: the tile index, except for an index >= 0x80 (both data
     ///   areas map it to 8800-8FFF: the read doesn't change). The byte at
-    ///   the old address goes to `latch` (`ObjRank::sel_latch`);
+    ///   the old address is latched (`Ppu::hold_fetch`);
     /// - a set: the latch, the last byte read with 8000-8FFF addressing
     ///   (Mealybug: "bitplane 1 data from the most recently drawn sprite
     ///   ... or tile"): the high plane of the last object fetched before
-    ///   this tile's reads (slot + 1 in `planes` bits 4-7) unless a clear's
-    ///   read on this line came after it. A read on an earlier line isn't
-    ///   modelled: then the row as `old` (bits 4-7 = 15: an object stall in
-    ///   tile j or j + 1, `Ppu::hold_fetch`) or `new`, which the earlier
-    ///   `LCDC_TILES_LATE` calibration fitted.
+    ///   this tile's reads (slot + 1 in `planes` bits 4-7) unless the
+    ///   latch `latch` (`ObjRank::sel_latch`) was read after it. With
+    ///   neither known (key 0 or 0xFF), the row as `old` (bits 4-7 = 15:
+    ///   an object stall in tile j or j + 1, `Ppu::hold_fetch`) or `new`,
+    ///   which the earlier `LCDC_TILES_LATE` calibration fitted.
     #[cold]
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn tile_sel_glitch(
         &self,
         src: &Sources,
-        latch: &mut (u8, u8),
+        latch: (u8, u8),
         lcdc: u8,
         planes: u8,
         index: u8,
         attr: u8,
-        y: u8,
-        tile_x: u8,
         old: u16,
         new: u16,
     ) -> u16 {
-        let (byte, key) = *latch;
+        let (byte, key) = latch;
         let data = if lcdc & LCDC_TILES_8000 != 0 {
-            let a = (usize::from(index) << 4 | usize::from(y & 7) << 1)
-                ^ (ATTR_FETCH[usize::from(attr)] as usize & 0x3FFF);
-            let read = src.vram[(a | usize::from(planes >> 3 & 1)) & 0x3FFF];
-            // Objects from this tile's x on are fetched after the read.
-            *latch = (read, tile_x.wrapping_add(8));
-            if index < 0x80 { index } else { read }
+            if index >= 0x80 {
+                return old;
+            }
+            index
         } else {
-            let this = key != 0;
             let s = usize::from(planes >> 4).wrapping_sub(1);
             if s < MAX_PER_LINE && u16::from(self.objects.get(s).2) + 8 >= u16::from(key) {
                 src.vram[self.obj_high_addr(src.oam, src.attrs, s, self.ly, lcdc)]
-            } else if this {
+            } else if key.wrapping_sub(1) < 0xFE {
                 byte
             } else {
                 return if planes >> 4 == 0 { new } else { old };
             }
         };
         SPREAD[usize::from(attr & BG_ATTR_X_FLIP != 0)][usize::from(data)] * 3
+    }
+
+    /// The byte of the BG or window tile at screen x `x` (its first pixel)
+    /// in bit plane `plane` (0 low, 1 high) at its 8000-8FFF address, with
+    /// the map select of `lcdc`, `scx` and `scy`, as drawn so far: what the
+    /// fetcher read for it with LCDC.4 set (TILE_SEL glitch latch,
+    /// `Ppu::hold_fetch`). Cold: LCDC.4 clears in mode 3 only.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn tile_byte_8000(
+        &self,
+        vram: &[u8; 0x4000],
+        x: u8,
+        lcdc: u8,
+        scx: u8,
+        scy: u8,
+        plane: usize,
+    ) -> u8 {
+        let (map_bit, y, col) = if self.window_active && x >= self.window_start() {
+            let col = x
+                .wrapping_sub(self.window_start())
+                .wrapping_add(self.window_skip);
+            (LCDC_WIN_MAP, self.window_row, col)
+        } else {
+            let col = bg_column(scx, self.bg_fine, x);
+            (LCDC_BG_MAP, self.ly.wrapping_add(scy), col)
+        };
+        let map = if lcdc & map_bit != 0 { 0x1C00 } else { 0x1800 };
+        let i = map | (usize::from(y >> 3) << 5) | usize::from(col >> 3);
+        let attr = if self.cgb { vram[i | 0x2000] } else { 0 };
+        let a = (usize::from(vram[i]) << 4 | usize::from(y & 7) << 1 | plane)
+            ^ (ATTR_FETCH[usize::from(attr)] as usize & 0x3FFF);
+        vram[a & 0x3FFF]
+    }
+
+    /// The CGB TILE_SEL glitch latch `latch` (`ObjRank::sel_end`) at the
+    /// start of a line, LCDC `lcdc`, before the renderer leaves the line
+    /// that ended: the high plane of that line's last object fetch (OAM as
+    /// it is now, `Renderer::obj_high_addr`) if it came after the latched
+    /// read; a read on that line becomes one on an earlier line (key 1);
+    /// BG reads with 8000 addressing to its end (0xFF) unknown (not
+    /// modelled: SameBoy keeps the last high-plane read, Mealybug "the read
+    /// in progress during pixel 159/160"). With LCDC.4 set, the new line's
+    /// BG reads use 8000 addressing from its start (0xFF). The hardware
+    /// latch persists across lines: Mealybug `m3_lcdc_tile_sel_change`
+    /// line 128 (line 127's clear), 129-135 (line 128's object),
+    /// `m3_lcdc_tile_sel_win_change` line 64 (line 63's BG read before the
+    /// clear), gambatte `bgtiledata_spx*` (the same). Cold: called only
+    /// on lines with LCDC.4 clear or after one (`Ppu::latch`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn carry_sel(
+        &self,
+        oam: &[u8; 0xA0],
+        vram: &[u8; 0x4000],
+        lcdc: u8,
+        latch: &mut (u8, u8),
+    ) {
+        let mut key = u8::from(latch.1.wrapping_sub(1) < 0xFE);
+        if let Some(s) = self.last_fetched()
+            && u16::from(self.objects.get(s).2) + 8 >= u16::from(latch.1)
+        {
+            latch.0 = vram[self.obj_high_addr(oam, None, s, self.ly, lcdc)];
+            key = 1;
+        }
+        latch.1 = if lcdc & LCDC_TILES_8000 != 0 {
+            0xFF
+        } else {
+            key
+        };
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`
@@ -1412,6 +1477,7 @@ mod tests {
                     hold: [Held::default(); 3],
                     next: 0,
                     sel_latch: (0, 0),
+                    sel_end: (0, 0),
                 },
             }
         }
@@ -2211,6 +2277,7 @@ mod tests {
                     hold: [Held::default(); 3],
                     next: 0,
                     sel_latch: (0, 0),
+                    sel_end: (0, 0),
                 },
             };
             split.r.start_frame();
