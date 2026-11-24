@@ -968,10 +968,24 @@ impl Ctx<'_, '_> {
                 s.ppu
                     .write_stat(now, first, &mut s.iflags, double, View::StatPhase1);
                 let at = now + edges::STAT_PHASE2.delay(double);
+                // Single speed, phase 2 on line 0's mode-2 pulse: mode 1
+                // still holds the line there (gambatte's line 0 starts a dot
+                // later, `Ppu::early_point`), so a write that keeps it up
+                // requests nothing. The pulse itself runs first (a mode 2
+                // the write selects is past it). CGB04C
+                // `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1` (`10 ->
+                // 50`, LYC = 0: E0), `m2enable/late_enable_m1disable_ly0_2`.
+                // (Synced to `now`, the dot before, for phase 1.)
+                let pulse = self.sys.ppu.early_point(at, double) == ppu::EARLY_PULSE;
+                let high = self.sys.ppu.stat_line_high();
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
+                let old = s.iflags;
                 s.ppu
                     .write_stat(at, value, &mut s.iflags, double, View::StatPhase2);
+                if pulse && high && s.ppu.stat_line_high() {
+                    s.iflags &= old | !ppu::INT_STAT;
+                }
             }
             0x44 => {} // LY is read-only.
             0x45 => {
@@ -1173,7 +1187,7 @@ impl Ctx<'_, '_> {
     fn write_if(&mut self, value: u8) {
         let at = self.clock() + 1;
         if self.sys.sched.deadline(EventKind::Ppu) <= at
-            && self.sys.ppu.if_write_sees(at, self.hot.mcycle == 2)
+            && self.sys.ppu.early_point(at, self.hot.mcycle == 2) == 0
         {
             // No reschedule: the PPU deadline, now passed, runs
             // `sync_ppu` at the next boundary, which sets the next one
@@ -3090,6 +3104,35 @@ mod tests {
             ctx.sys.iflags = 0;
             crate::cpu::Bus::write(&mut ctx, 0xFF0F, 0);
             assert_ne!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "STAT {stat:02X}");
+        }
+    }
+
+    /// Single speed, a STAT write whose phase 2 lands on line 0's mode-2
+    /// pulse (access at t = 3) sees the mode-1 source still holding the
+    /// line: `10 -> 50` with LYC = 0 requests nothing (CGB04C
+    /// `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1`); accessed at
+    /// t = 7 (`_2`) it does. `10 -> 20` at t = 3: the pulse is past for
+    /// the new mode-2 select (`m2enable/late_enable_m1disable_ly0_2`).
+    #[test]
+    fn stat_write_on_the_line_0_pulse_sees_mode_1() {
+        let line0 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 154 * 456;
+        for (value, t, irq) in [(0x50, 3, false), (0x50, 7, true), (0x20, 3, false)] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let _ = emu.run_until(line0 - 200, &mut fb, &mut []);
+            write(emu, 0xFF45, 0);
+            write(emu, 0xFF41, 0x10);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            while ctx.clock() < line0 + t {
+                ctx.idle();
+            }
+            assert_eq!(ctx.clock(), line0 + t);
+            ctx.sys.iflags = 0;
+            crate::cpu::Bus::write(&mut ctx, 0xFF41, value);
+            ctx.idle();
+            let stat = ctx.sys.iflags & crate::ppu::INT_STAT != 0;
+            assert_eq!(stat, irq, "{value:02X} at 0:{t}");
         }
     }
 

@@ -622,6 +622,10 @@ const fn entry_pos(i: u8) -> u64 {
     4 + 2 * i as u64
 }
 
+/// [`Ppu::early_point`]: line 153's LYC=0 point, line 0's mode-2 pulse.
+pub(crate) const EARLY_ZERO: u8 = 1;
+pub(crate) const EARLY_PULSE: u8 = 2;
+
 /// Where a clock falls: line, line position, and whether line 0 is the
 /// short first line after LCD enable.
 #[derive(Clone, Copy)]
@@ -865,17 +869,21 @@ impl Ppu {
         if v & 3 == 2 { v & !3 } else { v }
     }
 
-    /// Whether an IF write landing at `at` (one dot after its access)
-    /// sees, and so clears, the interrupt of a walk point at `at`. Not in
-    /// single speed at line 153's comparison against 0 and line 0's mode-2
-    /// pulse: gambatte (behaviour only, `lyc_irq.cpp`, `video.cpp`
+    /// Which single-speed walk point a dot early against gambatte is at
+    /// `at`: [`EARLY_ZERO`] (line 153's comparison against 0, t = 12),
+    /// [`EARLY_PULSE`] (line 0's mode-2 pulse, t = 4), or 0. gambatte
+    /// (behaviour only, `lyc_irq.cpp`, `video.cpp`
     /// `mode2_irq_line_cycle_ly0`) has those events a dot later, our
     /// `t = 13` and `5`, as our double-speed walk ([`edges::l153_zero_walk`],
-    /// [`edges::ly0_pulse`]); the single-speed walk keeps 12 and 4 for the
-    /// STAT and LYC write views. CGB04C (IF write accessed a dot before the
-    /// point: interrupt) `ly0/lycint152_lyc0irq_ifw_1`,
-    /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`; `_2` (4 dots later): none.
-    pub(crate) fn if_write_sees(&self, at: u64, double: bool) -> bool {
+    /// [`edges::ly0_pulse`]); the single-speed walk keeps 12 and 4, which
+    /// the STAT and LYC write views assume. A CPU write landing on one
+    /// (one dot after its access) sees it as still ahead:
+    /// - an IF write doesn't clear its interrupt (CGB04C, accessed a dot
+    ///   before the point: interrupt, `ly0/lycint152_lyc0irq_ifw_1`,
+    ///   `lyc153int_m2irq/lyc153int_m2irq_ifw_1`; `_2`, 4 dots later: none);
+    /// - a STAT write's phase 2 on the pulse sees line 0's mode-1 source
+    ///   still holding the line (`Ctx::write_ppu`).
+    pub(crate) fn early_point(&self, at: u64, double: bool) -> u8 {
         const ZERO: u32 = 153 * LINE + edges::l153_zero_walk(false);
         const PULSE: u32 = edges::ly0_pulse(false);
         // As `at` (frame position; line 0 of the first frame has no pulse),
@@ -886,7 +894,20 @@ impl Ppu {
             p -= FRAME;
             first = false;
         }
-        double || !self.lcd_enabled() || !(p == ZERO || (p == PULSE && !first))
+        if double || !self.lcd_enabled() {
+            0
+        } else if p == ZERO {
+            EARLY_ZERO
+        } else if p == PULSE && !first {
+            EARLY_PULSE
+        } else {
+            0
+        }
+    }
+
+    /// The STAT interrupt line is high.
+    pub(crate) fn stat_line_high(&self) -> bool {
+        self.line_irq.bits & IrqLine::STAT != 0
     }
 
     /// STAT bit 2 (LY=LYC) at `a`: 0 while the comparison is off in single
