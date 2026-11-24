@@ -3741,8 +3741,8 @@ mod dma_tests {
             // The new transfer copies all 160 bytes from 4000 as usual.
             idle_to(ctx, t0, 190);
             assert_eq!(ctx.hot.dma, 0);
-            for i in 0..0xA0 {
-                assert_eq!(ctx.mem.oam[i], i as u8 ^ 0x3C, "{i:#x}");
+            for (i, &b) in ctx.mem.oam.iter().enumerate() {
+                assert_eq!(b, i as u8 ^ 0x3C, "{i:#x}");
             }
             // Restarted in its own start delay: byte 0 in the next M-cycle.
             idle_to(ctx, t0, 200);
