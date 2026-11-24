@@ -252,6 +252,10 @@ exclude = [
   "same-suite/apu/channel_4/channel_4_freq_change.gb",
   "same-suite/apu/channel_4/channel_4_frequency_alignment.gb",
   "same-suite/apu/channel_1/channel_1_freq_change_timing-cgb0BC.gb",
+  "same-suite/apu/channel_1/channel_1_volume.gb",
+  "same-suite/apu/channel_2/channel_2_volume.gb",
+  "same-suite/apu/channel_4/channel_4_align.gb",
+  "same-suite/apu/channel_1/channel_1_sweep_restart.gb",
 ]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
@@ -276,6 +280,10 @@ checks = [{ fibonacci = true }]
 # and ch4 frequency ROMs below, as CGB E results (apu/README: the NRX2
 # glitch is only tested on revision E; a PCM12/PCM34 read glitch on CGB C
 # and older fails most ch1/2/4 tests; SameBoy has CGB-C-specific paths).
+# Also signed off (human, 2026-11-23, session 15): ch1/2 volume, ch4
+# align, ch1 sweep_restart, as CGB E results (each failing cell is
+# SameBoy's CGB C value: nrx2 0xFF step, ds even-alignment +2, NR10
+# old_negate).
 # Evidence: docs/plan/m9-triage.md group 15.
 [[group]]
 # source: same-suite/game-boy-test-roms-howto.md
@@ -295,6 +303,10 @@ roms = [
   "same-suite/apu/channel_4/channel_4_lfsr_restart_fast.gb",
   "same-suite/apu/channel_4/channel_4_freq_change.gb",
   "same-suite/apu/channel_4/channel_4_frequency_alignment.gb",
+  "same-suite/apu/channel_1/channel_1_volume.gb",
+  "same-suite/apu/channel_2/channel_2_volume.gb",
+  "same-suite/apu/channel_4/channel_4_align.gb",
+  "same-suite/apu/channel_1/channel_1_sweep_restart.gb",
 ]
 exit = { ld_b_b = true, timeout_s = 120 }
 checks = [{ fibonacci = true }]
