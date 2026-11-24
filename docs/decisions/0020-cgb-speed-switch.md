@@ -202,3 +202,36 @@ C `oamdma/oamdmasrcC0_speedchange_readC000` and
 `dma/hdma_transition_speedchange_oamdma` read WRAM mid-transfer right
 after a switch to double speed and see it one byte earlier than the HALT
 rule gives. The switch to single speed is untested.
+
+## Amendment (2026-11-24): the order of operations in `Ctx::speed_switch`
+
+Supersedes the order given under "Decision" ("the halt idles its 3 odd
+clocks first ... before the input, serial and timer deadlines are
+rescheduled"). The speed is an input to every lazily evaluated component
+and to every deadline, so the switch now goes in four steps:
+
+1. Everything lazy is brought up to the switch clock under the **old**
+   speed's rules (OAM DMA, the timer's reloads).
+2. The speed changes (the M-cycle length, the counter rate, the PPU's
+   walk, a paused OAM DMA's M-cycle length).
+3. Every speed-dependent deadline is set again under the **new** speed
+   (Ppu, DivApu, Input, Timer, Serial).
+4. Only then does time pass and the event loop run: to single speed, the
+   halt's 3 odd clocks. What is due in them runs at their end, the first
+   boundary of the moved grid.
+
+The halt lengths, the grid move and the timer's holds are unchanged. What
+changes is what the event loop sees in step 4 (M10 review A1-02). Before,
+it ran with the deadlines of the old speed:
+- A fast-clock serial transfer in flight across a switch to single speed
+  with the DIV reset held (IME off) shifted the same bit clock edge twice:
+  the old deadline fired at the end of the 3 clocks, where the frozen
+  counter hadn't reached the edge, and the handler re-armed for the same
+  edge 4 clocks on. The byte completed one bit (16 clocks) early.
+- A scheduled button change 5 or 6 clocks after the switch, inside the
+  first M-cycle of the moved grid, landed one M-cycle late (its old
+  deadline was past that M-cycle's start; ADR 0012 rounds down).
+- The DivApu deadline was set without rescheduling the countdown.
+
+Tests: `serial_bit_in_flight_across_a_switch_to_single_speed_shifts_once`,
+`scheduled_input_in_the_first_mcycle_after_a_switch_lands_there`.

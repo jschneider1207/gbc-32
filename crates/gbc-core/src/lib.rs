@@ -1927,6 +1927,85 @@ mod tests {
         assert_eq!(emu.peek(0xFF0F) & 0x04, 0x04);
     }
 
+    /// A fast-clock serial transfer running across a switch to single
+    /// speed, IME off (review A1-02): each bit clock edge shifts once.
+    /// STOP's DIV reset toggles the flip-flop exactly once (the clock bit
+    /// falls with the fetch's last tick or with the reset), so it shifts
+    /// iff the flip-flop was 1; with the flip-flop left at 1 the next
+    /// shift is 8 counter ticks after the reset. The counter is 4 at the
+    /// switch (`now`) and counts on from `now + 3` (the held DIV reset, 4
+    /// T-cycles, less the halt's short clock), one tick a clock: that
+    /// shift is at `now + 7`, else the first is at `now + 15`; then one
+    /// every 16 clocks (262144 Hz). The serial interrupt ends the halt.
+    #[test]
+    fn serial_bit_in_flight_across_a_switch_to_single_speed_shifts_once() {
+        use crate::schedule::EventKind;
+        let mut seen = [false; 2];
+        for pad in 0..4 {
+            let mut program = vec![
+                0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, // LD A,01; LDH (4D),A; STOP 00
+                0x3E, 0x08, 0xE0, 0xFF, // LD A,08; LDH (FF),A: IE = serial
+                0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A: arm the switch
+                0xAF, 0xE0, 0x01, // XOR A; LDH (01),A: SB = 00
+                0x3E, 0x83, 0xE0, 0x02, // LD A,83; LDH (02),A: fast clock
+            ];
+            program.extend(std::iter::repeat_n(0x00, pad)); // NOPs
+            let stop_at = 0x100 + program.len() as u16;
+            program.extend([0x10, 0x00, 0x40]); // STOP 00; LD B,B
+            let emu = with_program(&program, 0x80);
+            let mut fb = frame();
+            while emu.hw.cpu.regs.pc != stop_at {
+                let _ = emu.step(&mut fb, &mut []);
+                assert!(emu.clock() < 200_000);
+            }
+            assert_eq!(emu.hw.sys.hot.mcycle, 2);
+            // Before STOP's fetch (2 clocks): the flip-flop is 1 iff the
+            // next shift is at the clock bit's next fall, within 4 clocks.
+            let s = emu.clock();
+            let ff = emu.hw.sys.sched.deadline(EventKind::Serial) <= s + 4;
+            seen[usize::from(ff)] = true;
+            let bits = emu.hw.sys.serial.bits;
+            assert!(bits < 6, "pad {pad}");
+            // STOP: fetch, second byte, the switch, the halt's 3 odd clocks.
+            let _ = emu.step(&mut fb, &mut []);
+            let now = s + 4;
+            assert_eq!((emu.clock(), emu.hw.sys.hot.mcycle), (now + 3, 4));
+            assert_eq!(emu.hw.sys.serial.bits, bits + u8::from(ff), "pad {pad}");
+            let mut shifts = std::vec::Vec::new();
+            let mut last = emu.hw.sys.serial.bits;
+            while emu.peek(0xFF02) & 0x80 != 0 {
+                let _ = emu.step(&mut fb, &mut []);
+                let b = emu.hw.sys.serial.bits;
+                if b != last {
+                    shifts.push(emu.clock() - now);
+                    last = b;
+                }
+                assert!(emu.clock() < now + 200);
+            }
+            let first = if ff { 15 } else { 7 };
+            let expect: std::vec::Vec<u64> = (0..8 - u64::from(bits + u8::from(ff)))
+                .map(|i| first + 16 * i)
+                .collect();
+            assert_eq!(shifts, expect, "pad {pad}");
+            assert_eq!(emu.peek(0xFF01), 0xFF);
+            assert_eq!(emu.peek(0xFF0F) & 0x08, 0x08);
+        }
+        assert_eq!(seen, [true; 2], "both flip-flop phases");
+    }
+
+    /// The Input deadline follows the new speed before the halt's 3 odd
+    /// clocks are idled (review A1-02): a change inside the first
+    /// normal-speed M-cycle after the switch (`T + 3` to `T + 7`) lands
+    /// at its start, so a release at `T + 7` is a separate change and the
+    /// press raises the joypad interrupt (ADR 0012).
+    #[test]
+    fn scheduled_input_in_the_first_mcycle_after_a_switch_lands_there() {
+        let (a, none) = (Buttons::A, Buttons::EMPTY);
+        assert_eq!(across_switch_to_normal(&[(5, a), (7, none)]), (0x10, 0x0F));
+        assert_eq!(across_switch_to_normal(&[(6, a), (7, none)]), (0x10, 0x0F));
+        assert_eq!(across_switch_to_normal(&[(4, a), (6, none)]), (0, 0x0F));
+    }
+
     #[test]
     fn stop_with_a_button_held_neither_switches_nor_resets_div() {
         // P1 selects both groups and A is held: STOP (KEY1 armed) is a

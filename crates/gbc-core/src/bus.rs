@@ -1609,9 +1609,31 @@ impl Ctx<'_, '_> {
     ///   `div_cycles = -4`, the DIV reset held). On CGB B/C the same hold
     ///   applies with an interrupt pending and IME on (below; SameBoy,
     ///   modelling CGB E, has none there).
+    ///
+    /// # Order (ADR 0020, 2026-11-24 amendment)
+    /// The speed is an input to every lazily evaluated component and to
+    /// every deadline, so the switch goes in four steps, in this order:
+    ///
+    /// 1. Everything lazy is brought up to the switch clock with the
+    ///    **old** speed's rules: OAM DMA (`dma_pause`) and the
+    ///    timer's reloads (`Timer::speed_switch` catches up before it
+    ///    rebases). The APU runs on base clocks and has no rule that
+    ///    depends on the speed; the serial port and the scheduled inputs
+    ///    keep no lazy state (deadlines only).
+    /// 2. The speed changes (`hot.mcycle`, the timer's counter rate, the
+    ///    PPU's walk, a paused OAM DMA's M-cycle length).
+    /// 3. Every deadline that depends on the speed is set again for the
+    ///    **new** one: Ppu, DivApu, Input, Timer, Serial.
+    /// 4. Only then may time pass and the event loop run (`boundary`):
+    ///    the halt's 3 odd clocks to single speed.
+    ///
+    /// A deadline left from the old speed must never reach `boundary`: its
+    /// handler would run at a clock the component isn't due at and re-arm
+    /// from there (review A1-02: a fast-clock serial bit shifted twice).
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
-        self.sys.key1 = 0;
+        let now = self.clock();
         let m = 6 - self.hot.mcycle as u64;
+        // Step 1 (the timer's part is in `Timer::speed_switch` below).
         if self.hot.dma != 0 {
             self.dma_pause();
         }
@@ -1625,12 +1647,14 @@ impl Ctx<'_, '_> {
             // in `_2` (the switch in the end's M-cycle: no pause).
             self.sys.ppu.dma.ppu_to = NEVER;
         }
+        // Step 2.
+        self.sys.key1 = 0;
         if dma_paused {
             self.dma_retime(m);
         }
         self.hot.mcycle = m as i32;
+        // (Sets the Ppu deadline for the new walk too: step 3's.)
         self.ppu_speed_changed();
-        let now = self.clock();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
         // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`
         // (pending, IME on, both directions): the first DIV increment and
@@ -1647,29 +1671,32 @@ impl Ctx<'_, '_> {
         let short = i64::from(m == 4 && !pending);
         // T-cycles to clocks at the new speed.
         self.sys.timer.speed_switch(now, freeze * m / 4, short != 0);
-        // The DIV-APU bit changes (12 <-> 13) with the counter speed, and
-        // a switch to double speed toggles the frame sequencer's delay
-        // (`Timer::apu_ds_delay`).
-        self.set_apu_deadline(now);
         if !pending && self.sys.vdma.hblank {
             self.vdma_stop();
         }
+        // Step 3. The DIV-APU bit changes (12 <-> 13) with the counter
+        // speed, and a switch to double speed toggles the frame
+        // sequencer's delay (`Timer::apu_ds_delay`). The M-cycle length
+        // changes, and with it the boundary a scheduled button change
+        // rounds down to (ADR 0012). The timer and the serial clock follow
+        // the rebased counter, which already accounts for the grid moving
+        // in step 4 (`short`), so nothing here has to be set again after
+        // it. `schedule_serial` reschedules the countdown, for the DivApu
+        // and Input deadlines too.
+        self.set_apu_deadline(now);
+        self.sys.schedule_inputs(m);
+        self.schedule_timer();
+        self.schedule_serial();
         if short != 0 {
-            // The halt's odd clocks (`switch_end` below), idled first (the
-            // CPU halts at `now`, so after `vdma_halt`): the CPU's M-cycle
-            // grid moves by 3 (-1) clocks, and the input, serial and timer
-            // deadlines below follow the new grid.
+            // Step 4. The halt's odd clocks (`switch_end` below), idled
+            // first (the CPU halts at `now`, so after `vdma_stop`): the
+            // CPU's M-cycle grid moves by 3 (-1) clocks. What is due in
+            // them runs at their end, the first boundary of the new grid.
             self.hot.budget -= 3;
             if self.hot.budget <= 0 {
                 self.boundary();
             }
         }
-        // The M-cycle grid changes, and with it the boundary a scheduled
-        // button change rounds down to (ADR 0012); `schedule_serial`
-        // reschedules the countdown.
-        self.sys.schedule_inputs(m);
-        self.schedule_timer();
-        self.schedule_serial();
         if !pending {
             // To single speed, Gambatte's PPU gains a clock at the switch
             // (`PPU::speedChange`: `p_.now -= isDoubleSpeed()`), and SameBoy
