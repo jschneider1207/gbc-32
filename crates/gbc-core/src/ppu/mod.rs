@@ -2108,6 +2108,7 @@ impl Ppu {
     /// enters mode 0 (its `End` point: STAT reads mode 0 at single
     /// speed), or `None` with the LCD off or no line latched since it was
     /// turned on. For HDMA's HBlank trigger (ADR 0017).
+    #[inline]
     pub(crate) fn mode0_start(&self) -> Option<u64> {
         if !self.lcd_enabled() || self.line.start == NEVER {
             return None;

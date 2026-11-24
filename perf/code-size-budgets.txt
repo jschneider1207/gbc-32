@@ -99,7 +99,7 @@ report 97 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop_begin
 report 248 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch_halt
 report 375 <gbc_core::bus::Ctx>::write_palette_data
 report 745 <gbc_core::bus::Ctx>::vram_dma
-report 221 <gbc_core::bus::Ctx>::vdma_arm
+report 221 <gbc_core::bus::Ctx>::vdma_arm_at
 report 304 gbc_core::apu::read_apu
 report 380 <gbc_core::bus::Sys>::new
 report 890 <gbc_core::Emulator>::load

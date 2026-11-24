@@ -117,6 +117,7 @@ FLASH_OK .text._R*8gbc_core3bus*3Ctx8write_if*                 # IF writes
 FLASH_OK .text._R*8gbc_core3bus*3Ctx11write_hdma5*             # HDMA5 writes (a VRAM DMA start or stop)
 FLASH_OK .text._R*8gbc_core4hdma*7VramDma10write_addr*         # HDMA1-4 writes
 FLASH_OK .text._R*8gbc_core3bus*3Ctx18write_palette_data*      # BCPD/OCPD writes (CGB palette loads)
+FLASH_OK .text._R*8gbc_core3bus*3Ctx11vdma_arm_at*             # the HBlank trigger of a line, once per line during an HBlank transfer
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu10write_stat*              # STAT writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu9write_lyc*                # LYC writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu10write_lcdc*              # LCDC writes

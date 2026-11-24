@@ -2068,19 +2068,24 @@ impl Ctx<'_, '_> {
     /// per line. `fire_late`: a trigger at or before `now` fires at the
     /// next boundary (the PPU sync that latched the line ran late by less
     /// than an M-cycle); otherwise it is treated as passed.
-    /// Out of line and cold: `run_ppu` calls it only with an HDMA
-    /// active, and must stay small enough to inline into the PPU register
-    /// and palette write paths.
-    #[cold]
-    #[inline(never)]
+    ///
+    /// Every PPU sync during an HBlank transfer comes here (about 3.4 per
+    /// line), and all but the first of a line find it armed: that test is
+    /// inline.
+    #[inline(always)]
     fn vdma_arm(&mut self, now: u64, fire_late: bool) {
-        let s = &mut *self.sys;
-        let Some(start) = s.ppu.mode0_start() else {
-            return;
-        };
-        if start == s.vdma.line {
-            return;
+        let s = &*self.sys;
+        match s.ppu.mode0_start() {
+            Some(start) if start != s.vdma.line => self.vdma_arm_at(start, now, fire_late),
+            _ => {}
         }
+    }
+
+    /// [`Self::vdma_arm`] for a line whose mode 0 starts at `start`, not
+    /// armed yet.
+    #[inline(never)]
+    fn vdma_arm_at(&mut self, start: u64, now: u64, fire_late: bool) {
+        let s = &mut *self.sys;
         s.vdma.line = start;
         let at = start + hdma::HBLANK_DELAY;
         if at > now || fire_late {
