@@ -644,6 +644,21 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    walk's line-0 mode-2 pulse at `t = 5` (mode-1 end at 4, the mode-1
    select blocks the pulse) and LYC=0 at 153:13, double speed only
    (`docs/reference/stat-irq.md`); +4 incl. `offset1_lyc99int_m2irq_count_ds_1`.
+   **Line 144 coincidence read, done (branch `m9-lcd-offset`):** lines
+   144-152 keep the previous line's comparison to t = 2 for the reads and
+   write views, as lines 1-143 (`edges::VCMP_OFF`; gambatte
+   `getLycCmpLy`); the walk keeps its off-start at 0. Fixes
+   `offset{1,2}_lyc8fint_m1stat_1` (C4 at 144:2 and 144:1), +2 / -0,
+   -154 B (the arms merged).
+   **Line-0 pulse for the CPU, done (same branch):** single speed, the
+   pulse stays at 4 in the walk, but its deadline is one past it, so an
+   IF read or interrupt check at a boundary on 0:4 (offset 3 only) misses
+   it, at gambatte's 0:5. Fixes `offset3_lyc99int_m2irq_count_1`, +1 / -0,
+   +16 B. Tried first and rejected: the single-speed LYC=153 walk compare
+   at 4 (+1 / -7: every `offset3_lyc99int_*_2` and
+   `lycint152_lyc153irq_ifw_1`, `lycstatwirq_trigger_ly00_10_50_lcdoffset3_2`);
+   the walk's pulse at 5 (+1 / -4, gambatte's select latch, see
+   `docs/reference/stat-irq.md`).
 6. **LY read edge re-check** after 1/3 (`ly_count_ds_{2,3}`). Possibly no
    change.
 7. **Access windows:**

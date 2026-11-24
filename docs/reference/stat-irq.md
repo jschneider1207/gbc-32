@@ -133,7 +133,23 @@ The same split in single speed (`Ly3` at 4, the pulse at 5) passed
 `m2enable/*ly0*` single-speed rows (`disable_by_m1enable_ly0_1`,
 `late_enable_m1disable_ly0_2`, `late_m1disable_ly0_2`,
 `lyc0_late_m2enable_lycdisable_2`), whose write views at line 0 assume
-the single-speed points; not done.
+the single-speed points; not done. Moving only the pulse to 5 (`Ly3` at
+3) regressed three of them plus `lycEnable/lycwirq_trigger_ly00_stat50_2`.
+All four are gambatte's latch (`mstat_irq.h`, behaviour only): its m2
+event sees the STAT selects as of the last write with `cc + 2` before
+the event, so a write accessed at our 0:3 (T = 4) changes the line but
+not what the line-0 event is blocked by.
+
+What is done instead (single speed): the walk keeps the pulse at 4, and
+only the CPU sees its request a dot later (`Ppu::next_event`: the PPU
+deadline is one past the point; a write's own sync to the point still
+posts it there). By the move rule only CPU offset 3 (M-cycle boundaries
+at `t = 0 mod 4`) has a boundary on that dot: its IF read at 0:4 no
+longer sees the pulse (`offset3_lyc99int_m2irq_count_1`, E0; `_2` reads
+at 0:8). Full manifest +1 / -0. Line 153's LYC=0 point (12, gambatte 13)
+got the same treatment in a trial with the same results (no ROM needs
+it), but the extra test took `next_event` over its code-size budget;
+`Ppu::early_point` still covers IF writes on it.
 
 ## VBlank LYC interrupts and LYC writes (single speed)
 
@@ -201,7 +217,8 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 - Single speed, line 153's LYC=0 point (t = 12) and line 0's mode-2
   pulse (t = 4) are a dot before gambatte's events (our 13 and 5, which
   the double-speed walk uses), so the IF write doesn't see them at the
-  dot after its access (`Ppu::early_point`). CGB04C
+  dot after its access (`Ppu::early_point`; for the pulse also its
+  deadline a dot past the point, `Ppu::next_event`). CGB04C
   `ly0/lycint152_lyc0irq_ifw_1`, `lyc153int_m2irq/lyc153int_m2irq_ifw_1`
   (access a dot before the point: interrupt). Moving the single-speed
   walk points to 13 and 5 instead regressed
@@ -241,7 +258,9 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 - The single-speed walk's line-153 LYC=0 point (t = 12) and line-0
   mode-2 pulse (t = 4) are a dot before gambatte's events. IF writes and
   STAT phase 2 on the pulse work around it per view
-  (`Ppu::early_point`); moving the points (to 13 and 5, as in double
+  (`Ppu::early_point`), and the CPU sees the pulse's request a dot late
+  (`Ppu::next_event`, see "Line 0 and line 153's LYC=0 in double
+  speed"); moving the points (to 13 and 5, as in double
   speed) needs gambatte's select/LYC latching before the LYC event
   (`lyc_irq.cpp` `regChange`) for the line-153 STAT/LYC write views
   first (`lycEnable/lyc0_ff4{1,5}_disable_2`, `m2enable/*ly0*` single
