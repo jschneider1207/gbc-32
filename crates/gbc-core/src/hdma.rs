@@ -168,6 +168,14 @@ impl VramDma {
             return;
         }
         self.single = false;
+        // Bit 7 = 1 while an HBlank transfer is already active restarts it
+        // with the new length and, in the HBlank, requests a block at
+        // once, also when this line's block already ran (two blocks in
+        // one HBlank). This follows SameBoy (`GB_IO_HDMA5` sets `hdma_on`
+        // in mode 0 whether or not `hdma_on_hblank` was set). gambatte
+        // disagrees: with HDMA enabled its FF55 write only stores the
+        // length, with no new request. No test ROM here tells them apart
+        // (review finding A4-6, stage1-m10).
         self.hblank = hblank;
         self.pending = !hblank || mode0;
     }
@@ -904,5 +912,26 @@ mod tests {
         assert_eq!(emu.mem.vram[32..48], block(2));
         assert_eq!(emu.mem.vram[48], 0);
         assert_eq!(emu.peek(0xFF55), 0xFF);
+    }
+
+    #[test]
+    fn re_enabling_an_active_hdma_in_the_hblank_starts_another_block() {
+        // Pins `VramDma::write_hdma5`'s choice (SameBoy; gambatte differs).
+        let emu = setup(0x91, 0x80);
+        while emu.peek(0xFF41) & 3 != 2 || emu.peek(0xFF44) == 0 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x83);
+        step_to_stall(emu);
+        let ly = emu.peek(0xFF44);
+        assert_eq!((copied(emu), emu.peek(0xFF41) & 3), (1, 0));
+        // Still active (3 blocks left), this line's block done.
+        write(emu, 0xFF55, 0x81);
+        assert_eq!(step(emu), 4 * 10);
+        assert_eq!(emu.mem.vram[16..32], block(1));
+        assert_eq!((emu.peek(0xFF44), emu.peek(0xFF55)), (ly, 0x00));
+        // Then one block per line again.
+        step_to_stall(emu);
+        assert_eq!((emu.peek(0xFF44), emu.peek(0xFF55)), (ly + 1, 0xFF));
     }
 }
