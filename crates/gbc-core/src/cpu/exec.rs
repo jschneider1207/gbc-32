@@ -864,7 +864,7 @@ mod tests {
             assert!(!cpu.halted());
             assert_eq!(bus.log[0], (0, 0, '-'), "ime={ime}");
             if ime {
-                // Idle + dispatch (2 idle, 2 pushes, 1 idle) = 24 clocks.
+                // Idle + dispatch (3 idle, 2 pushes) = 24 clocks.
                 assert_eq!(bus.log.len(), 6, "ime={ime}");
                 assert_eq!(cpu.regs.pc, 0x40);
                 assert_eq!((bus.mem[0xFFFD], bus.mem[0xFFFC]), (0x01, 0x01));
@@ -875,6 +875,32 @@ mod tests {
                 assert_eq!(cpu.regs.a, 1);
             }
         }
+    }
+
+    #[test]
+    fn dispatch_pushes_pc_in_its_fourth_and_fifth_mcycles() {
+        // Three internal M-cycles, then PC high and PC low (SameBoy
+        // `GB_cpu_run`: read, OAM-bug cycle, no access, write, write;
+        // gambatte `Interrupter::interrupt`: writes at +12 and +16).
+        // gambatte cgb04c `oamdma/oamdma_src0000_busyint0002` pins the
+        // write M-cycles against an OAM DMA.
+        let mut bus = TestBus::new(&[0x00], 0x1234);
+        bus.ie = 0x04;
+        bus.iflags = 0x04;
+        let mut cpu = cpu_at(0x1234);
+        cpu.set_ime(true);
+        cpu.step(&mut bus);
+        assert_eq!(
+            bus.log,
+            [
+                (0, 0, '-'),
+                (0, 0, '-'),
+                (0, 0, '-'),
+                (0xFFFD, 0x12, 'w'),
+                (0xFFFC, 0x34, 'w'),
+            ]
+        );
+        assert_eq!(cpu.regs.pc, 0x50);
     }
 
     #[test]

@@ -160,13 +160,17 @@ pub trait Bus {
     fn interrupt_flags(&self) -> u8;
     /// Writes IF (used to acknowledge a dispatched interrupt). Free.
     fn set_interrupt_flags(&mut self, value: u8);
-    /// The last M-cycle of an interrupt dispatch: idles it and clears the
-    /// lowest bit of `pending` (if any) in IF, which SameBoy does 2
-    /// T-cycles in. Default: after the M-cycle, so a source firing again
-    /// in it is absorbed (at M-cycle granularity, ADR 0008).
-    fn acknowledge(&mut self, pending: u8) {
-        self.idle();
+    /// The last M-cycle of an interrupt dispatch: writes `value` (PC's low
+    /// byte) to `addr` at its start, then samples IF (`ie & IF`, the
+    /// interrupts still pending) and clears the lowest of them in IF,
+    /// which SameBoy does 2 T-cycles in. Returns the pending bits.
+    /// Default: the clear after the M-cycle, so a source firing again in
+    /// it is absorbed (at M-cycle granularity, ADR 0008).
+    fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
+        self.write(addr, value);
+        let pending = ie & self.interrupt_flags() & INT_MASK;
         self.set_interrupt_flags(self.interrupt_flags() & !(pending.isolate_lowest_one()));
+        pending
     }
     /// The CPU raised an event (`Events::LD_B_B`, `Events::CPU_LOCKED`).
     fn event(&mut self, event: Events) {
@@ -544,17 +548,23 @@ impl Cpu {
         }
     }
 
-    /// Interrupt dispatch: 5 M-cycles (two internal, push PC high, push PC
-    /// low, jump). IE is sampled after the high byte is pushed and IF after
-    /// the low byte, so a push that overwrites IE (SP = 0) or a change of
-    /// IF in between can cancel the dispatch; PC is then 0000 (Mooneye
-    /// `ie_push`; SameBoy `GB_cpu_run`). The chosen IF bit is cleared only
-    /// in the last M-cycle (SameBoy: 2 T-cycles into it), so the same
-    /// source firing again by then is absorbed (gambatte
-    /// `tima/tc00_irq_late_retrigger_2`; [`Bus::acknowledge`]).
+    /// Interrupt dispatch: 5 M-cycles (three internal, push PC high, push
+    /// PC low; the jump overlaps the next fetch). SameBoy `GB_cpu_run`
+    /// (read, OAM-bug cycle, no access, write, write) and gambatte
+    /// `Interrupter::interrupt` (writes at +12 and +16 clocks) agree; an
+    /// OAM DMA pins the write M-cycles on CGB C (gambatte cgb04c
+    /// `oamdma/oamdma_src0000_busyint0002`). IE is sampled after the high
+    /// byte is pushed and IF after the low byte, so a push that overwrites
+    /// IE (SP = 0) or a change of IF in between can cancel the dispatch;
+    /// PC is then 0000 (Mooneye `ie_push`; SameBoy `GB_cpu_run`). The
+    /// chosen IF bit is cleared only in the last M-cycle (SameBoy: 2
+    /// T-cycles into it), so the same source firing again by then is
+    /// absorbed (gambatte `tima/tc00_irq_late_retrigger_2`;
+    /// [`Bus::push_acknowledge`]).
     fn dispatch<B: Bus>(&mut self, bus: &mut B) {
         self.ime = false;
         self.ei_pending = false;
+        bus.idle();
         bus.idle();
         bus.idle();
         let pc = self.regs.pc;
@@ -562,10 +572,8 @@ impl Cpu {
         bus.write(sp, (pc >> 8) as u8);
         let ie = bus.interrupt_enable();
         let sp = sp.wrapping_sub(1);
-        bus.write(sp, pc as u8);
         self.regs.sp = sp;
-        let pending = ie & bus.interrupt_flags() & INT_MASK;
-        bus.acknowledge(pending);
+        let pending = bus.push_acknowledge(sp, pc as u8, ie);
         self.regs.pc = if pending == 0 {
             0x0000
         } else {

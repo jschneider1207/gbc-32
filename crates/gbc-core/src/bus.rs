@@ -1742,8 +1742,10 @@ impl Bus for Ctx<'_, '_> {
     /// Inlined into the dispatch: out of line, `synth:halt-irq` ran 0.5%
     /// more instructions and `Cpu::run` was 1.1 KB larger (measured).
     #[inline(always)]
-    fn acknowledge(&mut self, pending: u8) {
+    fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
+        self.write_mapped(addr, value);
+        let pending = ie & self.sys.iflags & INT_MASK;
         let bit = pending.isolate_lowest_one();
         if bit & PPU != 0 {
             // Only if a PPU edge can fall there (its deadline).
@@ -1755,6 +1757,7 @@ impl Bus for Ctx<'_, '_> {
         }
         self.idle();
         self.sys.iflags &= !(bit & !PPU);
+        pending
     }
 
     #[inline(always)]
@@ -2679,7 +2682,7 @@ mod tests {
             }
             assert_eq!(ctx.clock(), start);
             ctx.sys.iflags = crate::ppu::INT_STAT;
-            crate::cpu::Bus::acknowledge(&mut ctx, crate::ppu::INT_STAT);
+            let _ = crate::cpu::Bus::push_acknowledge(&mut ctx, 0xC000, 0, crate::ppu::INT_STAT);
             let stat = ctx.sys.iflags & crate::ppu::INT_STAT != 0;
             assert_eq!(
                 stat, !absorbed,
