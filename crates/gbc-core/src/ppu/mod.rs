@@ -1180,7 +1180,7 @@ impl Ppu {
             pt: Pt::V0,
         };
         while c.pos <= after {
-            c = self.step_vblank(c, double);
+            c = self.step(c, start, double);
         }
         (c.pos, c.pt)
     }
@@ -1347,35 +1347,6 @@ impl Ppu {
             line: line as u8,
             pt,
         }
-    }
-
-    /// [`Self::step`] (not `quiet`) from a point of lines 144-153, for
-    /// [`Self::next_point`] (a re-seek: cold, out of line); `sync` checks
-    /// in debug builds that the two agree (`seek_point`).
-    #[cold]
-    #[inline(never)]
-    fn step_vblank(&self, c: Cursor, double: bool) -> Cursor {
-        let l = u32::from(c.line);
-        let base = l * LINE;
-        let (pos, pt) = match c.pt {
-            Pt::V0 if l == 144 => (base + edges::QUIRK2, Pt::Quirk2),
-            Pt::V0 if l == 153 => (base + edges::L153_CMP, Pt::L153Cmp),
-            Pt::V0 | Pt::Quirk2 => (base + edges::CMP_WALK, Pt::V4),
-            Pt::V4 if l == 144 => (VBLANK_POS, Pt::VBlank),
-            Pt::L153Cmp => (base + edges::L153_OFF, Pt::L153Off),
-            Pt::L153Off => (base + edges::l153_zero_walk(double), Pt::L153Zero),
-            Pt::L153Zero => {
-                return Cursor {
-                    pos: FRAME + edges::ly0_pt(double),
-                    line: 0,
-                    pt: Pt::Ly3,
-                };
-            }
-            // `V4` (lines 145-152) and `VBlank`.
-            _ => (base + LINE + edges::VCMP_OFF, Pt::V0),
-        };
-        let line = if pt == Pt::V0 { c.line + 1 } else { c.line };
-        Cursor { pos, line, pt }
     }
 
     /// No STAT interrupt source is selected.
