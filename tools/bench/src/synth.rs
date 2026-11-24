@@ -86,8 +86,9 @@ const HALT_IRQ: &[u8] = &[
 /// four groups of 10 (8x16, Y=16/52/88/124, X=8+6i so they overlap) giving
 /// 10 objects on 64 of the 144 lines (40 objects cannot cover more), then
 /// LCD on with BG, window (WY=0, WX=87), objects, every STAT source
-/// (modes 0/1/2 and LYC=72) and only IE=STAT. The STAT handler at 0x48 bumps
-/// a WRAM counter. Then the event-storm timer and serial loop runs, which
+/// (modes 0/1/2 and LYC=72) and IE = STAT and timer (below). The STAT
+/// handler (`JP` at 0x48) bumps a WRAM counter. Then the event-storm serial
+/// loop runs, which
 /// also keeps a CGB HBlank HDMA going: 128 blocks from ROM 0000 to VRAM
 /// 8800 (tiles 128-255, which nothing displays), restarted as soon as one
 /// ends, so every visible line copies a 16-byte block. All four sound
@@ -96,19 +97,32 @@ const HALT_IRQ: &[u8] = &[
 /// through the master volume: every APU write syncs the APU, so its fixed
 /// cost per sync counts ([`worst_case`], [`STAT_HANDLER_NR50`]). The main
 /// loop also polls STAT and writes SCX (+1 each time) once per visible
-/// line, 10-33 M-cycles after mode 3 starts (the poll loop is 23 M-cycles):
-/// a mid-mode-3 write after the fetcher has started, so the PPU's
+/// line, the first time a poll sees mode 3 on a new LY, 18-42 M-cycles
+/// after mode 3 starts (the poll loop is 24 M-cycles; later when the
+/// timer handler runs in between; before the timer IRQ it compared the
+/// mode with the last poll's, and with the handlers taking most of a
+/// heavy line's modes 0 and 2 a poll saw no mode change on ~27 lines a
+/// frame): a mid-mode-3 write after the fetcher has started, so the PPU's
 /// held-fetch slow path (`Ppu::hold_fetch`, `render_held`) runs 144 times
 /// a frame, like a game's per-line parallax scroll (human, session 10).
+/// The timer interrupt is serviced too (IE = STAT and timer): TIMA counts
+/// at 262 kHz nominal, 524 kHz in double speed, from TMA=E0, so it
+/// overflows every 256 base clocks: 16,384 Hz, 274.3 a frame, about two
+/// per line. That is twice `synth:apu-writes`' 8 kHz PCM rate, the high
+/// end of what a game's timer-driven sample or sound driver asks for; a
+/// TMA of FF (an overflow every 8 clocks, as in `synth:event-storm`) would
+/// keep the CPU in the handler. The handler at 0x50 ([`TIMER_HANDLER`])
+/// bumps a 16-bit WRAM counter; the STAT handler moved behind a `JP` at
+/// 0x48 to make room for it ([`STAT_JP`]).
 const WORST_CASE: &[u8] = &[
     0xF3, //                   DI
     0x3E, 0x01, //             LD A,01
     0xE0, 0x4D, //             LDH (KEY1),A
     0x10, 0x00, //             STOP
-    0x3E, 0xFF, //             LD A,FF
-    0xE0, 0x06, //             LDH (TMA),A
+    0x3E, 0xE0, //             LD A,E0
+    0xE0, 0x06, //             LDH (TMA),A     an overflow every 256 base clocks
     0x3E, 0x05, //             LD A,05
-    0xE0, 0x07, //             LDH (TAC),A     on, 262 kHz
+    0xE0, 0x07, //             LDH (TAC),A     on, 262 kHz (524 kHz in double speed)
     0xAF, //                   XOR A
     0xE0, 0x40, //             LDH (LCDC),A    LCD off: free VRAM/OAM access
     0x21, 0x00, 0x80, //       LD HL,8000
@@ -149,8 +163,8 @@ const WORST_CASE: &[u8] = &[
     0xE0, 0x45, //             LDH (LYC),A
     0x3E, 0x78, //             LD A,78         STAT: LYC, mode 2, 1, 0
     0xE0, 0x41, //             LDH (STAT),A
-    0x3E, 0x02, //             LD A,02
-    0xE0, 0xFF, //             LDH (IE),A      STAT only
+    0x3E, 0x06, //             LD A,06
+    0xE0, 0xFF, //             LDH (IE),A      STAT and timer
     0xAF, //                   XOR A
     0xE0, 0x0F, //             LDH (IF),A
     0x3E, 0xB7, //             LD A,B7         LCD, window, 8x16 obj, 8000 tiles, obj, BG
@@ -159,12 +173,13 @@ const WORST_CASE: &[u8] = &[
     // wait:
     0xF0, 0x41, //             LDH A,(STAT)
     0xE6, 0x03, //             AND 3
-    0xBA, //                   CP D            same mode as the last poll?
-    0x28, 0x09, //             JR Z,serial
-    0x57, //                   LD D,A
     0xFE, 0x03, //             CP 3
-    0x20, 0x04, //             JR NZ,serial
-    0x1C, //                   INC E           mode 3 just started: new SCX
+    0x20, 0x0A, //             JR NZ,serial
+    0xF0, 0x44, //             LDH A,(LY)
+    0xBA, //                   CP D            mode 3 of the line last written?
+    0x28, 0x05, //             JR Z,serial
+    0x57, //                   LD D,A
+    0x1C, //                   INC E           a new line's mode 3: new SCX
     0x7B, //                   LD A,E
     0xE0, 0x43, //             LDH (SCX),A     mid-line: the held-fetch path
     // serial:
@@ -176,7 +191,7 @@ const WORST_CASE: &[u8] = &[
     // hdma:
     0xF0, 0x55, //             LDH A,(HDMA5)
     0x87, //                   ADD A,A         no carry = HDMA active
-    0x30, 0xE2, //             JR NC,wait
+    0x30, 0xE0, //             JR NC,wait
     0xAF, //                   XOR A           restart: 0000 -> 8800 (tiles 128-255, unused)
     0xE0, 0x51, //             LDH (HDMA1),A
     0xE0, 0x52, //             LDH (HDMA2),A
@@ -185,7 +200,7 @@ const WORST_CASE: &[u8] = &[
     0xE0, 0x53, //             LDH (HDMA3),A
     0x3E, 0xFF, //             LD A,FF         HBlank, 128 blocks
     0xE0, 0x55, //             LDH (HDMA5),A
-    0x18, 0xD1, //             JR wait
+    0x18, 0xCF, //             JR wait
 ];
 
 /// `synth:worst-case` audio: APU off and on (every channel off, including
@@ -356,13 +371,27 @@ fn cgb_raster() -> Vec<u8> {
     code
 }
 
-/// STAT handler at 0x48 (8 bytes): PUSH AF; PUSH HL; LD HL,C000; INC (HL);
-/// POP HL; POP AF; RETI.
+/// Where the worst-case STAT handler lives: after the vectors, so the
+/// timer vector at 0x50 is free for [`TIMER_HANDLER`].
+const STAT_HANDLER_AT: usize = 0x68;
+
+/// The STAT vector at 0x48: JP [`STAT_HANDLER_AT`].
+const STAT_JP: &[u8] = &[0xC3, STAT_HANDLER_AT as u8, 0x00];
+
+/// The worst-case STAT handler without APU writes (9 bytes): PUSH AF;
+/// PUSH HL; LD HL,C000; INC (HL); POP HL; POP AF; RETI.
 const STAT_HANDLER: &[u8] = &[0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xE1, 0xF1, 0xD9];
 
-/// The worst-case STAT handler with the channels on (15 bytes, over the
-/// unused timer vector): [`STAT_HANDLER`] plus LDH A,(NR50); XOR 07;
-/// LDH (NR50),A before the pops.
+/// The worst-case timer handler at 0x50 (13 bytes, up to 0x5C): bumps the
+/// 16-bit counter at C002 (little-endian). PUSH AF; PUSH HL; LD HL,C002;
+/// INC (HL); JR NZ,done; INC L; INC (HL); done: POP HL; POP AF; RETI.
+const TIMER_HANDLER: &[u8] = &[
+    0xF5, 0xE5, 0x21, 0x02, 0xC0, 0x34, 0x20, 0x02, 0x2C, 0x34, 0xE1, 0xF1, 0xD9,
+];
+
+/// The worst-case STAT handler with the channels on (15 bytes):
+/// [`STAT_HANDLER`] plus LDH A,(NR50); XOR 07; LDH (NR50),A before the
+/// pops.
 const STAT_HANDLER_NR50: &[u8] = &[
     0xF5, 0xE5, 0x21, 0x00, 0xC0, 0x34, 0xF0, 0x24, 0xEE, 0x07, 0xE0, 0x24, 0xE1, 0xF1, 0xD9,
 ];
@@ -423,30 +452,46 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
         STAT_HANDLER_NR50
     };
     let pcm = apu_writes();
-    let (code, stat_vector, timer_vector): (&[u8], &[u8], &[u8]) = match name {
-        "event-storm" => (EVENT_STORM, &[], &[]),
-        "dma-storm" => (DMA_STORM, &[], &[]),
-        "halt-irq" => (HALT_IRQ, &[], &[0xD9]), // RETI
-        _ if mask.is_some() => (&worst, stat, &[]),
-        "apu-writes" => (&pcm, &[], &PCM_HANDLER),
-        "apu-writes@hram" => (&pcm, &[], &PCM_HANDLER_HRAM),
-        "cgb-raster" => (&raster, &[], &[]),
+    // The code (at 0x150), and (address, bytes) pieces below 0x100: the
+    // interrupt vectors and handlers.
+    let (code, low): (&[u8], Vec<(usize, &[u8])>) = match name {
+        "event-storm" => (EVENT_STORM, vec![]),
+        "dma-storm" => (DMA_STORM, vec![]),
+        "halt-irq" => (HALT_IRQ, vec![(0x50, &[0xD9])]), // RETI
+        _ if mask.is_some() => (
+            &worst,
+            vec![
+                (0x48, STAT_JP),
+                (0x50, TIMER_HANDLER),
+                (STAT_HANDLER_AT, stat),
+            ],
+        ),
+        "apu-writes" => (&pcm, vec![(0x50, &PCM_HANDLER)]),
+        "apu-writes@hram" => (&pcm, vec![(0x50, &PCM_HANDLER_HRAM)]),
+        "cgb-raster" => (&raster, vec![]),
         _ => return None,
     };
-    Some(image(name, code, stat_vector, timer_vector))
+    Some(image(name, 0xC0, code, &low)) // CGB only
 }
 
-fn image(title: &str, code: &[u8], stat_vector: &[u8], timer_vector: &[u8]) -> Vec<u8> {
+fn image(title: &str, cgb_flag: u8, code: &[u8], low: &[(usize, &[u8])]) -> Vec<u8> {
     let mut rom = vec![0u8; 0x8000];
-    rom[0x48..0x48 + stat_vector.len()].copy_from_slice(stat_vector);
-    rom[0x50..0x50 + timer_vector.len()].copy_from_slice(timer_vector);
+    for &(at, bytes) in low {
+        let dst = &mut rom[at..at + bytes.len()];
+        assert!(
+            at + bytes.len() <= 0x100,
+            "{title}: {at:#x} runs into the header"
+        );
+        assert!(dst.iter().all(|&b| b == 0), "{title}: {at:#x} overlaps");
+        dst.copy_from_slice(bytes);
+    }
     // Entry: NOP; JP 0150.
     rom[0x100..0x104].copy_from_slice(&[0x00, 0xC3, 0x50, 0x01]);
     rom[0x104..0x134].copy_from_slice(&LOGO);
     let t = title.to_ascii_uppercase();
     let t = &t.as_bytes()[..t.len().min(15)];
     rom[0x134..0x134 + t.len()].copy_from_slice(t);
-    rom[0x143] = 0xC0; // CGB only
+    rom[0x143] = cgb_flag;
     // 0x147 = 00 (ROM only), 0x148 = 00 (32 KiB), 0x149 = 00 (no RAM).
     rom[0x150..0x150 + code.len()].copy_from_slice(code);
     // Pan Docs: The Cartridge Header, 014D (header checksum) and 014E-014F
@@ -537,7 +582,7 @@ mod tests {
         );
         assert_eq!(r[0], 62);
         assert_eq!(r[1] & 0x78, 0x78);
-        assert_eq!(r[2], 0x02);
+        assert_eq!(r[2], 0x06);
         assert_eq!(r[3] & 0x80, 0x80, "double speed");
         assert_ne!(r[4], 0, "STAT handler ran");
         // HBlank HDMA: ROM 0104-0133 (the logo) copied to 8904, and a
@@ -548,6 +593,28 @@ mod tests {
         let r = run("worst-case", u64::from(CLOCK_HZ) / 10, &addrs);
         assert_eq!(&r[..48], &LOGO);
         assert_eq!(r[48] & 0x80, 0, "HDMA active");
+    }
+
+    #[test]
+    fn worst_case_services_the_timer_irq_at_16_khz() {
+        // The handler's 16-bit counter at C002 over one frame: 70,224 / 256
+        // = 274.3 overflows, each serviced.
+        let at = u64::from(CLOCK_HZ) / 10;
+        let count = |c| {
+            let r = run("worst-case", c, &[0xC002, 0xC003, 0xFFFF, 0xFF06]);
+            assert_eq!((r[2], r[3]), (0x06, 0xE0), "IE, TMA");
+            u16::from_le_bytes([r[0], r[1]])
+        };
+        let n = count(at + 70_224).wrapping_sub(count(at));
+        assert!((274..=275).contains(&n), "{n} timer IRQs in a frame");
+        // The vectors: STAT jumps past the timer handler.
+        let rom = build("worst-case").unwrap();
+        assert_eq!(rom[0x48..0x4B], *STAT_JP);
+        assert_eq!(rom[0x50..0x50 + TIMER_HANDLER.len()], *TIMER_HANDLER);
+        assert_eq!(
+            rom[0x68..0x68 + STAT_HANDLER_NR50.len()],
+            *STAT_HANDLER_NR50
+        );
     }
 
     #[test]

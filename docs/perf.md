@@ -62,6 +62,34 @@ in git):
   program with only the channels in that mask (bit n = CHn+1) set up; @0
   is the program without any APU setup (the post-boot CH1 at f = 0 stays
   on), for measuring the APU's cost. Not in the check-bench list.
+  **Timer interrupt (M10, 2026-11-24).** Before this nothing in
+  worst-case took an interrupt other than STAT: TIMA ran from TMA=FF
+  with IE bit 2 clear, and since the lazy reloads (ADR 0011, 2026-11-24
+  amendment) a timer nobody takes costs no events at all. Now IE = STAT
+  and timer, TMA=E0 at TAC=05 (524 kHz in double speed): an overflow
+  every 256 base clocks, **16,384 Hz, 274.3 timer IRQs a frame** (about
+  two per line), each serviced by a 13-byte handler at 0x50 that bumps a
+  16-bit WRAM counter at C002 (PUSH AF/HL, INC, POP, RETI: 32 M-cycles
+  with the dispatch, about 25% of the CPU). The rate is twice
+  `synth:apu-writes`' 8 kHz PCM, the high end of a game's timer-driven
+  sample or sound driver; TMA=FF would keep the CPU in the handler. The
+  STAT handler moved to 0x68 behind a `JP` at 0x48 (4 M-cycles more per
+  STAT IRQ) to free the timer vector. The per-line SCX write now detects
+  a new line by LY (mode 3 on an LY other than the last one written)
+  instead of a mode change since the last poll: with the handlers
+  taking most of a heavy line's modes 0 and 2, the mode poll saw no
+  change on ~27 lines a frame (117 SCX writes instead of 144). It still
+  writes once per visible line, 18-42 M-cycles into mode 3
+  (`hold_fetch` 17,077 calls in 2 s, 143 a frame). Everything else is
+  unchanged. Ir (2 s): 276,111,793 -> **271,698,253 (-1.6%)**, 2.311 ->
+  **2.274 M Ir per frame, 56.6% of the 4.02 M line**. The same program
+  with IE = STAT only (the new TMA and poll, no timer IRQ) is
+  275,164,860: servicing 274 IRQs a frame *lowers* Ir by 3.47 M (-1.3%),
+  because the handler's 32 M-cycles replace poll-loop iterations whose
+  I/O reads (STAT, LY, SC, HDMA5) cost more per M-cycle than the
+  dispatch and the handler's WRAM increment. So interrupt dispatch is
+  now counted against the line, but it is not where the worst case's
+  cost is.
 - `synth:cgb-raster` (2 s): a CGB palette raster ("hi-color") effect in
   double speed. BG only (LCDC=91), one tile with all four colors, map
   attributes selecting palette (column & 7) so all 8 BG palettes are on
