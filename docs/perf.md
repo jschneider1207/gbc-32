@@ -491,6 +491,30 @@ Rule: raising a budget is committed with the change that needs it, with the
 measured size and the reason in the commit body. Initial budgets are the
 measured size plus about 5%.
 
+### Size pass, M9 (2026-11-23, branch `core-size`)
+
+`.text` 97,068 -> 95,652 B (-1,416) with no behavior change
+(diff-fingerprint vs b965ceb: 4,020 ROMs identical) and lower Ir: synth:worst-case
+477,624,031 -> 476,567,819 (-0.22%), cgb-acid2 685,168,960 -> 684,330,998
+(-0.12%):
+
+| Change | B saved | Note |
+|---|---|---|
+| `set_stalls` writes stalls in place; window inserted by shifting; dots summed in `sorted_object_stalls`; `LineTiming::finish` shared with `set_stalls_retriggered` | 596 | A first version (`copy_within` + re-summing in `finish`) saved 606 B but cost +0.2% worst-case Ir (memmove call, sum loop) |
+| `sorted_object_stalls`: no window = `i32::MAX` start, tile key one `i32` | 248 | The `Option` window made LLVM keep a loop copy per case; an `Option<(bool, i32)>` tile compare cost +0.45% cgb-acid2 Ir |
+| `window_stall_at` `#[cold]` `#[inline(never)]` | 516 | Three cold callers each had a copy |
+| `OamDma::ppu_read` `#[inline(never)]` | 56 | Cold callers only |
+
+Tried and dropped: feeding the object X iterator straight into
+`sorted_object_stalls` (+712 B, LLVM unrolled the mapped iterator).
+
+Unused lever: about 5.8 KB of `.text` is `nop` alignment padding (2,919
+`nop`s; 2.5 KB in `Cpu::run`, 1 KB in `execute_cb`): with
+`target-cpu=cortex-m7` LLVM aligns blocks after unconditional branches
+to 8 bytes. Removing it is a build-flag choice (an LLVM alignment
+option) whose cost on the real M7 fetch path callgrind can't show; it
+needs an MCU measurement and the human.
+
 ## ITCM placement plan (M8)
 
 Measured 2026-11-22 at 5e65f6f, same build as `check-code-size.sh`
