@@ -3,7 +3,7 @@
 //! of device-rate frames; the device callback only pops from it. The
 //! ring's fill drives frame pacing ([`crate::pacing::Pacing`]).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst, fence};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use crate::dsp::{DC_CUTOFF_HZ, DcBlocker, Resampler, Stereo, drc_factor};
+use crate::pacing::{callback_clock, pack_callback, smoothed_fill, unpack_callback};
 
 /// Audio buffered ahead of the device: frames run while the ring holds
 /// less than this. Low enough to feel immediate, high enough to ride out
@@ -34,8 +35,20 @@ const FILL_SMOOTHING: f64 = 1.0 / 32.0;
 /// How often `GBC_AUDIO_STATS=1` prints.
 const STATS_PERIOD: Duration = Duration::from_secs(4);
 
-#[derive(Default)]
 struct Shared {
+    /// Time base for `last_callback`.
+    epoch: Instant,
+    /// Seqlock over `last_callback` and the pop before it: odd while a
+    /// callback is popping.
+    seq: AtomicU64,
+    /// When the latest callback's chunk started playing on the smoothed
+    /// device clock ([`callback_clock`]; µs since `epoch`) and its length
+    /// in frames ([`pack_callback`]).
+    last_callback: AtomicU64,
+    /// Shortest and longest gap between callback starts (µs) since the
+    /// last `GBC_AUDIO_STATS` line.
+    gap_min_us: AtomicU64,
+    gap_max_us: AtomicU64,
     underruns: AtomicU64,
     /// Underruns before the first push are start-up, not counted.
     started: AtomicBool,
@@ -56,7 +69,28 @@ const STALL_TIMEOUT: Duration = Duration::from_millis(500);
 struct Stats {
     since: Instant,
     fill_sum: f64,
+    ring_sum: f64,
     readings: u64,
+    /// `Shared::callbacks` at `since`.
+    callbacks: u64,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Shared {
+            epoch: Instant::now(),
+            seq: AtomicU64::new(0),
+            last_callback: AtomicU64::new(0),
+            gap_min_us: AtomicU64::new(u64::MAX),
+            gap_max_us: AtomicU64::new(0),
+            underruns: AtomicU64::new(0),
+            started: AtomicBool::new(false),
+            callbacks: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
+            error: Mutex::new(None),
+        }
+    }
 }
 
 pub struct AudioOut {
@@ -65,8 +99,8 @@ pub struct AudioOut {
     prod: HeapProd<Stereo>,
     rate: u32,
     target: usize,
-    /// Where DRC centers the post-push fill: pacing tops the ring up to
-    /// just past `target`, by up to a frame, so half a frame above it.
+    /// Where DRC centers the post-push fill: pacing runs a frame as the
+    /// (smoothed) fill reaches `target`, so one frame above it.
     drc_center: f64,
     dc: DcBlocker,
     rs: Resampler,
@@ -94,7 +128,7 @@ impl AudioOut {
         let rate = config.sample_rate;
         let frames = |d: Duration| (u128::from(rate) * d.as_millis() / 1000) as usize;
         let (prod, cons) = HeapRb::<Stereo>::new(frames(RING_LATENCY)).split();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new());
         let channels = config.channels;
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, cons, shared.clone()),
@@ -114,7 +148,9 @@ impl AudioOut {
                 Stats {
                     since: Instant::now(),
                     fill_sum: 0.0,
+                    ring_sum: 0.0,
                     readings: 0,
+                    callbacks: 0,
                 }
             });
         let target = frames(TARGET_LATENCY);
@@ -125,7 +161,7 @@ impl AudioOut {
             prod,
             rate,
             target,
-            drc_center: target as f64 + frame_out / 2.0,
+            drc_center: target as f64 + frame_out,
             dc: DcBlocker::new(AUDIO_SAMPLE_RATE as f32, DC_CUTOFF_HZ),
             rs: Resampler::new(f64::from(AUDIO_SAMPLE_RATE), f64::from(rate)),
             avg_fill: target as f64,
@@ -139,8 +175,31 @@ impl AudioOut {
     }
 
     /// Device frames buffered in the ring.
-    pub fn fill(&self) -> usize {
+    fn ring_fill(&self) -> usize {
         self.prod.occupied_len()
+    }
+
+    /// Device frames buffered, as if the device played continuously
+    /// rather than taking a chunk per callback ([`smoothed_fill`]): what
+    /// pacing and DRC read, so frames run at an even rate instead of on
+    /// callback boundaries.
+    pub fn fill(&self) -> usize {
+        // Seqlock read. A callback in between retries; after a few, the
+        // raw ring fill (at worst one chunk low, for one reading).
+        for _ in 0..4 {
+            let s1 = self.shared.seq.load(SeqCst);
+            let packed = self.shared.last_callback.load(SeqCst);
+            let ring = self.ring_fill();
+            fence(SeqCst);
+            if s1.is_multiple_of(2) && self.shared.seq.load(SeqCst) == s1 {
+                let (at_us, chunk) = unpack_callback(packed);
+                let now = self.shared.epoch.elapsed();
+                let start = Duration::from_micros(at_us);
+                return smoothed_fill(ring, chunk, start, now, self.rate);
+            }
+            std::hint::spin_loop();
+        }
+        self.ring_fill()
     }
 
     /// [`TARGET_LATENCY`] in device frames.
@@ -194,26 +253,44 @@ impl AudioOut {
     }
 
     fn report(&mut self, fill: f64) {
+        if self.stats.is_none() {
+            return;
+        }
+        let ring = self.ring_fill() as f64;
         let Some(st) = &mut self.stats else { return };
         st.fill_sum += fill;
+        st.ring_sum += ring;
         st.readings += 1;
         if st.since.elapsed() < STATS_PERIOD {
             return;
         }
         let ms = |frames: f64| frames * 1000.0 / f64::from(self.rate);
+        let calls = self.shared.callbacks.load(Relaxed);
+        let secs = st.since.elapsed().as_secs_f64();
+        let (_, chunk) = unpack_callback(self.shared.last_callback.load(Relaxed));
+        let readings = st.readings.max(1) as f64;
+        let gap_min = self.shared.gap_min_us.swap(u64::MAX, Relaxed);
+        let gap_max = self.shared.gap_max_us.swap(0, Relaxed);
+        let gap_min = if gap_min == u64::MAX { 0 } else { gap_min };
         eprintln!(
-            "audio: underruns {} overflows {} errors {} avg fill {:.1} ms (target {:.0} ms) rate x{:.5}",
+            "audio: underruns {} overflows {} errors {} avg fill {:.1} ms (ring {:.1} ms, target {:.0} ms) rate x{:.5} callbacks {:.1}/s of {chunk} frames, gap {:.1}-{:.1} ms",
             self.shared.underruns.load(Relaxed),
             self.overflows,
             self.shared.errors.load(Relaxed),
-            ms(st.fill_sum / st.readings.max(1) as f64),
+            ms(st.fill_sum / readings),
+            ms(st.ring_sum / readings),
             ms(self.target as f64),
             self.factor,
+            (calls - st.callbacks) as f64 / secs,
+            gap_min as f64 / 1e3,
+            gap_max as f64 / 1e3,
         );
         *st = Stats {
             since: Instant::now(),
             fill_sum: 0.0,
+            ring_sum: 0.0,
             readings: 0,
+            callbacks: calls,
         };
     }
 }
@@ -226,12 +303,26 @@ fn build<T: SizedSample + FromSample<f32> + Send + 'static>(
 ) -> Result<cpal::Stream, String> {
     let channels = usize::from(config.channels).max(1);
     let on_error = shared.clone();
+    let rate = config.sample_rate;
+    let mut prev_at: Option<Duration> = None;
+    let mut clock: Option<(Duration, usize)> = None;
     device
         .build_output_stream(
             config,
             // Never blocks: pops what is there, silence for the rest.
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 shared.callbacks.fetch_add(1, Relaxed);
+                let at = shared.epoch.elapsed();
+                if let Some(prev) = prev_at {
+                    let gap = at.saturating_sub(prev).as_micros() as u64;
+                    shared.gap_min_us.fetch_min(gap, Relaxed);
+                    shared.gap_max_us.fetch_max(gap, Relaxed);
+                }
+                prev_at = Some(at);
+                let frames = data.len() / channels;
+                let start = callback_clock(clock, at, rate);
+                clock = Some((start, frames));
+                shared.seq.fetch_add(1, SeqCst);
                 let mut short = false;
                 for frame in data.chunks_mut(channels) {
                     let [l, r] = cons.try_pop().unwrap_or_else(|| {
@@ -240,6 +331,10 @@ fn build<T: SizedSample + FromSample<f32> + Send + 'static>(
                     });
                     write_frame(frame, l, r);
                 }
+                shared
+                    .last_callback
+                    .store(pack_callback(start, frames), SeqCst);
+                shared.seq.fetch_add(1, SeqCst);
                 if short && shared.started.load(Relaxed) {
                     shared.underruns.fetch_add(1, Relaxed);
                 }

@@ -82,8 +82,45 @@ native Windows smoke run (a device can't be unplugged by an agent).
 **2026-11-23: frame statistics.** `GBC_FRAME_STATS=1` (`frame_stats.rs`,
 pure, unit-tested; `None` and one branch per event when unset) prints
 every 4 s: emulated and presented frames per second, completed frames
-replaced before any present ("unpresented"), a histogram of frames run
-per wake-up (0/1/2/3+), the p1/p99/max interval between presents, and
-how late timed wake-ups ran (winit's `ResumeTimeReached`: actual minus
-requested, mean and max). `scripts/run-windows.sh` forwards it (and
-`GBC_AUDIO_STATS`) to the Windows process through `WSLENV`.
+replaced before any present ("unpresented"), completed frames identical
+to the one before ("unchanged": the game did not redraw, e.g. it lags or
+runs at 30 fps, as on hardware), a histogram of frames run per wake-up
+(0/1/2/3+), the p1/p99/max interval between completed frames and
+between presents, and how late timed wake-ups ran (winit's
+`ResumeTimeReached`: actual minus requested, mean and max). Reading it:
+emulated ≈ 59.7/s, unpresented 0 and tight intervals mean the host keeps
+pace, so remaining choppiness is the game's own (rising "unchanged");
+uneven intervals or unpresented frames are ours. `scripts/run-windows.sh`
+forwards it (and `GBC_AUDIO_STATS`) to the Windows process through
+`WSLENV`.
+
+**2026-11-23: pacing on a smoothed fill.** Measured on native Windows
+(WASAPI, 48 kHz, Shantae intro): audio was clean but frames ran 9-24 ms
+apart (p1/p99) instead of every 16.74 ms. winit already waits on a
+high-resolution timer (wake-ups 0.3 ms late on average), and no wake-up
+ran two frames. The cause was the fill itself: WASAPI takes 480 frames
+(10 ms) per callback, so the ring's fill falls in 10 ms steps and "run
+while below target" ran frames on callback boundaries, 10 or 20 ms
+apart; on a 60 Hz display that is visible judder. Changes (`pacing.rs`,
+pure and unit-tested, including a simulation of a 10 ms-chunk device
+with up to 2 ms of callback jitter that requires every frame within
+0.5 ms of 16.74 ms):
+- Pacing and DRC read `smoothed_fill`: the ring plus the last chunk,
+  less what the device has played of it since it started, as if the
+  device drained continuously (bounded to one chunk either way).
+- The callback stamps when its chunk starts on a smoothed device clock
+  (`callback_clock`: previous start plus its length, nudged 1/8 toward
+  the actual callback time; restarted if more than a chunk off), in one
+  atomic word with the chunk length, read under a seqlock.
+- The wake-up floor is 0.25 ms (was 1 ms): a frame can run up to the
+  floor late, and 1 ms showed in the simulation.
+- DRC centers on target plus one frame (was half a frame): frames now
+  run as the smoothed fill reaches the target, so the post-push fill sits
+  a frame above it. The factor went from x0.99936 (pinned off-center)
+  to x1.00008.
+After (same run, host under build load): frame interval p1/p99 about
+14-15.5 / 18-20 ms, rate x1.0001, no underruns. The rest is wake-up
+lateness and callback jitter; video is still not vsync-locked, so
+59.73 Hz against a 60 Hz display still repeats a frame every ~3.7 s.
+`GBC_AUDIO_STATS` now also prints the raw ring fill and the callback
+rate, chunk size and min-max gap.
