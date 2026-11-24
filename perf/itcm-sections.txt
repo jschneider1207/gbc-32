@@ -120,7 +120,6 @@ FLASH_OK .text._R*8gbc_core3bus*3Ctx18write_palette_data*      # BCPD/OCPD write
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu10write_stat*              # STAT writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu9write_lyc*                # LYC writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu10write_lcdc*              # LCDC writes
-FLASH_OK .text._R*8gbc_core3ppu*3Ppu12scroll_write*            # SCX/SCY/WX writes that land inside mode 3
 FLASH_OK .text._R*8gbc_core3apu10write_wave*                   # wave RAM writes
 # Cartridge registers
 FLASH_OK .text._R*8gbc_core4cart*4Cart9write_rom*              # MBC register writes (bank switches)

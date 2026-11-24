@@ -1089,9 +1089,10 @@ impl Renderer {
     /// read of the tile at screen x `x` (its first pixel; may be left of
     /// the screen), the last with 8000 addressing.
     pub(crate) fn sel_clear(&mut self, byte: u8, x: i32) {
+        // `x` is at most a tile past the screen: the key fits a byte.
         self.sel = SelLatch {
             byte,
-            read: SelRead::Before((x + 8).clamp(1, 254) as u8),
+            read: SelRead::Before((x + 8).max(1) as u8),
         };
     }
 
