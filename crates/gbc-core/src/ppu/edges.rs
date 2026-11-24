@@ -172,20 +172,33 @@ pub(crate) const VRAM_FROM_FIRST_SS: u32 = t(h(91));
 pub(crate) const VRAM_FROM_FIRST_DS: u32 = t(h(86));
 
 /// OAM writes / reads blocked from here (single / double speed), to the
-/// mode-3 end; the first line after LCD enable from `_FIRST`. Double-speed
-/// writes from 3: `oam_access/prewrite_ds_lcdoffset1_1` writes at 2
-/// (allowed); `prewrite_ds_2` (default phase) stays blocked.
-pub(crate) const OAM_WRITE_FROM_SS: u32 = t(h(0));
+/// mode-3 end; the first line after LCD enable from `_FIRST`. gambatte
+/// (behaviour only) `oamWritable` / `oamReadable` on CGB: blocked once
+/// `lineCycles + 4 >= 456` (reads: `+ 4 - ds`), our `t = 3` (its
+/// `lineCycles` L is our `t = L + 7`, see [`VRAM_FROM_SS`]; double-speed
+/// reads one dot later). Writes in both speeds from 3, not SameBoy's
+/// line start: `oam_access/prewrite_lcdoffset1_1` (CGB04C) writes at 2
+/// (allowed) and `_2` at 6; `prewrite_ds_lcdoffset1_1` writes at 2
+/// (allowed); the default phase (`prewrite_{1,2,3}`, `prewrite_ds_2`)
+/// can't tell 0 from 3.
+pub(crate) const OAM_WRITE_FROM_SS: u32 = t(h(3));
 pub(crate) const OAM_WRITE_FROM_DS: u32 = t(h(3));
 pub(crate) const OAM_WRITE_FROM_FIRST: u32 = t(h(84));
 pub(crate) const OAM_READ_FROM_SS: u32 = t(h(3));
 pub(crate) const OAM_READ_FROM_DS: u32 = t(h(4));
 pub(crate) const OAM_READ_FROM_FIRST: u32 = t(h(86));
 
-/// Palette RAM blocked from here (first line after LCD enable:
-/// `_FIRST`) to this many dots past the mode-3 end (single / double
-/// speed, where the end is already [`MODE0_DS_LATE`] later).
+/// Palette RAM blocked from here (single / double speed; first line after
+/// LCD enable: `_FIRST`, both speeds) to this many dots past the mode-3
+/// end (single / double speed, where the end is already
+/// [`MODE0_DS_LATE`] later). gambatte (behaviour only) `cgbpAccessible`:
+/// `lineCycles + ds < 80`, our 87 and, one dot earlier in double speed,
+/// 86 (as [`VRAM_FROM_DS`]). CGB04C `cgbpal_m3/cgbpal_{read,write}_m3start_
+/// ds_lcdoffset1_2` access at 86 (blocked), `_1` at 84; the default
+/// double-speed grid (odd dots: `_ds_1` at 85, `_ds_2` at 87) can't tell
+/// 86 from 87.
 pub(crate) const PALETTE_FROM: u32 = t(h(87));
+pub(crate) const PALETTE_FROM_DS: u32 = t(h(86));
 pub(crate) const PALETTE_FROM_FIRST: u32 = t(h(88));
 pub(crate) const PALETTE_EXTRA_SS: u32 = 4;
 pub(crate) const PALETTE_EXTRA_DS: u32 = 2;

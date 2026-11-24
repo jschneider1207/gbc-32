@@ -960,44 +960,47 @@ impl Ppu {
     /// reads give FF and writes are dropped while the PPU reads palettes
     /// (Pan Docs: LCD Color Palettes, "inaccessible ... during Mode 3").
     /// SameBoy (`display.c`, `cgb_palettes_blocked`, MIT): from 3 dots
-    /// after the VRAM block starts (first line after LCD enable: dot 88,
-    /// 3 dots before it) to 4 dots after the mode-3 end, 2 in double speed
-    /// (where `mode3_end` is already one dot later). Gambatte
+    /// after the single-speed VRAM block starts (double speed one dot
+    /// earlier, gambatte `cgbpAccessible`, [`edges::PALETTE_FROM_DS`];
+    /// first line after LCD enable: dot 88 in both speeds) to 4 dots after
+    /// the mode-3 end, 2 in double speed (where `mode3_end` is already one
+    /// dot later). Gambatte
     /// `cgbpal_m3/*` and `enable_display/ly{0,1}_late_cgbp*` (CGB04C)
     /// pass with these edges; DMG compatibility mode never gets here
     /// (BCPD/OCPD are closed there).
     #[inline(never)]
     pub(crate) fn palette_blocked(&self, now: u64, double: bool) -> bool {
-        let extra = if double {
-            edges::PALETTE_EXTRA_DS
+        let (from, extra) = if double {
+            (edges::PALETTE_FROM_DS, edges::PALETTE_EXTRA_DS)
         } else {
-            edges::PALETTE_EXTRA_SS
+            (edges::PALETTE_FROM, edges::PALETTE_EXTRA_SS)
         };
         // Fast path (hi-color raster writes, synth:cgb-raster): a latched
         // line (`mode3` set) is latched past position 89, at or before
         // `now`. So `now` is on it, past the window start, or on the next
-        // line before position 87, where `t` is past the window end.
+        // line before position 86 (the earlier, double-speed start), where
+        // `t` is past the window end.
         let t = now.wrapping_sub(self.line.start);
-        if t < u64::from(LINE + edges::PALETTE_FROM) && self.line.mode3 != 0 && self.lcd_enabled() {
+        if t < u64::from(LINE + edges::PALETTE_FROM_DS)
+            && self.line.mode3 != 0
+            && self.lcd_enabled()
+        {
             return t < u64::from(
                 u32::from(self.line.stat_end()) + edges::MODE0_DS_LATE * u32::from(double) + extra,
             );
         }
-        self.cpu_blocked(
-            now,
-            double,
-            [edges::PALETTE_FROM, edges::PALETTE_FROM_FIRST],
-            extra,
-        )
+        self.cpu_blocked(now, double, [from, edges::PALETTE_FROM_FIRST], extra)
     }
 
     /// CPU access to OAM (FE00-FEFF) is blocked at clock `now`: reads give
     /// FF and writes are dropped during the OAM scan and mode 3 (Pan Docs:
-    /// Rendering, "OAM access"). CGB C timing (SameBoy `oam_read_blocked`,
-    /// `oam_write_blocked`): writes from the line's first dot (double
-    /// speed: its third), reads from its fourth (double speed: its fifth),
-    /// both to the mode-3 end; on the first line after LCD enable, writes
-    /// from SameBoy's nominal 76 and reads from 78 (no OAM scan).
+    /// Rendering, "OAM access"). CGB C timing (gambatte `oamWritable`,
+    /// `oamReadable`, behaviour only; SameBoy `oam_read_blocked`,
+    /// `oam_write_blocked`): writes from the line's fourth dot in both
+    /// speeds ([`edges::OAM_WRITE_FROM_SS`]), reads from its fourth (double
+    /// speed: its fifth), both to the mode-3 end; on the first line after
+    /// LCD enable, writes from SameBoy's nominal 76 and reads from 78 (no
+    /// OAM scan).
     pub(crate) fn oam_blocked(&self, now: u64, double: bool, write: bool) -> bool {
         let from = match (write, double) {
             (true, false) => [edges::OAM_WRITE_FROM_SS, edges::OAM_WRITE_FROM_FIRST],
@@ -3700,16 +3703,19 @@ mod tests {
             [vram(85), vram(86), vram(255), vram(256)],
             [false, true, true, false]
         );
+        // OAM: writes and reads from dot 3 (gambatte `oamWritable`;
+        // `oam_access/prewrite_lcdoffset1_1` writes at 2).
         let oam = |t: u64, write| p.oam_blocked(l5 + t, false, write);
         assert_eq!(
             [
-                oam(0, true),
+                oam(2, true),
+                oam(3, true),
                 oam(2, false),
                 oam(3, false),
                 oam(255, false),
                 oam(256, true)
             ],
-            [true, false, true, true, false]
+            [false, true, false, true, true, false]
         );
         // Double speed: OAM writes from dot 3, VRAM from 85, both to one
         // dot after the mode-3 end.
@@ -3751,16 +3757,21 @@ mod tests {
             r2.sync(l5 + t);
             r2.ppu.palette_blocked(l5 + t, double)
         };
+        // Double speed from 86 (gambatte `cgbpAccessible`;
+        // `cgbpal_m3/cgbpal_*_m3start_ds_lcdoffset1_2` access at 86).
         assert_eq!(
-            [pal(86, true), pal(87, true), pal(258, true), pal(259, true)],
+            [pal(85, true), pal(86, true), pal(258, true), pal(259, true)],
             [false, true, true, false]
         );
-        // Synced to the line start (line 4 latched): 86 on the fast path,
-        // 87 on the slow one.
+        // Synced to the line start (line 4 latched): 85 on the fast path,
+        // 86 and 87 on the slow one.
         let mut r2 = Rig::on_at(on, 0, 0xFF);
         r2.sync(l5);
-        let pal = |t: u64| r2.ppu.palette_blocked(l5 + t, false);
-        assert_eq!([pal(86), pal(87)], [false, true]);
+        let pal = |t: u64, double| r2.ppu.palette_blocked(l5 + t, double);
+        assert_eq!(
+            [pal(86, false), pal(87, false), pal(85, true), pal(86, true)],
+            [false, true, false, true]
+        );
         // VBlank: free.
         let l150 = clock(on, 0, 150 * LINE + 100);
         r.sync(l150);
