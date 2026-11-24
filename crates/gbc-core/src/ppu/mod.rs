@@ -1788,7 +1788,8 @@ impl Ppu {
     /// (`Renderer::tile_sel_glitch`, `Renderer::carry_sel`). A set's glitched
     /// read takes the latch as of the set (`ObjRank::sel_latch`); from
     /// then on BG reads with 8000 addressing replace it (unknown: 0xFF).
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     fn tile_sel_latch(&mut self, mem: &mut Memory, tile: i32, phase: i32, win_hit: bool) {
         let r = &mut mem.obj_rank;
         if self.lcdc & 0x10 == 0 {
