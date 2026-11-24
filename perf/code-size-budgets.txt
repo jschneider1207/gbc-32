@@ -27,7 +27,7 @@
 # ITCM set (gating). Measured 2026-11-24.
 25738 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
 7237 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
-84 <gbc_core::bus::Ctx>::write_high
+90 <gbc_core::bus::Ctx>::write_high
 712 <gbc_core::bus::Ctx>::write_io
 866 gbc_core::bus::read_high
 204 <gbc_core::bus::Ctx>::sync_ppu
@@ -70,6 +70,7 @@
 517 <gbc_core::ppu::Ppu>::stat
 244 <gbc_core::schedule::Schedule>::set
 225 <gbc_core::timer::Timer>::schedule_overflow
+126 <gbc_core::timer::Timer>::reload
 225 <gbc_core::bus::Ctx>::start_audio
 198 <gbc_core::apu::noise::Noise>::advance
 196 <gbc_core::ppu::Ppu>::cpu_blocked
