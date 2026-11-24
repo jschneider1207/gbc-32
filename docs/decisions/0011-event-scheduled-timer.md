@@ -370,3 +370,69 @@ sm83-tests bus is unchanged.
    with a fingerprint check.
 6. The HALT tasks (IME=1 re-execute, `EI; HALT`, CGB wake-up latency),
    then OAM DMA and `set_buttons_at` on deadlines.
+
+## Amendments
+
+### 2026-11-24: reloads are lazy; no Timer event while its request is pending and masked
+
+The Consequences above named the cost: with TMA = FF at 262 kHz every
+fourth M-cycle was a trip through `boundary()`. A profile of
+`synth:worst-case` (IE = STAT only, IF bit 2 set once and never cleared)
+showed ~1.04 M such events per 2 emulated seconds, none with an
+observable effect. The decision stands (the timer is derived from the
+clock, its effect is a deadline); what the deadline stands for is narrower:
+
+- **The reload's state change is not an event.** `Timer::catch_up(now)`
+  runs every reload due at or before `now`: the first as before
+  (`reload(deadline())`), and, if a second is also due, the last one
+  directly. After the first reload TIMA counts from TMA and nothing else
+  changes until the next access, so reloads are `256 - TMA` falls of the
+  selected bit apart, `(256 - TMA) << (k + 1 - shift)` clocks:
+  `last = second + (((now - second) >> f) - ((now - second) >> f) % (256 - TMA)) << f`,
+  `f = k + 1 - shift`. The remainder is taken in 32-bit steps (no 64-bit
+  division on the MCU). Every access that reads or changes that state
+  catches up first: the TIMA read (on a copy; reads stay side-effect
+  free), TIMA/TMA/TAC/DIV writes, STOP (`stop_edge`, `write_div`) and
+  the speed switch. A TMA write therefore changes the period only from
+  its own clock on, and the cycle A/B rules see the same `overflow_at`
+  and `reloaded_at` as before.
+- **The Timer event only requests the interrupt**, and is scheduled at
+  `Timer::deadline()` except while IF bit 2 is set and IE bit 2 is clear:
+  then a reload has nothing to request and no dispatch can clear the bit,
+  so the deadline is `NEVER`. `Ctx::schedule_timer` (catch up, set the
+  deadline, reschedule) runs after timer register writes, DIV resets and
+  speed switches as before, and now also when bit 2 of IF or IE changes
+  (IF write, IE write, the CPU-side IF setter, and a dispatch whose push
+  lands on IF or IE).
+- **With IE bit 2 set the deadline stays on** and the event also runs the
+  reload and schedules the next, as before. The dispatch's acknowledge
+  (inlined three times in `Cpu::run`) is therefore unchanged: it clears a
+  bit whose deadline is already on. A hook there instead (deadline off
+  whenever IF bit 2 is set) cost +720 B in `Cpu::run` (measured), which
+  is why the condition includes IE.
+
+One corner had to be made explicit. A switch to single speed with nothing
+pending moves the CPU's M-cycle grid by 3 clocks, and a cycle A open at
+the switch ended at that first boundary (`now + 3`) because the reload
+ran from the deadline set before the switch, not from the one the
+switch's pause computed. `Timer::speed_switch` now says so (`short`), and
+`switch_to_single_speed_in_cycle_a_reloads_at_the_moved_grid` pins the
+values recorded from the previous implementation. Whether hardware agrees
+is untested by any ROM in the corpus; the behavior is kept, not judged.
+
+Verification: the differential test now leaves IF bit 2 set, writes IF
+and IE, acknowledges (also with the push on IF or IE) and idles for up to
+1,600 M-cycles, and requires the deadline to be `NEVER` while the timer
+is lazy; two unit tests compare `catch_up` with the reloads run one by
+one (all fields) and over gaps up to 2^50 clocks. 24 mutations of the
+catch-up and its call sites each fail at least one of them.
+`diff-fingerprint.sh main` is identical on 4,020 ROMs, and on 4,030 with
+`--audio-buffer 7 --hash-samples`; romtest shows no regressions.
+
+Measured (Ir, `check-bench.sh`, before -> after): `synth:worst-case`
+478.44 M -> 364.80 M (-23.8%), `synth:event-storm` 397.31 M -> 285.58 M
+(-28.1%), `synth:halt-irq` 291.30 M -> 292.12 M (+0.28%, the IE test in
+the event), the other six within 0.1%. MCU code: total `.text` 98,124 ->
+98,374 B (+250: `catch_up` 362, `schedule_timer` 210; `boundary` -66,
+`Timer::read` -158, `write_timer_io` -120), `Cpu::run` unchanged at
+24,584 B.
