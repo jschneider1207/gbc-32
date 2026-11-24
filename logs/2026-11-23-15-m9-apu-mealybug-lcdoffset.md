@@ -44,3 +44,15 @@
 - `m3_lcdc_tile_sel_change`, `_win_change` (8 px, latch carries over
   lines), `m3_wx_4_change_sprites` (CGB WX-match glitch): agents in
   flight at log time (branches `m9-tile-sel-latch`, `m9-cgb-wx-glitch`).
+
+## Addendum (2026-11-24, same session)
+- TILE_SEL latch carried across lines (4c16263..cdf447c): Mealybug
+  `m3_lcdc_tile_sel_change`, `_win_change` pass; gambatte `bgtiledata_spx*`
+  kept (they need the BG read just before the previous line's clear).
+- Window zero pixel: a WX match on a window tile's first pixel outputs
+  color 0 and shifts the window right (SameBoy `insert_bg_pixel`, DMG-only
+  there; CGB C capture shows it): `m3_wx_4_change_sprites` passes
+  (a98d26d..4f32363). Earlier `cgb_wx_glitch` guess was wrong (all-FF tiles).
+- Baseline 1205e48: stretch 3,437; every fail signed off. Gate passed at
+  4f32363. Plan M9 triage/fix/sign-off tasks ticked.
+- Left: M8 review lows (plan M9), real-game checklist (human), M9 review.
