@@ -640,6 +640,10 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    `lycint152_lyc0irq_late_retrigger_ds_1` (an edge one dot before the
    boundary, line 0 `t = 4` and `L153_ZERO`, absorbed here but not on
    hardware: likely half-dot edges), `m2enable/late_enable_ly0_ds_1`.
+   **Line 0 and LYC=0 in double speed, done (branch `m9-ds-m2`):** the
+   walk's line-0 mode-2 pulse at `t = 5` (mode-1 end at 4, the mode-1
+   select blocks the pulse) and LYC=0 at 153:13, double speed only
+   (`docs/reference/stat-irq.md`); +4 incl. `offset1_lyc99int_m2irq_count_ds_1`.
 6. **LY read edge re-check** after 1/3 (`ly_count_ds_{2,3}`). Possibly no
    change.
 7. **Access windows:**

@@ -53,7 +53,10 @@
 //!
 //! Line 153 (states 19, 14, 15, 16, 29, 17): LY reads 153 from `t = 2`
 //! and 0 from `t = 6` (`t = 8` in double speed); the comparison is
-//! against 153 at `t = 5..8` and against 0 from `t = 12`.
+//! against 153 at `t = 5..8` and against 0 from `t = 12` (the walk: 13
+//! in double speed, [`edges::l153_zero_walk`]). Double speed, line 0: the
+//! mode-1 source ends at `t = 4` and the mode-2 pulse is at `t = 5`
+//! ([`edges::ly0_pt`]).
 //!
 //! The first line after the LCD is enabled has no OAM scan (GBCTR; SameBoy
 //! "Handle mode 2 on the very first line 0"): mode 0 until position 86,
@@ -182,11 +185,12 @@ pub const WHITE: u16 = 0x7FFF;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Pt {
     /// Lines 0-143, `t = 3`: LY changes, mode-2 source (line 0: the mode-1
-    /// source stays, comparison against 0).
+    /// source stays, comparison against 0; double speed at `t = 4`, where
+    /// the mode-1 source ends unless mode 2 is selected, [`edges::ly0_pt`]).
     Ly3,
     /// Lines 0-143: comparison against LY and the end of the mode-2
-    /// source; line 0 at `t = 4` (with its mode-2 source), lines 1-143 at
-    /// [`edges::CMP_WALK`] (`t = 5`).
+    /// source; line 0 at `t = 4`, double speed 5 (with its mode-2 source,
+    /// [`edges::ly0_pulse`]), lines 1-143 at [`edges::CMP_WALK`] (`t = 5`).
     Ly4,
     /// The pixel pipeline starts: the line's mode-3 length is fixed
     /// ([`LineTiming`]).
@@ -645,7 +649,7 @@ impl Ppu {
         self.lcdc = 0x91;
         self.frame_start = 0u64.wrapping_sub(u64::from(POST_BOOT_POS));
         // LY = 144 against LYC = 0: no coincidence, no source enabled.
-        self.seek();
+        self.seek(false);
     }
 
     #[inline]
@@ -1005,8 +1009,7 @@ impl Ppu {
     /// with `start` the clock of frame position 0. A position past the
     /// frame belongs to the next one. A visible line's `End` is at its
     /// latched end, or at the earliest possible end if not latched yet.
-    fn next_point(&self, after: u32, first: bool, start: u64) -> (u32, Pt) {
-        let cmp = edges::CMP_WALK;
+    fn next_point(&self, after: u32, first: bool, start: u64, double: bool) -> (u32, Pt) {
         let (l, t) = (after / LINE, after % LINE);
         let base = l * LINE;
         if l < LINES {
@@ -1017,14 +1020,14 @@ impl Ppu {
                 edges::PIPE
             };
             if !first_line {
-                if t < edges::PT_LY {
-                    return (base + edges::PT_LY, Pt::Ly3);
-                }
-                let cmp = if l == 0 {
-                    edges::CMP_ON
-                } else {
-                    edges::CMP_WALK
+                // Line 0, double speed: both points a dot later.
+                let (ly, cmp) = match l {
+                    0 => (edges::ly0_pt(double), edges::ly0_pulse(double)),
+                    _ => (edges::PT_LY, edges::CMP_WALK),
                 };
+                if t < ly {
+                    return (base + ly, Pt::Ly3);
+                }
                 if t < cmp {
                     return (base + cmp, Pt::Ly4);
                 }
@@ -1045,27 +1048,17 @@ impl Ppu {
                 (base + LINE + edges::VCMP_OFF, Pt::V0)
             };
         }
-        if l == 144 {
-            return match t {
-                _ if t < edges::QUIRK2 => (base + edges::QUIRK2, Pt::Quirk2),
-                _ if t < cmp => (base + cmp, Pt::V4),
-                _ if t < edges::VBLANK => (VBLANK_POS, Pt::VBlank),
-                _ => (base + LINE + edges::VCMP_OFF, Pt::V0),
-            };
+        // VBlank: walk the line from its first point (`V0`, at or before
+        // `after`), as `step` does.
+        let mut c = Cursor {
+            pos: base + edges::VCMP_OFF,
+            line: l as u8,
+            pt: Pt::V0,
+        };
+        while c.pos <= after {
+            c = self.step_vblank(c, double);
         }
-        if l < 153 {
-            return if t < cmp {
-                (base + cmp, Pt::V4)
-            } else {
-                (base + LINE + edges::VCMP_OFF, Pt::V0)
-            };
-        }
-        match t {
-            _ if t < edges::L153_CMP => (base + edges::L153_CMP, Pt::L153Cmp),
-            _ if t < edges::L153_OFF => (base + edges::L153_OFF, Pt::L153Off),
-            _ if t < edges::L153_ZERO => (base + edges::L153_ZERO, Pt::L153Zero),
-            _ => (FRAME + edges::PT_LY, Pt::Ly3),
-        }
+        (c.pos, c.pt)
     }
 
     /// [`Self::next_point`] while no STAT interrupt source is selected
@@ -1103,22 +1096,35 @@ impl Ppu {
 
     /// The cursor for the current state: the first update point after
     /// `synced` (`< frame_start + FRAME`, as between syncs), by search.
-    fn seek_point(&self) -> Cursor {
+    fn seek_point(&self, double: bool) -> Cursor {
         let pos = self.synced.wrapping_sub(self.frame_start) as u32;
         let (pos, pt) = if self.quiet() {
             self.next_work_point(pos, self.first_frame, self.frame_start)
         } else {
-            self.next_point(pos, self.first_frame, self.frame_start)
+            self.next_point(pos, self.first_frame, self.frame_start, double)
         };
         let line = if pos >= FRAME { 0 } else { (pos / LINE) as u8 };
         Cursor { pos, line, pt }
     }
 
+    /// A speed switch: the walk's line-0 and line-153 points differ per
+    /// speed ([`edges::ly0_pt`], [`edges::l153_zero_walk`]), so the cursor
+    /// is re-sought at the new one (positions already passed keep the
+    /// lazy sync's rule: a point runs with the speed of the sync that
+    /// reaches it).
+    #[cold]
+    pub(crate) fn speed_changed(&mut self, double: bool) {
+        // (While the LCD is off the cursor is meaningless: set on enable.)
+        if self.lcd_enabled() {
+            self.seek(double);
+        }
+    }
+
     /// Re-seeks the cursor after a change to what the walk visits (LCD
     /// enable, reset, the STAT selects becoming empty or not).
     #[cold]
-    fn seek(&mut self) {
-        self.cursor = self.seek_point();
+    fn seek(&mut self, double: bool) {
+        self.cursor = self.seek_point(double);
     }
 
     /// The update point after `c` (which is at or before the next frame's
@@ -1127,17 +1133,21 @@ impl Ppu {
     /// returns for `c.pos`, without dividing. A visible line's `End` is at
     /// its latched end, or at the earliest possible end if not latched yet.
     #[inline]
-    fn step(&self, c: Cursor, quiet: bool, start: u64) -> Cursor {
+    fn step(&self, c: Cursor, quiet: bool, start: u64, double: bool) -> Cursor {
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
-            // Line 0 compares at `t = 4` in both speeds (design step 5).
+            // Relative to `Ly3`, which is a dot later on line 0 in double
+            // speed ([`edges::ly0_pt`]): line 0 compares one dot after it
+            // (`t = 4`, double speed 5; design step 5), lines 1-143 at
+            // `CMP_WALK`.
             Pt::Ly3 => (
-                base + if l == 0 {
-                    edges::CMP_ON
-                } else {
-                    edges::CMP_WALK
-                },
+                c.pos
+                    + if l == 0 {
+                        edges::CMP_ON - edges::PT_LY
+                    } else {
+                        edges::CMP_WALK - edges::PT_LY
+                    },
                 l,
                 Pt::Ly4,
             ),
@@ -1172,17 +1182,51 @@ impl Ppu {
             Pt::VBlank => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
             Pt::L153Cmp => (c.pos + (edges::L153_OFF - edges::L153_CMP), l, Pt::L153Off),
             Pt::L153Off => (
-                c.pos + (edges::L153_ZERO - edges::L153_OFF),
+                c.pos + (edges::l153_zero_walk(double) - edges::L153_OFF),
                 l,
                 Pt::L153Zero,
             ),
-            Pt::L153Zero => (FRAME + edges::PT_LY, 0, Pt::Ly3),
+            // Relative: double speed, a dot later as `L153Zero`.
+            Pt::L153Zero => (
+                c.pos + (FRAME + edges::PT_LY - (153 * LINE + edges::L153_ZERO)),
+                0,
+                Pt::Ly3,
+            ),
         };
         Cursor {
             pos,
             line: line as u8,
             pt,
         }
+    }
+
+    /// [`Self::step`] (not `quiet`) from a point of lines 144-153, for
+    /// [`Self::next_point`] (a re-seek: cold, out of line); `sync` checks
+    /// in debug builds that the two agree (`seek_point`).
+    #[cold]
+    #[inline(never)]
+    fn step_vblank(&self, c: Cursor, double: bool) -> Cursor {
+        let l = u32::from(c.line);
+        let base = l * LINE;
+        let (pos, pt) = match c.pt {
+            Pt::V0 if l == 144 => (base + edges::QUIRK2, Pt::Quirk2),
+            Pt::V0 if l == 153 => (base + edges::L153_CMP, Pt::L153Cmp),
+            Pt::V0 | Pt::Quirk2 => (base + edges::CMP_WALK, Pt::V4),
+            Pt::V4 if l == 144 => (VBLANK_POS, Pt::VBlank),
+            Pt::L153Cmp => (base + edges::L153_OFF, Pt::L153Off),
+            Pt::L153Off => (base + edges::l153_zero_walk(double), Pt::L153Zero),
+            Pt::L153Zero => {
+                return Cursor {
+                    pos: FRAME + edges::ly0_pt(double),
+                    line: 0,
+                    pt: Pt::Ly3,
+                };
+            }
+            // `V4` (lines 145-152) and `VBlank`.
+            _ => (base + LINE + edges::VCMP_OFF, Pt::V0),
+        };
+        let line = if pt == Pt::V0 { c.line + 1 } else { c.line };
+        Cursor { pos, line, pt }
     }
 
     /// No STAT interrupt source is selected.
@@ -1233,8 +1277,15 @@ impl Ppu {
             Pt::L153Cmp => (1, Some(153)),
             Pt::L153Off => (1, if double { Some(153) } else { None }),
             Pt::L153Zero => (1, Some(0)),
-            // `Ly3` on line 0 (`point_irq` handles the others).
-            _ => (1, Some(0)),
+            // `Ly3` on line 0 (`point_irq` handles the others). Double
+            // speed: the mode-1 source ends here, a dot before the mode-2
+            // pulse (`Ly4`), unless mode 2 is selected: then it lasts to
+            // the pulse, which a selected mode 1 so blocks, as in single
+            // speed ([`edges::ly0_pt`]).
+            _ => {
+                let ends = double && self.stat_select & SEL_MODE2 == 0;
+                (if ends { NO_MODE } else { 1 }, Some(0))
+            }
         };
         line.eval(self.stat_select, self.lyc, mode, cmp)
     }
@@ -1255,14 +1306,15 @@ impl Ppu {
                 c.pos -= FRAME;
                 start = start.wrapping_add(u64::from(FRAME));
             }
+            // (`point_irq` is false at `Latch`; skipping the call there
+            // saves ~0.25% Ir on cgb-acid2 but takes this past its
+            // thumbv7em code-size budget.)
             let fires = matches!(c.pt, Pt::End | Pt::VBlank)
-                || (!quiet
-                    && c.pt != Pt::Latch
-                    && self.point_irq(&mut line, c.pt, u32::from(c.line), double));
+                || (!quiet && self.point_irq(&mut line, c.pt, u32::from(c.line), double));
             if fires {
                 return start.wrapping_add(u64::from(c.pos));
             }
-            c = self.step(c, quiet, start);
+            c = self.step(c, quiet, start, double);
         }
     }
 
@@ -1318,7 +1370,7 @@ impl Ppu {
                 _ => {}
             }
             // After the point's work: `Latch` fixes where `End` is.
-            let n = self.step(c, quiet, self.frame_start);
+            let n = self.step(c, quiet, self.frame_start, double);
             self.cursor = n;
         }
         self.synced = now;
@@ -1326,7 +1378,7 @@ impl Ppu {
             // Past line 153, before the next frame's first point.
             self.next_frame();
         }
-        debug_assert_eq!(self.cursor, self.seek_point());
+        debug_assert_eq!(self.cursor, self.seek_point(double));
         events
     }
 
@@ -2465,7 +2517,7 @@ impl Ppu {
         }
         if was_quiet != self.quiet() {
             // The walk visits other points now (synced to `now`).
-            self.seek();
+            self.seek(double);
         }
         if was_quiet {
             // The line was low; its LY=LYC part wasn't tracked. While the
@@ -2509,8 +2561,9 @@ impl Ppu {
         // mode 2 (mode 0 not selected) requests the line-0 mode-2
         // interrupt while the line was low. gambatte (behaviour only,
         // `statChangeTriggersM2IrqCgb`, `ly == 153` branch): `2 < T <= 4`
-        // half-dots, our t = 5 to 5.5, the walk's pulse ([`Pt::Ly4`]) being
-        // at 4; a write at 4 is before gambatte's event at 5. CGB04C
+        // half-dots, our t = 5 to 5.5, after the walk's pulse
+        // ([`Pt::Ly4`], at 5); at 4 the pulse would also take it, unless
+        // mode 1 is selected (kept: no ROM tells). CGB04C
         // `m2enable/late_enable_ly0_ds_{1,lcdoffset1_1}` (t = 5, 4: IRQ),
         // `_ds_2`, `_ds_lcdoffset1_2` (t = 7, 6: none).
         if double
@@ -2640,7 +2693,7 @@ impl Ppu {
             self.first_frame = true;
             self.renderer.start_frame();
             self.line = LineTiming::NONE;
-            self.seek();
+            self.seek(double);
             // SameBoy's first update, one dot after the write: no mode
             // source, LY = 0 against LYC.
             if self
@@ -2843,20 +2896,30 @@ mod tests {
         /// Runs every deadline up to `until`: the clocks at which IF bits
         /// were requested, with the bits.
         fn irqs(&mut self, until: u64) -> Vec<(u64, u8)> {
+            self.irqs_at_speed(until, false)
+        }
+
+        /// [`Self::irqs`] in single or double speed.
+        fn irqs_at_speed(&mut self, until: u64, double: bool) -> Vec<(u64, u8)> {
             let mut out = Vec::new();
             loop {
-                let at = self.ppu.next_event(false);
+                let at = self.ppu.next_event(double);
                 if at > until {
                     break;
                 }
                 self.iflags = 0;
-                self.sync(at);
+                self.sync_at_speed(at, double);
                 if self.iflags != 0 {
                     out.push((at, self.iflags));
                 }
             }
-            self.sync(until);
+            self.sync_at_speed(until, double);
             out
+        }
+
+        fn sync_at_speed(&mut self, now: u64, double: bool) {
+            let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
+            p.sync(now, m, f, &mut self.iflags, double);
         }
 
         fn stat(&self, now: u64) -> u8 {
@@ -3244,6 +3307,58 @@ mod tests {
         assert_eq!(stat, Some(&(l153 + 12, INT_STAT)));
         let stat = r.stat(clock(on, 1, 200));
         assert_eq!(stat & 4, 4);
+    }
+
+    /// Double speed: line 0's mode-2 pulse at `t = 5` (single speed 4),
+    /// blocked by the mode-1 select, whose source ends at `t = 4`; LYC = 0
+    /// matches for the walk from line 153's `t = 13` (single speed 12).
+    /// [`edges::ly0_pt`], [`edges::l153_zero_walk`].
+    #[test]
+    fn double_speed_line_0_points() {
+        let on = 1000;
+        let l0 = clock(on, 1, 0);
+        let l153 = clock(on, 0, 153 * LINE);
+        // The STAT requests of frame 1's line 0 and frame 0's line 153.
+        let stat = |select: u8, lyc: u8, double: bool| {
+            let mut r = Rig::on_at(on, select, lyc);
+            r.ppu.speed_changed(double);
+            r.irqs_at_speed(l153, double);
+            let irqs = r.irqs_at_speed(l0 + 100, double);
+            irqs.iter()
+                .filter(|i| i.1 & INT_STAT != 0)
+                .map(|i| i.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stat(SEL_MODE2, 0xFF, true), [l0 + 5]);
+        assert_eq!(stat(SEL_MODE2, 0xFF, false), [l0 + 4]);
+        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, true), []);
+        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, false), []);
+        assert_eq!(stat(SEL_LYC, 0, true), [l153 + 13]);
+        assert_eq!(stat(SEL_LYC, 0, false), [l153 + 12]);
+        // The mode-1 source ends at `t = 4`: an LYC = 0 match written there
+        // (LYC selected, at the access in double speed) interrupts.
+        let mut r = Rig::on_at(on, SEL_MODE1 | SEL_LYC, 0xFF);
+        r.ppu.speed_changed(true);
+        r.irqs_at_speed(l0 + 4, true);
+        r.iflags = 0;
+        r.ppu.write_lyc(l0 + 4, 0, &mut r.iflags, true);
+        assert_eq!(r.iflags, INT_STAT);
+        // A switch to double speed between line 0's single-speed `Ly3`
+        // and `Ly4` moves the pulse to 5.
+        let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
+        r.irqs(l0 + 3);
+        r.ppu.speed_changed(true);
+        assert_eq!(r.ppu.next_event(true), l0 + 5);
+        // A switch with the LCD off leaves the cursor alone (it is set on
+        // enable; seeking from the stale frame start walked garbage lines,
+        // and hung once the line number wrapped).
+        let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
+        r.sync(l0 + 10);
+        r.ppu.write_lcdc(l0 + 10, 0x11, &mut r.iflags, false);
+        r.sync(l0 + 160 * u64::from(LINE));
+        let before = r.ppu.cursor;
+        r.ppu.speed_changed(true);
+        assert_eq!(r.ppu.cursor, before);
     }
 
     #[test]

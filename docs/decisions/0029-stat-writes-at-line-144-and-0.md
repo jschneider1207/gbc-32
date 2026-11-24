@@ -87,3 +87,19 @@ while its access is before t = 3. Details and ROMs:
 The interrupt a late mode-0 clear can't stop is requested at the write,
 not at the point 1-2 dots later in the same M-cycle (the CPU can't tell).
 +11 ROMs (`gambatte/m0enable`), no regressions, +534 B.
+
+## Amendment (2026-11-23): line 0 and LYC=0 in double speed
+
+The gambatte-over-SameBoy rule extends to the walk's line-0 points in
+double speed: line 0's mode-2 pulse is at t = 5 (gambatte's
+`mode2_irq_line_cycle_ly0`, T = 2), the mode-1 source ends a dot before
+it unless mode 2 is selected (which models `doM2Event`'s block by the
+mode-1 select), and line 153 compares LYC with 0 from t = 13 (gambatte's
+LYC=0 time, line 153 cycle 6). Single speed and the read and write views
+are unchanged. A speed switch re-seeks the walk and moves the PPU
+deadline (`Ppu::speed_changed`). Details and ROMs:
+`docs/reference/stat-irq.md`, "Line 0 and line 153's LYC=0 in double
+speed". +4 ROMs, no regressions. +438 B `.text` (`next_point` walks VBlank
+lines with an out-of-line `step_vblank` to stay within `seek`'s budget;
+`next_event` no longer skips the `point_irq` call at `Latch`, for its
+budget), cgb-acid2 +0.35% Ir, worst-case +0.05%.

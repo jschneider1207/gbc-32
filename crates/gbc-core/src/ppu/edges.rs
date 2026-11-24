@@ -302,3 +302,58 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 /// The write views stay per speed: [`VRAM_FROM_DS`], [`OAM_WRITE_FROM_DS`],
 /// [`LYC_DEFER_UNTIL_DS`] and the STAT phase-1 mode-2 window.
 pub(crate) const CMP_WALK: u32 = t(h(5));
+
+// --- Double speed: line 0's mode-2 pulse and line 153's comparison with 0 ---
+
+/// Line 0: the walk's first point (`Pt::Ly3`, comparison against 0):
+/// [`PT_LY`], double speed a dot later. In single speed the mode-1 source
+/// lasts to the mode-2 pulse (`Pt::Ly4`, [`ly0_pulse`]) and so blocks it
+/// when selected. In double speed the mode-1 source ends at `Ly3`, a dot
+/// before the pulse, unless mode 2 is selected: then it lasts to the pulse
+/// as in single speed, which models the select's block.
+/// gambatte (behaviour only, GPL): line 0's mode-2 interrupt is at line
+/// cycle `mode2_irq_line_cycle_ly0` = 454 (`video.cpp`), two cycles after
+/// every other line's (452, our `t = 3`), so `T = 2`, our `t = 5`, the
+/// dot of the LYC 1-153 interrupt ([`CMP_WALK`]); `mstat_irq.h`
+/// `doM2Event` blocks it by the mode-1 select (`blockedByM1Irq`).
+/// The default double-speed phase (M-cycle boundaries at odd `t`) can't
+/// tell 4 from 5 for a dispatch or IF read; `ds_lcdoffset1` (even `t`)
+/// and the dispatch's IF clear one dot into its last M-cycle can.
+/// CGB04C: `lyc153int_m2irq/lyc153int_m2irq_late_retrigger_ds_1` (the
+/// dispatch clears IF at 0:4, the pulse comes after it: IF = 2; `_ds_2`
+/// clears at 0:6: 0), `window/late_enable_afterVblank_ds_lcdoffset1_2`
+/// (the pulse dispatched 2 dots later), `lcd_offset/offset1_lyc99int_m2irq_count_ds_1`.
+/// The mode-1 end at 4: `lycEnable/lycwirq_trigger_ly00_stat50_ds_lcdoffset1_2`
+/// and `miscmstatirq/lycstatwirq_trigger_ly00_10_50_ds_lcdoffset1_2` (an
+/// LYC=0 match selected at 0:4 with mode 1 selected: interrupt; both fail
+/// with the mode-1 source to 5); the block: `m2enable/m2_late_m1disable_ly0_ds_2`
+/// (mode 1 cleared at 0:5: none; fails without it), `_ds_1` (at 0:3:
+/// interrupt). Single speed stays at 3 and 4: moving it as in double
+/// speed passed `lcd_offset/offset3_lyc99int_m2irq_count_1` but regressed
+/// 4 `m2enable/*ly0*` single-speed rows (their write views at line 0
+/// assume the old points).
+#[inline(always)]
+pub(crate) const fn ly0_pt(double: bool) -> u32 {
+    PT_LY + double as u32
+}
+
+/// Line 0: the mode-2 pulse (`Pt::Ly4`), one dot after [`ly0_pt`]:
+/// [`CMP_ON`], double speed [`CMP_WALK`].
+#[inline(always)]
+pub(crate) const fn ly0_pulse(double: bool) -> u32 {
+    CMP_ON + double as u32
+}
+
+const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
+
+/// Line 153: the walk's comparison against 0 (`Pt::L153Zero`), double
+/// speed one dot after [`L153_ZERO`] (the read and write views keep
+/// [`L153_ZERO`]). gambatte (behaviour only, `lyc_irq.cpp`) schedules the
+/// LYC=0 interrupt at line 153 cycle 6, our `t = 13`, as line 0's mode-2
+/// interrupt ([`ly0_pt`]). CGB04C `ly0/lycint152_lyc0irq_late_retrigger_ds_1`
+/// (the dispatch clears IF at 153:12, the LYC=0 request comes after it;
+/// `_ds_2` clears at 153:14). Single speed keeps 12 (no ROM tells).
+#[inline(always)]
+pub(crate) const fn l153_zero_walk(double: bool) -> u32 {
+    L153_ZERO + double as u32
+}

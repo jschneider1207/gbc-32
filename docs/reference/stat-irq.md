@@ -81,9 +81,59 @@ From gambatte `statChangeTriggersM2IrqCgb` and `statChangeTriggersM0LycOrM1StatI
   CGB04C `m2enable/late_enable_ds_1`.
 - Line 0, double speed: a first phase at t = 4-5 newly selecting mode 2
   (mode 0 not selected) requests the interrupt if the line was low
-  (`ly == 153` branch, `2 < T <= 4` half-dots, t = 5 to 5.5; a write at
-  t = 4 is before gambatte's event, after our walk's pulse). CGB04C
+  (`ly == 153` branch, `2 < T <= 4` half-dots, t = 5 to 5.5; the walk's
+  pulse is at 5 too, before the write, see below). CGB04C
   `m2enable/late_enable_ly0_ds_1`, `_ds_lcdoffset1_1`.
+
+## Line 0 and line 153's LYC=0 in double speed (the walk)
+
+gambatte (behaviour only, `video.cpp`, `lyc_irq.cpp`, `mstat_irq.h`) puts
+line 0's mode-2 interrupt at line cycle `mode2_irq_line_cycle_ly0` = 454,
+two cycles after every other line's 452 (our t = 3): `T = 2`, our line 0
+t = 5. Its LYC=0 interrupt is at line 153 cycle 6, our t = 13. `doM2Event`
+blocks line 0's by the mode-1 select (`blockedByM1Irq`). Our walk, double
+speed only (`edges::ly0_pt`, `ly0_pulse`, `l153_zero_walk`):
+
+| point | single speed | double speed |
+|---|---|---|
+| line 153, comparison against 0 (`L153Zero`) | 12 | 13 |
+| line 0 `Ly3`: comparison against 0; double speed: the mode-1 source ends, unless mode 2 is selected | 3 | 4 |
+| line 0 `Ly4`: the mode-2 pulse; the mode-1 source ends | 4 | 5 |
+
+In single speed the mode-1 source holds the line to the pulse, which so
+never rises with mode 1 selected. In double speed it ends a dot before
+the pulse, except with mode 2 selected: then it lasts to the pulse as in
+single speed, so a selected mode 1 blocks it. That models gambatte's
+block without a selects test in the hot `Ly4` arm (measured: masking the
+selects there cost ~0.4% Ir on cgb-acid2). It differs from gambatte for a
+write at 0:4 with modes 1 and 2 selected: its view ends the mode-1
+source, and the pulse then rises (no ROM). The read and write views are unchanged (LYC=0 from 153:12; line
+0 sees mode 1 to t = 4). The default double-speed phase (M-cycle
+boundaries at odd t) can't tell these from a dot earlier except through
+the dispatch's IF clear, one dot into its last M-cycle; `ds_lcdoffset1`
+(even t) can. CGB04C:
+
+- `lyc153int_m2irq/lyc153int_m2irq_late_retrigger_ds_1` (IF cleared at
+  0:4, the pulse after it: IF = 2), `_ds_2` (cleared at 0:6: 0);
+- `ly0/lycint152_lyc0irq_late_retrigger_ds_1` (IF cleared at 153:12, the
+  LYC=0 request after it), `_ds_2` (153:14);
+- `window/late_enable_afterVblank_ds_lcdoffset1_2` and
+  `lcd_offset/offset1_lyc99int_m2irq_count_ds_1` (the pulse dispatched at
+  0:6, not 0:4);
+- the mode-1 end at 4: `lycEnable/lycwirq_trigger_ly00_stat50_ds_lcdoffset1_2`,
+  `miscmstatirq/lycstatwirq_trigger_ly00_10_50_ds_lcdoffset1_2` (LYC=0
+  matched or selected at 0:4 with mode 1 selected: interrupt; both
+  regressed with the mode-1 source lasting to 5);
+- the select's block: `m2enable/m2_late_m1disable_ly0_ds_2` (mode 1
+  cleared at 0:5, after the pulse: none; regressed without the block),
+  `_ds_1` (0:3: interrupt).
+
+The same split in single speed (`Ly3` at 4, the pulse at 5) passed
+`lcd_offset/offset3_lyc99int_m2irq_count_1` but regressed four
+`m2enable/*ly0*` single-speed rows (`disable_by_m1enable_ly0_1`,
+`late_enable_m1disable_ly0_2`, `late_m1disable_ly0_2`,
+`lyc0_late_m2enable_lycdisable_2`), whose write views at line 0 assume
+the single-speed points; not done.
 
 ## VBlank LYC interrupts and LYC writes (single speed)
 

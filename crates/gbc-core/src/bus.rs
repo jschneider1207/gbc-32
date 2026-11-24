@@ -810,6 +810,17 @@ impl Ctx<'_, '_> {
         self.reschedule();
     }
 
+    /// A speed switch (after `hot.mcycle` changed): the walk's line-0 and
+    /// line-153 points differ per speed (`ppu::edges::ly0_pulse`), so the PPU
+    /// re-seeks its cursor and the deadline moves (to single speed they
+    /// come earlier).
+    #[cold]
+    #[inline(never)]
+    fn ppu_speed_changed(&mut self) {
+        self.sys.ppu.speed_changed(self.hot.mcycle == 2);
+        self.schedule_ppu();
+    }
+
     /// Writes to the PPU registers FF40-FF45 and FF47-FF4B. The PPU is
     /// synced to the write first (ADR 0002): the write lands between the
     /// update points before and after it, and moves the next deadline.
@@ -1396,6 +1407,7 @@ impl Ctx<'_, '_> {
             self.dma_retime(m);
         }
         self.hot.mcycle = m as i32;
+        self.ppu_speed_changed();
         let now = self.clock();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
         // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`
@@ -2771,9 +2783,9 @@ mod tests {
     #[test]
     fn dispatch_acknowledges_ppu_interrupts_half_way_into_its_last_mcycle() {
         // The mode-2 interrupt (STAT bit 5) of line 5 (t = 3) and of the
-        // next frame's line 0 (t = 4): on the CPU's grid (M-cycles from
-        // clock 0 mod 4), the first is at an M-cycle boundary and the
-        // second one clock past it.
+        // next frame's line 0 (t = 4, double speed 5: `edges::ly0_pulse`): on
+        // the CPU's grid (M-cycles from clock 0 mod 4), the first is at an
+        // M-cycle boundary and the second one clock past it.
         let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
         let line0 = line5 + 149 * 456;
         // (M-cycle clocks, edge, last M-cycle start before it, absorbed)
@@ -2781,7 +2793,10 @@ mod tests {
             (4, line5 + 3, 4, false),
             (4, line0 + 4, 1, true),
             (2, line5 + 3, 2, false),
-            (2, line0 + 4, 1, true),
+            // `lyc153int_m2irq/lyc153int_m2irq_late_retrigger_ds_1`: cleared
+            // at 0:4, before the edge; `_ds_2`: at 0:6, after it.
+            (2, line0 + 5, 2, false),
+            (2, line0 + 5, 0, true),
         ] {
             let emu = load(rom(0x8000, 0, 0, 0x80));
             let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
@@ -2791,6 +2806,7 @@ mod tests {
             let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
             ctx.write(0xFF41, 0x20);
             ctx.hot.mcycle = m;
+            ctx.sys.ppu.speed_changed(m == 2);
             while ctx.clock() < start {
                 ctx.idle();
             }
