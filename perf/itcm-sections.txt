@@ -91,15 +91,12 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3ppu6render9cgb_color*                       # render::cgb_color
 # Tier B, plain tile path (plan: first to drop if the firmware build is over budget)
 .text._R*8gbc_core3ppu6render*8Renderer6render*                # Renderer::render
-.text._R*8gbc_core3ppu6render12fill_partialKb0_*               # render::fill_partial::<false>
-.text._R*8gbc_core3ppu6render12partial_tileKb0_*               # render::partial_tile::<false>
 # Tier B, per line (the object and mixed-tile path; next to drop after the
 # plain tile path)
 .text._R*8gbc_core3ppu*3Ppu5latch*                             # Ppu::latch
 .text._R*8gbc_core3ppu*3Ppu10set_stalls*                       # Ppu::set_stalls
 .text._R*8gbc_core3ppu*10LineTiming6finish*                    # LineTiming::finish (from set_stalls)
 .text._R*8gbc_core3ppu6render*8Renderer13fetch_objects*        # Renderer::fetch_objects
-.text._R*8gbc_core3ppu6render12fill_partialKb1_*               # render::fill_partial::<true>
 .text._R*8gbc_core3ppu6render12partial_tileKb1_*               # render::partial_tile::<true>
 #
 # FLASH_OK: warm functions the set calls that stay in flash, behind the

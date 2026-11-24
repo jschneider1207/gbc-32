@@ -1357,10 +1357,8 @@ struct Part<'a> {
 }
 
 /// Part of the tile at map column `col` (from pixel `col & 7` on), mixed
-/// with `obj` with `MIX`: the fetch, then [`fill_partial`]. Out of line: at
-/// most two per span, and inlined (with its tile fetch) it would be copied
-/// twice into every `fill_tiles` instance (code size).
-#[inline(never)]
+/// with `obj` with `MIX`: the fetch, then [`fill_partial`]. At most two per
+/// part of a span.
 fn partial_tile<const MIX: bool>(out: &mut [u16], obj: &[u8], p: &Part, col: u8) {
     let (w, attr) = p.f.row(col);
     fill_partial::<MIX>(out, obj, w << (2 * (col & 7)), attr, p.master, p.colors);
@@ -1369,7 +1367,6 @@ fn partial_tile<const MIX: bool>(out: &mut [u16], obj: &[u8], p: &Part, col: u8)
 /// Part of a tile: the pixels of the decoded row `w` from bits 15-14 on, of
 /// a tile with attributes `attr` (palette; priority with `master`, see
 /// [`prio_mask`]), mixed with `obj` with `MIX`.
-#[inline(never)]
 fn fill_partial<const MIX: bool>(
     out: &mut [u16],
     obj: &[u8],
