@@ -2029,8 +2029,8 @@ mod tests {
                 at = Some((c / 456, c % 456));
             }
             let r = emu.step(&mut fb, &mut []);
-            if r.events.contains(Events::FRAME_READY) && at.is_some() {
-                return (at.unwrap(), fb);
+            if let (true, Some(at)) = (r.events.contains(Events::FRAME_READY), at) {
+                return (at, fb);
             }
             assert!(emu.clock() < 3 * u64::from(FRAME_CLOCKS));
         }
@@ -2078,6 +2078,28 @@ mod tests {
         assert_eq!(across_switch_to_normal(&[(5, a), (7, none)]), (0x10, 0x0F));
         assert_eq!(across_switch_to_normal(&[(6, a), (7, none)]), (0x10, 0x0F));
         assert_eq!(across_switch_to_normal(&[(4, a), (6, none)]), (0, 0x0F));
+    }
+
+    /// The speed-switch halt's skip always makes progress (review A1-08):
+    /// with its end off the M-cycle grid (not reachable through
+    /// `speed_switch`, which keeps it on the grid), it ends at the first
+    /// boundary past it instead of idling zero M-cycles forever.
+    #[test]
+    fn speed_switch_halt_ends_with_its_end_off_the_mcycle_grid() {
+        let emu = with_program(&[], 0x80);
+        let mut fb = frame();
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert!(cpu::Bus::speed_switch(&mut ctx, false, false));
+        let end = ctx.clock() + 0x8000 * 2;
+        ctx.sys.vdma.switch_end += 1;
+        let mut calls = 0;
+        while !ctx.speed_switch_over() {
+            ctx.idle_speed_switch();
+            calls += 1;
+            assert!(calls < 0x10000, "no progress at {}", ctx.clock());
+        }
+        assert_eq!(ctx.clock(), end + 2);
     }
 
     #[test]

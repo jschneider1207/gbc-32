@@ -1716,6 +1716,13 @@ impl Ctx<'_, '_> {
             // a clock against the PPU's, as on hardware (gambatte
             // `lcd_offset` tests, offsets 1 and 3).
             self.sys.vdma.switch_end = now + 0x8000 * m - short as u64;
+            // The halt is whole M-cycles from here (the odd clocks are
+            // idled): `idle_speed_switch` ends exactly on its end.
+            debug_assert!(
+                (self.sys.vdma.switch_end)
+                    .wrapping_sub(self.clock())
+                    .is_multiple_of(m)
+            );
             return true;
         }
         if dma_paused {
@@ -1755,13 +1762,16 @@ impl Ctx<'_, '_> {
     }
 
     /// The halted skip ([`Bus::idle_halted`]), stopping at the halt's
-    /// last M-cycle.
+    /// last M-cycle. Called while the halt isn't over
+    /// ([`Self::speed_switch_over`]); always idles at least one M-cycle,
+    /// so even a halt end off the M-cycle grid (`speed_switch` keeps it
+    /// on the grid, and asserts so) is passed rather than never reached.
     #[inline]
     pub(crate) fn idle_speed_switch(&mut self) {
         let m = self.hot.mcycle as u32;
         // The halt is 0x20000 clocks at most: the difference fits.
         let left = self.sys.vdma.switch_end.wrapping_sub(self.clock()) as u32 / m;
-        let n = self.mcycles_to_deadline().min(left);
+        let n = self.mcycles_to_deadline().min(left).max(1);
         self.hot.budget -= (n * m) as i32;
         if self.hot.budget <= 0 {
             self.boundary();
