@@ -190,7 +190,7 @@ impl Apu {
         self.fs.power = true;
         let ch1 = &mut self.sq[0];
         ch1.on = true;
-        ch1.set_duty(2);
+        ch1.duty = 2;
         ch1.freq = 0x7C1;
         ch1.pos = 6;
         ch1.high = true;

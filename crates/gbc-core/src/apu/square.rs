@@ -29,10 +29,7 @@ pub(crate) struct Square {
     /// The 11-bit frequency (NRx3, NRx4 bits 0-2): the period used at the
     /// next reload.
     pub(crate) freq: u16,
-    /// The duty pattern of NRx1 bits 6-7 (`DUTY`), XOR `DUTY[0]` so that
-    /// the all-zero state is duty 0 (`set_duty`, `pattern`). Kept as the
-    /// pattern, not the code: the steps need no table load (code size;
-    /// `advance` and `integrate` are in ITCM).
+    /// NRx1 bits 6-7: the duty code, an index into `DUTY`.
     pub(crate) duty: u8,
     /// The duty position, 0-7. Only APU power off resets it (Pan Docs).
     pub(crate) pos: u8,
@@ -63,16 +60,10 @@ impl Square {
         env: Envelope::ZERO,
     };
 
-    /// Sets the duty from its code (NRx1 bits 6-7).
-    #[inline]
-    pub(crate) fn set_duty(&mut self, code: u8) {
-        self.duty = DUTY[usize::from(code & 3)] ^ DUTY[0];
-    }
-
     /// The duty pattern as a mask, bit i = position i (`DUTY`).
     #[inline]
     fn pattern(&self) -> u8 {
-        self.duty ^ DUTY[0]
+        DUTY[usize::from(self.duty & 3)]
     }
 
     /// Base clocks per duty step: `(2048 - f) * 4`, 4-8192.
@@ -213,7 +204,7 @@ impl Square {
     pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, delay: u8) {
         match off {
             1 => {
-                self.set_duty(value >> 6);
+                self.duty = value >> 6;
                 self.len.load(LENGTH_MAX, u16::from(value & 0x3F));
             }
             2 => {
