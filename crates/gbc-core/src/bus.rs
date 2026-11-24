@@ -1184,6 +1184,34 @@ impl Ctx<'_, '_> {
         s.iflags = value & INT_MASK | s.iflags & !INT_MASK;
     }
 
+    /// [`Bus::push_acknowledge`] of a push onto IF itself (SP = FF10): the
+    /// vector comes from IF as it was before the write, the write and the
+    /// IF read being the same access (SameBoy `cycle_write_if` returns the
+    /// old IF; gambatte cgb04c `irq_precedence/if_and_ie_0_vector_4`:
+    /// SP = FF11 writes 0x80 to IF and the timer vector still runs). Out
+    /// of line: in the inlined dispatch, the old-IF select cost ~1.5% Ir
+    /// in every bench ROM (codegen of `Cpu::run`, measured).
+    #[cold]
+    #[inline(never)]
+    fn push_acknowledge_if(&mut self, value: u8, ie: u8) -> u8 {
+        let old = self.sys.iflags;
+        self.write_mapped(0xFF0F, value);
+        let pending = ie & old & INT_MASK;
+        let bit = pending.isolate_lowest_one();
+        // The bit is cleared as in `push_acknowledge`.
+        const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
+        if bit & PPU != 0 {
+            let mid = self.clock() + self.hot.mcycle as u64 / 2;
+            if self.sys.sched.deadline(EventKind::Ppu) <= mid {
+                self.run_ppu_to_call(mid);
+            }
+            self.sys.iflags &= !bit;
+        }
+        self.idle();
+        self.sys.iflags &= !(bit & !PPU);
+        pending
+    }
+
     /// FF00-FF7F, by the low 7 address bits.
     fn write_io(&mut self, reg: usize, value: u8) {
         let s = &mut *self.sys;
@@ -1986,15 +2014,11 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
-        // A push onto IF itself (SP = FF10) chooses from IF as it was
-        // before the write: the write and the IF read are the same access
-        // (SameBoy `cycle_write_if`, which returns the old IF; gambatte
-        // cgb04c `irq_precedence/if_and_ie_0_vector_4`: SP = FF11 writes
-        // 0x80 to IF and the timer vector still runs).
-        let old = self.sys.iflags;
+        if addr == 0xFF0F {
+            return self.push_acknowledge_if(value, ie);
+        }
         self.write_mapped(addr, value);
-        let iflags = if addr == 0xFF0F { old } else { self.sys.iflags };
-        let pending = ie & iflags & INT_MASK;
+        let pending = ie & self.sys.iflags & INT_MASK;
         let bit = pending.isolate_lowest_one();
         if bit & PPU != 0 {
             // Only if a PPU edge can fall there (its deadline).
