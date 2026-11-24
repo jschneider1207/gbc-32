@@ -549,8 +549,9 @@ pub(crate) struct Ppu {
     /// no OAM scan.
     first_frame: bool,
     line_irq: IrqLine,
-    /// The next update point after `synced` (meaningless while the LCD is
-    /// off; set on enable).
+    /// The next update point after `synced`. While the LCD is off the
+    /// position is meaningless (set on enable) and the point is never
+    /// `End` ([`Self::write_lcdc`]), so [`Self::drawing`] is false.
     cursor: Cursor,
     /// STAT bit 2 while the LCD is off: kept from when it was turned off
     /// (Mooneye `acceptance/ppu/stat_lyc_onoff`).
@@ -1972,9 +1973,11 @@ impl Ppu {
     /// needs the line latched (`Latch` passed) and a time before its mode-3
     /// end, where `End` is, with no point between the two. So a flush at
     /// the synced clock can skip the line-position arithmetic when this is
-    /// false.
+    /// false. False while the LCD is off: turning it off takes the cursor
+    /// off `End` ([`Self::write_lcdc`]).
     #[inline]
     pub(crate) fn drawing(&self) -> bool {
+        debug_assert!(self.lcd_enabled() || self.cursor.pt != Pt::End);
         matches!(self.cursor.pt, Pt::End)
     }
 
@@ -3004,6 +3007,13 @@ impl Ppu {
             self.blanked = true;
             self.skip_frame = false;
             self.line = LineTiming::NONE;
+            // No line is being drawn any more: off between a line's `Latch`
+            // and `End`, the cursor would stay on `End` and `drawing` true
+            // until the LCD is on again (palette RAM writes were dropped
+            // all that time; Pan Docs: LCD Color Palettes, blocked only
+            // during mode 3; SameBoy `GB_lcd_off` clears
+            // `cgb_palettes_blocked`).
+            self.cursor.pt = Pt::V0;
         }
         self.lcdc = value;
         if !was_on && on {
@@ -4093,6 +4103,32 @@ mod tests {
             }
             assert!(due > 2 * 144 * 160, "{due}");
         }
+    }
+
+    /// Turning the LCD off anywhere on a visible line ends `drawing`, and
+    /// nothing is blocked or in a mode while it is off (review A2-01: off
+    /// between `Latch` and `End` left the cursor on `End`).
+    #[test]
+    fn lcd_off_ends_drawing_and_the_access_blocks() {
+        let on = 1000;
+        let l5 = clock(on, 0, 5 * LINE);
+        let mut was_drawing = 0;
+        for t in 0..u64::from(LINE) {
+            let mut r = Rig::on_at(on, 0, 0xFF);
+            r.sync(l5 + t);
+            was_drawing += u32::from(r.ppu.drawing());
+            r.ppu.write_lcdc(l5 + t, 0x11, &mut r.iflags, false);
+            for now in [l5 + t, l5 + t + 4, l5 + t + 100_000] {
+                r.sync(now);
+                assert!(!r.ppu.drawing(), "off at {t}, at {now}");
+                assert!(r.ppu.mode3_pixel(now).is_none());
+                assert!(!r.ppu.palette_blocked(now, false) && !r.ppu.vram_blocked(now, false));
+                assert!(!r.ppu.oam_blocked(now, false, true));
+                assert_eq!(r.ppu.stat(now, false) & 3, 0);
+                assert_eq!(r.ppu.mode0_start(), None);
+            }
+        }
+        assert!(was_drawing > 160, "{was_drawing}");
     }
 
     /// A WY write after the line's WY == LY check point (`WY_CHECK_AT`)

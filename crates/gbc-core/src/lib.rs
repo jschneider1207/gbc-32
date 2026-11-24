@@ -2160,6 +2160,90 @@ mod tests {
         assert_eq!(emu.peek(0xFF0F) & 0x01, 0x01);
     }
 
+    /// A CGB-mode program that waits for STAT mode `mode`, turns the LCD
+    /// off, then (LCD off) reads STAT, writes BG and OBJ palette RAM, VRAM
+    /// and OAM, reads them back, and turns the LCD on again. Returns what
+    /// it read (STAT, VRAM, OAM, BCPD, OCPD) and the first pixel of the
+    /// third frame after (BG color 0 of palette 0, which it set to 001F).
+    fn lcd_off_in_mode(mode: u8) -> ([u8; 5], u16) {
+        #[rustfmt::skip]
+        let code = [
+            0xF0, 0x41,       // 0150 ldh a,[rSTAT]
+            0xE6, 0x03,       //      and 3
+            0xFE, mode,       //      cp mode
+            0x20, 0xF8,       //      jr nz,0150
+            0xAF,             //      xor a
+            0xE0, 0x40,       //      ldh [rLCDC],a   ; off, >= 40 dots later
+            0xF0, 0x41,       //      ldh a,[rSTAT]
+            0xE6, 0x03,       //      and 3
+            0xE0, 0x80,       //      ldh [FF80],a
+            0x3E, 0x80,       //      ld a,80
+            0xE0, 0x68,       //      ldh [rBCPS],a
+            0xE0, 0x6A,       //      ldh [rOCPS],a
+            0x3E, 0x1F,       //      ld a,1F
+            0xE0, 0x69,       //      ldh [rBCPD],a
+            0xE0, 0x6B,       //      ldh [rOCPD],a
+            0xAF,             //      xor a
+            0xE0, 0x69,       //      ldh [rBCPD],a
+            0xE0, 0x68,       //      ldh [rBCPS],a
+            0xE0, 0x6A,       //      ldh [rOCPS],a
+            0x21, 0x00, 0x80, //      ld hl,8000
+            0x36, 0x5A,       //      ld [hl],5A
+            0x7E,             //      ld a,[hl]
+            0xE0, 0x81,       //      ldh [FF81],a
+            0xAF,             //      xor a
+            0x77,             //      ld [hl],a       ; tile 0 blank again
+            0x21, 0x00, 0xFE, //      ld hl,FE00
+            0x36, 0xA5,       //      ld [hl],A5
+            0x7E,             //      ld a,[hl]
+            0xE0, 0x82,       //      ldh [FF82],a
+            0xF0, 0x69,       //      ldh a,[rBCPD]
+            0xE0, 0x83,       //      ldh [FF83],a
+            0xF0, 0x6B,       //      ldh a,[rOCPD]
+            0xE0, 0x84,       //      ldh [FF84],a
+            0x3E, 0x91,       //      ld a,91
+            0xE0, 0x40,       //      ldh [rLCDC],a
+            0x18, 0xFE,       //      jr @
+        ];
+        // Past the header (`with_program` sets 0143): 0100 jp 0150.
+        let mut program = vec![0u8; 0x50];
+        program[..3].copy_from_slice(&[0xC3, 0x50, 0x01]);
+        program.extend_from_slice(&code);
+        let emu = with_program(&program, 0x80);
+        let mut fb = frame();
+        for _ in 0..6 {
+            let _ = emu.run_frame(&mut fb, &mut []);
+        }
+        assert!(emu.lcd_enabled() && !emu.screen_blank());
+        let read = [0xFF80, 0xFF81, 0xFF82, 0xFF83, 0xFF84].map(|a| emu.peek(a));
+        (read, fb[0])
+    }
+
+    /// With the LCD off, palette RAM, VRAM and OAM are open to the CPU and
+    /// STAT reads mode 0, wherever in the frame it was turned off (Pan
+    /// Docs: LCDC.7, "LCD Color Palettes (CGB only)": blocked only during
+    /// mode 3; SameBoy `GB_lcd_off` clears its blocked flags). Mode 3
+    /// (review A2-01: the palette writes were dropped) against VBlank.
+    #[test]
+    fn lcd_off_in_mode_3_opens_palette_ram_vram_and_oam() {
+        let white = {
+            let emu = with_program(&[0x18, 0xFE], 0x80);
+            let mut fb = frame();
+            let _ = emu.run_frame(&mut fb, &mut []);
+            fb[0]
+        };
+        for mode in [1, 3] {
+            let (read, pixel) = lcd_off_in_mode(mode);
+            assert_eq!(
+                read,
+                [0, 0x5A, 0xA5, 0x1F, 0x1F],
+                "off in mode {mode}: STAT, VRAM, OAM, BCPD, OCPD"
+            );
+            assert_ne!(pixel, white, "off in mode {mode}");
+            assert_eq!(pixel, lcd_off_in_mode(1).1, "off in mode {mode}");
+        }
+    }
+
     #[test]
     fn joypad_interrupt_ends_halt() {
         // LD A,10; LDH (FF),A (IE = joypad); XOR A; LDH (0F),A; LD A,10;
