@@ -10,11 +10,12 @@ use gilrs::{Axis, EventType, GamepadId, Gilrs};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::frame_stats::{self, FrameStats};
 use crate::input::{HeldInput, key_to_button, pad_button_to_button};
 use crate::pacing::Pacing;
 use crate::png;
@@ -48,6 +49,8 @@ struct App<'e, 'a> {
     blank: bool,
     /// Frames still to run before the window closes itself (`--frames`).
     frames_left: Option<u64>,
+    /// `GBC_FRAME_STATS=1`: present/pacing statistics.
+    stats: Option<FrameStats>,
     error: Option<String>,
 }
 
@@ -59,6 +62,9 @@ impl App<'_, '_> {
         let blank = self.emu.screen_blank();
         let changed = blank != self.blank;
         self.blank = blank;
+        if let Some(s) = &mut self.stats {
+            s.emulated(r.events.contains(Events::FRAME_READY));
+        }
         if r.events.contains(Events::FRAME_READY) {
             std::mem::swap(&mut self.draw, &mut self.shown);
         }
@@ -107,7 +113,11 @@ impl App<'_, '_> {
                 w.get() as usize,
                 h.get() as usize,
             );
-            let _ = buf.present();
+            if buf.present().is_ok()
+                && let Some(s) = &mut self.stats
+            {
+                s.presented(Instant::now());
+            }
         }
     }
 }
@@ -146,6 +156,18 @@ impl ApplicationHandler for App<'_, '_> {
                 self.error = Some(e);
                 el.exit();
             }
+        }
+    }
+
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
+        if let (
+            Some(s),
+            StartCause::ResumeTimeReached {
+                requested_resume, ..
+            },
+        ) = (&mut self.stats, cause)
+        {
+            s.woke(requested_resume, Instant::now());
         }
     }
 
@@ -190,6 +212,12 @@ impl ApplicationHandler for App<'_, '_> {
                 *left -= 1;
             }
         }
+        if let Some(s) = &mut self.stats {
+            s.ran(ran);
+            if let Some(line) = s.report(Instant::now()) {
+                eprintln!("{line}");
+            }
+        }
         if self.frames_left == Some(0) {
             el.exit();
             return;
@@ -226,6 +254,7 @@ pub fn run(
         // +1: the first call ends early at the first frame boundary (see
         // `headless::run`), so `frames` complete frames follow it.
         frames_left: frames.map(|f| f + 1),
+        stats: frame_stats::from_env(Instant::now()),
         error: None,
     };
     el.run_app(&mut app)

@@ -78,3 +78,12 @@ no stale samples play and the first frames refill the 50 ms target as at
 start-up. `GBC_NO_AUDIO=1` stays silent with no retries. Verified: the
 policy by unit tests; the open/switch path only by code reading and a
 native Windows smoke run (a device can't be unplugged by an agent).
+
+**2026-11-23: frame statistics.** `GBC_FRAME_STATS=1` (`frame_stats.rs`,
+pure, unit-tested; `None` and one branch per event when unset) prints
+every 4 s: emulated and presented frames per second, completed frames
+replaced before any present ("unpresented"), a histogram of frames run
+per wake-up (0/1/2/3+), the p1/p99/max interval between presents, and
+how late timed wake-ups ran (winit's `ResumeTimeReached`: actual minus
+requested, mean and max). `scripts/run-windows.sh` forwards it (and
+`GBC_AUDIO_STATS`) to the Windows process through `WSLENV`.

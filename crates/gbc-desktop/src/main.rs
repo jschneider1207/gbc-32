@@ -8,6 +8,7 @@ mod args;
 mod audio;
 mod compat_palette;
 mod dsp;
+mod frame_stats;
 mod headless;
 mod input;
 mod pacing;

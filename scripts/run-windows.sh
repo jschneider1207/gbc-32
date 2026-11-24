@@ -10,7 +10,8 @@
 # never next to your ROM), runs it with --frames and --screenshot via WSL
 # interop, copies the PNG back (--out, default target/run-windows/last.png),
 # deletes the scratch dir and exits with the exe's exit code. Set
-# GBC_AUDIO_STATS=1 to see the audio statistics on stderr.
+# GBC_AUDIO_STATS=1 and/or GBC_FRAME_STATS=1 to see audio and frame-pacing
+# statistics on stderr.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,8 +53,8 @@ cp "$exe" "$scratch/gbc-desktop.exe"
 rom_name=$(basename "$rom")
 cp "$rom" "$scratch/$rom_name"
 
-# GBC_AUDIO_STATS reaches the Windows process only if listed in WSLENV.
-export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS"
+# The GBC_*_STATS variables reach the Windows process only via WSLENV.
+export WSLENV="${WSLENV:+$WSLENV:}GBC_AUDIO_STATS:GBC_FRAME_STATS"
 
 set +e
 (cd "$scratch" && ./gbc-desktop.exe "$(wslpath -w "$scratch/$rom_name")" \
