@@ -76,7 +76,9 @@ use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
 pub(crate) use render::ObjBuf;
-use render::{Colors, Held, Regs, Renderer, Sources, pair_table, set_pair_color};
+use render::{
+    Colors, Held, Mixed, Planes, Regs, Renderer, SetLatch, Sources, pair_table, set_pair_color,
+};
 
 pub(crate) mod edges;
 mod objects;
@@ -1651,7 +1653,7 @@ impl Ppu {
     /// (SameBoy `advance_fetcher_state_machine`, MIT; Pan Docs: Pixel FIFO;
     /// Mealybug: SCY "read during the B, 0 and 1 stages", TILE_SEL "during
     /// the 0 and 1 stages"). A tile caught between them keeps its map entry
-    /// and the planes read before the write (`Held::planes`: the others
+    /// and the planes read before the write (`Held::mixed`: the others
     /// with the new values). When pixel `x` is the next out, the tile it
     /// belongs to is in the FIFO, and the next one is fetched from the dot
     /// the first pixel of that tile is output (its map entry is read
@@ -1764,20 +1766,20 @@ impl Ppu {
             self.tile_sel_latch(mem, tile, phase, win_hit);
         }
         // Tile j + 1 (from `tile + 8`): fetched with the old values, its
-        // map entry only (`planes`: the planes still to read), or not yet.
+        // map entry only (`mixed`: the planes still to read), or not yet.
         // An LCDC.4 change reaches the data steps one dot early
         // (`LCDC_TILES_LATE`), and on a plane's read dot (the dot before)
         // glitches that plane (CGB C; Mealybug TILE_SEL notes): a clear
         // reads the tile index, a set the latch, the last byte read with
         // 8000-8FFF addressing (`Renderer::tile_sel_glitch`). For a set,
-        // bits 4-7 give the slot + 1 of the last object fetched before tile
-        // j + 1's reads, else 15 with an object stall in tile j or j + 1,
+        // `set_latch` names the last object fetched before tile j + 1's
+        // reads, else that there is an object stall in tile j or j + 1,
         // before or after the write (in tile 0: also one among the junk
-        // pixels), else 0. An empty object high plane as the latch is what
+        // pixels), else neither. An empty object high plane as the latch is what
         // the old calibration (a set "on time" next to an object stall)
         // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7. With the
         // latch unknown (`Renderer::sel`: BG reads with 8000 addressing
-        // to an earlier line's end), 15 and 0 keep that calibration's
+        // to an earlier line's end), the last two keep that calibration's
         // plane (old, else new); the lines it was fitted to (Mealybug
         // `m3_lcdc_tile_sel_change` X = 16-17, `_win_change` X = 8-17,
         // gambatte `bgtiledata_spx*`) now take the latch an earlier line
@@ -1786,31 +1788,42 @@ impl Ppu {
         // glitching the next dot's data read (`tile_sel_glitch`), which the
         // early clear stands for here; it has no set glitch in single speed.
         // Only SCY and LCDC.4 reach the data steps: other writes leave
-        // `planes` 0 (no redraw, `Renderer::mix_planes`).
+        // `mixed` none (no redraw, `Renderer::mix_planes`).
         let late = i32::from(reg == 0x40) * LCDC_TILES_LATE;
-        let (mut end, mut planes) = if phase >= FETCH_HIGH + late || !data || win_hit {
+        let (mut end, mut mixed) = if phase >= FETCH_HIGH + late || !data || win_hit {
             (
                 tile + 16 - 8 * i32::from(phase < FETCH_SAMPLED && !win_hit),
-                0,
+                Mixed::NONE,
             )
         } else if phase >= FETCH_SAMPLED {
-            let mut p = if phase >= FETCH_LOW + late { 2 } else { 3 };
-            if reg == 0x40 {
+            // The planes still to read: the high one, or both.
+            let unread = if phase >= FETCH_LOW + late {
+                Planes::HIGH
+            } else {
+                Planes::BOTH
+            };
+            let m = if reg == 0x40 {
                 // CGB TILE_SEL glitch: an LCDC.4 change on a plane's read
-                // dot replaces that plane's data (bits 2-3, `Held::planes`;
-                // bits 4-7 for a set's latch, `Renderer::mix_planes`).
-                let g = u8::from(phase == FETCH_LOW + late - 1)
-                    | u8::from(phase == FETCH_HIGH + late - 1) << 1;
-                let o = if last != NO_STALL {
-                    last + 1
+                // dot replaces that plane's data (`Mixed::glitched`, and
+                // `set_latch` for a set's latch, `Renderer::mix_planes`).
+                let glitched = Planes::new(
+                    phase == FETCH_LOW + late - 1,
+                    phase == FETCH_HIGH + late - 1,
+                );
+                let set_latch = if last != NO_STALL {
+                    SetLatch::Object(last)
+                } else if obj_hit {
+                    SetLatch::NearObject
                 } else {
-                    u8::from(obj_hit) * 15
+                    SetLatch::Plain
                 };
-                p = (p & !g) | g << 2 | o << 4;
-            }
-            (tile + 16, p)
+                Mixed::new(unread.without(glitched), glitched, set_latch)
+            } else {
+                Mixed::new(unread, Planes::NONE, SetLatch::Plain)
+            };
+            (tile + 16, m)
         } else {
-            (tile + 8, 0)
+            (tile + 8, Mixed::NONE)
         };
         // The window's first tile is fetched after it starts (from WX).
         if let Some(wx) = wx.filter(|_| !active) {
@@ -1819,7 +1832,7 @@ impl Ppu {
                 // Tile j + 1 cut by the window start: its planes as of
                 // its map entry (approximation).
                 end = s;
-                planes = 0;
+                mixed = Mixed::NONE;
             }
         }
         if end <= x {
@@ -1830,7 +1843,7 @@ impl Ppu {
             lcdc: self.lcdc,
             scx: mem.io[0x43],
             scy: mem.io[0x42],
-            planes,
+            mixed,
         };
         self.renderer.push_hold(seg, x);
         true

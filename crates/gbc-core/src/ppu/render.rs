@@ -155,21 +155,178 @@ impl ObjBuf {
     };
 }
 
-/// One held part of a line ([`Renderer::hold`]).
+/// A set of a tile's two bit planes: bit 0 the low plane, bit 1 the high.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Planes(u8);
+
+impl Planes {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const HIGH: Self = Self(2);
+    pub(crate) const BOTH: Self = Self(3);
+
+    pub(crate) const fn new(low: bool, high: bool) -> Self {
+        Self(low as u8 | (high as u8) << 1)
+    }
+
+    /// These planes less `other`'s.
+    pub(crate) const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// The bits of these planes in a decoded row ([`decode`]: the low
+    /// plane in the even bits).
+    const fn row_mask(self) -> u16 {
+        ((self.0 & 1) as u16 * 0x5555) | ((self.0 >> 1) as u16 * 0xAAAA)
+    }
+}
+
+/// For a plane glitched by an LCDC.4 set ([`Mixed::glitched`]): what the
+/// line's objects say about the TILE_SEL latch at that read
+/// (`Ppu::hold_fetch`, [`Renderer::tile_sel_glitch`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetLatch {
+    /// No object stall near the tile: with the latch unknown, the row as
+    /// read after the set.
+    #[default]
+    Plain,
+    /// An object stall in tile j or j + 1, before or after the write (in
+    /// tile 0: also one among the junk pixels), none of them known to be
+    /// fetched before the tile's reads: with the latch unknown, the row
+    /// as read before the set.
+    NearObject,
+    /// The object in this slot was the last fetched before the tile's
+    /// reads: its high plane is the latch, unless the latch was read
+    /// after its fetch.
+    Object(u8),
+}
+
+/// The bit planes of a held part's last tile (`[end - 8, end)`) that the
+/// fetcher read after the write ([`Held::mixed`]); its map entry was read
+/// before (`docs/design/mid-line-ppu.md` step 3):
+/// - [`Self::late`]: read after the write, with the next part's LCDC.4
+///   and SCY;
+/// - [`Self::glitched`]: read on an LCDC.4 change's dot (CGB TILE_SEL
+///   glitch): a clear gives the tile index as their data, a set the latch
+///   ([`Renderer::tile_sel_glitch`]). Not in `late`;
+/// - [`Self::set_latch`]: for a set's glitched plane.
+///
+/// One byte (bits 0-1 `late`, 2-3 `glitched`, 4-7 `set_latch` as slot + 1,
+/// 15 or 0), built and read only through the functions here. Packed so a
+/// [`Held`] is 5 bytes: every SCX, SCY or LCDC write in mode 3 builds one
+/// and shuffles the three held parts, and with a field per part that
+/// measured 21 x86 Ir more per write (+0.11% on `synth:cgb-raster`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Mixed(u8);
+
+impl Mixed {
+    /// Both planes as the map entry's fetch read them: no redraw.
+    pub(crate) const NONE: Self = Self(0);
+
+    const NEAR_OBJECT: u8 = 15;
+
+    pub(crate) const fn new(late: Planes, glitched: Planes, set_latch: SetLatch) -> Self {
+        let latch = match set_latch {
+            SetLatch::Plain => 0,
+            SetLatch::NearObject => Self::NEAR_OBJECT,
+            // Slots are 0-9.
+            SetLatch::Object(slot) => (slot & 0xF) + 1,
+        };
+        Self(late.0 | glitched.0 << 2 | latch << 4)
+    }
+
+    pub(crate) const fn late(self) -> Planes {
+        Planes(self.0 & 3)
+    }
+
+    pub(crate) const fn glitched(self) -> Planes {
+        Planes(self.0 >> 2 & 3)
+    }
+
+    pub(crate) const fn set_latch(self) -> SetLatch {
+        match self.0 >> 4 {
+            0 => SetLatch::Plain,
+            Self::NEAR_OBJECT => SetLatch::NearObject,
+            n => SetLatch::Object(n - 1),
+        }
+    }
+
+    /// No plane was read after the write.
+    pub(crate) const fn is_none(self) -> bool {
+        self.0 & 0xF == 0
+    }
+}
+
+/// One held part of a line ([`Renderer::push_hold`]): the pixels before
+/// `end` are drawn with the LCDC, SCX and SCY the fetcher read for them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Held {
     pub(crate) end: u8,
     pub(crate) lcdc: u8,
     pub(crate) scx: u8,
     pub(crate) scy: u8,
-    /// The bit planes of the part's last tile (`[end - 8, end)`) that the
-    /// fetcher read after the write, with the next part's LCDC.4 and SCY:
-    /// bit 0 the low plane, bit 1 the high plane (its map entry was read
-    /// before; `docs/design/mid-line-ppu.md` step 3). Bits 2 (low) and 3
-    /// (high): planes read on an LCDC.4 change's dot (CGB TILE_SEL glitch:
-    /// a clear gives the tile index as their data, a set the latch); bits
-    /// 4-7 for a set's latch (`Ppu::hold_fetch`).
-    pub(crate) planes: u8,
+    /// The planes of the part's last tile read after the write
+    /// ([`Renderer::mix_planes`] redraws them).
+    pub(crate) mixed: Mixed,
+}
+
+impl Held {
+    const NONE: Self = Self {
+        end: 0,
+        lcdc: 0,
+        scx: 0,
+        scy: 0,
+        mixed: Mixed::NONE,
+    };
+}
+
+/// When the byte in the CGB TILE_SEL glitch latch was read, relative to
+/// the object fetches of the current line ([`SelLatch`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SelRead {
+    /// Not known (power-on): any object fetch replaces it.
+    #[default]
+    Unknown,
+    /// Before the fetches of the objects with OAM X + 8 >= this (those
+    /// replace it) and after the others': the BG or window read of the
+    /// tile at screen x this - 8 on this line, the last with 8000
+    /// addressing before an LCDC.4 clear. 1: before all of this line's
+    /// objects (a read on an earlier line, or left of the screen).
+    Before(u8),
+    /// BG reads with 8000 addressing since: not known, and after every
+    /// object of the line.
+    BgSince,
+}
+
+/// The CGB TILE_SEL glitch latch as far as modelled: the last byte the PPU
+/// read with 8000-8FFF addressing, which a plane read on an LCDC.4 set's
+/// dot takes as its data ([`Renderer::tile_sel_glitch`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelLatch {
+    byte: u8,
+    read: SelRead,
+}
+
+impl SelLatch {
+    const UNKNOWN: Self = Self {
+        byte: 0,
+        read: SelRead::Unknown,
+    };
+
+    /// `byte` is what the latch holds.
+    const fn known(self) -> bool {
+        matches!(self.read, SelRead::Before(_))
+    }
+
+    /// The object at OAM X `x` of the current line was fetched after the
+    /// latched read (or the read is not known and its fetch stands in):
+    /// its high plane replaces the latch.
+    const fn before_object(self, x: u8) -> bool {
+        match self.read {
+            SelRead::Unknown => true,
+            SelRead::Before(key) => x as u16 + 8 >= key as u16,
+            SelRead::BgSince => false,
+        }
+    }
 }
 
 /// The PPU registers the renderer reads, as of the span being drawn.
@@ -338,19 +495,13 @@ pub(crate) struct Renderer {
     /// whose planes were read after a write keeps the next part's values
     /// even when a later write lands before its end.
     hold: [Held; 3],
-    /// CGB TILE_SEL glitch latch (the last byte the PPU read with
-    /// 8000-8FFF addressing) as far as modelled, as (byte, key)
-    /// (`Ppu::tile_sel_latch`, [`Renderer::carry_sel`]): key 8-175, the BG
-    /// or window read of the tile at screen x key - 8 on this line, the
-    /// last with 8000 addressing before an LCDC.4 clear (objects from that
-    /// x on were fetched after it); 1, a read on an earlier line (before
-    /// this line's objects); 0, unknown; 0xFF, BG reads with 8000
-    /// addressing since (unknown, after every object). Kept across lines.
-    sel: (u8, u8),
+    /// The CGB TILE_SEL glitch latch now (`Ppu::tile_sel_latch`,
+    /// [`Renderer::carry_sel`]). Kept across lines.
+    sel: SelLatch,
     /// `sel` as of the last LCDC.4 set in mode 3, for that set's glitched
     /// read ([`Renderer::tile_sel_glitch`]; a later clear changes `sel`
     /// before the tile is drawn).
-    sel_at_set: (u8, u8),
+    sel_at_set: SelLatch,
     /// Screen x + 1 of the window zero pixel due on the current line
     /// ([`Renderer::render_zero`]), 0: none.
     win_zero: u8,
@@ -374,15 +525,9 @@ impl Renderer {
             slow: 0,
             obj_fetched: false,
             next_obj: 0,
-            hold: [Held {
-                end: 0,
-                lcdc: 0,
-                scx: 0,
-                scy: 0,
-                planes: 0,
-            }; 3],
-            sel: (0, 0),
-            sel_at_set: (0, 0),
+            hold: [Held::NONE; 3],
+            sel: SelLatch::UNKNOWN,
+            sel_at_set: SelLatch::UNKNOWN,
             win_zero: 0,
             cgb: false,
         }
@@ -650,9 +795,9 @@ impl Renderer {
             let to = end.min(x1);
             self.render(row, x0, to, &held, src, obj);
             let from = x0.max(end.saturating_sub(8));
-            if h.planes != 0 && from < to {
+            if !h.mixed.is_none() && from < to {
                 let next = hold.get(i + 1).map_or(*regs, regs_of);
-                self.mix_planes(row, &obj.pix, from, to, &held, &next, h.planes, src);
+                self.mix_planes(row, &obj.pix, from, to, &held, &next, h.mixed, src);
             }
             x0 = to;
         }
@@ -723,8 +868,9 @@ impl Renderer {
     }
 
     /// Redraws pixels `[x0, x1)` of one BG or window tile, just drawn with
-    /// `held`, with the bit planes in `planes` (bit 0 low, bit 1 high) read
-    /// with `next`'s LCDC.4 and SCY instead: the fetcher read the map entry
+    /// `held`, with the bit planes `mixed.late()` read with `next`'s LCDC.4
+    /// and SCY instead (and `mixed.glitched()` as the TILE_SEL glitch gives
+    /// them): the fetcher read the map entry
     /// and the other planes before a write and these after it (CGB C;
     /// Mealybug "mixing tile bitplane data from different rows" and "from
     /// two different tile patterns"). The window row ignores SCY.
@@ -739,7 +885,7 @@ impl Renderer {
         x1: usize,
         held: &Regs,
         next: &Regs,
-        planes: u8,
+        mixed: Mixed,
         src: &Sources,
     ) {
         let lcdc = held.lcdc;
@@ -779,13 +925,11 @@ impl Renderer {
         };
         let (old, attr) = fetch(y, lcdc);
         let (new, _) = fetch(y_next, next.lcdc);
-        // Decoded rows: the low plane in the even bits ([`decode`]).
-        let mask = |p: u8| (u16::from(p & 1) * 0x5555) | (u16::from(p >> 1 & 1) * 0xAAAA);
-        let (m, g) = (mask(planes), mask(planes >> 2));
+        let (m, g) = (mixed.late().row_mask(), mixed.glitched().row_mask());
         let glitch = if g != 0 {
             let index =
                 src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
-            self.tile_sel_glitch(src, lcdc, planes, index, attr, old, new)
+            self.tile_sel_glitch(src, lcdc, mixed.set_latch(), index, attr, old, new)
         } else {
             0
         };
@@ -802,7 +946,7 @@ impl Renderer {
     }
 
     /// For [`Renderer::mix_planes`]: the decoded row (as [`decode`]) whose
-    /// glitched plane (`planes` bits 2-3, one) the fetcher took for the
+    /// glitched plane (`Mixed::glitched`, one) the fetcher took for the
     /// tile at screen x `tile_x` with tile index `index`, attributes
     /// `attr` and row `y`, read across an LCDC.4 change on that plane's
     /// read dot (CGB TILE_SEL glitch; Mealybug TILE_SEL notes, SameBoy
@@ -814,10 +958,10 @@ impl Renderer {
     /// - a set: the latch, the last byte read with 8000-8FFF addressing
     ///   (Mealybug: "bitplane 1 data from the most recently drawn sprite
     ///   ... or tile"): the high plane of the last object fetched before
-    ///   this tile's reads (slot + 1 in `planes` bits 4-7) unless the
+    ///   this tile's reads (`set_latch`, [`SetLatch::Object`]) unless the
     ///   latch as of the set (`sel_at_set`) was read after it. With
-    ///   neither known (key 0 or 0xFF), the row as `old` (bits 4-7 = 15:
-    ///   an object stall in tile j or j + 1, `Ppu::hold_fetch`) or `new`,
+    ///   neither known, the row as `old` (an object stall in tile j or
+    ///   j + 1, `Ppu::hold_fetch`) or `new` ([`SetLatch::Plain`]),
     ///   which the earlier `LCDC_TILES_LATE` calibration fitted.
     #[cold]
     #[inline(never)]
@@ -826,26 +970,29 @@ impl Renderer {
         &self,
         src: &Sources,
         lcdc: u8,
-        planes: u8,
+        set_latch: SetLatch,
         index: u8,
         attr: u8,
         old: u16,
         new: u16,
     ) -> u16 {
-        let (byte, key) = self.sel_at_set;
+        let latch = self.sel_at_set;
         let data = if lcdc & LCDC_TILES_8000 != 0 {
             if index >= 0x80 {
                 return old;
             }
             index
         } else {
-            let s = usize::from(planes >> 4).wrapping_sub(1);
-            if s < MAX_PER_LINE && u16::from(self.objects.get(s).2) + 8 >= u16::from(key) {
-                src.vram[self.obj_high_addr(src.oam, src.attrs, s, self.ly, lcdc)]
-            } else if key.wrapping_sub(1) < 0xFE {
-                byte
-            } else {
-                return if planes >> 4 == 0 { new } else { old };
+            let object = match set_latch {
+                SetLatch::Object(s) => Some(usize::from(s)),
+                _ => None,
+            }
+            .filter(|&s| s < MAX_PER_LINE && latch.before_object(self.objects.get(s).2));
+            match object {
+                Some(s) => src.vram[self.obj_high_addr(src.oam, src.attrs, s, self.ly, lcdc)],
+                None if latch.known() => latch.byte,
+                None if set_latch == SetLatch::Plain => return new,
+                None => return old,
             }
         };
         SPREAD[usize::from(attr & BG_ATTR_X_FLIP != 0)][usize::from(data)] * 3
@@ -888,11 +1035,13 @@ impl Renderer {
     /// start of a line, LCDC `lcdc`, before the renderer leaves the line
     /// that ended: the high plane of that line's last object fetch (OAM as
     /// it is now, `Renderer::obj_high_addr`) if it came after the latched
-    /// read; a read on that line becomes one on an earlier line (key 1);
-    /// BG reads with 8000 addressing to its end (0xFF) unknown (not
+    /// read; a read on that line becomes one on an earlier line
+    /// (`SelRead::Before(1)`);
+    /// BG reads with 8000 addressing to its end ([`SelRead::BgSince`])
+    /// unknown (not
     /// modelled: SameBoy keeps the last high-plane read, Mealybug "the read
     /// in progress during pixel 159/160"). With LCDC.4 set, the new line's
-    /// BG reads use 8000 addressing from its start (0xFF). The hardware
+    /// BG reads use 8000 addressing from its start (`BgSince`). The hardware
     /// latch persists across lines: Mealybug `m3_lcdc_tile_sel_change`
     /// line 128 (line 127's clear), 129-135 (line 128's object),
     /// `m3_lcdc_tile_sel_win_change` line 64 (line 63's BG read before the
@@ -902,18 +1051,21 @@ impl Renderer {
     #[inline(never)]
     pub(crate) fn carry_sel(&mut self, oam: &[u8; 0xA0], vram: &[u8; 0x4000], lcdc: u8) {
         let mut latch = self.sel;
-        let mut key = u8::from(latch.1.wrapping_sub(1) < 0xFE);
-        if let Some(s) = self.last_fetched()
-            && u16::from(self.objects.get(s).2) + 8 >= u16::from(latch.1)
-        {
-            latch.0 = vram[self.obj_high_addr(oam, None, s, self.ly, lcdc)];
-            key = 1;
-        }
-        latch.1 = if lcdc & LCDC_TILES_8000 != 0 {
-            0xFF
+        // On an earlier line from here on.
+        if latch.known() {
+            latch.read = SelRead::Before(1);
         } else {
-            key
-        };
+            latch.read = SelRead::Unknown;
+        }
+        if let Some(s) = self.last_fetched()
+            && self.sel.before_object(self.objects.get(s).2)
+        {
+            latch.byte = vram[self.obj_high_addr(oam, None, s, self.ly, lcdc)];
+            latch.read = SelRead::Before(1);
+        }
+        if lcdc & LCDC_TILES_8000 != 0 {
+            latch.read = SelRead::BgSince;
+        }
         self.sel = latch;
     }
 
@@ -922,7 +1074,7 @@ impl Renderer {
     /// LCDC.4 stays set (most lines: one test, no call).
     #[inline]
     pub(crate) const fn sel_carries(&self, lcdc: u8) -> bool {
-        self.sel.1 != 0xFF || lcdc & LCDC_TILES_8000 == 0
+        !matches!(self.sel.read, SelRead::BgSince) || lcdc & LCDC_TILES_8000 == 0
     }
 
     /// An LCDC.4 set in mode 3 ([`Renderer::tile_sel_glitch`] reads the
@@ -930,14 +1082,17 @@ impl Renderer {
     /// 8000 addressing replace the latch (unknown).
     pub(crate) const fn sel_set(&mut self) {
         self.sel_at_set = self.sel;
-        self.sel.1 = 0xFF;
+        self.sel.read = SelRead::BgSince;
     }
 
     /// An LCDC.4 clear in mode 3: the latch holds `byte`, the BG or window
     /// read of the tile at screen x `x` (its first pixel; may be left of
     /// the screen), the last with 8000 addressing.
     pub(crate) fn sel_clear(&mut self, byte: u8, x: i32) {
-        self.sel = (byte, (x + 8).max(1) as u8);
+        self.sel = SelLatch {
+            byte,
+            read: SelRead::Before((x + 8).clamp(1, 254) as u8),
+        };
     }
 
     /// The line has a held part still to draw ([`Renderer::render_held`]).
@@ -954,7 +1109,8 @@ impl Renderer {
         let last = hold[2];
         if i32::from(last.end) <= x {
             *hold = [Held::default(), Held::default(), seg];
-        } else if seg.end > last.end || (seg.end == last.end && last.planes != 0 && seg.planes == 0)
+        } else if seg.end > last.end
+            || (seg.end == last.end && !last.mixed.is_none() && seg.mixed.is_none())
         {
             // Same end: the held tile's planes read after the earlier
             // write were read with the values before this one, which the
@@ -969,7 +1125,7 @@ impl Renderer {
         for h in &mut self.hold {
             if h.end > start {
                 h.end = start;
-                h.planes = 0;
+                h.mixed = Mixed::NONE;
             }
         }
     }
@@ -2115,7 +2271,7 @@ mod tests {
             lcdc: s.regs.lcdc,
             scx: 3,
             scy: 0,
-            planes: 0,
+            mixed: Mixed::NONE,
         };
         s.span(&mut row, 0, W);
         run(&row, 0, 1, 101);
