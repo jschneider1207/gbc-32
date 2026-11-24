@@ -375,7 +375,12 @@ bit 1. `Ppu::sync(now)` commits the points up to `now`; `Ppu::next_event`
 walks ahead without committing to the first point that requests an
 interrupt, completes the frame (VBlank, `FRAME_READY`) or ends a visible
 line's mode 3, which is the `EventKind::Ppu` deadline. With no STAT source
-selected the walk skips to `Latch`/`End`/`VBlank` only.
+selected the walk skips to `Latch`/`End`/`VBlank` only: the two walks are
+separate code (`step_work`; `step` + `point_irq`), each compiled into the
+sync (`run_points::<QUIET>`) and the look-ahead, chosen once per call.
+`Ppu::sync` and `walk_to` inline only the test for "no point to run"
+(most register and palette writes); the deadline's own sync
+(`Ppu::sync_due`) skips it.
 
 IF (`Sys::iflags`) holds bits 0-4 and nothing else, so the CPU's
 interrupt checks are `IE & IF` with no mask. A request that reaches IF at

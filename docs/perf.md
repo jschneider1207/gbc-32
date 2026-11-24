@@ -352,6 +352,52 @@ deadline skipped the evaluation at the points before it. worst-case
 more bytes of `Hw`. `#[inline(always)]` on `point_irq`: -0.1 M for +800 B
 of `next_event`; not done.
 
+2026-11-24, with the per-function byte caps gone (review F: L3, L4, L8,
+L13, L14; B11, B13). Ir against main 66cfb53, measured the same day;
+total `.text` 109,330 -> 111,680 B (+2,350):
+
+| step | cgb-acid2 | worst-case | cgb-raster | cpu_instrs | halt-irq | `.text` |
+|---|---|---|---|---|---|---|
+| one `point_irq`, inlined into the walk; the look-ahead skips `Latch` and calls it | -2.03% | -0.33% | +0.41% | -0.03% | -0.09% | +1,116 |
+| `walk_to`'s "no point to run" test inline; the deadline's sync without it, inlined into `sync_ppu` | -0.59% | -0.13% | -4.62% | -0.13% | -0.39% | +276 |
+| the walk without a STAT source as its own walk (`step_work`) | -0.22% | -0.03% | -0.19% | -0.23% | -0.70% | +1,058 |
+| the seek uses `step` (no `step_vblank`) | 0 | 0 | 0 | 0 | 0 | -58 |
+| `vdma_arm`'s "armed for this line" test inline, not `#[cold]` | 0 | -0.22% | 0 | 0 | 0 | +116 |
+| LCDC writes test LCDC.5 before `wy_write` | -0.02% | 0 | 0 | 0 | 0 | +8 |
+| OAM accesses and `on_line` without a panic path | +0.01% | 0 | +0.01% | +0.02% | +0.06% | -166 |
+| all (vs main) | -2.83% | -0.71% | -4.40% | -0.38% | -1.12% | +2,350 |
+
+(Each row against the row before; the others of the nine: cgb_sound
+-0.56%, apu-writes -0.78%, event-storm -0.31%, dma-storm -0.30% in all.)
+
+To check the ITCM report after these: `walk_to` is `run_points::<false>`
+(2,058 B) and `run_points::<true>` (578 B) now, and `point_irq` is
+`point_irq_ahead` (1,054 B).
+
+Tried and not kept:
+- `point_irq` inlined into the look-ahead too: LLVM hoists every arm's
+  select and LYC tests in front of the loop (about 70 instructions per
+  `next_event`, whatever it visits). cgb-acid2 -1.90% instead of -2.03%,
+  and with no source selected cpu_instrs +0.21%, halt-irq +0.61%; with the
+  two walks separate it is cgb-acid2 +1.1% against the call.
+- One function per update point that both applies the STAT part and
+  returns the next point (`step` and `point_irq` fused, one `match`):
+  cgb-acid2 +2.2%, worst-case +0.5% against main (the `(bool, Cursor)`
+  result goes through memory; the look-ahead's call got dearer).
+- `cpu_blocked` inlined into the VRAM, OAM and palette checks (L13):
+  +470 B for cgb-acid2 -0.06%, and cgb-raster +2.45% (`palette_blocked`'s
+  fast path carries the larger frame). The nine benches hardly access
+  VRAM or OAM from the CPU (at most 0.12% of cgb-acid2), so they can't
+  show a gain there; a VRAM-heavy bench would be needed to decide.
+- A clamp in `LineObjects::len` to drop the bounds checks in `set_stalls`
+  and `Renderer::last_fetched`: cgb-acid2 -0.25%, worst-case -0.14%, but
+  halt-irq +0.21%, apu-writes +0.15%, cgb_sound +0.11%.
+
+Still there (B11): the look-ahead re-walks the points the sync then
+runs (about 100 Ir per `next_event` with a STAT source selected, one
+call per sync), and every PPU register write recomputes it although
+only STAT, LYC, LCDC and a moved mode-3 end can change it.
+
 Remaining worst-case cost per visible line (callgrind, 2 s): two PPU
 events one dot apart (the `End` draw, then the HBlank STAT edge), each a
 scheduler dispatch + `sync_ppu` + `sync` + `next_event` (sync 5.5 M,
@@ -717,8 +763,7 @@ set calls: `__aeabi_memcpy*`, `__aeabi_memclr*`, plus linker veneers). The vecto
    writes other than the per-access ones (`write_stat`, `write_lyc`,
    `write_lcdc`, `write_timer_io`, `Timer::read`, `read_apu`, ...), MBC
    register writes (`Cart::write_rom`), the OAM DMA and VRAM DMA paths
-   (`read/write_during_dma`, `dma_sync`, `vdma_turn`), and
-   `Ppu::point_irq_rare` (lines 0, 144 and 153).
+   (`read/write_during_dma`, `dma_sync`, `vdma_turn`, `vdma_arm_at`).
 3. Flash, cold: everything else, including every `#[cold]` function the
    set calls (24 of them, 8,928 B: `Ppu::scan_to`, `scan_line`,
    `hold_fetch`, `Ctx::oam_dma`, `Cpu::stop`, ...). `__aeabi_uldivmod`
