@@ -225,7 +225,8 @@ impl Sys<'_> {
 /// Cold: once per reset.
 #[inline(never)]
 fn boot_logo(vram: &mut [u8; 0x4000], rom: Rom<'_>) {
-    // Tile 0x19, plane 1 zero.
+    // Tile 0x19, plane 1 zero. The glyph bytes come from SameBoy
+    // BootROMs/cgb_boot.asm (MIT, Copyright (c) 2015-2025 Lior Halphon).
     const TRADEMARK: [u8; 16] = [
         0x3C, 0, 0x42, 0, 0xB9, 0, 0xA5, 0, 0xB9, 0, 0xA5, 0, 0x42, 0, 0x3C, 0,
     ];
