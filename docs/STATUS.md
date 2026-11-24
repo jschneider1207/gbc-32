@@ -13,8 +13,9 @@
 
 ## Next up (session 15): M9
 
-33 open fix targets (57 stretch fails minus 24 signed off; the 5
-no-reference Mealybug ROMs are signed off too). By area:
+27 open fix targets (51 stretch fails minus 24 signed off; the 5
+no-reference Mealybug ROMs are signed off too). Baseline 9ea63c4
+(stretch 3,410). By area:
 1. **Mealybug 7** (`docs/design/mid-line-ppu.md`, last section, groups
    C-F): C `m3_lcdc_tile_sel_change`, `m3_scy_change` and D
    `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` likely need one
@@ -25,11 +26,9 @@ no-reference Mealybug ROMs are signed off too). By area:
 2. **SameSuite APU 7** (group 15 "unclear"): ch1 `sweep`, `sweep_restart`;
    ch1/2 `volume`; ch4 `align`, `delay`, `equivalent_frequencies`. May turn
    out E-only (then evidence + sign-off request).
-3. **STAT singles:** `m2int_m0irq_scx3_ifw_{2,4,ds_2}` (3),
-   `lycEnable/lyc_ff45_trigger_delay_2` (IF request 5 cycles after an LYC
-   write), `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1`,
-   `irq_precedence/if_and_ie_0_vector_4` (IE cleared during the push ->
-   vector 0000; note dispatch now pushes in M-cycles 4-5, 9fb207f).
+3. STAT singles: done (e5739b8, 6 ROMs). Left: single-speed line-153/0
+   walk points are a dot early vs gambatte (IF/STAT writes work around it
+   where ROMs hit it); "Open" in `docs/reference/stat-irq.md`.
 4. **lcd_offset 3:** `offset{1,2}_lyc8fint_m1stat_1` (line-144 STAT mode
    read edge, design steps 6-9), `offset3_lyc99int_m2irq_count_1` (single
    speed version of the ds fix regresses 4 `m2enable/*ly0*`).
@@ -40,11 +39,13 @@ no-reference Mealybug ROMs are signed off too). By area:
 6. M8 review lows still open (plan M9 bullets).
 After M9: M10, in-depth review (human starts it on Fable). Items for it:
 `obj_size_fetch` temporarily swaps one VRAM byte for one object fetch
-(unobservable, but unusual); boot-tile setup (`bus.rs` `boot_logo`).
+(unobservable, but unusual); boot-tile setup (`bus.rs` `boot_logo`);
+delayed LYC request kept in IF bits 5-6 (`LYC_IRQ_PENDING`, reads OR 0xE0,
+interrupt checks mask with `INT_MASK`; unusual).
 
-**Budgets (main e2c908e+):** `.text` 95,652 of 97,500 B (1,848 free after
-the session 14 size pass). Worst-case 476.57 M Ir (~3.99 M Ir/frame, 99.2%
-of the 4.02 M line). cgb-acid2 684.33 M (baseline 682.33, guard +3%). APU
+**Budgets (main 9ea63c4):** `.text` 96,550 of 97,500 B (950 free; tight
+again). Worst-case 476.78 M Ir (~3.99 M Ir/frame, 99.2%
+of the 4.02 M line). cgb-acid2 686.27 M (baseline 682.33, guard +3%). APU
 per-write 905.6 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size
 lever (needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment
 `nop` padding (`docs/perf.md` code size).
@@ -329,7 +330,7 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 186d4bc (`acceptance/results/stage1.json`, session 14; session 13
+Baseline 9ea63c4 (`acceptance/results/stage1.json`, session 14; session 13
 ended at 3,376; M8 tag `stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at
 bc07793 (session 14 end). (.text 95,652 B, worst-case ~3.99 M Ir/frame.)
 
@@ -337,4 +338,4 @@ bc07793 (session 14 end). (.text 95,652 B, worst-case ~3.99 M Ir/frame.)
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 40 | 40 | |
-| stretch | 3,404 | 3,461 | 57 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 1 in `same-suite-apu-pcm-glitch`, 3 in `gambatte-uninit-palram`, 5 no-reference in `mealybug-no-cgb-reference`. 33 open fix targets |
+| stretch | 3,410 | 3,461 | 51 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 1 in `same-suite-apu-pcm-glitch`, 3 in `gambatte-uninit-palram`, 5 no-reference in `mealybug-no-cgb-reference`. 27 open fix targets |
