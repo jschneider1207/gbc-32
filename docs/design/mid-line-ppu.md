@@ -891,3 +891,75 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
   `cgb-acid2` unchanged (673,925,093). A first version that kept a
   per-stall junk mask in `set_stalls` cost cgb-acid2 +0.46%; the lookup
   moved to the cold `hold_fetch`.
+
+### Mealybug leftovers (branch `m9-mealybug`)
+
+Diffed every failing Mealybug ROM against its `_cgb_c.png` (romtest's
+`target/acceptance/stage1/failed/mealybug/*.actual.png`, per-line pixel
+ranges) and grouped them:
+
+| Root cause | ROMs |
+|---|---|
+| A. Boot ROM tiles missing from VRAM (not timing) | `m3_bgp_change_sprites`, `m3_lcdc_bg_map_change`, `m3_lcdc_obj_en_change`, `m3_lcdc_obj_en_change_variant`, `m3_obp0_change`, `m3_scx_low_3_bits` |
+| B. LCDC.2 read per object bit plane | `m3_lcdc_obj_size_change`, `m3_lcdc_obj_size_change_scx` |
+| C. BG data reads next to an object stall (LCDC.4) | `m3_lcdc_tile_sel_change` (also `m3_scy_change`, SCY) |
+| D. Window tiles vs object stalls at the line start | `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` |
+| E. CGB TILE_SEL glitch (step G) | `m3_lcdc_tile_sel_change2`, `m3_lcdc_tile_sel_win_change2` |
+| F. CGB WX-match fetch glitch (SameBoy `cgb_wx_glitch`) | `m3_wx_4_change_sprites` |
+
+- **A (fixed, 6 ROMs).** These ROMs draw tile 0x19, the (R) symbol, which
+  the boot ROM leaves in VRAM; ours was all zeros, so the objects (or the
+  BG column of `m3_scx_low_3_bits`, whose "pixels 152-159" were this) were
+  blank. `bus::boot_logo` writes the header logo to tiles 1-24 and (R) to
+  tile 25, plane 0 only, each logo pixel doubled (SameBoy
+  `BootROMs/cgb_boot.asm`: "required for DMG compatibility. This is done
+  by the original CGB Boot ROM as well"; its final VRAM DMAs clear only
+  the tile map and bank 1). Test `boot_leaves_the_header_logo_and_trademark_in_vram`
+  (mutations: no call, no doubling, rows not doubled, (R) unspaced).
+  `diff-fingerprint.sh main`: 3,490 of 4,020 runs differ, because the
+  fingerprint hashes VRAM at the end; with 8010-819F left out of that hash
+  on both sides, 142 runs differ: 18 Mealybug runs, and ROMs that show
+  or DMA the boot tiles without loading them (gambatte `oamdma`
+  `src8000` and `late_sp*`, `sprites` `late_sizechange*` and
+  `1spritesPrLine_xpos*`, `window` `*spxA7*`/`late_disable_spx10*`,
+  `m0enable` `enable_wxA6_2x_spxA7*`, `enable_display_ly0_sprites*`,
+  Mooneye `*_timing` and `oam_dma_*`, which OAM-DMA from 8000); no pass or
+  fail changed. Cost 264 B (`boot_logo`; the first, unrolled version was
+  474 B).
+- **B (fixed, 2 ROMs).** An object's fetch reads LCDC.2 for each plane:
+  `OBJ_LOW_READ` = 4 and `OBJ_HIGH_READ` = 2 dots before its stall ends
+  (SameBoy reads 3 and 1, "Which T-cycle actually reads this?"; one dot
+  more fits CGB C, like `LCDC_TILES_LATE`). An object left of pixel 0 is
+  fetched 8 - X dots before our pixel-0 stall ends (it stalls at line
+  position X - 8). `Ppu::obj_size_fetch` (cold, LCDC.2 writes in mode 3)
+  fetches the objects whose reads came first with the old height
+  (`Renderer::fetch_next_object`: `fetch_objects` cut to that object);
+  a write between the reads puts the new height's high-plane byte in the
+  old row's place for that one fetch (VRAM is the PPU's alone in mode 3),
+  so the hot `fetch_object` is unchanged. Calibration (Mealybug + gambatte
+  `sprites`/`oamdma`): 4/2 and 4/1 -> 2 flips, 3/1 and 3/2 -> 1, 4/3 and
+  5/x -> 0, no regressions. Test `object_fetch_reads_the_height_per_bit_plane`
+  (mutations: off, low 3, high 1, no X < 8 shift, no byte swap, no
+  one-object cut). `diff-fingerprint.sh 889e8a2`: exactly the two ROMs
+  (+ `#input`). Cost ~830 B (`obj_size_fetch` 712, `fetch_next_object`
+  118).
+- **C (tried, not committed).** In `m3_lcdc_tile_sel_change` the lines
+  whose object is left of pixel 0 (X = 3, 5-7) need tile 1's plane reads
+  one dot earlier than `LCDC_TILES_LATE` = 1 gives (thresholds 3/5 instead
+  of 4/6 after pixel 0): `LCDC_TILES_LATE` acts as 0 on those lines, as
+  the step-F note found. Applying that to LCDC writes only (SCY writes
+  got worse: `m3_scy_change` 189 -> 238 px) takes the ROM from 380 to 124
+  px with no regressions, but flips nothing: lines 128-143 (objects at
+  X = 16-17, stalls at pixels 8-9) also want tile 2 fetched partly after
+  a write landing inside the stall, which `hold_fetch`'s "the stall
+  finishes the next tile" rule doesn't give, and line 128 differs from
+  129-135 with the same writes and stalls (unexplained). Likely one model:
+  SameBoy advances the BG fetcher during an object fetch (the fetcher is
+  paused only in PUSH), so the next tile's reads fall at fixed dots of the
+  stall, not at its start or end.
+- **D, E, F: not attempted.** D needs the window fetch's frontier with
+  objects at X = 0-17 (all window from x = 0, WX = 7); E is step G
+  (`data_for_tile_sel_glitch`); F needs the CGB `cgb_wx_glitch` (a tile
+  fetch whose T1 step sees WX == position + 7 skips its VRAM reads), a
+  per-dot fetcher detail our span renderer has no place for yet.
+- **Cost.** `.text` 95,494 -> 96,626 B of 97,500 (both fixes).
