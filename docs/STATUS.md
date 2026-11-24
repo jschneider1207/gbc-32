@@ -69,7 +69,18 @@ spread frame intervals to 13-20.5 ms: queued fix = sleep to ~2 ms before
 due, then precise wait (after the replay tooling, `desktop-replay`, same
 files). Stutter work: automatic detection from a per-frame log + DWM refresh
 counts on agent-run native replays (human: noticing stutters and pressing
-a mark key is not a good strategy; marks optional). Next
+a mark key is not a good strategy; marks optional).
+Tooling landed (ADR 0030, `docs/desktop-diagnostics.md`): record/replay,
+`GBC_FRAME_LOG`, `scripts/analyze-frame-log.exs`, `scripts/synth-input.exs`
+(LADX slide route). Human recording of a Wario Land 3 level:
+`/mnt/x/gbc-32/wario-land-{session.txt,frames.csv}` (+ `.sav`); display
+irregularities 70/min (beat 15), all 0-1 ms after vblank.
+**Queued for a future session (human):** SameBoy differential harness:
+SameBoy v1.0.5 core (MIT) built from source in scratch, boot ROMs from a
+copy of `X:\sameboy_winsdl_v1.0.5` (no RGBDS needed), CGB C model, replay
+our recordings, compare frames from the game's start (SameBoy runs its
+boot ROM, we don't). Settles game-side questions (e.g. Wario Land 3 camera
+steps) objectively. Next
 candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
 (human: "decide after the stall fix").
 
