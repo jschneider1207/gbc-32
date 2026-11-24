@@ -971,12 +971,12 @@ With the feature, `Ctx::eager_sync` runs at the start of every M-cycle,
 before its access (`Bus::read`, `write`, `idle`, the dispatch's
 acknowledge), and brings every lazily synced component up to the clock:
 the PPU walk (and a running OAM DMA's bytes, as before every PPU sync), the
-APU (samples included), the timer's lazy reloads (`Timer::catch_up`) and
-the cartridge RTC. The skips (HALT, STOP mode, the speed-switch halt, a
+APU (samples included), the timer's lazy reloads (`Timer::catch_up`), the
+serial port's lazy shifts (`Serial::catch_up`) and the cartridge RTC. The skips (HALT, STOP mode, the speed-switch halt, a
 VRAM DMA stall) go one M-cycle at a time, with the same sync in each. It
 sets no deadline and raises no event of its own; in particular the PPU
 deadline is left where the lazy build put it (`run_ppu_to`, not
-`sync_ppu_to`). Serial has no lazy state (each bit is an event).
+`sync_ppu_to`).
 
 The script runs the corpus without audio and with `--audio-buffer 7
 --hash-samples`, and compares each with the product build's lines. What

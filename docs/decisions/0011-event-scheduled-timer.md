@@ -182,7 +182,8 @@ Docs "Timer obscure behaviour", Timer overflow behavior. SameBoy
     under Consequences;*
   - set on SC writes, after each bit, after a DIV write and after a speed
     switch;
-  - one event per bit.
+  - one event per bit. *Superseded 2026-11-24: one event per transfer, its
+    completion; see the amendment "serial shifts are lazy".*
 - **DIV-APU (M6)**: deadline = the next fall of counter bit 12, or 13 in
   double speed (DIV bit 4/5; Pan Docs Audio details "DIV-APU"; SameBoy
   `apu_bit = double_speed ? 0x2000 : 0x1000`). The APU's frame-sequencer
@@ -427,7 +428,8 @@ is lazy; two unit tests compare `catch_up` with the reloads run one by
 one (all fields) and over gaps up to 2^50 clocks. 24 mutations of the
 catch-up and its call sites each fail at least one of them.
 `diff-fingerprint.sh main` is identical on 4,020 ROMs, and on 4,030 with
-`--audio-buffer 7 --hash-samples`; romtest shows no regressions.
+`--audio-buffer 7 --hash-samples`; romtest shows no regressions; `check-sync-invariance.sh` passes (its one known eager-sync
+difference, a PPU one, is unchanged).
 
 Measured (Ir, `check-bench.sh`, before -> after): `synth:worst-case`
 478.44 M -> 364.80 M (-23.8%), `synth:event-storm` 397.31 M -> 285.58 M
@@ -436,3 +438,77 @@ the event), the other six within 0.1%. MCU code: total `.text` 98,124 ->
 98,374 B (+250: `catch_up` 362, `schedule_timer` 210; `boundary` -66,
 `Timer::read` -158, `write_timer_io` -120), `Cpu::run` unchanged at
 24,584 B.
+
+### 2026-11-24: serial shifts are lazy; one Serial event per transfer
+
+Review B2 (`docs/reviews/stage1-m10/B-perf.md`): a running transfer
+scheduled each of its eight shifts, and only the eighth has an effect
+outside the port (SC bit 7 clears, IF bit 3, `Events::SERIAL_TX`). With
+the port re-armed on the CGB fast clock after every byte
+(`synth:worst-case`) that was about 488,000 events in 2 emulated seconds,
+seven in eight of them unobservable.
+
+- **Only the completion is an event.** The Serial deadline is the clock
+  of `Serial::completion()`: the counter value of the first shift edge
+  after the port's sync point, plus one period (`2^(k+2)` counter ticks,
+  k = 7, or 2 on the fast clock) for each further bit of the eight. It is
+  set where the deadline was set before, less "after each bit": SC write,
+  DIV reset, speed switch, STOP mode's wake-up.
+- **The shifts before it are a function of the counter.** With the
+  flip-flop as counter bit `k+1` XOR `phase`, the shift edges are the
+  counter values `v ≡ phase << (k+1)` modulo `2^(k+2)`, so the number in
+  `(c0, c1]` is `edges(c1) - edges(c0)`, `edges(c) = (c + 2^(k+2) - r) >>
+  (k+2)`, `r = phase << (k+1)`. `sb`, `out` and `bits` are kept as of a
+  counter value `synced`, and `Serial::catch_up(c)` applies the shifts in
+  `(synced, c]` in one 16-bit shift (`out:sb`, 1s shifted in), never more
+  than the transfer has left.
+- **Every access that reads or changes that state, or moves the edges,
+  catches up first:** the SB read (`Serial::read_sb`, on the fly: reads
+  stay side-effect free), the SB write (now through `write_timer_io`; the
+  bits already sent stay in `out`, the deadline doesn't move), the SC
+  write (before its own flip-flop edge and the new phase), the DIV reset
+  (up to the old counter value, before its edge and the rebase), and the
+  completion event itself. The event runs before any access on its clock,
+  so no other catch-up completes a byte. Nothing in an SC read depends on
+  the shifts (bit 7 clears at the completion).
+- **Keyed on the counter value, not the clock.** A speed switch and STOP
+  mode change only the counter's rate, so they change no shift and need
+  no catch-up: the same edges are counted whenever the port is next
+  caught up. The switch sets the deadline again in its step 3 (ADR 0020,
+  2026-11-24 amendment); STOP mode removes it and the wake-up sets it
+  again. An external-clock transfer (SC bit 0 clear) has no edges and no
+  deadline, as before.
+- The `eager-sync` test feature catches the port up at every M-cycle
+  (`Ctx::eager_sync`); `check-sync-invariance.sh` must stay identical.
+
+Verification. `serial.rs`'s differential test
+(`lazy_port_matches_the_eager_per_bit_reference`) drives the lazy port
+and the eager per-bit reference (flip-flop as a bool, one `shift` per
+edge) on one counter through 8,000 random sequences of M-cycles, gaps
+longer than a transfer, SB/SC writes, DIV resets, speed switches (with
+the off-grid clock of a switch to single speed) and STOP modes, on both
+bit clocks and the external one, and compares SB, SC, the bit count, the
+bits sent, the last byte, the flip-flop and the completion's counter
+value at every observation. The bus-level differential test
+(`timer/differential.rs`) reads SB at every check without syncing,
+compares the caught-up port, `SERIAL_TX` and the Serial deadline (now
+exactly the eager model's completion clock, found by ticking a copy up to
+1,200 M-cycles ahead), and lets STOP mode last up to 400 M-cycles. Both
+have coverage floors for the lazy cases. Of 31 mutations (edge count off
+by one each way, the cap, the completion's first edge, period and bit
+count, each catch-up call site, the deadline a cycle early and late,
+each reschedule, the event raise) 30 each fail at least one test; two of
+those (an edge counted one counter tick early, which no M-cycle-aligned
+access can see, and the cap, which only a late catch-up reaches) fail
+only a unit test. The 31st, a catch-up at the speed switch, changed
+nothing, which is why there is none.
+`diff-fingerprint.sh main` is identical on 4,020 ROMs, and on
+4,030 with `--audio-buffer 7 --hash-samples`; romtest shows no
+regressions; `check-sync-invariance.sh` passes (its one known eager-sync
+difference, a PPU one, is unchanged).
+
+Measured (Ir, `check-bench.sh`, before -> after): `synth:worst-case` 372.56 M -> 320.84 M (-13.9%), `synth:event-storm`
+293.04 M -> 209.51 M (-28.5%), the other seven within 0.01%. MCU code:
+total `.text` 100,080 -> 101,102 B (+1,022: `Serial::catch_up` and
+`bus::read_sb` out of line, `write_timer_io` 578 -> 778, `div_reset`
+476 -> 550, `read_high` 824 -> 840).

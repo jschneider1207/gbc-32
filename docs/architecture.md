@@ -220,7 +220,8 @@ See ADR 0002. In short:
 - The CPU is the master clock (ADR 0008). The per-M-cycle tick is only a
   clock countdown; the timer, serial bit clock (and the DIV-APU edge)
   are computed from the clock on access and act through deadlines in the
-  event table (ADR 0011).
+  event table (ADR 0011). A serial transfer has one deadline, its
+  completion; the bits before it are shifted on access.
 - The PPU and APU are lazily caught up to the current cycle whenever one of
   their registers is written, and at scheduled events (PPU: STAT interrupt
   edges, VBlank, each visible line's mode-3 end; APU: `DivApu` and
@@ -259,7 +260,7 @@ apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register wr
 dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`)
 hdma.rs     * VRAM DMA (GDMA/HDMA): `VramDma`, block copy, the resumable CPU stall (ADR 0021 GDMA amendment)
 cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1/2/3(+RTC)/5, HuC1/HuC3 (huc3.rs: the HuC3 clock chip)
-serial.rs   * SB/SC internal-clock transfers, last byte sent
+serial.rs   * SB/SC internal-clock transfers, lazy (ADR 0011): shifts caught up on access, completion as the Serial event, last byte sent
 ```
 
 ### CPU and bus (ADR 0008)
@@ -293,14 +294,17 @@ wake-up or the end of the call, so the wake-up lands on the same M-cycle
 as idling one M-cycle at a time. The CGB speed-switch pause skips the same
 way, a deadline at a time. `Emulator::step` targets `clock + 1`, so its
 halted step stays one M-cycle. On the event table so far: the TIMA reload (`Timer`),
-the serial bit clock (`Serial`), the PPU (`Ppu`: STAT interrupt edges,
+a serial transfer's completion (`Serial`; its earlier bit shifts are
+computed from the system counter when SB or SC is accessed or DIV is
+reset, `Serial::catch_up`), the PPU (`Ppu`: STAT interrupt edges,
 VBlank and each visible line's mode-3 end) and scheduled
 button changes (`Input`, `Sys::inputs`, ADR 0012). The timer
 (`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
 of the clock (rebased on DIV writes and speed switches), computes DIV and
 TIMA from it on reads, and stores the overflow clock and the last reload
 clock for the cycle A/B window; timer, serial and DIV writes go through
-the out-of-line `Ctx::write_timer_io` and reads through `Timer::read`, off
+the out-of-line `Ctx::write_timer_io` and reads through `Timer::read`
+and `Serial::read_sb`, off
 the inlined bus path. `Sys` is `repr(C)` with the
 fields the inlined bus path reads first, to keep their Thumb-2 load
 offsets small (the event table at the front cost `Cpu::run` about 1 KB).
