@@ -70,3 +70,20 @@ Same T to t mapping. SameBoy's two-phase STAT write stays. Where
 gambatte's single write time and our phase 2 disagree
 (`lycstatwirq_trigger_ly00_10_50_1`), it stays open. +20 ROMs, no
 regressions, +438 B.
+
+## Amendment (2026-11-23): writes just before the mode-0 interrupt
+
+The gambatte-over-SameBoy rule extends to the mode-0 interrupt on lines
+0-143: it sees the STAT selects and LYC as latched up to a short time
+before it (gambatte `mstat_irq.h`: `cc + 2` for STAT, `cc + 5 + 1 - ds`
+for LYC, with `cc` our write's access and the event our `HBlank` point).
+A STAT write whose access is at most 2 dots (double speed: 1) before the
+point no longer stops it by clearing mode 0, nor unblocks it by clearing
+the LYC select; a LYC write at most 6 dots (double speed: 2) before it
+no longer unblocks it (`edges::M0_STAT_LATCH`, `M0_LYC_LATCH`). Also, in
+double speed, a STAT write's phase 2 sees the previous line's mode 0
+while its access is before t = 3. Details and ROMs:
+`docs/reference/stat-irq.md`, "Writes just before the mode-0 interrupt".
+The interrupt a late mode-0 clear can't stop is requested at the write,
+not at the point 1-2 dots later in the same M-cycle (the CPU can't tell).
++11 ROMs (`gambatte/m0enable`), no regressions, +534 B.

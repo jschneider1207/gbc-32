@@ -104,6 +104,41 @@ From gambatte `statChangeTriggersM2IrqCgb` and `statChangeTriggersM0LycOrM1StatI
   bit is set requests the interrupt (gambatte `memory.cpp` FF41).
   `lycEnable/lcdoff_lycirqen_1`.
 
+## Writes just before the mode-0 interrupt (lines 0-143)
+
+gambatte (`mstat_irq.h`, behaviour only) evaluates the mode-0 interrupt
+with the STAT selects and LYC latched at the last write that landed early
+enough: a STAT write only while `cc + 2` is before the event, a LYC write
+only while `cc + 5 + 1 - ds` is (CGB; `cc` in T-cycles, half-dots in
+double speed). Its event (`doM0Event`) fires if mode 0 is selected now or
+in the latch, unless the latched LYC select and LYC match LY. Mapped to
+ours, `cc` is the write's access and the event is the walk's `HBlank`
+point (mode-3 end + 1). The CGB04C captures of `m0enable/*` pin this
+mapping at each SCX (`edges::M0_STAT_LATCH`, `M0_LYC_LATCH`):
+
+| write, access before `HBlank` | single speed | double speed |
+|---|---|---|
+| STAT, clearing mode 0 | 1-2 dots: interrupt still comes | 1 dot (phase 2 lands on the point: already right) |
+| STAT, clearing LYC while LY=LYC | 1-2 dots: still blocked | 1 dot: still blocked |
+| LYC, ending LY=LYC | 1-6 dots: still blocked | 1-2 dots: still blocked |
+
+ROMs: `disable_{,scx3_,scx4_,scx7_}2` (2) and `disable_scx{1,2,5}_1`
+(0) in single speed; `lycdisable_ff45_{,scx1_,scx2_,scx3_}2` (0),
+`_scx1_1` (2); `lycdisable_ff45_scx1_ds_{1,2}`,
+`lycdisable_ff41_scx1_ds_{1,2}`. DMG differs (`dmg08` results: no STAT
+latch, a 1-dot LYC one), the reason these ROMs' CGB and DMG results
+differ.
+
+Double speed, line start: a STAT write's phase 2 (half a dot after the
+access, a whole dot on our grid) sees the previous line's mode 0 while
+the access is before `t = 3` (gambatte `T > 8` half-dots), i.e. phase 2
+to `t < 4`. `m0enable/late_enable_ds_lcdoffset1_1` (enable with the
+access at t = 2: interrupt), `late_enable_ds_2` (t = 3: none). Moving
+every double-speed phase-2 mode view half a dot (as the comparison is)
+passed the same ROMs on lines 0-143 but would delay a phase-2 mode-0
+enable at the mode-0 start past the walk's point, which gambatte's event
+still takes; line 144's windows already assume the whole-dot phase 2.
+
 ## Open
 
 - `lycstatwirq_trigger_ly00_10_50_1` and `_ds_1` (want `E0`): the write

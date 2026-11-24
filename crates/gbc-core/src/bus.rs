@@ -4066,9 +4066,28 @@ mod dma_tests {
         n: u64,
         double: bool,
     ) -> u8 {
+        irq_after_write(0, lyc, sel, pos, 0xFF41, value, n, double)
+    }
+
+    /// [`stat_irq_after_write_with`] with SCX = `scx` and the write to
+    /// `reg` (STAT or LYC).
+    #[allow(clippy::too_many_arguments)]
+    fn irq_after_write(
+        scx: u8,
+        lyc: u8,
+        sel: u8,
+        pos: u64,
+        reg: u16,
+        value: u8,
+        n: u64,
+        double: bool,
+    ) -> u8 {
         let emu = setup();
         let mut stat = 0;
         with_ctx(emu, |ctx| {
+            if scx != 0 {
+                ctx.write(0xFF43, scx);
+            }
             let e = ctx.clock();
             ctx.write(0xFF45, lyc);
             ctx.write(0xFF40, 0x91);
@@ -4080,7 +4099,7 @@ mod dma_tests {
             }
             assert_eq!(ctx.clock(), e + pos - 3);
             ctx.sys.iflags = 0;
-            ctx.write(0xFF41, value);
+            ctx.write(reg, value);
             while ctx.clock() < e + pos - 3 + n * ctx.hot.mcycle as u64 {
                 ctx.idle();
             }
@@ -4178,6 +4197,46 @@ mod dma_tests {
         assert_eq!(w(136 * 456 + 7), 0);
         assert_eq!(w(154 * 456 + 5), STAT);
         assert_eq!(w(154 * 456 + 7), 0);
+    }
+
+    /// STAT writes just before the mode-0 interrupt (line 2, SCX 0: at
+    /// t = 257; SCX 1: 258) no longer change the selects it sees: within
+    /// 2 dots of the access in single speed, 1 in double speed
+    /// (`edges::M0_STAT_LATCH`; gambatte `m0enable/disable_*`,
+    /// `lycdisable_ff41_scx1_ds_*`, CGB04C).
+    #[test]
+    fn stat_writes_just_before_the_mode_0_interrupt_are_too_late() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let at = 2 * 456 + 255;
+        // Single speed, clearing mode 0: 2 dots before, the interrupt
+        // still comes; 3 dots before, not.
+        let w = |scx| irq_after_write(scx, 0xFF, 0x08, at, 0xFF41, 0, 3, false);
+        assert_eq!(w(0), STAT);
+        assert_eq!(w(1), 0);
+        // Clearing the LYC select while LY=LYC (2): 2 dots before, the
+        // interrupt stays blocked; 3 dots before, unblocked.
+        let w = |scx, at, double| irq_after_write(scx, 2, 0x48, at, 0xFF41, 0x08, 3, double);
+        assert_eq!(w(0, at, false), 0);
+        assert_eq!(w(1, at, false), STAT);
+        // Double speed: 1 dot before, blocked; 2 dots before, not.
+        assert_eq!(w(1, at + 2, true), 0);
+        assert_eq!(w(0, at, true), STAT);
+    }
+
+    /// A LYC write ending LY=LYC just before the mode-0 interrupt (line 2)
+    /// doesn't unblock it: within 6 dots of the access in single speed, 2
+    /// in double speed (`edges::M0_LYC_LATCH`; gambatte
+    /// `m0enable/lycdisable_ff45_*`, CGB04C).
+    #[test]
+    fn lyc_writes_just_before_the_mode_0_interrupt_still_block_it() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let w = |scx, at, double| irq_after_write(scx, 2, 0x48, at, 0xFF45, 0xFF, 4, double);
+        // Single speed: 6 dots before (SCX 0), 7 (SCX 1).
+        assert_eq!(w(0, 2 * 456 + 251, false), 0);
+        assert_eq!(w(1, 2 * 456 + 251, false), STAT);
+        // Double speed: 2 dots before (SCX 0), 3 (SCX 1).
+        assert_eq!(w(0, 2 * 456 + 255, true), 0);
+        assert_eq!(w(1, 2 * 456 + 255, true), STAT);
     }
 
     /// Single speed: clearing the mode-1 select 1-2 dots before line

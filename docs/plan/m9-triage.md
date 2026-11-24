@@ -343,6 +343,14 @@ scx3_2}` are not this mechanism: they clear the mode-0 source (STAT write
 start, so they test where mode 0 starts against the write per SCX (CGB C
 differs from DMG), an edge-position question.
 
+**m0enable, done (branch `m9-m0enable`):** not an edge position but
+gambatte's latch: the mode-0 interrupt sees the selects and LYC as of
+2 dots (STAT; double speed 1) and 6 dots (LYC; double speed 2) before
+it, from the write's access (`edges::M0_STAT_LATCH`, `M0_LYC_LATCH`;
+`docs/reference/stat-irq.md`, ADR 0029 amendment). Plus the double-speed
+phase 2 seeing the previous line's mode 0 to t < 4. All 11 failing
+`gambatte/m0enable` pass, no regressions.
+
 ### 13. OAM DMA: VRAM source vs CPU reads, misc (10)
 **Done (session 10, ADR 0028 amendment):** the 6
 `src{8000,9F00}_busypop{7FFF,9FFF}*` pass (a conflicting read with a VRAM

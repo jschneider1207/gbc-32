@@ -129,6 +129,31 @@ pub(crate) const MODE0_DS_LATE: u32 = 1;
 /// The HBlank interrupt source rises this many dots after the mode-3 end.
 pub(crate) const HBLANK_AFTER_END: u32 = 1;
 
+/// The mode-0 interrupt ([`HBLANK_AFTER_END`] past the mode-3 end) sees
+/// the STAT selects and LYC as they were shortly before it: a STAT write
+/// whose access is at most [`M0_STAT_LATCH`] dots before it (single,
+/// double speed) no longer changes the selects it sees (clearing mode 0
+/// doesn't stop it, clearing LYC doesn't unblock it), and a LYC write
+/// whose access is at most [`M0_LYC_LATCH`] dots before it can't end the
+/// LY=LYC match that blocks it. gambatte (behaviour only, `mstat_irq.h`
+/// `statRegChange`, `lycRegChange`, `doM0Event`): the selects and LYC its
+/// mode-0 event sees are latched only while `cc + 2 * cgb` (STAT) and
+/// `cc + 5 * cgb + 1 - ds` (LYC) is before the event, `cc` in T-cycles
+/// (half-dots in double speed), with `cc` our access and the event our
+/// mode-0 interrupt point. CGB04C, single speed:
+/// `m0enable/disable_{,scx3_,scx4_,scx7_}2` (STAT `08 -> 00` 1-2 dots
+/// before: interrupt), `disable_scx{1,5}_1` (3 dots: none);
+/// `lycdisable_ff45_{,scx1_,scx2_,scx3_}2` (LYC `-> FF` 2-6 dots before:
+/// no interrupt), `lycdisable_ff45_scx1_1` (7 dots: interrupt). Double
+/// speed: `lycdisable_ff45_scx1_ds_2` (LYC 1 dot before: none),
+/// `lycdisable_ff45_scx1_ds_1` (3 dots: interrupt);
+/// `lycdisable_ff41_scx1_ds_2` (STAT `48 -> 08` 1 dot before: none),
+/// `lycdisable_ff41_scx1_ds_1` (3 dots: interrupt). DMG (the `dmg08`
+/// results) latches STAT writes up to the event and LYC writes up to 1
+/// dot before it.
+pub(crate) const M0_STAT_LATCH: [u32; 2] = [2, 1];
+pub(crate) const M0_LYC_LATCH: [u32; 2] = [6, 2];
+
 /// VRAM blocked for the CPU from here to the mode-3 end: single speed two
 /// dots after STAT reads mode 3, double speed with it (first line after
 /// LCD enable: `_FIRST`). gambatte (behaviour only) `vramReadable` /

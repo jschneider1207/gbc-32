@@ -685,6 +685,26 @@ impl Ppu {
         (self.line.start == line_start).then_some(u32::from(self.line.end))
     }
 
+    /// The line position of the walk's mode-0 interrupt point
+    /// ([`Pt::HBlank`]) on the line at `a`, or [`LINE`] if its mode-3 end
+    /// isn't latched yet.
+    fn m0_irq_at(&self, now: u64, a: At) -> u32 {
+        let start = now.wrapping_sub(u64::from(a.t));
+        self.latched_end(start)
+            .map_or(LINE, |e| e + edges::HBLANK_AFTER_END)
+    }
+
+    /// Whether a STAT or LYC write landing at `now`, `delay` dots after its
+    /// access, has its access at most `latch` dots (single, double speed)
+    /// before the line's mode-0 interrupt point and lands before or at it
+    /// ([`edges::M0_STAT_LATCH`]).
+    #[inline(never)]
+    fn m0_latched(&self, now: u64, double: bool, delay: u32, latch: [u32; 2]) -> bool {
+        let a = self.at(now);
+        let irq = self.m0_irq_at(now, a) + delay;
+        a.t < irq && irq <= a.t + latch[usize::from(double)]
+    }
+
     // --- Reads (side-effect free) ---
 
     /// LY at clock `now`.
@@ -963,7 +983,13 @@ impl Ppu {
                 // mode 0 (gambatte: a mode-0 enable triggers there while
                 // `T > 4`; CGB04C `m2enable/lyc1_m2irq_late_lycdisable_1`,
                 // `late_enable_after_lycint_disable_1`).
-                _ if t < edges::PT_LY => 0,
+                // Double speed: phase 2 lands half a dot after its access,
+                // so it sees mode 0 to the access's t < 3, the whole-dot
+                // t < 4 (gambatte: `T > 8` half-dots; CGB04C
+                // `m0enable/late_enable_ds_lcdoffset1_1`, a mode-0 enable
+                // with phase 2 at t = 2.5: interrupt; `late_enable_ds_2`,
+                // t = 3.5: none).
+                _ if t < edges::PT_LY + u32::from(double && view == View::StatPhase2) => 0,
                 _ => 2,
             }
         } else if t < end {
@@ -2424,6 +2450,7 @@ impl Ppu {
     ) {
         self.early_cmp(now, iflags, double, view);
         let was_quiet = self.quiet();
+        let cleared = self.stat_select & !value;
         let added = value & !self.stat_select;
         self.stat_select = value & 0x78;
         if !self.lcd_enabled() {
@@ -2452,7 +2479,32 @@ impl Ppu {
             self.line_irq = IrqLine { bits: 0, lyc };
         }
         let low = self.line_irq.bits & IrqLine::STAT == 0;
+        // A write at most `edges::M0_STAT_LATCH` dots (from its access)
+        // before the mode-0 interrupt no longer changes the selects it
+        // sees: clearing the mode-0 select doesn't stop it (unless LY=LYC
+        // blocks it), and clearing the LYC select while LY=LYC doesn't
+        // unblock it (the line stays up for the mode-0 source). The
+        // interrupt is requested here rather than at the point, later in
+        // the same M-cycle: the CPU sees IF only at M-cycle boundaries.
+        let late = self.m0_latched(
+            now,
+            double,
+            u32::from(view == View::StatPhase2),
+            edges::M0_STAT_LATCH,
+        );
+        // (Held through both phases: the line, up so far, is held while
+        // LY=LYC with the LYC select off and mode 0 on.)
+        let blocked = late
+            && !low
+            && self.line_irq.lyc
+            && self.stat_select & (SEL_LYC | SEL_MODE0) == SEL_MODE0;
         self.update_at(now, iflags, double, view);
+        if late && cleared & SEL_MODE0 != 0 && low {
+            *iflags |= INT_STAT;
+        }
+        if blocked {
+            self.line_irq.bits |= IrqLine::STAT;
+        }
         // Double speed, line 0: a first phase at t = 4-5 that newly selects
         // mode 2 (mode 0 not selected) requests the line-0 mode-2
         // interrupt while the line was low. gambatte (behaviour only,
@@ -2537,7 +2589,22 @@ impl Ppu {
             *iflags |= INT_STAT;
         }
         if !(l == 153 && (edges::LYC153_OLD_FROM..edges::L153_CMP).contains(&t)) {
+            // Mode 0 selected: a write that ends LY=LYC at most
+            // `edges::M0_LYC_LATCH` dots (from its access) before the
+            // mode-0 interrupt doesn't lower the line; the mode-0 source
+            // takes it over, with no interrupt.
+            let hold = self.stat_select & (SEL_MODE0 | SEL_LYC) == SEL_MODE0 | SEL_LYC
+                && self.line_irq.lyc
+                && self.m0_latched(
+                    now,
+                    double,
+                    edges::LYC_WRITE.delay(double) as u32,
+                    edges::M0_LYC_LATCH,
+                );
             self.update_at(now, iflags, double, View::LycWrite);
+            if hold {
+                self.line_irq.bits |= IrqLine::STAT;
+            }
         }
     }
 
