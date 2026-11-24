@@ -1292,14 +1292,25 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     pub(crate) fn write_mapped(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr);
-        match (addr | self.hot.dma) >> 13 {
-            0..=3 => self.sys.cart.write_rom(addr, value, self.hot.clock()),
-            4 => self.write_vram(addr, value),
-            5 => self.sys.cart.write_ram(addr, value, self.hot.clock()),
-            6 => *wram_mut(self.mem, self.sys, a) = value,
-            _ if self.hot.dma != 0 => self.write_during_dma(addr, value),
-            _ if addr < 0xFE00 => *wram_mut(self.mem, self.sys, a) = value,
-            _ => self.write_high(addr, value),
+        // The tests in the order of how often real code takes them: WRAM
+        // (the stack), then FF00-FFFF, then the rest.
+        let key = addr | self.hot.dma;
+        if key >> 13 == 6 {
+            *wram_mut(self.mem, self.sys, a) = value;
+        } else if key >= 0xE000 {
+            if self.hot.dma != 0 {
+                self.write_during_dma(addr, value)
+            } else if addr >= 0xFE00 {
+                self.write_high(addr, value)
+            } else {
+                *wram_mut(self.mem, self.sys, a) = value;
+            }
+        } else {
+            match key >> 13 {
+                4 => self.write_vram(addr, value),
+                5 => self.sys.cart.write_ram(addr, value, self.hot.clock()),
+                _ => self.sys.cart.write_rom(addr, value, self.hot.clock()),
+            }
         }
     }
 
