@@ -48,6 +48,7 @@ const WORKLOADS: &[(&str, &str, &str)] = &[
         "synth:apu-writes",
         "APU register writes",
     ),
+    ("synth:dmg-raster", "synth:dmg-raster", "DMG render path"),
 ];
 
 /// Median of a non-empty slice (mean of the middle two when even).

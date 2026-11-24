@@ -17,8 +17,9 @@
 //! ROMs finish within seconds and then spin): the synthetic programs
 //! (timer and serial storm in double speed, OAM DMA, HALT with interrupts,
 //! all four APU channels with raster writes, palette raster with HDMA, APU
-//! register writes), cgb-acid2 (halted, STAT interrupts every frame),
-//! cpu_instrs, cgb_sound and the MBC3 RTC test (the RTC counts 30 minutes).
+//! register writes, DMG-mode raster), cgb-acid2 (halted, STAT interrupts
+//! every frame), cpu_instrs, cgb_sound and the MBC3 RTC test (the RTC
+//! counts 30 minutes).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -40,6 +41,7 @@ const WORKLOADS: &[(&str, bool)] = &[
     ("synth:worst-case", true),
     ("synth:cgb-raster", true),
     ("synth:apu-writes", true),
+    ("synth:dmg-raster", true),
     // (It turns the LCD off while it sets up.)
     ("cgb-acid2/cgb-acid2.gbc", false),
     ("blargg/cpu_instrs/cpu_instrs.gb", false),

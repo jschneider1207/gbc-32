@@ -4,7 +4,7 @@ ROMs, each run for 20 emulated seconds (83,886,080 clocks): `blargg/cpu_instrs/c
 (CPU), `blargg/cgb_sound/cgb_sound.gb` (APU), `cgb-acid2/cgb-acid2.gbc` (PPU).
 The test ROMs are read from `$TEST_ROMS` (default `test-roms/`).
 
-Five synthetic ROMs cover paths those miss. `tools/bench` builds them in
+Synthetic ROMs cover paths those miss. `tools/bench` builds them in
 memory (`bench synth:<name> <secs>`, hand-assembled SM83 in
 `tools/bench/src/synth.rs`, 32 KiB, valid header and checksums; no ROM files
 in git):
@@ -108,6 +108,22 @@ in git):
   per frame, 147 Ir per write. What is left is mostly the sync to the
   write and `write_io` itself; the 34k mid-mode-3 writes per 2 s each
   draw a span (~370 Ir).
+- `synth:dmg-raster` (2 s, M10 2026-11-24): the DMG render path, which no
+  other line ran (every other bench ROM is CGB). Header 0143 = 00, so
+  DMG compatibility mode, single speed. BG (map 9800, a tile with all
+  four colors across each row), window (WY=0, WX=87, map 9C00, a solid
+  tile) and 40 8x16 objects in the worst-case layout (10 per line on 64
+  of 144 lines, X=8+6i overlapping, so DMG's X-coordinate priority
+  decides), with OBP0/OBP1, X/Y flip in every combination and
+  BG-over-OBJ priority on three objects of each group. LCDC=F7. Per line:
+  in mode 0, rotate the shades (a permutation) into BGP, OBP0 and its
+  complement into OBP1, SCY + 1; in mode 3, SCX and the next BGP mid-line
+  (the held-fetch path twice a line: `hold_fetch` 33,888 calls in 2 s,
+  284 a frame). When added: **185,451,213 Ir = 1.552 M Ir per frame**
+  (cgb-raster 2.268 M). A unit test checks that it runs in DMG mode
+  (KEY1 locked, the objects drawn in the caller's DMG OBJ colors) and
+  that a frame shows objects on exactly the 64 lines, the tenth
+  object of each line, a changing BG and a flat window.
 
 **Audio buffers (M6 task 8).** `run_emulation` calls the core the way the
 MCU front end will: at most one frame per call (`run_until(min(target,
@@ -1259,16 +1275,17 @@ is the small version.
 
 ### Long run (`--long`)
 
-`bench --long [--minutes N] [--root DIR]` runs ten workloads that keep
-working (the six synthetic programs, cgb-acid2, cpu_instrs, cgb_sound and
+`bench --long [--minutes N] [--root DIR]` runs eleven workloads that keep
+working (the seven synthetic programs, cgb-acid2, cpu_instrs, cgb_sound and
 rtc3test) from power-on for 30 emulated minutes, 7,549,747,200 clocks,
 past 2^32 (17 min 4 s), in frame-sized calls with an audio buffer. The
 script builds it with the `checked` profile and no feature (the product's
 code with overflow checks and debug assertions). It fails on a panic, a
 call that makes no progress, a sample count other than one per 128 clocks,
 or (for the workloads that keep the LCD on) a frame count more than one off
-one per 70,224 clocks. 60.5 s wall for all ten in parallel (2026-11-24, 8
-threads; the slowest, `synth:worst-case`, alone). It complements the
+one per 70,224 clocks. 60.5 s wall for the ten before dmg-raster in
+parallel (2026-11-24, 8 threads; the slowest, `synth:worst-case`,
+alone). It complements the
 offset check: that one covers the whole corpus near four boundaries, this
 one covers state that has actually lived for 2^32 clocks.
 
@@ -1298,7 +1315,8 @@ Workloads (ROMs from `scripts/fetch-test-roms.sh`, hash-pinned; `synth:*`
 are built in memory): cpu_instrs (CPU), cgb_sound (APU), cgb-acid2 (PPU,
 mostly halted), cgb-acid-hell (PPU, objects), mealybug hdma_timing-C and
 same-suite hdma_mode0 (HDMA), and the synthetic worst-case, dma-storm,
-cgb-raster and apu-writes. Test ROMs that finish early idle (halted or
+cgb-raster, apu-writes and dmg-raster (added after the baseline below;
+not measured in it). Test ROMs that finish early idle (halted or
 spinning) for the rest of the run, so their numbers are a floor on cost,
 not a stress figure; synth:worst-case is the upper bound.
 

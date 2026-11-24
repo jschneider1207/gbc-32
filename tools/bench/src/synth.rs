@@ -1,6 +1,7 @@
 //! Synthetic benchmark ROMs, hand-assembled SM83 built in memory (no ROM
 //! files in git). Each one stresses a path the test-ROM benchmarks miss
-//! (docs/perf.md). All are 32 KiB, no MBC, CGB-only, with a valid header
+//! (docs/perf.md). All are 32 KiB, no MBC, CGB-only (except
+//! `dmg-raster`, which runs in DMG compatibility mode), with a valid header
 //! and checksums; execution starts at 0x0100 as the CGB boot ROM leaves it.
 
 /// The names `bench synth:<name>` accepts.
@@ -11,6 +12,7 @@ pub const NAMES: &[&str] = &[
     "worst-case",
     "cgb-raster",
     "apu-writes",
+    "dmg-raster",
 ];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
@@ -371,6 +373,121 @@ fn cgb_raster() -> Vec<u8> {
     code
 }
 
+/// DMG render path (DMG compatibility mode, header 0143 = 00, so single
+/// speed): BG, window and 10 objects per line, with per-line raster
+/// writes, the DMG counterpart of `synth:cgb-raster`. With the LCD off:
+/// tiles 0-3 have all four colors across each row (55/33), tile 4 is solid
+/// color 3; the BG map (9800) is all tile 0 and the window map (9C00) all
+/// tile 4. 40 8x16 objects (tile 2) in four groups of 10 as in
+/// `synth:worst-case` (Y=16/52/88/124, X=8+6i, so they overlap and DMG's
+/// X-coordinate priority decides): 10 objects on 64 of the 144 lines.
+/// Object i has attributes (10-i)<<4: OBP0/OBP1, X and Y flip in every
+/// combination, and BG-over-OBJ priority on objects 0-2. BGP=OBP0=E4,
+/// OBP1=1B, window at WY=0, WX=87 (the right half), LCDC=F7 (LCD, window
+/// map 9C00, window, 8000 tiles, BG map 9800, 8x16 objects, objects, BG).
+/// Per line: wait for mode 0, rotate the shades by one (RLCA twice, still
+/// a permutation) into BGP, OBP0 and its complement into OBP1, SCY + 1;
+/// wait for mode 3, then write SCX and the next rotation to BGP mid-line.
+const DMG_RASTER: &[u8] = &[
+    0xF3, //             DI
+    0xAF, //             XOR A
+    0xE0, 0x40, //       LDH (LCDC),A    LCD off: free VRAM/OAM access
+    0x21, 0x00, 0x80, // LD HL,8000
+    0x06, 0x20, //       LD B,32         tiles 0-3
+    // tile:
+    0x3E, 0x55, //       LD A,55
+    0x22, //             LD (HL+),A
+    0x3E, 0x33, //       LD A,33
+    0x22, //             LD (HL+),A      colors 0-3 across each row
+    0x05, //             DEC B
+    0x20, 0xF7, //       JR NZ,tile
+    0x3E, 0xFF, //       LD A,FF
+    0x06, 0x10, //       LD B,16         tile 4 solid color 3
+    // solid:
+    0x22, //             LD (HL+),A
+    0x05, //             DEC B
+    0x20, 0xFC, //       JR NZ,solid
+    0x21, 0x00, 0x98, // LD HL,9800
+    // map:
+    0x7C, //             LD A,H
+    0xD6, 0x9C, //       SUB 9C
+    0x9F, //             SBC A,A         FF below 9C00
+    0x2F, //             CPL
+    0xE6, 0x04, //       AND 4           tile 0 (BG map), tile 4 (window map)
+    0x22, //             LD (HL+),A
+    0x7C, //             LD A,H
+    0xFE, 0xA0, //       CP A0
+    0x20, 0xF3, //       JR NZ,map
+    0x21, 0x00, 0xFE, // LD HL,FE00
+    0x16, 0x10, //       LD D,16         first group's Y
+    0x1E, 0x04, //       LD E,4          groups
+    // group:
+    0x06, 0x0A, //       LD B,10
+    0x0E, 0x08, //       LD C,8          first X
+    // obj:
+    0x7A, //             LD A,D
+    0x22, //             LD (HL+),A      Y
+    0x79, //             LD A,C
+    0x22, //             LD (HL+),A      X
+    0x3E, 0x02, //       LD A,2
+    0x22, //             LD (HL+),A      tile 2 (and 3)
+    0x78, //             LD A,B
+    0xE6, 0x0F, //       AND 0F
+    0xCB, 0x37, //       SWAP A
+    0x22, //             LD (HL+),A      attributes B<<4
+    0x79, //             LD A,C
+    0xC6, 0x06, //       ADD A,6
+    0x4F, //             LD C,A
+    0x05, //             DEC B
+    0x20, 0xEC, //       JR NZ,obj
+    0x7A, //             LD A,D
+    0xC6, 0x24, //       ADD A,36
+    0x57, //             LD D,A
+    0x1D, //             DEC E
+    0x20, 0xE1, //       JR NZ,group
+    0x3E, 0xE4, //       LD A,E4
+    0xE0, 0x47, //       LDH (BGP),A
+    0xE0, 0x48, //       LDH (OBP0),A
+    0x2F, //             CPL
+    0xE0, 0x49, //       LDH (OBP1),A
+    0xAF, //             XOR A
+    0xE0, 0x4A, //       LDH (WY),A
+    0x3E, 0x57, //       LD A,87
+    0xE0, 0x4B, //       LDH (WX),A
+    0x3E, 0xF7, //       LD A,F7
+    0xE0, 0x40, //       LDH (LCDC),A
+    0x1E, 0xE4, //       LD E,E4         the shades, line to line
+    // line:
+    0xF0, 0x41, //       LDH A,(STAT)
+    0xE6, 0x03, //       AND 3
+    0x20, 0xFA, //       JR NZ,line      until mode 0
+    0x7B, //             LD A,E
+    0x07, //             RLCA
+    0x07, //             RLCA            rotate the shades
+    0x5F, //             LD E,A
+    0xE0, 0x47, //       LDH (BGP),A
+    0xE0, 0x48, //       LDH (OBP0),A
+    0x2F, //             CPL
+    0xE0, 0x49, //       LDH (OBP1),A
+    0x14, //             INC D
+    0x7A, //             LD A,D
+    0xE0, 0x42, //       LDH (SCY),A
+    // mode3:
+    0xF0, 0x41, //       LDH A,(STAT)
+    0xE6, 0x03, //       AND 3
+    0xFE, 0x03, //       CP 3
+    0x20, 0xF8, //       JR NZ,mode3
+    0x7A, //             LD A,D
+    0x2F, //             CPL
+    0xE0, 0x43, //       LDH (SCX),A     SCX in mode 3
+    0x7B, //             LD A,E
+    0x07, //             RLCA
+    0x07, //             RLCA
+    0x5F, //             LD E,A
+    0xE0, 0x47, //       LDH (BGP),A     BGP in mode 3
+    0x18, 0xD7, //       JR line
+];
+
 /// Where the worst-case STAT handler lives: after the vectors, so the
 /// timer vector at 0x50 is free for [`TIMER_HANDLER`].
 const STAT_HANDLER_AT: usize = 0x68;
@@ -469,9 +586,13 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
         "apu-writes" => (&pcm, vec![(0x50, &PCM_HANDLER)]),
         "apu-writes@hram" => (&pcm, vec![(0x50, &PCM_HANDLER_HRAM)]),
         "cgb-raster" => (&raster, vec![]),
+        "dmg-raster" => (DMG_RASTER, vec![]),
         _ => return None,
     };
-    Some(image(name, 0xC0, code, &low)) // CGB only
+    // Pan Docs, 0143 (CGB flag): bit 7 clear runs the cartridge in DMG
+    // compatibility mode; C0 is CGB only.
+    let cgb_flag = if name == "dmg-raster" { 0x00 } else { 0xC0 };
+    Some(image(name, cgb_flag, code, &low))
 }
 
 fn image(title: &str, cgb_flag: u8, code: &[u8], low: &[(usize, &[u8])]) -> Vec<u8> {
@@ -511,14 +632,30 @@ fn image(title: &str, cgb_flag: u8, code: &[u8], low: &[(usize, &[u8])]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gbc_core::{CLOCK_HZ, Config, Emulator, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, WHITE};
+    use gbc_core::{
+        CLOCK_HZ, Config, DmgPalettes, Emulator, Events, Frame, Memory, SCREEN_HEIGHT,
+        SCREEN_WIDTH, WHITE, rgb555,
+    };
 
     /// Runs `name` for `clocks` and returns `peek` of each address.
     fn run(name: &str, clocks: u64, addrs: &[u16]) -> Vec<u8> {
+        run_frame(name, clocks, false, Config::default(), addrs).0
+    }
+
+    /// Runs `name` for `clocks`, then (if `whole`) on to the end of the
+    /// next complete frame, and returns `peek` of each address and the
+    /// frame buffer.
+    fn run_frame(
+        name: &str,
+        clocks: u64,
+        whole: bool,
+        config: Config,
+        addrs: &[u16],
+    ) -> (Vec<u8>, Box<Frame>) {
         let rom = build(name).unwrap();
         let mut mem = Box::new(Memory::new());
         let mut emu = Emulator::new(&mut mem);
-        emu.load(&rom, &mut [], Config::default()).unwrap();
+        emu.load(&rom, &mut [], config).unwrap();
         let mut frame: Box<Frame> = vec![WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]
             .into_boxed_slice()
             .try_into()
@@ -526,7 +663,14 @@ mod tests {
         while emu.clock() < clocks {
             let _ = emu.run_until(clocks, &mut frame, &mut []);
         }
-        addrs.iter().map(|&a| emu.peek(a)).collect()
+        if whole {
+            while !emu
+                .run_frame(&mut frame, &mut [])
+                .events
+                .contains(Events::FRAME_READY)
+            {}
+        }
+        (addrs.iter().map(|&a| emu.peek(a)).collect(), frame)
     }
 
     #[test]
@@ -686,5 +830,45 @@ mod tests {
         assert_eq!(a[2] & 0x80, 0x80, "auto-increment");
         assert_ne!(a[2], b[0], "BCPS advanced");
         assert_ne!(a[3], b[1], "SCX written");
+    }
+
+    #[test]
+    fn dmg_raster_draws_bg_window_and_ten_objects_per_line_in_dmg_mode() {
+        // Object shades only DMG mode can produce: the caller's OBP0/OBP1
+        // colors (CGB mode would use OBJ palette RAM instead).
+        let red = [1, 2, 3, 4].map(|r| rgb555(r * 7, 0, 0));
+        let green = [1, 2, 3, 4].map(|g| rgb555(0, g * 7, 0));
+        let config = Config {
+            dmg_palettes: DmgPalettes {
+                obj0: red,
+                obj1: green,
+                ..DmgPalettes::GRAYSCALE
+            },
+        };
+        let at = u64::from(CLOCK_HZ) / 10;
+        let (r, frame) = run_frame("dmg-raster", at, true, config, &[0xFF4D, 0xFF40]);
+        assert_eq!(r[0], 0xFF, "KEY1 locked: DMG compatibility mode");
+        assert_eq!(r[1], 0xF7, "LCD, window, 8x16 objects, BG");
+        let obj = |p: u16| red.contains(&p) || green.contains(&p);
+        let changes = |row: &[u16]| row.windows(2).filter(|w| w[0] != w[1]).count();
+        for y in 0..SCREEN_HEIGHT {
+            let row = &frame[y * SCREEN_WIDTH..(y + 1) * SCREEN_WIDTH];
+            // Objects: on lines 0-15, 36-51, 72-87, 108-123 (8x16 at
+            // Y=16+36k), the tenth (X=62, OBP1) visible past the ninth.
+            let want = (y % 36) < 16 && y < 124;
+            assert_eq!(row.iter().any(|&p| obj(p)), want, "objects on line {y}");
+            assert_eq!(
+                row[56..62].iter().any(|&p| green.contains(&p)),
+                want,
+                "tenth object, line {y}"
+            );
+            assert!(row[62..].iter().all(|&p| !obj(p)), "line {y}");
+            // BG (x 64-79, no objects): four colors across each tile row,
+            // so nearly every pixel differs from the last.
+            assert!(changes(&row[64..80]) >= 12, "BG on line {y}");
+            // Window (x 80-159, WX=87): solid tile 4, so one shade, or
+            // two around the mid-line BGP write.
+            assert!(changes(&row[80..]) <= 1, "window on line {y}");
+        }
     }
 }
