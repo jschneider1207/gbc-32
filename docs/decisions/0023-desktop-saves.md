@@ -66,3 +66,36 @@ stem and the other Game Boy extension (`gb`/`gbc`, either case) exists;
 then it is `<file name>.sav` (`game.gbc.sav`). Common-case saves are
 untouched; only someone who later adds the other-extension file next to an
 existing `game.sav` has to rename it. Deterministic, no config.
+
+## Amendment (2026-11-23): the save file is written on a thread
+
+`write_atomic` (temp file, `sync_all`, rename) blocks for as long as the
+disk and any antivirus take; on the main thread that time is a frame
+stall. Measured on native Windows: 2.2-7.2 ms for a 32 KiB save (C: temp
+and X:), one Wario Land 3 autosave 3.4 ms. Not the cause of the reported
+hitches (those were the game's LCD-off periods, ADR 0024 amendment), but
+a slower drive or a scan would be, so writes moved off the main thread.
+
+- `save_writer::SaveWriter` (one per session, for a cartridge with a
+  save) owns a thread that writes with `write_atomic`, unchanged.
+- `Autosave::after_frame` decides as before, then encodes a snapshot
+  (RAM copy plus RTC footer, stamped with the current unix time) and
+  `submit`s it: it never waits for the disk. A snapshot submitted while
+  another is still queued replaces it; one write is in flight at most.
+  Writes therefore happen in submission order and the newest snapshot
+  is always the last written: none is reordered, and only snapshots
+  superseded before they were written are skipped.
+- A failed write warns on stderr from the writer thread and sets a flag;
+  the next `after_frame` sees it and owes the save again (retried one
+  second of emulated time later, as before).
+- Exit: `session::run` ejects the cartridge as before, then
+  `SaveWriter::finish(exit save)` queues the exit save behind anything
+  queued or in flight and joins the thread, so it is on disk before
+  `run` returns, and its result is the exit status (a failure is exit 1,
+  reported once). This path is the same for Esc, window close,
+  Ctrl+C/SIGTERM (which only end the loop, ADR 0023 M7 review) and a
+  panic in the loop (caught, saved, then resumed). Dropping a writer that
+  was never finished (an early error return) still writes what was
+  queued.
+- Not covered, as before: a crash or kill of the process mid-play loses
+  only what the last completed write did not have.

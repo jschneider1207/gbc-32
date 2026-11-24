@@ -2,12 +2,12 @@
 //! window and headless loops both run inside [`run`].
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use gbc_core::{CLOCK_HZ, Config, Emulator, Memory, cart_info};
 
 use crate::compat_palette;
 use crate::save::{MAX_OWED_SECS, SaveFile, SettleTracker, sync_rtc};
+use crate::save_writer::{SaveWriter, WriteStats};
 
 /// Unix time now, in seconds. The only wall clock the front end reads.
 pub fn unix_now() -> u64 {
@@ -28,28 +28,27 @@ pub struct Options<'a> {
 }
 
 /// Writes the save during play. The main loop calls
-/// [`Autosave::after_frame`] once per emulated frame.
+/// [`Autosave::after_frame`] once per emulated frame; the file is written
+/// on a background thread ([`SaveWriter`]), so the loop never waits for
+/// the disk.
 pub struct Autosave {
-    file: Option<SaveFile>,
+    file: Option<(SaveFile, SaveWriter)>,
     tracker: SettleTracker,
     now: fn() -> u64,
-    writes: WriteStats,
-}
-
-/// Save files written since the last [`Autosave::take_write_stats`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct WriteStats {
-    pub count: u64,
-    /// The longest single write.
-    pub max: Duration,
 }
 
 impl Autosave {
     /// Saves once the game has written to its save and then left it alone
     /// for one second of emulated time, or after `MAX_OWED_SECS` of
-    /// continuous writes. Failures warn and are retried.
+    /// continuous writes. Failures warn (on the writer thread) and are
+    /// retried one second later.
     pub fn after_frame(&mut self, emu: &mut Emulator<'_>) {
-        let Some(file) = &self.file else { return };
+        let Some((file, writer)) = &self.file else {
+            return;
+        };
+        if writer.take_failed() {
+            self.tracker.retry(emu.clock());
+        }
         let dirty = emu.save_dirty();
         let due = self.tracker.poll(dirty, emu.clock());
         if dirty {
@@ -58,19 +57,23 @@ impl Autosave {
         if !due {
             return;
         }
-        let t = Instant::now();
-        let r = file.store(emu.cart_ram(), emu.rtc_state(), (self.now)());
-        self.writes.count += 1;
-        self.writes.max = self.writes.max.max(t.elapsed());
-        if let Err(e) = r {
-            eprintln!("warning: can't write {}: {e}", file.path.display());
-            self.tracker.retry(emu.clock());
-        }
+        // A snapshot: the RAM copy is microseconds; the write is not ours.
+        writer.submit(file.encode(emu.cart_ram(), emu.rtc_state(), (self.now)()));
     }
 
-    /// Writes since the last call (for `GBC_FRAME_STATS`).
+    /// Writes finished since the last call (for `GBC_FRAME_STATS`).
     pub fn take_write_stats(&mut self) -> WriteStats {
-        std::mem::take(&mut self.writes)
+        self.file
+            .as_ref()
+            .map_or_else(WriteStats::default, |(_, w)| w.take_stats())
+    }
+
+    /// Waits until every queued write has finished (tests).
+    #[cfg(test)]
+    pub fn flush(&self) {
+        if let Some((_, w)) = &self.file {
+            w.wait_idle();
+        }
     }
 }
 
@@ -113,20 +116,31 @@ pub fn run<R>(
         emu.set_rtc_state(sync_rtc(rtc, saved_at, now));
     }
 
+    let file = match save {
+        Some(f) => {
+            let w = SaveWriter::spawn(f.path.clone())
+                .map_err(|e| format!("can't start the save writer: {e}"))?;
+            Some((f, w))
+        }
+        None => None,
+    };
     let mut autosave = Autosave {
-        file: save,
+        file,
         tracker: SettleTracker::new(u64::from(CLOCK_HZ), u64::from(CLOCK_HZ) * MAX_OWED_SECS),
         now: opts.now,
-        writes: WriteStats::default(),
     };
     // A panic in the loop still gets the exit save, then keeps unwinding.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         body(&mut emu, &mut autosave)
     }));
 
+    // The exit save goes after any autosave still queued or in flight;
+    // `finish` returns once it is on disk (or failed).
     let ejected = emu.eject().expect("a cartridge is loaded");
-    if let Some(file) = &autosave.file {
-        file.store(ejected.save_ram(), ejected.rtc, (opts.now)())
+    if let Some((file, writer)) = autosave.file.take() {
+        let last = file.encode(ejected.save_ram(), ejected.rtc, (opts.now)());
+        writer
+            .finish(Some(last))
             .map_err(|e| format!("can't write {}: {e}", file.path.display()))?;
     }
     match result {
@@ -170,16 +184,66 @@ mod tests {
                 let _ = emu.run_frame(&mut frame, &mut []);
                 autosave.after_frame(emu);
             }
+            autosave.flush();
             let early = sav.exists();
             for _ in 0..60 {
                 let _ = emu.run_frame(&mut frame, &mut []);
                 autosave.after_frame(emu);
             }
+            autosave.flush();
             (early, std::fs::read(&sav).ok())
         })
         .unwrap();
         assert!(!early, "still settling after half a second");
         assert_eq!(late.map(|s| s[0]), Some(0x42), "written during play");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_autosave_is_retried() {
+        let dir = std::env::temp_dir().join(format!("gbc-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom_path = dir.join("r.gb");
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100..0x103].copy_from_slice(&[0xC3, 0x50, 0x01]);
+        rom[0x147] = 0x03; // MBC1+RAM+BATTERY
+        rom[0x149] = 0x02;
+        rom[0x14D] = rom[0x134..=0x14C]
+            .iter()
+            .fold(0u8, |x, &b| x.wrapping_sub(b).wrapping_sub(1));
+        // ld a,0A; ld (0000),a; ld a,42; ld (A000),a; jr $ (one write only)
+        rom[0x150..0x15B]
+            .copy_from_slice(&[0x3E, 0x0A, 0xEA, 0, 0, 0x3E, 0x42, 0xEA, 0, 0xA0, 0x18]);
+        rom[0x15B] = 0xFE;
+        std::fs::write(&rom_path, &rom).unwrap();
+        let opts = Options {
+            rom_path: &rom_path,
+            now: || 1,
+            sync_rtc_on_load: false,
+            dmg_palette: compat_palette::Mode::Auto,
+        };
+        let sav = dir.join("r.sav");
+        // A directory in the temp file's place makes the write fail.
+        let block = dir.join("r.sav.tmp");
+        std::fs::create_dir(&block).unwrap();
+        let (first, retried) = run(&opts, |emu, autosave| {
+            let mut frame: Box<Frame> = Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]);
+            let mut frames = |n| {
+                for _ in 0..n {
+                    let _ = emu.run_frame(&mut frame, &mut []);
+                    autosave.after_frame(emu);
+                    autosave.flush();
+                }
+            };
+            frames(90); // the write is due after a quiet second, and fails
+            let first = sav.exists();
+            std::fs::remove_dir(&block).unwrap();
+            frames(90); // the game wrote nothing new: only a retry saves
+            (first, std::fs::read(&sav).ok())
+        })
+        .unwrap();
+        assert!(!first, "the blocked write failed");
+        assert_eq!(retried.map(|s| s[0]), Some(0x42), "retried during play");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

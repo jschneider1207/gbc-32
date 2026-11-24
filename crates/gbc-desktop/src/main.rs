@@ -14,6 +14,7 @@ mod input;
 mod pacing;
 mod png;
 mod save;
+mod save_writer;
 mod session;
 mod shutdown;
 mod video;

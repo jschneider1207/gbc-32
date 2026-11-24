@@ -124,3 +124,26 @@ lateness and callback jitter; video is still not vsync-locked, so
 59.73 Hz against a 60 Hz display still repeats a frame every ~3.7 s.
 `GBC_AUDIO_STATS` now also prints the raw ring fill and the callback
 rate, chunk size and min-max gap.
+
+**2026-11-23: attributing stalls.** `GBC_FRAME_STATS` lines also give
+`blank` (frames that completed no picture: LCD off), `busy max` (longest
+event-loop iteration, wake-up to `about_to_wait` done, all handlers and
+the stats print included), `step max` (running one wake-up's frames,
+autosave hand-off included), `present max` (one blit + present), `pads
+max` (one gilrs poll), and `saves N max X ms` (writes completed on the
+save writer thread, ADR 0023 amendment). Wake lateness now also counts a
+wake-up caused by an event after the deadline had passed. A gap of 50 ms
+or more between completed frames prints its own `hitch:` line: frames
+emulated in it and how many were blank, busy/step/wake-late maxima
+within it, and the min-max audio pacing fill estimate seen at wake-ups
+in it. Reading it: frames ≈ gap / 16.74 ms with all but one blank is
+the game blanking the LCD (as on hardware); busy or step near the gap is
+our code blocking; wake late near the gap is the OS; few frames with
+small busy and late and a fill above target is the pacer holding back.
+Measured, native Windows: Wario Land 3's boot shows
+`hitch: 344.8 ms between pictures, 23 frames emulated (22 blank), busy
+max 36.2 step max 0.4 wake late max 1.00 ms, audio fill 49.0-58.0 ms`.
+The human's in-game hitches (exact multiples of a frame, wake late ~1
+ms, emulated a little above 59.73/s, no multi-frame catch-up) fit the
+same pattern: the extra "emulated" frames are frames cut short when the
+LCD turns back on, not catch-up.

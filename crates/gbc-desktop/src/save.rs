@@ -186,9 +186,9 @@ impl SaveFile {
         }
     }
 
-    pub fn store(&self, ram: &[u8], rtc: Option<RtcState>, now_unix: u64) -> io::Result<()> {
-        let bytes = encode(ram, rtc.as_ref().map(|r| (r, now_unix)));
-        write_atomic(&self.path, &bytes)
+    /// The file's bytes for this RAM and clock, stamped `now_unix`.
+    pub fn encode(&self, ram: &[u8], rtc: Option<RtcState>, now_unix: u64) -> Vec<u8> {
+        encode(ram, rtc.as_ref().map(|r| (r, now_unix)))
     }
 }
 
