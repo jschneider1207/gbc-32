@@ -963,3 +963,82 @@ ranges) and grouped them:
   fetch whose T1 step sees WX == position + 7 skips its VRAM reads), a
   per-dot fetcher detail our span renderer has no place for yet.
 - **Cost.** `.text` 95,494 -> 96,626 B of 97,500 (both fixes).
+
+### Mealybug C and D: the BG fetch through object stalls (branch `m9-mealy-cd`)
+
+All four ROMs pulse one register for 8 dots per line (`ld [hl], c` /
+`ld [hl], b`) at a fixed dot (line position `first_pixel + 11` and `+ 19`
+here), with one object per 8-line band at X = 0..17.
+
+- **Model (SameBoy display.c, mode-3 loop).** At an object match the BG
+  fetcher keeps advancing (`while (fetcher_state <
+  GB_FETCHER_GET_TILE_DATA_HIGH_T2 || fifo_size == 0)`) until it holds the
+  next tile, then waits in PUSH. So tile j + 1's T1 / DATA_LOW / DATA_HIGH
+  run at fixed dots from tile j's *fetch window* (the dot its first pixel is
+  output, or would be before a stall at that pixel); an object stall moves
+  none of them, and a write inside a stall can land between them. The old
+  rule ("a stall in tile j finishes tile j + 1 before the write") is gone.
+  `Ppu::tile_lead` counts the stall dots before tile j's window: earlier
+  tiles' stalls; a window start at tile j (it fetches tile j itself); and an
+  object left of tile 0 (X - 8 < -(SCX & 7)), which SameBoy matches with the
+  junk pixels after tile 0's fetch began, so it counts from tile 0 on but
+  not for the junk tile before it (gambatte `scx_during_m3_spx0/1` regress
+  otherwise). A window stall inside tile j still finishes tile j + 1
+  (unchanged approximation).
+- **Window activation (D).** With the window at the next pixel (WX >= 7),
+  `hold_fetch` treats the window as started from its activation dot: the
+  window stall's first dot, after any junk-pixel object stalls (SameBoy
+  activates at the position check, so `X < 8` objects stall first; our
+  `LineTiming` orders the window stall first at x = 0, same total). In the
+  window stall the tile being fetched is window tile 0 (phase from the
+  activation); after it, window tile 1 from the stall's end (an object at
+  the window's first pixel then fetches tile 1 inside its own stall:
+  Mealybug lines 64-71, X = 8). Before, such a write cut the BG tile at the
+  window start and gave the window's tiles the new values.
+- **LCDC.4 sets (calibrated).** `LCDC_TILES_LATE` = 1 still holds for
+  clears and for sets on lines without objects near the write (gambatte
+  `bgtiledata_spx*`: set 3 dots into a tile with no objects reaches the
+  next tile's low plane; `spx09` line 0, object in an earlier tile: 5 dots
+  in reaches the high plane). A set with an object stall in tile j or j + 1
+  (before or after the write; in tile 0 also a junk-pixel one) reaches the
+  data steps on time (late 0): Mealybug `m3_lcdc_tile_sel_change` X = 3-7
+  (after a junk stall), 16-17 (inside the stall), `m3_lcdc_tile_sel_win_change`
+  X = 14-17 (stall after the write). SameBoy writes LCDC on time
+  (`GB_CONFLICT_LCDC_CGB`), with a clear glitching the next dot's data read
+  (`tile_sel_glitch`: the tile number as data; in these ROMs the old tile's
+  bytes, which "clear one dot early" reproduces). It doesn't explain the
+  gambatte early set; no reference found. Variants tried: late 0 for all
+  sets (14 `bgtiledata` regress), tile 1 one dot earlier after junk stalls
+  (fixes X < 8 but breaks X = 16-17), late per plane (high always on time:
+  `bgtiledata_spx09_1/3` regress).
+- **Result.** Full manifest vs main: 2 fail -> pass (Mealybug
+  `m3_scy_change` 189 -> 0 px, `m3_lcdc_win_map_change` 444 -> 0),
+  0 regressions. `m3_lcdc_tile_sel_change` 380 -> 8 px,
+  `m3_lcdc_tile_sel_win_change` 706 -> 8 px; E (`*_tile_sel_change2`,
+  261 and 272 px) and F (`m3_wx_4_change_sprites`, 10 px) unchanged.
+- **Unexplained.** The 8 px left are one line each, the first line of an
+  object band at a tile boundary: `m3_lcdc_tile_sel_change` line 128
+  (X = 16; lines 129-135 with the same object, writes and stalls pass)
+  wants tile 2 fully new, i.e. its low-plane read (dot 10) seeing the write
+  at dot 11, as a late-1 set would; `m3_lcdc_tile_sel_win_change` line 64
+  (X = 8; 65-71 pass) wants window tile 1's high plane new, the same one-dot
+  shift. In the window ROM line 128 behaves like 129, and in the BG ROM
+  line 64 can't show it, so no rule ("first object row", "object at a tile
+  boundary", "previous line's object in another tile") fits both. The CPU
+  side is identical on every line (NOP slide, 456-dot lines). SameBoy
+  predicts the 129-135 behaviour for those lines too. CGB C and D captures
+  agree, so it isn't a photo artifact.
+- **Tests** (mutation-checked): `bg_fetch_keeps_its_dots_through_an_object_stall`
+  (old stall rule; late always / never for sets; junk stall counted for the
+  junk tile; object stall only up to the write; no-walk shortcut taken at
+  pixel 0), `window_tile_0_is_fetched_from_the_window_activation`
+  (no `win_now`; no activation-dot condition; no in-stall shift).
+- **Cost.** `.text` 96,550 -> 96,916 B of 97,500 (`tile_lead` 480 B, cold).
+  A first version with the junk test as an early-out in the loop cost
+  +1,100 B: LLVM unswitched the loop on it. `tile_lead` is skipped for a
+  map-select or SCX write once tile j's first pixel and pixel 0 are out
+  (it can't change `end` then): walking the stalls on every SCX write cost
+  `synth:worst-case` +1.0%. Bench vs main (x86 Ir, callgrind):
+  `synth:worst-case` 476,778,465 -> 477,473,830 (+0.15%; 3.997 M Ir per
+  emulated frame, 99.4% of the 4.02 M line), `cgb-acid2` 686,265,829 ->
+  686,242,177, `synth:cgb-raster` 321,127,575 -> 321,485,104 (+0.11%).
