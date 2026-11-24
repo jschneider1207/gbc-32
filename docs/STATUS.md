@@ -67,7 +67,9 @@ felt. Link's Awakening DX (84858f7): hitches = 2-3 LCD-off frames; a
 ~40 s stretch with `wake late` mean 1.0 / max 4.1 ms (elsewhere 0.35 / ~1)
 spread frame intervals to 13-20.5 ms: queued fix = sleep to ~2 ms before
 due, then precise wait (after the replay tooling, `desktop-replay`, same
-files). Stutter work now waits on a recorded session with M marks. Next
+files). Stutter work: automatic detection from a per-frame log + DWM refresh
+counts on agent-run native replays (human: noticing stutters and pressing
+a mark key is not a good strategy; marks optional). Next
 candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
 (human: "decide after the stall fix").
 
