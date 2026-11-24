@@ -1,88 +1,95 @@
-# Code-size budgets for gbc-core functions on the MCU build
-# (thumbv7em-none-eabihf, release with `codegen-units = 1` as pinned in
-# Cargo.toml, -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh;
-# rules in docs/perf.md "Code-size budgets" (human, 2026-11-24).
+# Code size of gbc-core on the MCU build (thumbv7em-none-eabihf, release with
+# `codegen-units = 1` as pinned in Cargo.toml, -C target-cpu=cortex-m7).
+# Checked by scripts/check-code-size.sh; rules in docs/perf.md "Code-size
+# budgets".
+#
+# Sized for the final MCU, the STM32H735IGK6 (human, 2026-11-24: the caps
+# are the ones valid for the final MCU; the Stage 2 dev board may run
+# slower). Its ITCM is configured to 128 KiB (RM0468 Rev 3 §2.4 Table 8,
+# TCM_AXI_SHARED[1:0] = 01 in FLASH_OPTSR2_PRG, §4.9.25) and holds all of
+# gbc-core, so no function needs a cap of its own.
 #
 # Two kinds of line; '#' lines and blank lines are ignored:
-#   <bytes> <symbol>          gates: over budget, or symbol not found, fails.
-#                             Only for functions in the ITCM set
-#                             (perf/itcm-sections.txt); the script fails a
-#                             gating line for a function outside it.
-#   report <bytes> <symbol>   printed with its size, never fails. For
-#                             functions that stay in flash (the script fails
-#                             a `report` line for a function in the ITCM
-#                             set), and for the special name `(total .text)`.
+#   <bytes> (total .text)     THE GATE: the sum of every .text* section in
+#                             the rlib, alignment padding included, before
+#                             the linker drops what a front end does not
+#                             use. Over it fails. Exactly one such line.
+#   report <bytes> <symbol>   printed with its size, the figure and % of
+#                             it; never fails. Above the figure it prints
+#                             "over, report only"; a symbol that is not
+#                             found prints a WARN (update the line).
+#                             Every per-function line is a report line.
 # <symbol> is the exact demangled name, as printed by nm -C.
 #
-# Gating lines:
-#  - A symbol that is not found (renamed or inlined away) is a failure:
-#    update this file, do not delete the line to make the check pass.
-#  - Budgets are at most the measured size + 5% (rounded up). Raising one is
-#    committed with the change that needs it, with the measured size and the
-#    reason in the commit body. What binds in the end is the ITCM-set total
-#    (scripts/check-itcm-set.sh); these keep one function from eating its
-#    margin unseen.
-#  - Every function in the ITCM set of 128 B or more has a line.
+# Gate: 128 KiB ITCM (131,072 B) minus an 8 KiB platform reserve (ISRs,
+# the frame blit, compiler_builtins, veneers) = 122,880 B. Provisional
+# until the H735 firmware crate exists and its linked ELF is measured
+# (LTO changes inlining). Raising it needs the human.
+122880 (total .text)
 #
-# ITCM set (gating). Measured 2026-11-24.
-25738 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-7237 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
-90 <gbc_core::bus::Ctx>::write_high
-712 <gbc_core::bus::Ctx>::write_io
-866 gbc_core::bus::read_high
-204 <gbc_core::bus::Ctx>::sync_ppu
-347 <gbc_core::bus::Ctx>::write_mapped
-1183 <gbc_core::bus::Ctx>::boundary
-960 <gbc_core::ppu::Ppu>::sync
-590 <gbc_core::ppu::Ppu>::next_event
-444 <gbc_core::ppu::Ppu>::point_irq
-1563 <gbc_core::bus::Ctx>::write_ppu
-124 gbc_core::bus::read_vram
-122 <gbc_core::bus::Ctx>::write_vram
-175 gbc_core::bus::read_oam
-192 <gbc_core::bus::Ctx>::write_oam
-1252 <gbc_core::ppu::render::Renderer>::render
-1050 gbc_core::ppu::render::fill_mixed
-815 gbc_core::ppu::render::fill_plain
-229 gbc_core::ppu::render::fill_partial::<false>
-145 gbc_core::ppu::render::fill_partial::<true>
-1796 <gbc_core::ppu::Ppu>::latch
-154 <gbc_core::ppu::Ppu>::draw
-355 <gbc_core::ppu::Ppu>::flush
-782 <gbc_core::ppu::render::Renderer>::fetch_objects
-170 gbc_core::ppu::render::partial_tile::<false>
-192 gbc_core::ppu::render::partial_tile::<true>
-546 <gbc_core::Emulator>::run
-771 <gbc_core::apu::Apu>::sync
-1191 <gbc_core::apu::noise::Noise>::integrate
-675 <gbc_core::apu::wave::Wave>::integrate
-395 <gbc_core::apu::square::Square>::integrate
-93 gbc_core::apu::mix::constant
-160 <gbc_core::apu::Apu>::step
-322 <gbc_core::apu::Apu>::write
-508 <gbc_core::bus::Ctx>::write_apu
-82 <gbc_core::bus::Ctx>::div_apu_event
-59 <gbc_core::bus::Ctx>::set_apu_deadline
-45 <gbc_core::bus::Ctx>::apu_sync
-280 <gbc_core::bus::Sys>::set_div_apu_deadline
-866 <gbc_core::ppu::Ppu>::set_stalls
-603 <gbc_core::cpu::Cpu>::step_not_running::<gbc_core::bus::Ctx>
-517 <gbc_core::ppu::Ppu>::stat
-244 <gbc_core::schedule::Schedule>::set
-225 <gbc_core::timer::Timer>::schedule_overflow
-126 <gbc_core::timer::Timer>::reload
-225 <gbc_core::bus::Ctx>::start_audio
-198 <gbc_core::apu::noise::Noise>::advance
-196 <gbc_core::ppu::Ppu>::cpu_blocked
-194 <gbc_core::apu::square::Sweep>::clock
-173 <gbc_core::ppu::Ppu>::ly
-150 <gbc_core::bus::Ctx>::run_ppu_to_call
-143 <gbc_core::apu::wave::Wave>::advance
-139 <gbc_core::ppu::Ppu>::check_wy_at
-135 <gbc_core::apu::square::Square>::advance
+# Per-function sizes (report only). The figures are the caps these lines had
+# while they gated (measured + 5%; the last ones stopped gating 2026-11-24),
+# kept so that growth shows up in review. Lower a figure when a function
+# shrinks for good; do not raise one to hide growth.
 #
-# Flash functions (report only). The numbers are the budgets these lines
-# had while they gated; a size above one prints "over, report only".
+# Functions in the H753 (Stage 2) ITCM set, perf/itcm-sections.txt.
+report 25738 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+report 7237 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+report 90 <gbc_core::bus::Ctx>::write_high
+report 712 <gbc_core::bus::Ctx>::write_io
+report 866 gbc_core::bus::read_high
+report 204 <gbc_core::bus::Ctx>::sync_ppu
+report 347 <gbc_core::bus::Ctx>::write_mapped
+report 1183 <gbc_core::bus::Ctx>::boundary
+report 960 <gbc_core::ppu::Ppu>::sync
+report 590 <gbc_core::ppu::Ppu>::next_event
+report 444 <gbc_core::ppu::Ppu>::point_irq
+report 1563 <gbc_core::bus::Ctx>::write_ppu
+report 124 gbc_core::bus::read_vram
+report 122 <gbc_core::bus::Ctx>::write_vram
+report 175 gbc_core::bus::read_oam
+report 192 <gbc_core::bus::Ctx>::write_oam
+report 1252 <gbc_core::ppu::render::Renderer>::render
+report 1050 gbc_core::ppu::render::fill_mixed
+report 815 gbc_core::ppu::render::fill_plain
+report 229 gbc_core::ppu::render::fill_partial::<false>
+report 145 gbc_core::ppu::render::fill_partial::<true>
+report 1796 <gbc_core::ppu::Ppu>::latch
+report 154 <gbc_core::ppu::Ppu>::draw
+report 355 <gbc_core::ppu::Ppu>::flush
+report 782 <gbc_core::ppu::render::Renderer>::fetch_objects
+report 170 gbc_core::ppu::render::partial_tile::<false>
+report 192 gbc_core::ppu::render::partial_tile::<true>
+report 546 <gbc_core::Emulator>::run
+report 771 <gbc_core::apu::Apu>::sync
+report 1191 <gbc_core::apu::noise::Noise>::integrate
+report 675 <gbc_core::apu::wave::Wave>::integrate
+report 395 <gbc_core::apu::square::Square>::integrate
+report 93 gbc_core::apu::mix::constant
+report 160 <gbc_core::apu::Apu>::step
+report 322 <gbc_core::apu::Apu>::write
+report 508 <gbc_core::bus::Ctx>::write_apu
+report 82 <gbc_core::bus::Ctx>::div_apu_event
+report 59 <gbc_core::bus::Ctx>::set_apu_deadline
+report 45 <gbc_core::bus::Ctx>::apu_sync
+report 280 <gbc_core::bus::Sys>::set_div_apu_deadline
+report 866 <gbc_core::ppu::Ppu>::set_stalls
+report 603 <gbc_core::cpu::Cpu>::step_not_running::<gbc_core::bus::Ctx>
+report 517 <gbc_core::ppu::Ppu>::stat
+report 244 <gbc_core::schedule::Schedule>::set
+report 225 <gbc_core::timer::Timer>::schedule_overflow
+report 126 <gbc_core::timer::Timer>::reload
+report 225 <gbc_core::bus::Ctx>::start_audio
+report 198 <gbc_core::apu::noise::Noise>::advance
+report 196 <gbc_core::ppu::Ppu>::cpu_blocked
+report 194 <gbc_core::apu::square::Sweep>::clock
+report 173 <gbc_core::ppu::Ppu>::ly
+report 150 <gbc_core::bus::Ctx>::run_ppu_to_call
+report 143 <gbc_core::apu::wave::Wave>::advance
+report 139 <gbc_core::ppu::Ppu>::check_wy_at
+report 135 <gbc_core::apu::square::Square>::advance
+#
+# Other functions.
 report 735 <gbc_core::bus::Ctx>::write_timer_io
 report 380 <gbc_core::timer::Timer>::read
 report 615 gbc_core::bus::read_during_dma
@@ -101,8 +108,3 @@ report 380 <gbc_core::bus::Sys>::new
 report 890 <gbc_core::Emulator>::load
 report 185 <gbc_core::cart::Cart>::into_ejected
 report 510 <gbc_core::cart::RtcTime>::add_seconds
-# All of gbc-core: the sum of every .text* section in the rlib, alignment
-# padding included, before the linker drops what a front end does not use.
-# Flash is 1-2 MB, so this is a trend line, not a constraint (99,000 was the
-# last gating budget).
-report 99000 (total .text)

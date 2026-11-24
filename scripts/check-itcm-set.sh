@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# Pre-link check of the ITCM set (perf/itcm-sections.txt; docs/perf.md "ITCM
-# placement plan (M8)", ADR 0026) on the gbc-core rlib for thumbv7em: every
-# glob must match at least one function section (a rename or inlining shows up
-# as MISSING), and the summed size of all matched sections must fit
-# ITCM_BUDGET_BYTES. A section matched by two globs is counted once.
+# Pre-link check of the DEV-BOARD ITCM placement plan (perf/itcm-sections.txt;
+# docs/perf.md "ITCM placement plan", ADR 0026) on the gbc-core rlib for
+# thumbv7em. It only matters for Stage 2 on the NUCLEO-H753ZI (64 KiB ITCM,
+# fixed). The final MCU, the STM32H735, places all of gbc-core in a 128 KiB
+# ITCM; what gates there is the total in scripts/check-code-size.sh
+# (human, 2026-11-24: the dev board may run slower).
 #
-# Callee closure: a direct call or tail call (R_ARM_THM_CALL / R_ARM_THM_JUMP*
-# relocation) from a section in the set to a gbc-core function outside it
-# fails, unless the callee is `#[cold]` (rustc puts it in `.text.unlikely.`)
-# or matches a `FLASH_OK <glob>  # <reason>` line of the set file. Such a call
-# crosses ITCM -> flash through a linker veneer and runs behind the I-cache.
-# A FLASH_OK line with no reason, or that no longer matches such a callee,
-# fails too. Not seen: calls through function pointers (gbc-core has none on
+# Fails (exit 1): a glob that matches no function section (a rename or
+# inlining shows up as MISSING: a stale list is a bug, because the Stage 2
+# linker rules are generated from it); a FLASH_OK line without a reason; the
+# build failing or the relocations not being understood.
+#
+# Reported with a WARN line, exit 0:
+#   - the summed size of all matched sections over ITCM_BUDGET_BYTES (a
+#     section matched by two globs is counted once);
+#   - callee closure: a direct call or tail call (R_ARM_THM_CALL /
+#     R_ARM_THM_JUMP* relocation) from a section in the set to a gbc-core
+#     function outside it that is neither `#[cold]` (rustc puts it in
+#     `.text.unlikely.`) nor on a `FLASH_OK <glob>  # <reason>` line. Such a
+#     call crosses ITCM -> flash through a linker veneer and runs behind the
+#     H753's 16 KiB I-cache. A FLASH_OK line that no longer matches such a
+#     callee is reported the same way.
+# Not seen: calls through function pointers (gbc-core has none on
 # these paths) and callees outside the rlib (`__aeabi_mem*`, core's panic
 # paths; the front end's ITCM reserve and the post-link veneer count cover
 # those, docs/perf.md).
@@ -69,10 +79,11 @@ done < "$SETFILE"
 
 total=$(sort -u "$work/matched" | awk -F'|' '{s += $3} END {print s + 0}')
 margin=$((budget - total))
-echo "ITCM set: $nglobs globs, $total B of $budget B budget, margin $margin B"
+echo "H753 ITCM set: $nglobs globs, $total B of $budget B budget, margin $margin B (report only)"
+nwarn=0
 if [ "$total" -gt "$budget" ]; then
-  echo "FAIL: ITCM set is over budget by $((-margin)) B (docs/perf.md 'ITCM placement plan (M8)')" >&2
-  fail=1
+  echo "WARN: H753 ITCM set is over its $budget B budget by $((-margin)) B: the Stage 2 build must drop functions from the set (docs/perf.md 'ITCM placement plan'; report only)"
+  nwarn=$((nwarn + 1))
 fi
 
 # Callee closure. Edges "<calling section>|<target symbol>" from the
@@ -124,8 +135,8 @@ while read -r key glob rest; do
     if [[ $sec == $glob ]]; then n=$((n + 1)); echo "$sec" >> "$work/allowed"; fi
   done < "$work/out"
   if [ "$n" -eq 0 ]; then
-    echo "FAIL: FLASH_OK $glob matches no non-ITCM, non-cold function called from the ITCM set (stale: remove it)" >&2
-    fail=1
+    echo "WARN: FLASH_OK $glob matches no non-ITCM, non-cold function called from the ITCM set (stale: remove it; report only)"
+    nwarn=$((nwarn + 1))
   fi
 done < "$SETFILE"
 sort -u -o "$work/allowed" "$work/allowed"
@@ -136,15 +147,19 @@ while IFS='|' read -r sec sz caller; do
     continue
   fi
   nopen=$((nopen + 1))
-  echo "FAIL: ITCM function calls a non-ITCM, non-cold gbc-core function ($sz B):" >&2
-  printf '  callee %s\n  caller %s\n' "${sec#.text.}" "${caller#.text.}" | demangle >&2
-  echo "  add the callee to the set, or a 'FLASH_OK <glob>  # <reason>' line, in $SETFILE" >&2
-  fail=1
+  nwarn=$((nwarn + 1))
+  echo "WARN: H753 ITCM function calls a non-ITCM, non-cold gbc-core function ($sz B; report only):"
+  printf '  callee %s\n  caller %s\n' "${sec#.text.}" "${caller#.text.}" | demangle
+  echo "  add the callee to the set, or a 'FLASH_OK <glob>  # <reason>' line, in $SETFILE"
 done < "$work/out"
-echo "ITCM closure: $nedges call relocations in the set, $ncore to gbc-core; $(wc -l < "$work/allowed") warm callees left in flash by FLASH_OK ($allowed_bytes B, $nallow lines), $nopen not allowed"
+echo "H753 ITCM closure (report only): $nedges call relocations in the set, $ncore to gbc-core; $(wc -l < "$work/allowed") warm callees left in flash by FLASH_OK ($allowed_bytes B, $nallow lines), $nopen not allowed"
 
 if [ "$fail" -ne 0 ]; then
-  echo "FAIL: ITCM set check (perf/itcm-sections.txt)" >&2
+  echo "FAIL: ITCM set check ($SETFILE)" >&2
   exit 1
 fi
-echo "OK: every ITCM glob matches, the set fits and its warm callees are in it or allowed"
+if [ "$nwarn" -ne 0 ]; then
+  echo "OK with $nwarn WARN: every ITCM glob matches; H753 fit/closure warnings above are report only (Stage 2 dev board)"
+else
+  echo "OK: every ITCM glob matches, the set fits the H753 budget and its warm callees are in it or allowed"
+fi

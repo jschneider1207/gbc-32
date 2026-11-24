@@ -1,11 +1,20 @@
-# ITCM-resident gbc-core functions: one linker input-section glob per line,
-# `<glob>  # <demangled name>`; '#' starts a comment. Single source of truth
-# for the front ends' `.itcm` linker rules (docs/perf.md "ITCM placement
-# plan (M8)", ADR 0026) and for scripts/check-itcm-set.sh.
+# DEV-BOARD ITCM placement plan: the gbc-core functions that go in ITCM on
+# the Stage 2 NUCLEO-H753ZI (64 KiB ITCM, fixed). It only matters for
+# Stage 2. The final MCU, the STM32H735IGK6, configures 128 KiB of ITCM and
+# places ALL of gbc-core there (a `*(.text._R*8gbc_core*)`-style rule, no
+# list); its gate is the total in perf/code-size-budgets.txt (human,
+# 2026-11-24: the caps are the final MCU's; the dev board may run slower).
 #
-# Callee closure (check-itcm-set.sh): every gbc-core function that a function
-# in this set calls directly is in the set too, or is `#[cold]` (a
-# `.text.unlikely.` section, never listed here), or has a
+# One linker input-section glob per line, `<glob>  # <demangled name>`; '#'
+# starts a comment. Single source of truth for the Stage 2 front end's
+# `.itcm` linker rules (docs/perf.md "ITCM placement plan", ADR 0026) and for
+# scripts/check-itcm-set.sh. A glob that matches nothing fails the check (a
+# stale list is a bug); the fit and the callee closure below are reported
+# with a WARN line and never fail.
+#
+# Callee closure (check-itcm-set.sh, report only): every gbc-core function
+# that a function in this set calls directly should be in the set too, or be
+# `#[cold]` (a `.text.unlikely.` section, never listed here), or have a
 # `FLASH_OK <glob>  # <reason>` line at the end of this file.
 #
 # The globs match the length-prefixed path segments of rustc's v0-mangled
@@ -15,9 +24,11 @@
 # `Ppu::vram_blocked`, `Ppu::oam_blocked` and `render::frame_row` are inlined
 # into their callers and so have no section.
 #
-# ITCM_BUDGET_BYTES: the budget for the summed size of every section matched
-# below. Assumption (docs/perf.md): H753 ITCM 64 KiB minus an 8 KiB front-end
-# reserve (ISRs, blit, compiler_builtins, veneers) = 56 KiB.
+# ITCM_BUDGET_BYTES: the H753 budget for the summed size of every section
+# matched below (report only: over it prints a WARN). Assumption
+# (docs/perf.md): H753 ITCM 64 KiB minus an 8 KiB front-end reserve (ISRs,
+# blit, compiler_builtins, veneers) = 56 KiB. If the set outgrows it, the
+# Stage 2 build drops functions in the order given in docs/perf.md.
 ITCM_BUDGET_BYTES=57344
 #
 # Tier A: per instruction / bus access
@@ -96,7 +107,8 @@ ITCM_BUDGET_BYTES=57344
 # FLASH_OK: warm functions the set calls that stay in flash, behind the
 # I-cache and a linker veneer. Each needs a reason; none runs per instruction,
 # per plain memory access or per scanline of an ordinary frame. A line that
-# no longer matches such a callee fails the check (remove it).
+# no longer matches such a callee prints a WARN (remove it); a line without
+# a reason fails the check.
 # I/O register reads and writes (one call per access to that register)
 FLASH_OK .text._R*8gbc_core3bus13read_io_other*                # reads of the less common FFxx registers
 FLASH_OK .text._R*8gbc_core5timer*5Timer4read*                 # DIV/TIMA/TMA/TAC reads
