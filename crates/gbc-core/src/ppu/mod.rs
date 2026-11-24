@@ -2891,24 +2891,27 @@ fn sorted_object_stalls(
 ) -> (usize, u16) {
     let n = sorted.len().min(10);
     let mut total = 0;
-    let win_x = window.map(|wx| i32::from(wx) - 7);
-    let mut last_tile = None;
+    // No window: a start no object reaches (one test per object, no
+    // second copy of the loop).
+    let win_x = window.map_or(i32::MAX, |wx| i32::from(wx) - 7);
+    // The tile The Pixel is in, as one number: BG tiles 0..=52 (X + SCX
+    // < 423), window tiles 64 + 0..=20 (-1: none yet).
+    let mut last_tile = -1;
     let mut k = 0;
     for &x in &sorted[..n] {
         if x >= 168 {
             break;
         }
         let px = i32::from(x) - 8;
-        let (tile, right) = match win_x {
-            Some(w) if px >= w => ((true, (px - w) >> 3), 7 - ((px - w) & 7)),
-            _ => {
-                let bx = px + i32::from(scx);
-                ((false, (bx + 8) >> 3), 7 - (bx & 7))
-            }
+        let (tile, right) = if px >= win_x {
+            (64 + ((px - win_x) >> 3), 7 - ((px - win_x) & 7))
+        } else {
+            let bx = px + i32::from(scx);
+            ((bx + 8) >> 3, 7 - (bx & 7))
         };
         let mut dots = 6;
-        if last_tile != Some(tile) {
-            last_tile = Some(tile);
+        if last_tile != tile {
+            last_tile = tile;
             dots += if x == 0 { 5 } else { (right - 2).max(0) };
         }
         out[k] = (px.max(0) as u8, dots as u8);
