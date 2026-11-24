@@ -8,13 +8,11 @@
   (49c0756); M1-M8 tagged likewise.
 - **Last updated:** 2026-11-24, session 16 (log
   `logs/2026-11-24-16-m10-review.md`).
-- **Model (human, 2026-11-24): the rest of M10 must be continued on Fable
-  (`claude-fable-5-2`), as session 16 was.** If this session is running on
-  another model, stop and tell the human before doing any work. The
-  orchestrator is Fable; fix agents for new emulation logic, subtle
-  timing/performance work and reviews also run on Fable (the default when
-  no `model` is passed to the Agent tool); a cheaper model is acceptable
-  only for mechanical, fully specified steps (AGENTS.md "Fix agents").
+- **Model (human, 2026-11-24): the main session for the rest of M10 must
+  be Fable (`claude-fable-5-2`), as session 16 was.** If the main session
+  is running on another model, stop and tell the human before doing any
+  work. Subagents run on whatever model the main (Fable) session judges
+  best for each task.
 
 ## Next up: M10 (in-depth review), second half
 
