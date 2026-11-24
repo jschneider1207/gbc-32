@@ -44,19 +44,15 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
 113,154 B (margin 9,726 B).
 
 **Remaining, in order** (one agent per item, see "How work is run"):
-1. Bus access fast paths: review B8 + inventory A1 (`write_mapped`
-   out of line), then L1 (CB (HL) merge) if bytes allow. Biggest byte
-   spend left (est. 8-10 KB of the 9.7 KB margin): measure Ir per byte; the
-   dearest revertable step so far is the separate no-STAT PPU walk
-   (85567d7-line commit in the walk theme, ~1 KB for 0.2-0.7%).
-2. Retire ADR 0027 (human: "Yes retire that ADR"): dated amendment marking
-   it retired (ROM is in HyperRAM on OCTOSPI; ES0491 2.7.3 is FMC-only,
-   2.8.4 Table 5 allows any-address HyperBus reads); undo inventory items
-   R1-R4 and L19 where a wide ROM read is the natural/faster form (e.g.
-   `Cart::dma_block` word copies), each measured; remove
-   `check-rom-loads.sh` from the gate (gate edit prompts the human) and
-   from `acceptance/README.md` if listed (human-owned: ask, or the human
-   already allowed contract edits that follow their decisions: confirm).
+1. DONE (session 17, c2f19a0): bus dispatch reorder (cpu_instrs -7.52%,
+   cgb_sound -5.22%, dma-storm -5.24%, +754 B); A1 inline forms and L1
+   measured and dropped (docs/perf.md "CPU write path"/"CPU read path";
+   the push-only inline write, +1,664 B for ~0.75%, is the best leftover).
+2. DONE (session 17): ADR 0027 retired, ROM is a plain slice, VRAM DMA
+   copies ROM blocks as 16-byte chunks (-328 B); `check-rom-loads.sh`
+   removed from the gate and deleted (6d8434f). Baseline eb31bf6:
+   worst-case 276.1 M Ir, cpu_instrs 1,275.7 M, `.text` 113,580 B
+   (margin 9,300 B).
 3. Scheduler one-pass (B5); inventory themes 1 (small scalar state), 4
    (OAM DMA read clears), 10 (timer/scheduler attributes), 11 (attribute
    sweep per file family).
@@ -91,7 +87,7 @@ report format, commit trailer.
 **Gates now:** total gbc-core `.text` <= 122,880 B (128 KiB ITCM on the
 H735 minus 8 KiB reserve; provisional until a firmware ELF exists); +3% Ir
 vs `perf/bench-baseline.txt`; fuzz under the `checked` profile; invariance
-checks; `check-rom-loads.sh` (until ADR 0027's retirement lands).
+checks.
 Per-function size lines and the H753 ITCM hot set are report-only (the
 dev-board set is over its figure: expected, WARN only). Release profile:
 `codegen-units = 1` plus
@@ -131,7 +127,12 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None. Session 16 ended at a clean point: every `m10-*` branch is merged
+- Session 17 (2026-11-24): items 3 and 4 run as agents on branches
+  `m10-sched` and `m10-bench-irq` (worktrees in that session's scratchpad;
+  if the session died, inspect the branches with `git log main..<b>`,
+  re-verify and merge, or delete). Item 4 needs a baseline re-record
+  after merge (new `synth:dmg-raster` line, worst-case with a timer IRQ).
+- Before session 17: Session 16 ended at a clean point: every `m10-*` branch is merged
   by fast-forward and its worktree removed; `main` builds, passes tests and
   the checks listed under "How work is run" as of the last merge
   (c08c22a + baseline). The full `gate-stage1.sh` has NOT been run since
