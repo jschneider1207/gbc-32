@@ -315,9 +315,16 @@ pub(crate) struct Sweep {
     /// bus runs `clock` `SWEEP_LAG` clocks after the last `DivApu` event.
     pub(crate) due: bool,
     /// 1 MHz ticks (4 base clocks each) to the overflow check that
-    /// follows a write-back (0: none; `clock`).
+    /// follows a write-back (0: none; `clock`), in bits 0-2. With
+    /// `CHECK_CANCELLED` set, the ticks still run but no check follows
+    /// (`trigger`).
     pub(crate) check: u8,
 }
+
+/// `Sweep::check`: a trigger came since the write-back, so the pending
+/// overflow check is void. The remaining ticks still count down as events
+/// (`due`), because the bus's `DivApu` deadline is already set for them.
+const CHECK_CANCELLED: u8 = 0x80;
 
 /// Base clocks from the DIV-APU edge that steps the frame sequencer to 3
 /// or 7 to the sweep step it causes. gambatte (`SweepUnit`, GPL, behaviour
@@ -390,8 +397,20 @@ impl Sweep {
     /// calculation runs for its overflow check only. `late`: the trigger
     /// is close enough before a sweep step (`Apu::write_rest`) that the
     /// step doesn't count: one more step to the first calculation.
+    ///
+    /// An overflow check still pending from the last sweep step is
+    /// cancelled: it belongs to the old note, and run later it would add
+    /// the new shadow shifted by whatever NR10 holds by then (M10 review
+    /// A3-6). SameBoy `GB_apu_write` NR14: a trigger reloads
+    /// `square_sweep_calculate_countdown` and `sweep_length_addend` for
+    /// its own check (shift 0: addend 0, nothing can overflow); the one
+    /// in flight is replaced, not left to run. This trigger's own check
+    /// is instant here (`docs/reference/apu.md`, "Not modelled").
     #[inline]
     pub(crate) fn trigger(&mut self, ch: &mut Square, late: bool) {
+        if self.check != 0 {
+            self.check |= CHECK_CANCELLED;
+        }
         self.shadow = ch.freq & 0x7FF;
         self.reload();
         self.timer += u8::from(late);
@@ -430,15 +449,20 @@ impl Sweep {
     /// `sweep_calculation_done` (a countdown of `NR10 & 7`, on every
     /// revision); SameSuite `channel_1_sweep` (shift 7: CH1 still on 7
     /// M-cycles after the step, off 8 after). A check with the shift
-    /// written to 0 meanwhile is dropped (SameBoy pauses it).
+    /// written to 0 meanwhile is dropped (SameBoy pauses it), and so is
+    /// one a trigger came before (`trigger`).
     #[inline(never)]
     pub(crate) fn clock(&mut self, ch: &mut Square) {
         self.due = false;
         if self.check != 0 {
             self.check -= 1;
-            self.due = self.check != 0;
-            if !self.due && self.nr10 & 7 != 0 {
-                self.calc(ch);
+            self.due = self.check & 7 != 0;
+            if !self.due {
+                let cancelled = self.check & CHECK_CANCELLED != 0;
+                self.check = 0;
+                if !cancelled && self.nr10 & 7 != 0 {
+                    self.calc(ch);
+                }
             }
             return;
         }
@@ -816,6 +840,61 @@ mod tests {
             sw.clock(&mut sq);
         }
         assert!(sq.on && !sw.due);
+    }
+
+    /// A trigger replaces a pending overflow check with its own (M10
+    /// review A3-6): the old one must not run later against the new note.
+    /// SameBoy `GB_apu_write` NR14: the trigger reloads
+    /// `square_sweep_calculate_countdown` and `sweep_length_addend` from
+    /// the new frequency and the NR10 of that moment (or zeroes the addend
+    /// for shift 0), so no later check adds anything else.
+    #[test]
+    fn a_trigger_cancels_the_pending_overflow_check() {
+        // Shift 7: 0x7E0 + 0xF is written back; the check is 7 ticks on.
+        let (mut sw, mut sq) = ch1(0x17, 0x7E0);
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.due, sw.check), (0x7EF, true, 7));
+        sw.clock(&mut sq);
+        sw.clock(&mut sq);
+        // A new note at f 0x7F0 (its own check passes: + 0xF), then NR10
+        // for the next effect: shift 1, which would overflow.
+        sq.write(3, 0xF0, 0, 10);
+        sq.write(4, 0x87, 0, 10);
+        sw.trigger(&mut sq, false);
+        assert!(sq.on);
+        sw.write(0x11, &mut sq);
+        // The event chain keeps its ticks (the bus's `DivApu` deadline
+        // follows `due`), but nothing is calculated at its end.
+        for left in (0..5).rev() {
+            assert!(sw.due, "{left} ticks before the end");
+            sw.clock(&mut sq);
+            assert!(sq.on, "the old check does not judge the new note");
+        }
+        assert_eq!((sw.due, sw.check, sw.timer), (false, 0, 1), "no step taken");
+        assert_eq!(sq.freq, 0x7F0);
+        // The next sweep step calculates as usual, and its check runs.
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sw.check), (0x7F0, 0), "0x7F0 + 0x3F8 overflows");
+        assert!(!sq.on);
+        // With shift 0 at the trigger there is no check at all.
+        let (mut sw, mut sq) = ch1(0x17, 0x7E0);
+        sw.clock(&mut sq);
+        sw.write(0x10, &mut sq);
+        sq.write(4, 0x87, 0, 10);
+        sw.trigger(&mut sq, false);
+        sw.write(0x11, &mut sq);
+        while sw.due {
+            sw.clock(&mut sq);
+        }
+        assert!(sq.on);
+        // Without a trigger the check still runs (shift 7 -> 1 here).
+        let (mut sw, mut sq) = ch1(0x17, 0x7E0);
+        sw.clock(&mut sq);
+        sw.write(0x11, &mut sq);
+        while sw.due {
+            sw.clock(&mut sq);
+        }
+        assert!(!sq.on);
     }
 
     #[test]
