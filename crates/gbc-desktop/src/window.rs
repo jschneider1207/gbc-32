@@ -63,7 +63,8 @@ impl App<'_, '_> {
         let changed = blank != self.blank;
         self.blank = blank;
         if let Some(s) = &mut self.stats {
-            s.emulated(r.events.contains(Events::FRAME_READY));
+            let ready = r.events.contains(Events::FRAME_READY);
+            s.emulated(ready, ready && self.draw == self.shown, Instant::now());
         }
         if r.events.contains(Events::FRAME_READY) {
             std::mem::swap(&mut self.draw, &mut self.shown);
