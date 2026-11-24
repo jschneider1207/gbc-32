@@ -1397,6 +1397,10 @@ impl Ctx<'_, '_> {
             0x51..=0x54 if cgb => s.vdma.write_addr(reg - 0x50, value),
             0x55 if cgb => self.write_hdma5(value),
             0x4D if cgb => s.key1 = value & 0x01,
+            // RP, the infrared port (CGB mode only): the LED (bit 0) and
+            // the read enable (bits 6-7) are stored; read in
+            // `read_io_other`.
+            0x56 if cgb => self.mem.io[reg] = value & 0xC1,
             0x4F if cgb => {
                 s.vbk = value & 0x01;
                 s.vram_off = usize::from(s.vbk) * 0x2000;
@@ -2567,6 +2571,18 @@ fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         }
         // FF74 (GB_IO_PSW): R/W in CGB mode only (see `read_io`).
         0x74 if cgb => mem.io[reg],
+        // RP (CGB mode only; Pan Docs: "FF56 - RP"): bits 0, 6 and 7 as
+        // written, bits 2-5 read 1 (SameBoy `read_high_memory`,
+        // `GB_IO_RP`: `| 0x2E`, and `| 0x10` on every revision but CGB E),
+        // and bit 1 reads 1 (no signal) unless reading is enabled (bits
+        // 6-7 = 3) and light arrives. No link to another port is
+        // modelled, so the only light is this port's own LED (bit 0;
+        // SameBoy: "You will read your own IR LED if it's on"). Not
+        // modelled: the receiver adapting to a steady light (Pan Docs).
+        0x56 if cgb => {
+            let rp = mem.io[reg];
+            (0x3E | rp) & !(u8::from(rp == 0xC1) << 1)
+        }
         _ => 0xFF,
     }
 }
@@ -4105,6 +4121,36 @@ mod tests {
         // compatibility mode on CGB: 7E).
         assert_eq!(load(rom(0x8000, 0, 0, 0x80)).peek(0xFF02), 0x7F);
         assert_eq!(load(rom(0x8000, 0, 0, 0x00)).peek(0xFF02), 0x7E);
+    }
+
+    #[test]
+    fn rp_infrared_port_reads_back_its_writable_bits() {
+        // FF56 (Pan Docs: "FF56 - RP"; SameBoy `read_high_memory`,
+        // `GB_IO_RP`): bits 0 (LED), 6 and 7 (read enable) read back, bits
+        // 2-5 read 1, and bit 1 reads 1 (no signal) unless reading is
+        // enabled (bits 6-7 = 3) and light arrives. There is no peer, so
+        // the only light is the port's own LED.
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        assert_eq!(emu.peek(0xFF56), 0x3E, "after boot");
+        for (w, r) in [
+            (0xFF, 0xFD),
+            (0x00, 0x3E),
+            (0xC0, 0xFE),
+            (0x01, 0x3F),
+            (0x80, 0xBE),
+            (0x41, 0x7F),
+            (0x3E, 0x3E),
+            (0xC1, 0xFD),
+        ] {
+            write(emu, 0xFF56, w);
+            assert_eq!(emu.peek(0xFF56), r, "after writing {w:#04x}");
+        }
+        // CGB mode only: FF in DMG compatibility mode (SameBoy: `if
+        // (!gb->cgb_mode) return 0xFF`).
+        let emu = load(rom(0x8000, 0, 0, 0x00));
+        assert_eq!(emu.peek(0xFF56), 0xFF);
+        write(emu, 0xFF56, 0x00);
+        assert_eq!(emu.peek(0xFF56), 0xFF);
     }
 
     #[test]
