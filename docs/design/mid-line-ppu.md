@@ -360,7 +360,8 @@ pixel 159 (`bus.rs` palette path: run to `at`, flush, then sync).
 - **Result:** 35 fail->pass, 0 regressions (`bgtilemap` 20 incl. 4 `_ds`,
   `scx_during_m3` 11, Mealybug `m3_lcdc_bg_map_change2`,
   `m3_lcdc_win_map_change2`, `m3_scx_high_5_bits{,_change2}`).
-- **Code size.** The hold lives in `Memory::obj_rank` (`ObjRank { rank,
+- **Code size.** (The hold has since moved to `Renderer`: "State
+  ownership after the size caps", at the end.) The hold lives in `Memory::obj_rank` (`ObjRank { rank,
   hold }`): `Memory` is `repr(C)`, and every other spot either shifted hot
   arrays out of Thumb-2 immediates (`Ppu::draw` 146 -> 158 B with the hold
   after `bg_pairs`, 160 B with `bg_pairs` moved last), needed a second
@@ -1238,7 +1239,8 @@ glitch's latch carried over from the previous line.
   line's last object fetch, or the BG/window read before its last LCDC.4
   clear, whichever came later; if the line read with 8000 addressing to
   its end, the read in progress there.
-- **Model.** `ObjRank::sel_end` = (byte, key), kept across lines:
+- **Model.** (Now `Renderer::sel`, a `SelLatch`: "State ownership after
+  the size caps", at the end.) `ObjRank::sel_end` = (byte, key), kept across lines:
   - a mode-3 LCDC.4 clear (`Ppu::tile_sel_latch`, from the cold
     `hold_fetch`) latches the read on or before its dot: tile j + 1's
     plane once its read dot is reached (on the read dot, the glitched read
@@ -1350,7 +1352,8 @@ glitch's latch carried over from the previous line.
   bit 1 `ZERO_DUE`), so `render`'s existing one-byte test leads to
   `render_zero`; `start_frame` drops a stale `ZERO_DUE` (a line the LCD
   going off cut short; dropping it in `start_line` cost ~2 Ir per line). `win_zero` lives in `ObjRank` (`Memory`): in `Renderer` it
-  pushed `Hw` past 864 B.
+  pushed `Hw` past 864 B. (Since moved to `Renderer`: "State ownership
+  after the size caps", at the end.)
 - **Calibration.** The zero pixel's threshold counted from 0-5 pixels
   after `drawn` gives the same manifest (line 12's write lands at pixel
   0), 6 and 8 lose the ROM; earlier thresholds are no-ops (pixels already
@@ -1388,3 +1391,95 @@ glitch's latch carried over from the previous line.
   `synth:worst-case` 478,337,446 -> 478,444,047 (+0.02%, ~4.005 M Ir per
   frame, 99.6% of the 4.02 M line), `cgb-acid2` +0.07% (+1.33% of the
   baseline's 3% guard), `synth:halt-irq` +0.09%, the rest +0.01-0.06%.
+
+### State ownership after the size caps (branch `m10-ppu-state`)
+
+Behaviour-preserving (fingerprint-identical to 50028e9); reviews
+`docs/reviews/stage1-m10/` F S5/S7/S8/S11/S13/L18, D3, D6, A2-03/06/09,
+E9.
+
+- **Why.** The steps above parked the fetcher's per-line state wherever
+  a byte cap left room: in `Memory::obj_rank` (`ObjRank`), because in
+  `Renderer` it pushed `Hw` past 864 B or `Ppu::draw` past its
+  per-function figure. Both caps are gone (2026-11-24; the total `.text`
+  and the +3% Ir guard remain), so the state lives with its owner.
+- **`Renderer` owns the fetcher's line state:** the held parts (`hold`,
+  through `push_hold`, `cut_holds`, `holding`), the object fetch cursor
+  (`next_obj`), the TILE_SEL glitch latch (`sel`, `sel_at_set`, through
+  `sel_set`, `sel_clear`, `sel_carries`, `carry_sel`) and the window zero
+  pixel (`win_zero`, `set_zero`). `start_line` resets the cursor and the
+  hold. `Ppu::hold_fetch`, `tile_sel_latch`, `window_write`,
+  `window_zero`, `retrigger` and `wy_written` only read registers from
+  `Memory` now (`&Memory`).
+- **`Memory` keeps the object line buffer only,** as one
+  `ObjBuf { pix, rank }` (`Memory::obj_buf`): `render` takes one `&mut`
+  for it where it took two. `Memory::clear` restores exactly
+  `Memory::new()`; the test `clear_restores_new_from_every_field_dirty`
+  dirties every field first (the old `clear` left `hold`, `win_zero` and
+  `dma_read_clears`).
+- **Types for the packed bytes.** `Held::planes` (bits 0-1 late planes,
+  2-3 glitched planes, 4-7 a slot + 1 / 15 / 0) is `Held::mixed: Mixed`,
+  built with `Mixed::new(late, glitched, set_latch)` and read through
+  `late()`, `glitched()` (`Planes`) and `set_latch()`
+  (`SetLatch::{Plain, NearObject, Object(slot)}`). It stays one byte, as
+  a measured choice: with a field per part a `Held` is 10 bytes instead
+  of 5, and `hold_fetch` + `render_held` cost 24 x86 Ir more per mode-3
+  scroll write than the bare byte did (`synth:cgb-raster`, one SCX write
+  per line: +0.13%); the one-byte newtype costs 3. The
+  latch pair (byte, key) with key ranges 0 / 1 / 8-175 / 0xFF is
+  `SelLatch { byte, read: SelRead }` with `SelRead::{Unknown, Before(x +
+  8), BgSince}`; `known()` and `before_object(X)` are the two questions
+  the key arithmetic answered (unpacked: read only on LCDC.4 writes in
+  mode 3 and in the per-line `sel_carries` test, which is one compare
+  either way).
+- **The stall list is a type.** `LineTiming::stalls` is a `Stalls`
+  (`ppu/stalls.rs`): a fixed array of 11 `(x, dots)`, a length and the
+  window's index, written only by `set_objects`, `insert_window`,
+  `window_ran`, `splice_earlier` and `clear` and read through `as_slice`
+  and `window_index() -> Option`, so `len <= 11` and "no window stall"
+  need no `% 11` / `% 12` / `% 10` masks and no `NO_STALL` sentinel at
+  the callers (`0xFF % 11 == 2` used to read stall 2 for "none").
+  `Stalls::timed` yields each stall with the line position it begins at;
+  `LineTiming::walk` adds what it is (`StallKind::{Window, EarlierWindow,
+  Object(fetch position)}`). `window_stall_at`, `tile_lead`, `fix_attrs`
+  and `obj_size_fetch` share it in place of four hand-written clock loops
+  and two copies of `i - (i > win) - (i > prev)`; `tile_lead` returns a
+  `TileLead` struct. Two forms are kept for speed, both measured:
+  `pixels_before` (every flush) walks the slice itself (the iterator cost
+  2 Ir per call), and the window's index is a byte beside the length,
+  not an `Option<u8>` (`clear` on every line without a stall is then one
+  store: the `Option` cost 1 Ir per line).
+- **Line timing.** `LineTiming::mode3` is a `u16` like its neighbours and
+  the late-WY latch is `Ppu::wy_late` (it sat in a `LineTiming` padding
+  byte "so LCD off and on clear it"; they clear it by name now).
+  `LineTiming::fine()` stays derived from `first_pixel`: a stored copy
+  cost a store per line (+1 Ir per line, measured) for three cold
+  readers. `Renderer::win_wx` keeps its WX + 1 encoding: `win_wx != 0`
+  and `window_start` are on the per-span path, and a second per-line
+  copy in `LineTiming` measured +0.02% (c8e8626, above).
+- **`obj_size_fetch`** hands `Renderer::fetch_next_object` the LCDC each
+  bit plane's address is computed with (`lcdc_low`, `lcdc_high`); it no
+  longer patches the high plane's VRAM byte around the fetch.
+- **Not moved: the object buffer and the pair tables** (`Memory::obj_buf`
+  352 B, `Memory::bg_pairs` 512 B; S8). Tried in `Ppu` (next to
+  `colors`, no signature change in `render.rs`): x86 Ir against the same tree
+  without the move: cgb-acid2 -0.031%, worst-case -0.005%, cgb-raster
+  +0.152% (the pair-table update on palette writes), and exactly 1 Ir
+  per line less on the other six (not a locality effect); `.text`
+  +538 B; `Emulator` 920 -> 1,784 B. `Emulator::eject` and `power_cycle`
+  build an `Hw` on the stack: their frames are 976 / 988 B at 50028e9,
+  1,000 / 1,012 B now, and `eject`'s was 1,888 B with the buffers in
+  `Hw`. No measured win, and the construction paths' stack nearly
+  doubles (ADR 0006's concern), so they stay in `Memory`. Moving them
+  wants `Hw` reset in place first.
+- **Cost.** Against 50028e9 (x86 Ir, `check-bench.sh`): cpu_instrs -68,
+  cgb_sound -68, cgb-acid2 -425,382 (-0.061%), event-storm -11,
+  dma-storm -128,825 (-0.030%), halt-irq -11, worst-case -459,890
+  (-0.124%), cgb-raster -153,255 (-0.047%), apu-writes -11. thumbv7em:
+  `.text` 104,646 -> 105,262 B (+616: +596 the cold copy of the object
+  fetch in `fetch_next_object`, +248 the `Mixed`/`SelLatch` accessors,
+  the rest net smaller); `Emulator` 872 -> 896 B, `Memory` 50,968 ->
+  50,952 B. Panic paths on thumbv7em (relocations to `core::panicking`
+  per function): 24 in 17 functions -> 18 in 12, none added (the bounds
+  checks in `hold_fetch`, `tile_lead`, `fix_attrs`, `obj_size_fetch`,
+  `Ppu::flush` and one of `set_stalls`' two are gone).

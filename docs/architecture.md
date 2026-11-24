@@ -202,10 +202,10 @@ caller's `Memory`, which must never be required to live on the stack
 (ADR 0009). `Memory::new()` is all zero bytes, so on the MCU a
 `static MEM: Memory` goes to `.bss` (no flash image, no boot copy); the
 desktop and `romtest` use `Box::new(Memory::new())`. `Emulator` holds
-`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else; 824 B with the pointer on thumbv7em, printed by `scripts/check-code-size.sh`, no fixed cap)
+`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else; 896 B with the pointer on thumbv7em, printed by `scripts/check-code-size.sh`, no fixed cap)
 and is small enough for the stack. Run calls copy the `mem` pointer into
 the per-call `Ctx`, so the hot path is the same as with an inline field.
-The APU's internal state is `Memory::apu` (all zero = powered off, at most 128 B, checked by a test; ADR 0021 section 2); its register bytes stay in `Memory::io`. Per-line PPU scratch (the object pixel buffer `Memory::obj_buf`, 176 B) lives in `Memory` too, and the CGB palette tables will follow; the renderer gets it as a `&mut` array per `render` call.
+The APU's internal state is `Memory::apu` (all zero = powered off, at most 128 B, checked by a test; ADR 0021 section 2); its register bytes stay in `Memory::io`. The renderer's large line scratch lives in `Memory` too: the object line buffer `Memory::obj_buf` (`ppu::ObjBuf`: the line's object pixels and their drawing-priority ranks, 352 B), which the renderer gets as one `&mut` per `render` call, and the BG pixel-pair tables `Memory::bg_pairs` (512 B). The per-line fetcher state (held fetches, the object fetch cursor, the TILE_SEL glitch latch, the window zero pixel) is not there: it belongs to `Renderer`, in `Hw`. `Memory::clear` (`new`, `load`, `reset`, `eject`) restores exactly `Memory::new()`, checked field by field by a test.
 New large state goes in `Memory` as fields whose power-on value is zero
 (non-zero post-boot values are written by `reset`); everything else goes in
 `Hw`.
@@ -250,6 +250,7 @@ timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clo
   reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
 ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
   objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
+  stalls.rs  *   `Stalls`: one line's mode-3 pipeline stalls (objects, window starts), a bounded list and the one timed walk over it
   render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
 apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register write entry, pure reads (`read_apu`), StereoSample, output constants
   units.rs  *   Length and Envelope, shared by the channels that have them
@@ -381,7 +382,10 @@ requests".
 Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
 `SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
 "OBJ penalty algorithm"), as `LineTiming` with the per-pixel stalls so
-`Ppu::mode3_pixel(now)` can say which pixel is being drawn. Objects come
+`Ppu::mode3_pixel(now)` can say which pixel is being drawn. The stalls
+are a `Stalls` list (`ppu/stalls.rs`: at most 11, the window's as an
+`Option`), and everything that needs a stall's place in the line walks
+it through one iterator (`Stalls::timed`, `LineTiming::walk`). Objects come
 from one OAM scan per line (`objects.rs`, `LineObjects::scan`) that feeds
 both the stalls and the renderer, skipped for lines a cached object-line
 map (`ObjectLines`, invalidated by `Ppu::oam_written` on CPU and DMA OAM
@@ -431,6 +435,16 @@ the `End` point draws whatever of the line is left up to pixel 160
 line counter and WY condition; the renderer's WY condition is the only
 copy, which the window stall reads too). `Ppu::drawn` counts the pixels
 of the current line already in the frame.
+
+The renderer owns the fetcher's per-line state for mid-mode-3 writes
+(`docs/design/mid-line-ppu.md`): the held parts of the line (`Held`:
+pixels fetched before a map-select, tile-data, SCX or SCY write, drawn
+with the old values, and which planes of the last tile were read after
+it, `Mixed`), the object fetch cursor, the CGB TILE_SEL glitch latch
+(`SelLatch`) and the window zero pixel. The timing code decides them
+(`Ppu::hold_fetch`, `Ppu::window_write`) and hands them over
+(`Renderer::push_hold`, `sel_set`/`sel_clear`, `set_zero`); `Memory` only
+supplies registers, VRAM, OAM and the object line buffer.
 
 Mid-line writes (ADR 0002 catch-up): `Ctx::write_ppu` for LCDC, SCY, SCX,
 BGP, OBP0, OBP1, WY and WX calls `Ppu::flush(at)` before the write lands,
