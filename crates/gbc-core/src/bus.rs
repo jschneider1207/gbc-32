@@ -26,6 +26,7 @@ use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{self, Frame, Ppu, View, edges};
+use crate::rom::Rom;
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
@@ -176,6 +177,7 @@ impl Sys<'_> {
         for &(addr, value) in POST_BOOT_IO {
             mem.io[usize::from(addr & 0x7F)] = value;
         }
+        boot_logo(&mut mem.vram, self.cart.rom);
         // NR52 = F1 is APU state (ADR 0021 section 7).
         mem.apu.post_boot();
         self.set_div_apu_deadline(true, 0);
@@ -208,6 +210,35 @@ impl Sys<'_> {
             mem.io[0x68] = 0x88;
             mem.io[0x6A] = 0x90;
         }
+    }
+}
+
+/// The tiles the boot ROM leaves in VRAM bank 0: the cartridge header's
+/// logo (0104-0133) as tiles 1-24 and the (R) symbol as tile 25 (0x19),
+/// bit plane 0 only. Each logo byte is two rows of 4 pixels; each pixel
+/// is doubled in both directions (SameBoy BootROMs/cgb_boot.asm, MIT:
+/// `DoubleBitsAndWriteRowTwice`, `ReadTrademarkSymbol`; "required for
+/// DMG compatibility. This is done by the original CGB Boot ROM as
+/// well"). Its final VRAM DMAs clear only tile map rows 5-14 and bank 1
+/// tiles 0-64. Mealybug `m3_obp0_change`,
+/// `m3_lcdc_obj_en_change` use tile 0x19 as an object (CGB C photos).
+/// Cold: once per reset.
+#[inline(never)]
+fn boot_logo(vram: &mut [u8; 0x4000], rom: Rom<'_>) {
+    const TRADEMARK: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+    for i in 0..48 {
+        let b = rom.get(0x104 + i).unwrap_or(0);
+        for (half, nibble) in [b >> 4, b & 0x0F].into_iter().enumerate() {
+            // Bit k of the nibble to bits 2k and 2k+1.
+            let n = u16::from(nibble);
+            let d = ((n & 1) | (n & 2) << 1 | (n & 4) << 2 | (n & 8) << 3) * 3;
+            let row = 0x10 + i * 8 + half * 4;
+            vram[row] = d as u8;
+            vram[row + 2] = d as u8;
+        }
+    }
+    for (k, &b) in TRADEMARK.iter().enumerate() {
+        vram[0x190 + 2 * k] = b;
     }
 }
 

@@ -872,6 +872,30 @@ mod tests {
     }
 
     #[test]
+    fn boot_leaves_the_header_logo_and_trademark_in_vram() {
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x104..0x106].copy_from_slice(&[0xCE, 0xED]);
+        rom[0x132..0x134].copy_from_slice(&[0x33, 0x3E]);
+        let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
+        let emu = fresh();
+        emu.load(rom, ram, Config::default()).unwrap();
+        let v = &emu.mem.vram;
+        // Tile 1 from CE ED: nibbles C, E, E, D doubled, each two rows,
+        // bit plane 0 only.
+        let plane0 = [0xF0, 0xF0, 0xFC, 0xFC, 0xFC, 0xFC, 0xF3, 0xF3];
+        for (r, &p) in plane0.iter().enumerate() {
+            assert_eq!(v[0x10 + 2 * r..0x12 + 2 * r], [p, 0], "row {r}");
+        }
+        // Tile 24's last rows from 33 3E: nibbles 3, 3, 3, E.
+        assert_eq!(v[0x188..0x190], [0x0F, 0, 0x0F, 0, 0xFC, 0, 0xFC, 0]);
+        let trademark = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+        for (r, &p) in trademark.iter().enumerate() {
+            assert_eq!(v[0x190 + 2 * r..0x192 + 2 * r], [p, 0], "(R) row {r}");
+        }
+        assert!(v[..0x10].iter().chain(&v[0x1A0..]).all(|&b| b == 0));
+    }
+
+    #[test]
     fn memory_new_equals_cleared_state() {
         // `Memory::new()` is all zeros; that must equal what
         // `Memory::clear` (used by `new`, `reset` and `eject`) produces
