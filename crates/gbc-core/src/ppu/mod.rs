@@ -481,6 +481,21 @@ impl LineTiming {
         (self.first_pixel.wrapping_sub(u16::from(self.mode3) + 12)) as u8 & 7
     }
 
+    /// `edge` and `end` from the `n_stalls` stalls, `total` dots in all
+    /// (shared tail of
+    /// [`Ppu::set_stalls`] and [`Ppu::set_stalls_retriggered`]).
+    #[inline(never)]
+    fn finish(&mut self, total: u16) {
+        let k = usize::from(self.n_stalls) % 12;
+        // The stalls at pixel 159 (the trailing ones) don't delay the
+        // HBlank interrupt (`LineTiming::edge`); rare, out of line.
+        self.edge = 0;
+        if k != 0 && self.stalls[(k - 1) % 11].0 >= 159 {
+            self.edge = edge_dots(&self.stalls[..k]);
+        }
+        self.end = self.first_pixel + 160 + total - u16::from(self.edge);
+    }
+
     /// Index in `stalls` of the earlier window start after a re-trigger
     /// (`NO_STALL`: none): the first stall at its x (a window stalls before
     /// the objects at its x).
@@ -1948,46 +1963,32 @@ impl Ppu {
         }
         let t = &mut self.line;
         t.win_stall = NO_STALL;
-        let mut total = 0u16;
-        let mut k = 0;
-        if n != 0 || window.is_some() {
-            let mut stalls = [(0u8, 0u8); 10];
-            let n_obj = sorted_object_stalls(&xs[..n], scx, window, &mut stalls);
+        // The objects' stalls straight into `stalls` (no objects and no
+        // window: none).
+        let (objs, _) = t.stalls.split_first_chunk_mut::<10>().unwrap();
+        let (mut k, mut total) = sorted_object_stalls(&xs[..n], scx, window, objs);
+        if let Some(wx) = window {
             // The window start stalls 6 dots; at WX = 0 with SCX & 7 != 0
             // one more (AGE `stat-mode-window`, verified on CGB B/C/E;
             // SameBoy display.c has the extra dot, `cycles_for_line += 1`,
             // for DMG only).
             let fine = u8::from(scx & 7 != 0);
-            let win = window.map(|wx| (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0)));
+            let w = (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0));
             // The window start goes before the first object at or after
-            // it (after all of them if none is).
-            let mut i = 0;
-            if let Some(w) = win {
-                while i < n_obj && stalls[i].0 < w.0 {
-                    t.stalls[k] = stalls[i];
-                    k += 1;
-                    total += u16::from(stalls[i].1);
-                    i += 1;
-                }
-                t.win_stall = k as u8;
-                t.stalls[k] = w;
-                k += 1;
-                total += u16::from(w.1);
+            // it (after all of them if none is): the objects are in x
+            // order, so shift up the ones at or after it.
+            let mut i = k.min(10);
+            k = i + 1;
+            while i > 0 && t.stalls[i - 1].0 >= w.0 {
+                t.stalls[i] = t.stalls[i - 1];
+                i -= 1;
             }
-            for &s in &stalls[i..n_obj] {
-                t.stalls[k] = s;
-                k += 1;
-                total += u16::from(s.1);
-            }
+            t.stalls[i] = w;
+            t.win_stall = i as u8;
+            total += u16::from(w.1);
         }
         t.n_stalls = k as u8;
-        // The stalls at pixel 159 (the trailing ones) don't delay the
-        // HBlank interrupt (`LineTiming::edge`); rare, out of line.
-        t.edge = 0;
-        if k != 0 && t.stalls[(k - 1) % 11].0 >= 159 {
-            t.edge = edge_dots(&t.stalls[..k]);
-        }
-        t.end = t.first_pixel + 160 + total - u16::from(t.edge);
+        t.finish(total);
     }
 
     /// [`Self::set_stalls`] after a re-trigger ([`Self::retrigger`]): the
@@ -2022,11 +2023,7 @@ impl Ppu {
         t.prev_wx = pwx;
         let k = usize::from(t.n_stalls) % 12;
         let total: u16 = t.stalls[..k].iter().map(|s| u16::from(s.1)).sum();
-        t.edge = 0;
-        if k != 0 && t.stalls[(k - 1) % 11].0 >= 159 {
-            t.edge = edge_dots(&t.stalls[..k]);
-        }
-        t.end = t.first_pixel + 160 + total - u16::from(t.edge);
+        t.finish(total);
     }
 
     /// Clock (line position) at which the window's stall begins, under the
@@ -2881,7 +2878,7 @@ pub(crate) fn object_stalls(
     let n = xs.len().min(10);
     sorted[..n].copy_from_slice(&xs[..n]);
     sorted[..n].sort_unstable();
-    sorted_object_stalls(&sorted[..n], scx, window, out)
+    sorted_object_stalls(&sorted[..n], scx, window, out).0
 }
 
 /// [`object_stalls`] of X coordinates already in ascending order (the
@@ -2891,8 +2888,9 @@ fn sorted_object_stalls(
     scx: u8,
     window: Option<u8>,
     out: &mut [(u8, u8); 10],
-) -> usize {
+) -> (usize, u16) {
     let n = sorted.len().min(10);
+    let mut total = 0;
     let win_x = window.map(|wx| i32::from(wx) - 7);
     let mut last_tile = None;
     let mut k = 0;
@@ -2914,9 +2912,10 @@ fn sorted_object_stalls(
             dots += if x == 0 { 5 } else { (right - 2).max(0) };
         }
         out[k] = (px.max(0) as u8, dots as u8);
+        total += dots as u16;
         k += 1;
     }
-    k
+    (k, total)
 }
 
 /// The dots of `stalls` (in x order) at pixel 159, the last
