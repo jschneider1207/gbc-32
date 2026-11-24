@@ -17,19 +17,35 @@ use crate::Events;
 use crate::rom::Rom;
 
 /// A snapshot of the CPU registers ([`Emulator::registers`](crate::Emulator::registers)).
+///
+/// `repr(C)` with the low register of each pair first, so that a pair
+/// (AF, BC, DE, HL) is one little-endian 16-bit load or store on the
+/// hosts this runs on; with the high one first every 16-bit use
+/// byte-swapped (`rev` on thumbv7em; Stage 1 M10 review, C7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct Registers {
-    pub a: u8,
     pub f: u8,
-    pub b: u8,
+    pub a: u8,
     pub c: u8,
-    pub d: u8,
+    pub b: u8,
     pub e: u8,
-    pub h: u8,
+    pub d: u8,
     pub l: u8,
+    pub h: u8,
     pub sp: u16,
     pub pc: u16,
 }
+
+// The layout the pair accessors in `exec` compile to one load for.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(Registers, f) + 1 == offset_of!(Registers, a));
+    assert!(offset_of!(Registers, c) + 1 == offset_of!(Registers, b));
+    assert!(offset_of!(Registers, e) + 1 == offset_of!(Registers, d));
+    assert!(offset_of!(Registers, l) + 1 == offset_of!(Registers, h));
+    assert!(offset_of!(Registers, f) % 2 == 0 && offset_of!(Registers, l) % 2 == 0);
+};
 
 impl Registers {
     const fn zero() -> Self {
