@@ -121,4 +121,6 @@
 890 <gbc_core::Emulator>::load
 185 <gbc_core::cart::Cart>::into_ejected
 510 <gbc_core::cart::RtcTime>::add_seconds
-97500 (total .text)
+# Human (2026-11-24, session 15): 97,500 -> 99,000 for the last three
+# Mealybug ROMs (TILE_SEL latch across lines, CGB WX-match glitch).
+99000 (total .text)
