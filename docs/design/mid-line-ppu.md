@@ -1042,3 +1042,48 @@ here), with one object per 8-line band at X = 0..17.
   `synth:worst-case` 476,778,465 -> 477,473,830 (+0.15%; 3.997 M Ir per
   emulated frame, 99.4% of the 4.02 M line), `cgb-acid2` 686,265,829 ->
   686,242,177, `synth:cgb-raster` 321,127,575 -> 321,485,104 (+0.11%).
+
+### First tile's column under a moved discard (branch `m9-scx-0367c0`)
+
+gambatte `scx_during_m3/scx_0367c0` (mode-2 interrupt; SCX 03 latched,
+then 67 near mode-3 start, C0 mid-line; `_1`-`_4` move the 67 write by
+4 dots each) failed by screen x 0 only: `_3`/`_ds_3` on lines 1-143,
+`_2`/`_ds_2` on line 0 (line 0's writes land 4 dots later relative to
+the PPU, so line 0 of `_2` is the other lines of `_3`).
+
+- **What the captures show.** Per line (lines 1-143; line 0 one step
+  later): `_1`/`_2` take tile 0 and the discard from 67 (the write is
+  before the latch); `_3` keeps tile 0's map entry from 03 (map column 0)
+  but the discard moves to 7, so x 0 is column 0's pixel 7 and x 1-8 are
+  column 13; `_4` keeps both (discard 3), tile 1 from 67; line 0 of `_4`
+  keeps tile 1 too. The hold model already gave all of this: `hold_fetch`
+  held tile 0 with SCX 03 and `set_fine(7)` moved the discard.
+- **Cause.** `bg_column` turned the held SCX 03 with fine 7 into column
+  31 (`(3 - 7) & !7` borrows a tile), right for a later tile (SameBoy
+  `(SCX + position_in_line + 8 - 1) / 8`) but not for the first one,
+  which the fetcher reads at mode-3 start while `position_in_line` is in
+  the discard range: `x = SCX >> 3`, no position term (SameBoy
+  `advance_fetcher_state_machine`, MIT). With a wrapped discard (n >= 8)
+  the renderer's first tile is the second one fetched, also in that
+  range, so the same column.
+- **Rule.** `bg_column` takes the first tile's column (x < 8 - fine) from
+  `SCX & !7` with no borrow. It differs from the old form only when the
+  SCX drawn there has low bits below the fine scroll, which needs a held
+  SCX below a discard an SCX write moved (the live SCX matches the fine
+  scroll after a move, and a window end sets the fine scroll so its BG
+  resumes at a tile boundary).
+- **Calibration.** None: no constant.
+- **Result.** Full manifest: 4 fail -> pass (the four ROMs above), 0
+  regressions; stretch 3,422 -> 3,426. `diff-fingerprint.sh main`: only
+  those four ROMs differ.
+- **Test** (mutation-checked: rule off; `x < 7 - fine`):
+  `first_tile_column_ignores_a_held_scx_below_the_moved_discard`.
+- **Cost.** `.text` +72 B (`Renderer::render` 1,092 -> 1,148, inlined
+  `bg_column`; a `x < 8 - fine` form cost +112 B). It is in the hot span
+  path (one compare and select per span): a cold version in
+  `render_held` needs a split render call and the same change in
+  `mix_planes`. Bench (x86 Ir, callgrind, vs the same tree without the
+  change): `synth:worst-case` 477,914,253 -> 478,066,560 (+0.03%; 4.002 M
+  Ir per emulated frame, 99.6% of the 4.02 M line), `cgb-acid2`
+  688,152,942 -> 689,060,632 (+0.13%), `synth:cgb-raster` 321,691,149 ->
+  321,827,995 (+0.04%).

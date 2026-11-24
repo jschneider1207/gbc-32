@@ -89,8 +89,23 @@ const FETCH_COL: u8 = 0;
 /// still move the column by a carry or borrow:
 /// `((scx + X + FETCH_COL) & !7) + (x - X)`, which is the form below. With
 /// `scx & 7 == fine` it is `scx + x`. `docs/design/mid-line-ppu.md` step 2.
+///
+/// The first tile (`x < 8 - fine`) is fetched at mode-3 start, while the
+/// line position is still in the discard range, from column `SCX / 8`
+/// with no position term (SameBoy `advance_fetcher_state_machine`:
+/// `position_in_line + 16 < 8`), so its low SCX bits never borrow. That
+/// differs only for a held SCX below a discard an SCX write moved
+/// (`Ppu::hold_fetch`): gambatte `scx_during_m3/scx_0367c0` `_3`, `_ds_3`
+/// (and `_2`, `_ds_2` line 0) show screen x 0 from column 0 with SCX 03
+/// held and the discard moved to 7 by the 67 write.
 #[inline(always)]
 const fn bg_column(scx: u8, fine: u8, x: u8) -> u8 {
+    // `x` < 160 and `fine` < 8: no wrap in use.
+    let scx = if x.wrapping_add(fine) < 8 {
+        (scx & 0xF8) | fine
+    } else {
+        scx
+    };
     (scx.wrapping_sub(fine).wrapping_add(FETCH_COL) & 0xF8)
         .wrapping_add(fine)
         .wrapping_add(x)
@@ -1789,6 +1804,37 @@ mod tests {
                 assert_eq!(bg_column(scx, scx & 7, x), scx.wrapping_add(x), "{scx} {x}");
             }
         }
+    }
+
+    #[test]
+    fn first_tile_column_ignores_a_held_scx_below_the_moved_discard() {
+        // Line-start SCX 3; a write of 0x67 inside the discard moved it to
+        // 7 (`set_fine`) after tile 0's map entry was read with SCX 3
+        // (held up to x 1). Tile 0 is map column 0 (its pixel 7 at x 0),
+        // not column 31 by a borrow; tile 1 on is column 13 (0x67 / 8 + 1).
+        let mut s = Scene::new();
+        s.solid_tile(0x10, 1);
+        s.solid_tile(0x20, 2);
+        s.solid_tile(0x30, 3);
+        s.vram[0x1800] = 1;
+        s.vram[0x1800 + 31] = 2;
+        s.vram[0x1800 + 13] = 3;
+        let mut row = [0; W];
+        s.regs.scx = 3;
+        s.begin(0);
+        s.r.set_fine(7);
+        s.regs.scx = 0x67;
+        s.obj_rank.hold[2] = Held {
+            end: 1,
+            lcdc: s.regs.lcdc,
+            scx: 3,
+            scy: 0,
+            planes: 0,
+        };
+        s.span(&mut row, 0, W);
+        run(&row, 0, 1, 101);
+        run(&row, 1, 9, 103);
+        run(&row, 9, 17, 100);
     }
 
     #[test]
