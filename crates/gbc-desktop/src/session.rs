@@ -6,6 +6,7 @@ use std::path::Path;
 use gbc_core::{CLOCK_HZ, Config, Emulator, Memory, cart_info};
 
 use crate::compat_palette;
+use crate::input_log::{Header, RomId, fnv1a64};
 use crate::save::{MAX_OWED_SECS, SaveFile, SettleTracker, sync_rtc};
 use crate::save_writer::{SaveWriter, WriteStats};
 
@@ -25,6 +26,9 @@ pub struct Options<'a> {
     pub sync_rtc_on_load: bool,
     /// Colors for DMG-only cartridges (ADR 0025).
     pub dmg_palette: compat_palette::Mode,
+    /// `--replay-input`: start from the recording's cartridge RAM, RTC
+    /// and palette instead of the `.sav`, and write no save (ADR 0030).
+    pub replay: Option<&'a Header>,
 }
 
 /// Writes the save during play. The main loop calls
@@ -80,22 +84,45 @@ impl Autosave {
 /// Loads the ROM at `opts.rom_path` (and its `.sav`), calls `body`, then
 /// ejects the cartridge and writes the save: always, for a cartridge that
 /// has one, since the RTC counts without marking the save dirty (ADR
-/// 0015). `Err` is a message for stderr (exit 1).
+/// 0015). `body` also gets the state the run started from, as a recording
+/// header (ADR 0030). With `opts.replay` the run starts from that header
+/// instead and no save is read or written. `Err` is a message for stderr
+/// (exit 1).
 pub fn run<R>(
     opts: &Options<'_>,
-    body: impl FnOnce(&mut Emulator<'_>, &mut Autosave) -> R,
+    body: impl FnOnce(&mut Emulator<'_>, &mut Autosave, &Header) -> R,
 ) -> Result<R, String> {
     let path = opts.rom_path;
     let rom = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
     let info = cart_info(&rom).map_err(|e| format!("{}: {e}", path.display()))?;
-    let save = SaveFile::for_rom(path, &info);
+    let rom_id = RomId::of(&rom);
     let mut cart_ram = vec![0u8; info.ram_size];
     let mut stored_rtc = None;
+    let mut sav = None;
+    let mut dmg_palette = opts.dmg_palette;
+    let save = match opts.replay {
+        Some(h) => {
+            h.check_rom(&rom_id)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if h.cart_ram.len() != info.ram_size || h.rtc.is_some() != info.rtc {
+                return Err(format!(
+                    "{}: the recording's cartridge RAM or RTC does not fit this cartridge",
+                    path.display()
+                ));
+            }
+            cart_ram.copy_from_slice(&h.cart_ram);
+            dmg_palette = h.dmg_palette;
+            None
+        }
+        None => SaveFile::for_rom(path, &info),
+    };
     if let Some(save) = &save {
         let loaded = save
-            .load()
+            .load_raw()
             .map_err(|e| format!("can't read {}: {e}", save.path.display()))?;
-        if let Some(d) = loaded {
+        if let Some(bytes) = loaded {
+            sav = Some((bytes.len(), fnv1a64(&bytes)));
+            let d = save.decode(&bytes);
             for w in &d.warnings {
                 eprintln!("warning: {}: {w}", save.path.display());
             }
@@ -107,7 +134,7 @@ pub fn run<R>(
     let mut mem = Box::new(Memory::new());
     let mut emu = Emulator::new(&mut mem);
     let config = Config {
-        dmg_palettes: compat_palette::select(opts.dmg_palette, &rom),
+        dmg_palettes: compat_palette::select(dmg_palette, &rom),
     };
     emu.load(&rom, &mut cart_ram, config)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -115,6 +142,19 @@ pub fn run<R>(
         let now = opts.sync_rtc_on_load.then(opts.now);
         emu.set_rtc_state(sync_rtc(rtc, saved_at, now));
     }
+    if let Some(rtc) = opts.replay.and_then(|h| h.rtc) {
+        emu.set_rtc_state(rtc);
+    }
+    let start = Header {
+        rom_title: rom_id.title,
+        header_checksum: rom_id.header_checksum,
+        global_checksum: rom_id.global_checksum,
+        rom_hash: rom_id.hash,
+        dmg_palette,
+        sav: opts.replay.map_or(sav, |h| h.sav),
+        cart_ram: emu.cart_ram().to_vec(),
+        rtc: emu.rtc_state(),
+    };
 
     let file = match save {
         Some(f) => {
@@ -131,7 +171,7 @@ pub fn run<R>(
     };
     // A panic in the loop still gets the exit save, then keeps unwinding.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        body(&mut emu, &mut autosave)
+        body(&mut emu, &mut autosave, &start)
     }));
 
     // The exit save goes after any autosave still queued or in flight;
@@ -176,9 +216,10 @@ mod tests {
             now: || 1,
             sync_rtc_on_load: false,
             dmg_palette: compat_palette::Mode::Auto,
+            replay: None,
         };
         let sav = dir.join("a.sav");
-        let (early, late) = run(&opts, |emu, autosave| {
+        let (early, late) = run(&opts, |emu, autosave, _| {
             let mut frame: Box<Frame> = Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]);
             for _ in 0..30 {
                 let _ = emu.run_frame(&mut frame, &mut []);
@@ -221,12 +262,13 @@ mod tests {
             now: || 1,
             sync_rtc_on_load: false,
             dmg_palette: compat_palette::Mode::Auto,
+            replay: None,
         };
         let sav = dir.join("r.sav");
         // A directory in the temp file's place makes the write fail.
         let block = dir.join("r.sav.tmp");
         std::fs::create_dir(&block).unwrap();
-        let (first, retried) = run(&opts, |emu, autosave| {
+        let (first, retried) = run(&opts, |emu, autosave, _| {
             let mut frame: Box<Frame> = Box::new([WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]);
             let mut frames = |n| {
                 for _ in 0..n {
@@ -264,9 +306,10 @@ mod tests {
             now: || 1,
             sync_rtc_on_load: false,
             dmg_palette: compat_palette::Mode::Auto,
+            replay: None,
         };
         let r = std::panic::catch_unwind(|| {
-            let _ = run(&opts, |_, _| panic!("boom"));
+            let _ = run(&opts, |_, _, _| panic!("boom"));
         });
         assert!(r.is_err(), "the panic keeps unwinding");
         assert!(dir.join("p.sav").exists(), "exit save written");

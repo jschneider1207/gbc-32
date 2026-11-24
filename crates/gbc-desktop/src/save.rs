@@ -177,13 +177,19 @@ impl SaveFile {
         })
     }
 
-    /// Reads the save if the file exists. `Ok(None)` when it doesn't.
-    pub fn load(&self) -> io::Result<Option<Decoded>> {
+    /// The file's raw bytes if it exists (decode them with
+    /// [`SaveFile::decode`]). `Ok(None)` when it doesn't.
+    pub fn load_raw(&self) -> io::Result<Option<Vec<u8>>> {
         match fs::read(&self.path) {
-            Ok(bytes) => Ok(Some(decode(&bytes, self.ram_size, self.has_rtc))),
+            Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// What the bytes of this cartridge's save file hold.
+    pub fn decode(&self, bytes: &[u8]) -> Decoded {
+        decode(bytes, self.ram_size, self.has_rtc)
     }
 
     /// The file's bytes for this RAM and clock, stamped `now_unix`.

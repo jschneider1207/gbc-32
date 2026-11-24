@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gbc_core::{Emulator, Events, Frame, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, WHITE};
 use gilrs::{Axis, EventType, GamepadId, Gilrs};
@@ -15,8 +15,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::dwm;
+use crate::frame_log::{self, Emulated, FrameLog};
 use crate::frame_stats::{self, FrameStats};
 use crate::input::{HeldInput, key_to_button, pad_button_to_button};
+use crate::input_log::Driver;
 use crate::pacing::Pacing;
 use crate::png;
 use crate::session::Autosave;
@@ -51,33 +54,85 @@ struct App<'e, 'a> {
     frames_left: Option<u64>,
     /// `GBC_FRAME_STATS=1`: present/pacing statistics.
     stats: Option<FrameStats>,
+    /// Buttons per frame (live, or `--replay-input`), `--record-input`
+    /// and `--frame-hashes` (ADR 0030).
+    driver: Driver,
+    /// `GBC_FRAME_LOG`: one CSV row per frame.
+    log: Option<FrameLog>,
+    /// The frame about to run (`Driver` frame numbering).
+    frame_no: u64,
+    /// The audio fill estimate at the current wake-up, for `log`.
+    wake_fill: Option<f64>,
+    /// When the current event-loop iteration began, and how late that
+    /// was for a timed wake-up, for `log`.
+    wake: Option<(Instant, Option<Duration>)>,
+    /// `--no-input`: ignore the keyboard and pads (unattended runs).
+    no_input: bool,
     error: Option<String>,
 }
 
 impl App<'_, '_> {
     /// Runs one frame and returns how many audio samples it wrote.
     fn run_one_frame(&mut self) -> usize {
-        self.emu.set_buttons(self.held.held());
+        let live = if self.no_input {
+            gbc_core::Buttons::default()
+        } else {
+            self.held.held()
+        };
+        let (buttons, replayed_mark) = self.driver.begin_frame(live);
+        self.emu.set_buttons(buttons);
+        let t_start = Instant::now();
         let r = self.emu.run_frame(&mut self.draw, &mut self.audio);
+        let t_end = Instant::now();
+        let ready = r.events.contains(Events::FRAME_READY);
         let blank = self.emu.screen_blank();
-        let changed = blank != self.blank;
+        let was_blank = self.blank;
+        let blank_changed = blank != was_blank;
         self.blank = blank;
-        if let Some(s) = &mut self.stats {
-            let ready = r.events.contains(Events::FRAME_READY);
-            if let Some(h) = s.emulated(ready, ready && self.draw == self.shown, Instant::now()) {
-                eprintln!("{h}");
+        // The picture equals the last one (only computed when measured).
+        let same = (self.stats.is_some() || self.log.is_some()) && ready && self.draw == self.shown;
+        if let Some(s) = &mut self.stats
+            && let Some(h) = s.emulated(ready, same, t_end)
+        {
+            eprintln!("{h}");
+        }
+        if let Some(l) = &mut self.log {
+            let (changed, motion) =
+                frame_log::picture_change(&self.shown, &self.draw, ready, same, was_blank, blank);
+            l.frame(&Emulated {
+                frame: self.frame_no,
+                wake: self.wake.map(|w| w.0),
+                wake_late: self.wake.and_then(|w| w.1),
+                start: t_start,
+                end: t_end,
+                ready,
+                blank,
+                changed,
+                motion,
+                audio_fill_ms: self.wake_fill,
+            });
+            if replayed_mark {
+                l.mark();
             }
         }
-        if r.events.contains(Events::FRAME_READY) {
+        self.frame_no += 1;
+        if ready {
             std::mem::swap(&mut self.draw, &mut self.shown);
         }
-        if (r.events.contains(Events::FRAME_READY) || changed)
+        self.driver
+            .end_frame(ready, blank, video::visible(&self.shown, blank));
+        if (ready || blank_changed)
             && let Some(g) = &self.gfx
         {
             g.window.request_redraw();
         }
         self.autosave.after_frame(self.emu);
         r.audio_samples.min(AUDIO_SLOTS)
+    }
+
+    /// No frames left to run: `--frames` reached, or the replay ended.
+    fn finished(&self) -> bool {
+        self.frames_left == Some(0) || self.driver.replay_done()
     }
 
     /// Drains gamepad events (hotplug included) into `held`.
@@ -117,12 +172,15 @@ impl App<'_, '_> {
                 w.get() as usize,
                 h.get() as usize,
             );
-            if buf.present().is_ok()
-                && let Some(s) = &mut self.stats
-            {
+            if buf.present().is_ok() {
                 let now = Instant::now();
-                s.presented(now);
-                s.present_took(now - t);
+                if let Some(s) = &mut self.stats {
+                    s.presented(now);
+                    s.present_took(now - t);
+                }
+                if let Some(l) = &mut self.log {
+                    l.presented(t, now, dwm::now());
+                }
             }
         }
     }
@@ -166,20 +224,28 @@ impl ApplicationHandler for App<'_, '_> {
     }
 
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        let Some(s) = &mut self.stats else { return };
+        if self.stats.is_none() && self.log.is_none() {
+            return;
+        }
         let now = Instant::now();
-        s.iteration_began(now);
-        match cause {
+        let requested = match cause {
             StartCause::ResumeTimeReached {
                 requested_resume, ..
-            } => s.woke(requested_resume, now),
+            } => Some(requested_resume),
             // Woken by an event after the deadline had already passed: as
             // late as a timed wake-up would have been.
             StartCause::WaitCancelled {
                 requested_resume: Some(r),
                 ..
-            } if now > r => s.woke(r, now),
-            _ => {}
+            } if now > r => Some(r),
+            _ => None,
+        };
+        self.wake = Some((now, requested.map(|r| now.saturating_duration_since(r))));
+        if let Some(s) = &mut self.stats {
+            s.iteration_began(now);
+            if let Some(r) = requested {
+                s.woke(r, now);
+            }
         }
     }
 
@@ -197,6 +263,14 @@ impl ApplicationHandler for App<'_, '_> {
                 let down = event.state == ElementState::Pressed;
                 if code == KeyCode::Escape && down {
                     el.exit();
+                } else if code == KeyCode::KeyM {
+                    // Mark the last frame (a stutter the human saw).
+                    if down && !event.repeat && self.driver.marks_enabled(self.log.is_some()) {
+                        self.driver.mark();
+                        if let Some(l) = &mut self.log {
+                            l.mark();
+                        }
+                    }
                 } else if let Some(b) = key_to_button(code) {
                     self.held.set_key(b, down);
                 }
@@ -214,12 +288,13 @@ impl ApplicationHandler for App<'_, '_> {
         self.poll_pads();
         let t_pads = Instant::now();
         self.pacing.begin(t_pads);
-        if let (Some(s), Some(fill)) = (&mut self.stats, self.pacing.fill_ms()) {
+        self.wake_fill = self.pacing.fill_ms();
+        if let (Some(s), Some(fill)) = (&mut self.stats, self.wake_fill) {
             s.fill(fill);
         }
         let mut ran = 0;
         while self.pacing.should_run(ran) {
-            if self.frames_left == Some(0) {
+            if self.finished() {
                 break;
             }
             let n = self.run_one_frame();
@@ -240,7 +315,7 @@ impl ApplicationHandler for App<'_, '_> {
             }
             s.iteration_ended(Instant::now());
         }
-        if self.frames_left == Some(0) {
+        if self.finished() {
             el.exit();
             return;
         }
@@ -249,8 +324,10 @@ impl ApplicationHandler for App<'_, '_> {
     }
 }
 
-/// Opens the window and plays until it is closed. `Err` is a message for
-/// stderr; it returns normally so the caller still writes the save.
+/// Opens the window and plays until it is closed (or `frames` or the
+/// replay ran out). `Err` is a message for stderr; it returns normally so
+/// the caller still writes the save.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     emu: &mut Emulator<'_>,
     autosave: &mut Autosave,
@@ -258,6 +335,9 @@ pub fn run(
     scale: u32,
     frames: Option<u64>,
     screenshot: Option<&Path>,
+    driver: Driver,
+    log: Option<FrameLog>,
+    no_input: bool,
 ) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| format!("can't start the event loop: {e}"))?;
     let mut app = App {
@@ -277,14 +357,37 @@ pub fn run(
         // `headless::run`), so `frames` complete frames follow it.
         frames_left: frames.map(|f| f + 1),
         stats: frame_stats::from_env(Instant::now()),
+        driver,
+        log,
+        frame_no: 0,
+        wake_fill: None,
+        wake: None,
+        no_input,
         error: None,
     };
-    el.run_app(&mut app)
-        .map_err(|e| format!("event loop failed: {e}"))?;
-    if let Some(p) = screenshot {
-        png::write_frame(p, video::visible(&app.shown, app.blank))?;
+    let ran = el
+        .run_app(&mut app)
+        .map_err(|e| format!("event loop failed: {e}"));
+    let App {
+        driver,
+        log,
+        shown,
+        blank,
+        error,
+        ..
+    } = app;
+    // The recording and logs are finished even if the loop failed.
+    let inputs = driver.finish();
+    let logged = log.map(FrameLog::finish).transpose();
+    ran?;
+    if let Some(n) = logged? {
+        eprintln!("frame log: {n} rows written");
     }
-    app.error.map_or(Ok(()), Err)
+    inputs?;
+    if let Some(p) = screenshot {
+        png::write_frame(p, video::visible(&shown, blank))?;
+    }
+    error.map_or(Ok(()), Err)
 }
 
 /// Gamepads are optional: a failure (e.g. no udev) is one warning.

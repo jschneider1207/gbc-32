@@ -8,8 +8,11 @@ use crate::compat_palette::Mode;
 pub const USAGE: &str = "usage: gbc-desktop <rom.gb|rom.gbc> [--headless] [--frames N] [--scale K]
                   [--screenshot out.png]
                   [--dmg-palette auto|gray]
+                  [--record-input FILE | --replay-input FILE]
+                  [--frame-hashes FILE] [--no-input]
 
-  --headless     run without a window or audio device (needs --frames)
+  --headless     run without a window or audio device (needs --frames,
+                 or --replay-input)
   --frames N     emulate N frames, then exit 0 (N >= 1; the window closes
                  itself and the save is written as on Esc)
   --screenshot PATH
@@ -18,7 +21,24 @@ pub const USAGE: &str = "usage: gbc-desktop <rom.gb|rom.gbc> [--headless] [--fra
   --dmg-palette auto|gray
                  colors for DMG-only games: the CGB boot ROM's pick for
                  the title (default), or grayscale
-  -h, --help     print this text";
+  --record-input FILE
+                 record the buttons held each frame, and the starting
+                 cartridge RAM and clock, to FILE; key M marks the last
+                 frame (prints `mark at frame N`)
+  --replay-input FILE
+                 play a recording back instead of the keyboard and pads,
+                 from its own starting save (the .sav is neither read nor
+                 written), then exit at its end (or after --frames)
+  --no-input     ignore the keyboard and pads (unattended runs, e.g. a
+                 game's title or demo with GBC_FRAME_LOG)
+  --frame-hashes FILE
+                 write `<frame> <ready> <blank> <hash>` per frame, to
+                 compare two runs
+  -h, --help     print this text
+
+Environment: GBC_FRAME_STATS=1 prints frame-pacing statistics every 4 s;
+GBC_FRAME_LOG=FILE writes one CSV row per frame (window only, see
+docs/desktop-diagnostics.md).";
 
 pub const DEFAULT_SCALE: u32 = 4;
 const MAX_SCALE: u32 = 32;
@@ -35,6 +55,14 @@ pub struct Args {
     pub scale: u32,
     /// Colors for DMG-only cartridges.
     pub dmg_palette: Mode,
+    /// `--record-input`: write the input recording here (ADR 0030).
+    pub record_input: Option<PathBuf>,
+    /// `--replay-input`: play this recording back.
+    pub replay_input: Option<PathBuf>,
+    /// `--frame-hashes`: write per-frame picture hashes here.
+    pub frame_hashes: Option<PathBuf>,
+    /// `--no-input`: hold no buttons, whatever is pressed.
+    pub no_input: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,11 +80,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
     let mut screenshot: Option<PathBuf> = None;
     let mut scale = DEFAULT_SCALE;
     let mut dmg_palette = Mode::Auto;
+    let mut record_input: Option<PathBuf> = None;
+    let mut replay_input: Option<PathBuf> = None;
+    let mut frame_hashes: Option<PathBuf> = None;
+    let mut no_input = false;
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "--headless" => headless = true,
+            "--no-input" => no_input = true,
             "--frames" => {
                 let v = it.next().ok_or("--frames needs a value")?;
                 if frames.is_some() {
@@ -71,6 +104,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 let v = it.next().ok_or("--screenshot needs a value")?;
                 if screenshot.replace(PathBuf::from(v)).is_some() {
                     return Err("--screenshot given twice".into());
+                }
+            }
+            "--record-input" | "--replay-input" | "--frame-hashes" => {
+                let v = it.next().ok_or_else(|| format!("{arg} needs a value"))?;
+                let slot = match arg.as_str() {
+                    "--record-input" => &mut record_input,
+                    "--replay-input" => &mut replay_input,
+                    _ => &mut frame_hashes,
+                };
+                if slot.replace(PathBuf::from(v)).is_some() {
+                    return Err(format!("{arg} given twice"));
                 }
             }
             "--scale" => {
@@ -101,8 +145,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         }
     }
     let rom = rom.ok_or("no ROM given")?;
-    if headless && frames.is_none() {
-        return Err("--headless needs --frames N (it would never exit)".into());
+    if headless && frames.is_none() && replay_input.is_none() {
+        return Err("--headless needs --frames N or --replay-input (it would never exit)".into());
+    }
+    if record_input.is_some() && replay_input.is_some() {
+        return Err("--record-input and --replay-input can't be combined".into());
     }
     Ok(Command::Run(Args {
         rom,
@@ -111,6 +158,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         screenshot,
         scale,
         dmg_palette,
+        record_input,
+        replay_input,
+        frame_hashes,
+        no_input,
     }))
 }
 
@@ -138,6 +189,29 @@ mod tests {
         assert_eq!(a.screenshot, None);
         assert_eq!(a.scale, 4);
         assert_eq!(a.dmg_palette, Mode::Auto);
+        assert_eq!(a.record_input, None);
+        assert_eq!(a.replay_input, None);
+        assert_eq!(a.frame_hashes, None);
+        assert!(!a.no_input);
+        assert!(run(&["x.gb", "--no-input"]).no_input);
+    }
+
+    #[test]
+    fn input_recording_options() {
+        let a = run(&["x.gb", "--record-input", "r.txt"]);
+        assert_eq!(a.record_input, Some(PathBuf::from("r.txt")));
+        // A headless replay ends with the recording: no --frames needed.
+        let a = run(&[
+            "--headless",
+            "--replay-input",
+            "r.txt",
+            "--frame-hashes",
+            "h.txt",
+            "x.gb",
+        ]);
+        assert!(a.headless && a.frames.is_none());
+        assert_eq!(a.replay_input, Some(PathBuf::from("r.txt")));
+        assert_eq!(a.frame_hashes, Some(PathBuf::from("h.txt")));
     }
 
     #[test]
@@ -206,6 +280,10 @@ mod tests {
             &["--dmg-palette", "grey", "a.gb"],
             &["a.gb", "--dmg-palette"],
             &["--headless", "--frames", "1", "--frames", "2", "a.gb"],
+            &["a.gb", "--record-input"],
+            &["a.gb", "--record-input", "r", "--replay-input", "r"],
+            &["a.gb", "--replay-input", "r", "--replay-input", "s"],
+            &["--headless", "--record-input", "r", "a.gb"],
         ] {
             assert!(p(bad).is_err(), "{bad:?} should be rejected");
         }
