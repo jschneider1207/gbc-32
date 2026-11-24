@@ -275,13 +275,6 @@ fn header(rom: &[u8], at: usize) -> u8 {
     Rom::new(rom).get(at).unwrap_or(0)
 }
 
-/// Byte `i` of `rom`, or FF past its end. Out of line for the same reason
-/// as `header`, for the cold ROM reads of VRAM DMA (`Cart::rom_tail`).
-#[inline(never)]
-fn rom_byte(rom: Rom<'_>, i: usize) -> u8 {
-    rom.get(i).unwrap_or(0xFF)
-}
-
 /// Bytes of cartridge RAM the cartridge uses, from the header. The buffer
 /// passed to [`Emulator::load`](crate::Emulator::load) must be at least
 /// this long; only this many bytes are used (and are the save file, see
@@ -856,18 +849,16 @@ impl<'a> Cart<'a> {
 
     /// The 16 bytes [`Self::read_rom`] or [`Self::read_ram`] return for
     /// `addr..addr + 16` (`addr` 16-aligned, below C000), for VRAM DMA
-    /// blocks: 16 byte reads from the ROM bank window (never a wide copy:
-    /// the ROM may be in memory without unaligned reads, ADR 0027) or one
-    /// copy from the RAM bank. The RTC
-    /// and Hudson registers don't depend on the address. Every RAM size is 0 or a
-    /// power of two of at least 512 (`cart_ram_size`), so the
-    /// `ram_len - 1` mask keeps the low 4 bits and the 16 bytes are one
-    /// run of `ram_buf`.
+    /// blocks: one copy from the ROM bank window or the RAM bank. The RTC
+    /// and Hudson registers don't depend on the address. A ROM window
+    /// starts at a multiple of the bank size, and every RAM size is 0 or
+    /// a power of two of at least 512 (`cart_ram_size`), so the
+    /// `ram_len - 1` mask keeps the low 4 bits: either way the 16 bytes
+    /// are one 16-aligned run of the slice.
     pub(crate) fn dma_block(&self, addr: u16) -> [u8; 16] {
         let (mem, off): (&[u8], usize) = if addr < 0x8000 {
             let window = self.rom_win[usize::from(addr >> 14) & 1];
-            let off = usize::from(addr) & (ROM_BANK - 1);
-            return Self::rom_block(window, off);
+            (window.into_inner(), usize::from(addr) & (ROM_BANK - 1))
         } else if !self.ram_enabled || (self.ram_mapped() && self.ram_len == 0) {
             return [0xFF; 16];
         } else if !self.ram_mapped() {
@@ -882,40 +873,11 @@ impl<'a> Cart<'a> {
         }
     }
 
-    /// 16 byte reads from `window` at `off`. When the whole block is in
-    /// the window the bounds checks fold away (16 plain `ldrb`, not 16
-    /// checked loads: those cost ~500 B of code, ADR 0027); otherwise
-    /// [`Self::rom_tail`].
-    #[inline(never)]
-    fn rom_block(window: Rom<'_>, off: usize) -> [u8; 16] {
-        let mut b = [0xFF; 16];
-        match window.sub(off, off + 16) {
-            Some(src) => {
-                for (i, x) in b.iter_mut().enumerate() {
-                    *x = src.get(i).unwrap_or(0xFF);
-                }
-            }
-            None => Self::rom_tail(window, off, &mut b),
-        }
-        b
-    }
-
-    /// A block that runs past the end of the ROM bank window (a ROM whose
-    /// size isn't a multiple of 16): those bytes read FF, as in
-    /// `read_rom`. A loop with a call per byte and a trip count LLVM
-    /// can't see, so it stays rolled (code size; it is never hot).
-    #[cold]
-    #[inline(never)]
-    fn rom_tail(window: Rom<'_>, off: usize, b: &mut [u8; 16]) {
-        let n = window.len().saturating_sub(off);
-        for (i, x) in b.iter_mut().take(n).enumerate() {
-            *x = rom_byte(window, off + i);
-        }
-    }
-
-    /// A block from `off` in `mem` that ends inside it: the bytes past the
-    /// end read FF, as in [`Self::read_ram`]. Never taken for the RAM bank
-    /// (see [`Self::dma_block`]); the fallback replaces a panic path.
+    /// A block from `off` in `mem` that ends inside it or starts past its
+    /// end: the missing bytes read FF, as in [`Self::read_rom`] (a ROM
+    /// whose size isn't a multiple of 16, or a bank past the end of the
+    /// file). Never taken for the RAM bank (see [`Self::dma_block`]);
+    /// there the fallback replaces a panic path.
     #[cold]
     #[inline(never)]
     fn block_tail(mem: &[u8], off: usize) -> [u8; 16] {
