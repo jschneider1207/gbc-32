@@ -609,3 +609,28 @@ shows a stream that spans both ends and, through Pan Docs' CGB capacitor
 (0.998943 per clock), goes below -50,000. A shared, tested integer DC
 blocker for Stage 2 (the review's other proposal) is not part of this
 amendment.
+
+### 2026-11-24: NR50/NR51 writes list spans instead of syncing the channels (M10 B12)
+
+Section 3 has every APU register write sync to the access clock, and
+section 8 has the mixer read NR50/NR51 from `mem.io` because "a write
+syncs first". The invariant behind both is narrower than a full sync: a
+channel must be exact at the clock where *its* state changes, and the
+output needs every stretch mixed with the weights that were in force
+over it. An NR50/NR51 write changes no channel state. So `Apu` now keeps
+a list of the spans not mixed yet (`mix::Spans`: cut at window ends and
+at mixer writes, at most 16, each with the weights in force), and
+`Apu::sync_write` only extends that list for a write to FF24/FF25,
+noting the new weights for the spans that follow. The channels integrate
+the whole list in one call each when it is full or when anything else
+syncs (`Apu::sync`: channel and wave RAM writes, NR52, `DivApu` events,
+the audio-buffer event, the end of the run call), and the mixer applies
+the weights per run of spans. `Output::synced` is still the clock the
+output is listed to; the channels are at the list's start, and the list
+is empty between run calls and whenever no buffer is passed. `read_apu`
+advances its channel copies by `now - synced` plus the clocks listed.
+
+Exact: a window's sum is linear in its spans and the channels' closed
+forms do not depend on where the spans are cut (the section 3
+invariant); `bench --fingerprint --audio-buffer {7,64} --hash-samples`
+is identical to before. Numbers in `docs/perf.md`, "APU cost".

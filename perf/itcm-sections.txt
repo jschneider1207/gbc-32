@@ -63,6 +63,9 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core*8Emulator10run_cycles*                       # Emulator::run_cycles
 # Tier C: APU, per sync
 .text._R*8gbc_core3apu3mix*3Apu4sync*                          # Apu::sync
+.text._R*8gbc_core3apu3mix*3Apu10sync_write*                   # Apu::sync_write
+.text._R*8gbc_core3apu3mix*3Apu4list*                          # Apu::list
+.text._R*8gbc_core3apu3mix*3Apu5flush*                         # Apu::flush
 .text._R*8gbc_core3apu*3Apu4step*                              # Apu::step
 .text._R*8gbc_core3apu*3Apu5write*                             # Apu::write
 .text._R*8gbc_core3apu*9integrate*                             # Square/Wave/Noise::integrate (3)

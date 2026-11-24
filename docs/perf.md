@@ -175,6 +175,24 @@ channel steps in every span at r = 0, so laziness would not help the
 worst case. Caching the weights would not help PCM through NR50 (every
 write changes them).
 
+**NR50/NR51 writes without a channel sync (M10 B12, 2026-11-24).** A
+mixer write changes no channel state, so it no longer syncs the
+channels: `Apu::sync_write` lists the spans up to the write (`mix::Spans`,
+at most 16, cut at window ends and mixer writes) and notes the new
+weights; the channels integrate the list in one call each when it is
+full or when anything else syncs, and `Apu::flush` mixes it in runs of
+constant weights (ADR 0021, amendment of 2026-11-24). The per-channel
+setup is then paid once per 16 spans instead of once per write. Exact
+(`--audio-buffer {7,64} --hash-samples` fingerprints identical). x86 Ir
+per APU write (`synth:apu-writes` minus `@hram`, over 16,384 writes):
+917.2 at 4564c6c, 748.9 with this and the plain integrator loops; this
+change alone: apu-writes 85.37 M -> 83.17 M (-2.6%), worst-case 370.96 M
+-> 368.21 M (-0.74%), cgb_sound +0.13% (a channel write still syncs
+everything, now through the list), `.text` +1,344 B. What a mixer write
+still costs is the span it cuts (about 290 Ir in the four integrators at
+the worst periods, plus its mix) and about 240 Ir of listing and
+dispatch.
+
 History (state at 4dd75a2, superseded by task 8b below): sample output with every channel silent: `Apu::sync` inclusive on `@0`
 is ~56k Ir/frame (6.67 M per 2 s, ~100 Ir per window; it was ~66k
 measured as buffers vs empty buffers). So the APU on worst-case is

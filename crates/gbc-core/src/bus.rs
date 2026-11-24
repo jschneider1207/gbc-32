@@ -765,7 +765,8 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn write_apu(&mut self, reg: usize, value: u8) {
         let now = self.clock();
-        self.apu_sync(now);
+        let Memory { apu, io, .. } = &mut *self.mem;
+        apu.sync_write(reg, value, now, io, self.audio, &mut self.audio_len);
         match reg {
             0x26 => self.write_nr52(value, now),
             0x10..=0x25 if !self.mem.apu.powered() => {}

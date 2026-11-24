@@ -24,6 +24,7 @@ mod units;
 mod wave;
 
 pub(crate) use mix::Output;
+use mix::Spans;
 
 use crate::memory::Memory;
 use noise::Noise;
@@ -121,6 +122,8 @@ fn check_long_advance<T: Copy + PartialEq + core::fmt::Debug>(
 pub(crate) struct Apu {
     /// The output stream: kept across power cycles.
     pub(crate) out: Output,
+    /// The spans waiting to be mixed.
+    pub(crate) spans: Spans,
     pub(crate) fs: Fs,
     /// CH1 and CH2.
     pub(crate) sq: [Square; 2],
@@ -158,6 +161,7 @@ impl Apu {
     pub(crate) const fn new() -> Self {
         Self {
             out: Output::new(),
+            spans: Spans::new(),
             fs: Fs {
                 power: false,
                 step: 0,
@@ -441,7 +445,8 @@ impl Apu {
 /// 3). Out of line, off `read_high`.
 #[inline(never)]
 pub(crate) fn read_apu(mem: &Memory, now: u64, reg: usize) -> u8 {
-    let dt = now.saturating_sub(mem.apu.out.synced);
+    // The channels are at the start of the spans listed (`mix::Spans`).
+    let dt = now.saturating_sub(mem.apu.out.synced) + mem.apu.spans.clocks();
     match reg {
         0x26 => mem.apu.nr52(),
         // PCM12/PCM34: each channel's digital output (0-15) if it is on,
@@ -1146,6 +1151,24 @@ mod sync_tests {
     /// between events is cut at random extra sync points; at each, the reads
     /// from the stale state (advanced copies) must equal those after the sync.
     fn drive(seed: u64, split: bool, room: Room) -> (Vec<Apu>, Vec<StereoSample>) {
+        drive_as(seed, split, room, false)
+    }
+
+    /// `apu` with its listed spans mixed and its channels at `now`, the
+    /// samples dropped.
+    fn caught_up(mem: &Memory, now: u64) -> Apu {
+        let mut apu = mem.apu;
+        let mut scratch = [StereoSample::default(); 64];
+        apu.sync(now, &mem.io, &mut scratch, &mut 0);
+        apu
+    }
+
+    /// `drive`; with `bus` (and `Room::Always`), a write syncs as the bus's
+    /// `write_apu` does (`Apu::sync_write`): an NR50/NR51 write then leaves
+    /// spans listed and the channels behind. The states recorded are those
+    /// of a copy brought up to date, and half the cuts compare the reads
+    /// with such a copy's instead of syncing.
+    fn drive_as(seed: u64, split: bool, room: Room, bus: bool) -> (Vec<Apu>, Vec<StereoSample>) {
         let mut rng = Rng::new(seed ^ 0xA5A5);
         let mut mem = Box::new(Memory::new());
         mem.apu.power_on(0, false);
@@ -1153,7 +1176,7 @@ mod sync_tests {
         let mut len = 0;
         let mut states = Vec::new();
         let mut prev = 0;
-        let mut sync = |mem: &mut Memory, now: u64, rng: &mut Rng| {
+        let mut sync = |mem: &mut Memory, now: u64, write: Option<(usize, u8)>, rng: &mut Rng| {
             let with = match room {
                 Room::Always => true,
                 Room::Never => false,
@@ -1161,7 +1184,10 @@ mod sync_tests {
             };
             let Memory { apu, io, .. } = mem;
             let audio: &mut [StereoSample] = if with { &mut buf } else { &mut [] };
-            apu.sync(now, io, audio, &mut len);
+            match write {
+                Some((reg, v)) if bus => apu.sync_write(reg, v, now, io, audio, &mut len),
+                _ => apu.sync(now, io, audio, &mut len),
+            }
         };
         let evs = script(seed);
         let ends = evs.iter().map(|&(t, ev)| (t, Some(ev)));
@@ -1176,13 +1202,24 @@ mod sync_tests {
                 cuts.sort_unstable();
                 for c in cuts {
                     let before = reads(&mem, c);
-                    sync(&mut mem, c, &mut rng);
+                    if bus && rng.below(2) == 0 {
+                        let listed = mem.apu;
+                        mem.apu = caught_up(&mem, c);
+                        assert_eq!(before, reads(&mem, c), "seed {seed}: reads at {c}");
+                        mem.apu = listed;
+                        continue;
+                    }
+                    sync(&mut mem, c, None, &mut rng);
                     assert_eq!(before, reads(&mem, c), "seed {seed}: reads at {c}");
                 }
             }
-            sync(&mut mem, t, &mut rng);
+            let to_write = match ev {
+                Some(Ev::Write(reg, v)) => Some((reg, v)),
+                _ => None,
+            };
+            sync(&mut mem, t, to_write, &mut rng);
             prev = t;
-            states.push(mem.apu);
+            states.push(if bus { caught_up(&mem, t) } else { mem.apu });
             match ev {
                 Some(Ev::Write(reg, v)) => write(&mut mem, reg, v, t),
                 Some(Ev::Step) => mem.apu.edge(),
@@ -1217,6 +1254,21 @@ mod sync_tests {
             assert!(s1 == s2, "seed {seed}: samples differ");
             // The script keeps the mix audible and varied.
             assert!(s1.iter().any(|s| s.left != s1[0].left));
+        }
+    }
+
+    /// NR50/NR51 writes that only list spans (`Apu::sync_write`) give the
+    /// same samples, the same state once caught up, and the same reads
+    /// while spans are listed.
+    #[test]
+    fn mixer_writes_that_only_list_spans_change_neither_state_nor_samples() {
+        for seed in 0..12 {
+            let (one, s1) = drive(seed, false, Room::Always);
+            for split in [false, true] {
+                let (listed, s2) = drive_as(seed, split, Room::Always, true);
+                assert_same(seed, &one, &listed, true);
+                assert!(s1 == s2, "seed {seed}: samples differ");
+            }
         }
     }
 
