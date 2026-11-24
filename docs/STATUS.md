@@ -180,6 +180,15 @@ Decided in session 16 (2026-11-24, M10 review), human:
 - STOP mode as implemented (ADR 0020 amendment, 6f228f9), including the
   APU channels holding their tone while stopped (SameBoy CGB path):
   "Thats fine for stop."
+- Size caps must be the ones valid for the final MCU (STM32H735IGK6: ITCM
+  configurable to 128/192/256 KiB, 32 KiB caches), not the dev board; a
+  slower dev board (H753, Stage 2) is acceptable, it is a temporary step.
+  Per-function caps and the 57,344 B ITCM hot set become a dev-board
+  report; the product gate is total gbc-core `.text` against the H735 ITCM
+  (branch `m10-gates-h735`).
+- Stage 3 ROM memory is HyperRAM on OCTOSPI, not FMC SDRAM (the human
+  referred to it as decided; hardware ADR 0001 not yet updated). ADR 0027
+  (byte-wide ROM reads, for the FMC erratum) stays until retired.
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.
