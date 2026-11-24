@@ -168,7 +168,7 @@ speedup, so it stays out of line.
 ### 2026-11-24: one test between two instructions; the countdown in M-cycles
 
 Stage 1 M10 review, findings B6, B7, B9 (`docs/reviews/stage1-m10/B-perf.md`)
-and C6 (`C-size-mcu.md`). Behaviour is unchanged: the SM83 single-step
+and C6, C7 (`C-size-mcu.md`). Behaviour is unchanged: the SM83 single-step
 suite, the romtest manifest and the fingerprint of every corpus run are
 identical.
 
@@ -261,27 +261,42 @@ as a value: rematerialized before each use on x86 (`lea; mov`), spilled
 and reloaded on thumb (612 stack-slot references in `Cpu::run`, review
 B9/C6). Offset 0 needs no address, which is why the count is first. The
 other hot fields (`hot.dma`, the `sys` and `mem` pointers) still pay one
-instruction per access; raising the limit (`-C
-llvm-args=-cgp-max-address-users-to-scan=100000`) on the unchanged main
-gave -3.3% Ir on cpu_instrs and -1% to -3.6% elsewhere, but it is a
-hidden LLVM option and a build-configuration decision (not taken here).
+instruction per access. Raising the limit (`-C
+llvm-args=-cgp-max-address-users-to-scan=100000`) folds them all: on the
+tree of this amendment it takes cpu_instrs from -12.32% to -18.19%
+against the baseline, cgb_sound to -15.06%, event-storm to -14.12%,
+worst-case to -10.42%, cgb-raster to -10.69%, halt-irq to -3.62%, and
+thumb `.text` from 111,490 to 110,360 B (`Cpu::run` 26,544 -> 25,414 B).
+It is a hidden LLVM option and a build-configuration decision (the bench,
+the size check and the firmware would all have to build with it): not
+taken here, recorded for the human. Any further hot field in `Ctx` or
+`Hot` (review B8: ROM windows and bank offsets by value) meets the same
+limit.
+
+**Register pairs** (review C7). `Registers` is `repr(C)` with the low
+register of each pair first (F, A, C, B, E, D, L, H), so a pair is one
+16-bit load or store instead of two bytes swapped (`rev` on thumb: 71 ->
+28 in `Cpu::run`).
 
 Measurements (x86 Ir, `scripts/check-bench.sh`, against the baseline of
 the same day; thumbv7em sizes from `scripts/check-code-size.sh`):
 
-| | baseline | countdown | + attention |
-|---|---|---|---|
-| cpu_instrs | 1,694,717,771 | -6.03% | -11.94% |
-| cgb_sound | 1,130,295,021 | -5.90% | -9.92% |
-| cgb-acid2 | 689,083,500 | +0.21% | -0.25% |
-| event-storm | 208,386,107 | -6.83% | -10.32% |
-| dma-storm | 428,664,099 | -0.63% | -2.66% |
-| halt-irq | 286,184,478 | -1.87% | -2.41% |
-| worst-case | 313,479,719 | -4.15% | -7.98% |
-| cgb-raster | 324,867,705 | -4.31% | -7.94% |
-| apu-writes | 82,421,047 | -1.04% | -1.57% |
-| total `.text` (B) | 108,656 | 108,242 | 112,368 |
-| `Cpu::run` (B) | 24,512 | 23,784 | 27,400 (+ `checked_fetch` 1,088) |
+| | baseline | countdown | + attention | + register pairs |
+|---|---|---|---|---|
+| cpu_instrs | 1,694,717,771 | -6.03% | -11.94% | -12.32% |
+| cgb_sound | 1,130,295,021 | -5.90% | -9.92% | -9.96% |
+| cgb-acid2 | 689,083,500 | +0.21% | -0.25% | -0.28% |
+| event-storm | 208,386,107 | -6.83% | -10.32% | -10.32% |
+| dma-storm | 428,664,099 | -0.63% | -2.66% | -2.99% |
+| halt-irq | 286,184,478 | -1.87% | -2.41% | -2.41% |
+| worst-case | 313,479,719 | -4.15% | -7.98% | -7.98% |
+| cgb-raster | 324,867,705 | -4.31% | -7.94% | -8.15% |
+| apu-writes | 82,421,047 | -1.04% | -1.57% | -1.59% |
+| total `.text` (B) | 108,656 | 108,242 | 112,368 | 111,490 |
+| `Cpu::run` (B) | 24,512 | 23,784 | 27,400 | 26,544 |
+
+(`checked_fetch` is 1,088 B from the attention step on; `step_not_running`,
+538 B, is inlined into it.)
 
 Thumb, from the end of one instruction's handler to the `tbh` of the
 next, opcode in ROM: 28 instructions, 8 loads, 2 stores, 4 conditional
