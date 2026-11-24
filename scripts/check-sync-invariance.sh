@@ -34,15 +34,9 @@ cd "$(dirname "$0")/.."
 # Known sync-placement differences: `<run>|<diagnosis>`, one per line.
 # Adding one is a decision, not a fix: say what state depends on when the
 # sync happens. An entry whose run no longer differs fails the check.
-KNOWN_EAGER=(
-  # Single speed, line 0's mode-2 pulse: the walk point is at dot 4 but the
-  # CPU must see its IF request a dot later, which `Ppu::next_event` gets by
-  # putting the deadline one past the point ("only a sync at it ... posts
-  # it"). A sync on the point itself (this ROM's IF read is at an M-cycle
-  # boundary there, 0:4) posts it a dot early, so IF depends on whether
-  # anything synced the PPU at that exact dot. Named in `next_event`'s doc.
-  "gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1_cgb04c_out98.gbc|IF bit 1 at line 0 dot 4 (single speed): the mode-2 pulse is posted by the sync, one dot late by deadline only"
-)
+# None today (the one there was, line 0's single-speed mode-2 pulse posted
+# by deadline only, is a timed request now: `irq::PendingIrq`, ADR 0032).
+KNOWN_EAGER=()
 
 ROMS_DIR=${TEST_ROMS:-test-roms}
 TDIR=target/invariance

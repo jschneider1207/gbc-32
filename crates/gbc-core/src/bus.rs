@@ -1325,11 +1325,11 @@ impl Ctx<'_, '_> {
     fn write_if(&mut self, value: u8) {
         let at = self.clock() + 1;
         if self.sys.sched.deadline(EventKind::Ppu) <= at {
-            if self.sys.ppu.early_point(at, self.hot.mcycle == 2) == 0 {
+            if self.sys.ppu.early_point(at, self.hot.mcycle == 2) != ppu::EARLY_ZERO {
                 self.sync_ppu_to(at);
             } else {
-                // The walk point at `at` counts as still ahead; a timed
-                // request due by `at` is in IF all the same.
+                // Line 153's LYC=0 point at `at` counts as still ahead; a
+                // timed request due by `at` is in IF all the same.
                 let s = &mut *self.sys;
                 s.ppu.post_irqs(at, &mut s.iflags);
             }
@@ -3543,6 +3543,42 @@ mod tests {
             ctx.sys.iflags = 0;
             crate::cpu::Bus::write(&mut ctx, 0xFF0F, 0);
             assert_ne!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "STAT {stat:02X}");
+        }
+    }
+
+    /// Single speed, line 0's mode-2 pulse (walk point t = 4): its
+    /// interrupt request reaches IF at t = 5 however the PPU was synced
+    /// before, also by a sync on the point itself, which leaves the PPU
+    /// deadline on the request's clock (gambatte's event is at our t = 5;
+    /// CGB04C `lcd_offset/offset3_lyc99int_m2irq_count_1`: an IF read at
+    /// 0:4 doesn't see it).
+    #[test]
+    fn line_0_pulse_request_reaches_if_a_dot_after_its_point_however_synced() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let line0 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 154 * 456;
+        // Dots of line 0 the PPU is synced to before dot 5.
+        for syncs in [&[][..], &[4], &[3, 4], &[1, 2, 3, 4]] {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let _ = emu.run_until(line0 - 500, &mut fb, &mut []);
+            write(emu, 0xFF45, 0xFF);
+            write(emu, 0xFF41, 0x20);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            while ctx.clock() < line0 - 1 {
+                ctx.idle();
+            }
+            assert_eq!(ctx.clock(), line0 - 1);
+            ctx.sys.iflags = 0;
+            for &t in syncs {
+                ctx.sync_ppu_to(line0 + t);
+                assert_eq!(ctx.sys.iflags & STAT, 0, "{syncs:?}: synced to dot {t}");
+            }
+            if syncs.last() == Some(&4) {
+                assert_eq!(ctx.sys.sched.deadline(EventKind::Ppu), line0 + 5);
+            }
+            ctx.sync_ppu_to(line0 + 5);
+            assert_eq!(ctx.sys.iflags & STAT, STAT, "{syncs:?}");
         }
     }
 

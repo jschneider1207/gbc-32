@@ -379,6 +379,27 @@ pub(crate) const fn ly0_pulse(double: bool) -> u32 {
 
 const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
 
+/// Single speed: the interrupt request of line 0's mode-2 pulse reaches
+/// IF this many dots after its walk point ([`ly0_pulse`], t = 4), at
+/// gambatte's event (behaviour only, `video.cpp`
+/// `mode2_irq_line_cycle_ly0`: our t = 5, where the double-speed walk has
+/// the pulse itself). The STAT and LYC write views at line 0 are
+/// calibrated on the walk's dot (moving the point regressed
+/// `m2enable/{late_m1disable,late_enable_m1disable,
+/// lyc0_late_m2enable_lycdisable}_ly0_2`-style rows and
+/// `lycEnable/lycwirq_trigger_ly00_stat50_2`; gambatte latches the selects
+/// its event sees, `mstat_irq.h` `statRegChange`), so the line changes at
+/// 4 and only IF follows a dot later: an IF read or interrupt check at an
+/// M-cycle boundary on the point doesn't see it, and an IF write landing
+/// on the point doesn't clear it. CGB04C
+/// `lcd_offset/offset3_lyc99int_m2irq_count_1` (M-cycle boundaries at
+/// `t = 0 mod 4`, the one CPU phase with a boundary on the point: its IF
+/// read at 0:4 must not see the pulse; `_2`, at 0:8, does) and
+/// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`. (Line 153's LYC=0 point, also
+/// a dot early, requests at once: no ROM needs the delay there, and
+/// `Ppu::early_point` covers its IF writes.)
+pub(crate) const LY0_PULSE_IRQ: u64 = 1;
+
 /// Line 153: the walk's comparison against 0 (`Pt::L153Zero`), double
 /// speed one dot after [`L153_ZERO`] (the read and write views keep
 /// [`L153_ZERO`]). gambatte (behaviour only, `lyc_irq.cpp`) schedules the
