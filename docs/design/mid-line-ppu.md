@@ -1305,3 +1305,86 @@ glitch's latch carried over from the previous line.
   emulated frame, 99.6% of the 4.02 M line), `cgb-acid2` 689,230,519 ->
   690,935,270 (+0.25%: lines with LCDC.4 clear call `carry_sel`),
   `synth:cgb-raster` 321,789,917 -> 321,897,064 (+0.03%).
+
+### Window zero pixel (Mealybug F, branch `m9-cgb-wx-glitch`)
+
+- **What the capture shows.** `m3_wx_4_change_sprites` (window from WX =
+  4, so window tiles start at x = 5 + 8k; WX = LY written at pixel 0 of
+  each line, WX = 80 about 96 dots later; all tile data FF, BGP 1B: every
+  BG/window pixel white, color 0 black) failed by 10 px, one per line:
+  `_cgb_c.png` (= `_cgb_d.png`) has a black pixel at x = LY - 7 on lines
+  12, 28, 36, ... 92 (LY - 7 a window tile's first pixel; line 20 is
+  under a normal-priority object, line 36's pixel shows the priority-bit
+  object: BG color 0), none on lines 100+ (x >= 93: the WX = 80 write
+  comes first). The ROM's comment: "Window reactivation zero pixels
+  should be present when window is already activated and the pixel that
+  the window reactivates on is on the same cycle as the window tile
+  nametable read."
+- **Not `cgb_wx_glitch`.** The earlier guess, SameBoy's CGB
+  `cgb_wx_glitch` (a fetch step whose T1 sees WX == position + 7 skips its
+  VRAM read: stale tile index, low plane = previous high, high = low), is
+  invisible here: every tile and data byte is the same (FF), so stale data
+  draws the same white pixels. Not modelled (no capture pins it).
+- **Rule.** SameBoy display.c (MIT) `insert_bg_pixel`: while
+  `wx_triggered` and not on the window's first fetch, WX == position + 7
+  with the fetcher at GET_TILE_T1 and 8 pixels in the BG FIFO (the dot a
+  tile's first pixel is output) outputs an empty FIFO item (color 0,
+  palette 0, no BG priority) without popping, so the window's pixels come
+  one dot later and the last one is lost; mode 3 isn't longer. SameBoy
+  limits it to DMG (`!GB_is_cgb || WX == 0`); the CGB C capture shows it,
+  and the human rule puts captures first. `Ppu::window_zero` (cold, from
+  `window_write`'s branch for a window already started, so for WX, WY and
+  LCDC.5 writes: the live WX is what counts) sets
+  `ObjRank::win_zero` = z + 1 when z = WX - 7 is not drawn yet (`drawn`
+  after the flush), on screen, and a window tile's first pixel after the
+  first (`Renderer::window_tile_edge`: on the grid of the window's start
+  and first-tile skip); any such write clears a zero pixel still due.
+  `Renderer::render_zero` (cold) draws up to z, puts the color-0 pixel at
+  z mixed with that pixel's objects (they go over color 0, priority bit
+  or not) and decrements `window_skip`, but only if the window is still
+  drawn there from an earlier start (an LCDC.5 clear switched it off, or
+  a re-trigger starts it at z: `m3_lcdc_win_en_change_multiple` writes
+  WX = 120, x = 113, a tile edge of its window from 17, then re-triggers
+  there).
+- **Hot path.** `Renderer::obj_dirty` became `slow` (bit 0 the old flag,
+  bit 1 `ZERO_DUE`), so `render`'s existing one-byte test leads to
+  `render_zero`; `start_frame` drops a stale `ZERO_DUE` (a line the LCD
+  going off cut short; dropping it in `start_line` cost ~2 Ir per line). `win_zero` lives in `ObjRank` (`Memory`): in `Renderer` it
+  pushed `Hw` past 864 B.
+- **Calibration.** The zero pixel's threshold counted from 0-5 pixels
+  after `drawn` gives the same manifest (line 12's write lands at pixel
+  0), 6 and 8 lose the ROM; earlier thresholds are no-ops (pixels already
+  drawn). The take-back is unpinned within line 92 (x = 85, kept) vs line
+  100 (x = 93, taken back). SameBoy's WX lands one dot after the access;
+  `drawn` is the pixel at the access dot (no ROM tells them apart).
+- **Approximations.** Pixels only; BG tiles after a later LCDC.5 clear
+  keep the window's unshifted grid; a zero pixel inside a held part
+  (`render_held`) isn't redrawn by `mix_planes`; one per line at a time.
+- **Result.** Full manifest: 1 fail -> pass (`m3_wx_4_change_sprites`,
+  10 -> 0 px), 0 regressions. `diff-fingerprint.sh main` (cdf447c): 8 runs,
+  the ROM and its no-reference siblings `m3_wx_{4,5,6}_change` (+
+  `#input`: they write WX = 4/5/6 and WX = LY the same way, so they get
+  the zero pixels on the lines where LY - 7 is a tile edge of their
+  window).
+- **Tests.** `wx_at_a_window_tile_s_first_pixel_inserts_a_zero_pixel`
+  (WX at x = 20 and at x = 28 itself, x = 29 too late, not a tile edge,
+  taken back, still due across a flush), mutation-checked: no
+  `window_zero` call, `z > drawn`, no take-back, no shift, wrong grid,
+  no re-arm after a partial draw. ROM-level: no "earlier start" check ->
+  `m3_lcdc_win_en_change_multiple` regresses; objects not mixed -> the
+  target fails (line 36). `window_pixels_follow_the_timing_decision`:
+  its WX = 0x4F case (WX moved to x = 72 during the window's stall at 64)
+  is exactly this edge (x = 72 is the second window tile's first pixel),
+  so line 5 x = 72 is now color 0 (frame value 1, was 2) per the rule
+  above; a WX = 0x4E case (x = 71, not an edge) keeps the old intent and
+  values.
+- **Cost.** `.text` 97,586 -> 98,124 B (+538: `render_zero` 252,
+  `window_zero` 164, `render` +34, the rest LLVM noise: `fix_attrs` +40,
+  `Emulator::new`/`load` +20 for the `ObjRank` byte). Variants measured:
+  `mode3_pixel` in `window_zero` got it outlined (+264 B, and a call in
+  every `flush`); three `render` calls and `clamp` in `render_zero` +82.
+  `check-bench.sh` vs main (x86 Ir): about 3 Ir more per `render` call
+  (the flags byte test; `synth:apu-writes` +51,708 = +0.06%),
+  `synth:worst-case` 478,337,446 -> 478,444,047 (+0.02%, ~4.005 M Ir per
+  frame, 99.6% of the 4.02 M line), `cgb-acid2` +0.07% (+1.33% of the
+  baseline's 3% guard), `synth:halt-irq` +0.09%, the rest +0.01-0.06%.
