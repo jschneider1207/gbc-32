@@ -52,7 +52,12 @@ romtest full manifest (+ `check-bench.sh` when the hot path moved), then
 test seen failing first. Core public API changes get one independent
 reviewer on the diff.
 
-**Gates now (be036b7):** ITCM set fit + glob match + callee closure
+**Gates now (9b501c3, sized for the final MCU, STM32H735 with 128 KiB ITCM):**
+total gbc-core `.text` <= 122,880 B (97,136 now) in `check-code-size.sh`;
++3% Ir guard; `check-rom-loads.sh`. Per-function lines and the H753 ITCM
+hot set (fit, closure) are report-only. Budget-driven code shapes are
+being undone: inventory `docs/reviews/stage1-m10/F-budget-distortions.md`
+(55 items, 12 behaviour-preserving themes, 22 keep-as-is). Old text:
 (`check-itcm-set.sh`; 55,0xx of 57,344 B, margin ~2.3 KB; a new function
 called from ITCM code needs a glob or a `FLASH_OK <glob>  # reason` line in
 `perf/itcm-sections.txt`); per-function caps for ITCM functions only
@@ -117,6 +122,19 @@ Open (M10, session 16):
 - **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
   0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
+- **`acceptance/README.md` item 5** still says every symbol in
+  `perf/code-size-budgets.txt` must fit its budget and a missing symbol
+  fails; since the budget reform and the H735 retarget (9b501c3) only the
+  total `.text` line gates. Contract text is human-owned: please update.
+- **Hardware repo follow-ups** from the H735 gate work: ADR 0001 and
+  `firmware-interface.md` still say FMC SDRAM and byte-wise ROM reads;
+  `TCM_AXI_SHARED` should be 01 (128 KiB ITCM, 256 KiB AXI: two frames +
+  audio + 128 KiB cart RAM need 231,424 B; at 192 KiB ITCM, AXI is 34,816 B
+  short). A full-panel 153,600 B LTDC frame buffer does not fit in AXI
+  SRAM next to 128 KiB of cart RAM.
+- **Retire ADR 0027 (byte-wide ROM reads)?** ES0491 2.7.3 is an FMC
+  erratum; 2.8.4 Table 5 allows memory-mapped HyperBus reads at any address
+  and length. With HyperRAM the gate has no hardware reason left.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
 - **Hardware repo** (C11): `docs/firmware-interface.md` says "~200 KiB
