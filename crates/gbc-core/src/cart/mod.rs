@@ -1,5 +1,5 @@
 //! Cartridge: ROM, external RAM, mappers and RTC. No MBC, MBC1 (and
-//! MBC1M), MBC2, MBC3/MBC30 and MBC5 are emulated; a header that names
+//! MBC1M), MBC2, MBC3/MBC30, MBC5 and HuC1 are emulated; a header that names
 //! any other mapper ([`MapperKind`]) is a load error (ADR 0031).
 //!
 //! The ROM and cartridge RAM are borrowed from the caller for the
@@ -187,7 +187,7 @@ pub enum MapperKind {
     Tama5,
     /// Hudson HuC3: FE. Not emulated.
     HuC3,
-    /// Hudson HuC1: FF. Not emulated.
+    /// Hudson HuC1 (infrared port, not connected to anything): FF.
     HuC1,
     /// A code Pan Docs does not assign (04, 07, 0A, 0E, 14-18, 1F, 21,
     /// 23-FB).
@@ -223,7 +223,7 @@ impl MapperKind {
         // `supported_kinds_are_the_ones_that_load` checks every code).
         matches!(
             self,
-            Self::RomOnly | Self::Mbc1 | Self::Mbc2 | Self::Mbc3 | Self::Mbc5
+            Self::RomOnly | Self::Mbc1 | Self::Mbc2 | Self::Mbc3 | Self::Mbc5 | Self::HuC1
         )
     }
 
@@ -533,6 +533,9 @@ enum Mapper {
     Mbc3Rtc,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },
+    /// Hudson HuC1 (type FF): ROM and RAM banking, and an infrared port in
+    /// place of the RAM enable (Pan Docs: HuC1). See `write_rom`.
+    HuC1,
 }
 
 impl Mapper {
@@ -559,19 +562,17 @@ impl Mapper {
             K::Mbc5 => Self::Mbc5 {
                 rumble: cart_type >= 0x1C,
             },
-            K::Mmm01
-            | K::Mbc6
-            | K::Mbc7
-            | K::PocketCamera
-            | K::Tama5
-            | K::HuC3
-            | K::HuC1
-            | K::Unknown => {
+            K::HuC1 => Self::HuC1,
+            K::Mmm01 | K::Mbc6 | K::Mbc7 | K::PocketCamera | K::Tama5 | K::HuC3 | K::Unknown => {
                 return Err(LoadErrorKind::UnsupportedMapper { mapper, cart_type });
             }
         })
     }
 }
+
+/// `Cart::rtc_sel` for the infrared register of the Hudson mappers at
+/// A000-BFFF (the MBC3 values are 08-0C and FF).
+const SEL_IR: u8 = 0x1E;
 
 /// Bytes per switchable ROM bank and RAM bank.
 const ROM_BANK: usize = 0x4000;
@@ -627,13 +628,14 @@ pub(crate) struct Cart<'a> {
     /// RAM bank (4 bits, 3 on rumble carts). Bank 0 is a real bank.
     ///
     /// MBC3 reuses both: `mbc5_rom` is its ROM bank (8 bits stored, 7 used
-    /// below 4 MiB) and `mbc5_ram` the raw 4000-5FFF value.
+    /// below 4 MiB) and `mbc5_ram` the raw 4000-5FFF value. HuC1 too: its
+    /// 6-bit ROM bank and 3-bit RAM bank.
     mbc5_rom: u16,
     mbc5_ram: u8,
     /// MBC3: the selected RTC register, 08-0C, or 0xFF when the 4000-5FFF
     /// value maps nothing at A000-BFFF (RTC select above 0C, or RAM
     /// bank 4-7 on an RTC cart below MBC30); 0 when RAM is mapped. Kept apart from `mbc5_ram`
-    /// so the RAM read path tests one byte.
+    /// so the RAM read path tests one byte. HuC1: `SEL_IR` in IR mode.
     rtc_sel: u8,
 }
 
@@ -750,8 +752,11 @@ impl<'a> Cart<'a> {
         self.mbc5_rom = 1;
         self.mbc5_ram = 0;
         self.rtc_sel = 0;
-        // Without an MBC there is no enable register.
-        self.ram_enabled = self.mapper == Mapper::None;
+        // Without an MBC there is no enable register. Nor on HuC1, whose
+        // 0000-1FFF register selects RAM or the IR port instead (Pan Docs:
+        // HuC1, "Most MBCs can disable the cartridge RAM [...] HuC1
+        // doesn't do this"); it powers on in RAM mode (`rtc_sel` 0).
+        self.ram_enabled = matches!(self.mapper, Mapper::None | Mapper::HuC1);
         self.update_banks();
     }
 
@@ -907,6 +912,11 @@ impl<'a> Cart<'a> {
             0x0A => t.hours,
             0x0B => t.days as u8,
             0x0C => (t.days >> 8) as u8 & 1 | u8::from(t.halted) << 6 | u8::from(t.day_carry) << 7,
+            // HuC1 IR register: C0 = no light seen, C1 = light (Pan Docs:
+            // HuC1, A000-BFFF; SameBoy `Core/memory.c` `read_mbc_ram`:
+            // `0xC0 | effective_ir_input`). No IR peer is emulated, so
+            // the receiver never sees light.
+            SEL_IR => 0xC0,
             _ => 0xFF,
         }
     }
@@ -920,7 +930,10 @@ impl<'a> Cart<'a> {
     /// `rtc_cycles` on a seconds write only).
     #[inline(never)]
     fn write_rtc(&mut self, v: u8, now: u64) {
-        if self.rtc_sel == 0xFF {
+        // Nothing mapped (FF), or the HuC1 IR register: a write there only
+        // switches the IR transmitter LED (Pan Docs: HuC1), which nothing
+        // can see. It never reaches the RAM and is no save change.
+        if self.rtc_sel >= SEL_IR {
             return;
         }
         // Count the time before the write with the old halt state.
@@ -1054,6 +1067,32 @@ impl<'a> Cart<'a> {
                 }
                 self.update_banks();
             }
+            Mapper::HuC1 => {
+                // Pan Docs: HuC1; SameBoy `Core/memory.c` `write_mbc`
+                // (GB_HUC1) and `Core/gb.h` (`huc1`: `bank_low:6`,
+                // `bank_high:3`), which is where the register widths come
+                // from (Pan Docs: "at least 6 bits", "at least 2 bits").
+                match addr >> 13 {
+                    // RAM/IR select, not a RAM enable: 0E maps the IR
+                    // register at A000-BFFF, anything else the RAM (games
+                    // still write 0A and 00 here; both mean RAM). SameBoy
+                    // compares the low nibble (`(value & 0xF) == 0xE`);
+                    // Pan Docs only says "write $0E". Unverified on
+                    // hardware which of the two it is for 1E-FE.
+                    0 => self.rtc_sel = if value & 0x0F == 0x0E { SEL_IR } else { 0 },
+                    // ROM bank, 6 bits. No 0 -> 1 fix-up: SameBoy maps the
+                    // value as written (`Core/mbc.c`
+                    // `GB_update_mbc_mappings`, GB_HUC1), so 0 puts bank 0
+                    // at 4000-7FFF. Pan Docs doesn't say; unverified on
+                    // hardware. Power-on is bank 1 (`GB_reset_mbc`).
+                    1 => self.mbc5_rom = u16::from(value & 0x3F),
+                    // RAM bank; the RAM size masks it (`ram_index`).
+                    2 => self.mbc5_ram = value & 0x07,
+                    // 6000-7FFF: no effect (Pan Docs: "Nothing?").
+                    _ => {}
+                }
+                self.update_banks();
+            }
         }
     }
 
@@ -1073,7 +1112,9 @@ impl<'a> Cart<'a> {
                 usize::from(self.mbc5_rom),
                 usize::from(self.mbc5_ram & 7),
             ),
-            Mapper::Mbc5 { .. } => (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram)),
+            Mapper::Mbc5 { .. } | Mapper::HuC1 => {
+                (0, usize::from(self.mbc5_rom), usize::from(self.mbc5_ram))
+            }
             Mapper::Mbc1 | Mapper::Mbc1M => {
                 // Multicart: only the low 4 bits of BANK1 reach the ROM
                 // address and BANK2 sits above them (Pan Docs: MBC1,
@@ -1371,10 +1412,10 @@ mod tests {
     }
 
     /// The codes that load: every type Pan Docs assigns to no mapper,
-    /// MBC1, MBC2, MBC3 or MBC5.
-    const SUPPORTED: [u8; 19] = [
+    /// MBC1, MBC2, MBC3, MBC5 or HuC1.
+    const SUPPORTED: [u8; 20] = [
         0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x19, 0x1A,
-        0x1B, 0x1C, 0x1D, 0x1E,
+        0x1B, 0x1C, 0x1D, 0x1E, 0xFF,
     ];
 
     /// A4-1/D12: a mapper the core does not emulate is refused with a
@@ -1391,7 +1432,6 @@ mod tests {
             (0xFC, K::PocketCamera),
             (0xFD, K::Tama5),
             (0xFE, K::HuC3),
-            (0xFF, K::HuC1),
             // Unassigned codes, the old "MBC4" range (15-17) among them.
             (0x04, K::Unknown),
             (0x07, K::Unknown),
@@ -2004,5 +2044,182 @@ mod mbc1m_tests {
         // 08 is ROM+RAM.
         h[HEADER_CART_TYPE] = 0x08;
         assert_eq!(cart_ram_size(&h), Ok(0x2000));
+    }
+}
+
+/// Unit tests for the Hudson mappers. No test ROM in the suite covers
+/// them, so these tests and the citations in `mod.rs` are what their
+/// behavior rests on.
+#[cfg(test)]
+mod huc_tests {
+    use super::*;
+    extern crate std;
+    use std::vec::Vec;
+
+    /// A ROM of `banks` banks of the given type whose byte 0 of every bank is
+    /// the bank number, with 32 KiB of RAM declared (0149 = 03).
+    fn rom(cart_type: u8, banks: usize) -> Vec<u8> {
+        let mut rom = std::vec![0u8; banks * ROM_BANK];
+        for (i, chunk) in rom.chunks_mut(ROM_BANK).enumerate() {
+            chunk[0] = i as u8;
+        }
+        rom[HEADER_CART_TYPE] = cart_type;
+        rom[HEADER_RAM_SIZE] = 0x03;
+        rom
+    }
+
+    fn bank(c: &Cart<'_>) -> u8 {
+        c.read_rom(0x4000)
+    }
+
+    #[test]
+    fn huc1_header() {
+        let r = rom(0xFF, 2);
+        assert_eq!(
+            cart_info(&r),
+            Ok(CartInfo {
+                mapper: MapperKind::HuC1,
+                ram_size: 0x8000,
+                battery: true,
+                rtc: false,
+            })
+        );
+        assert!(cart_info(&r).unwrap().has_save());
+        let mut r = r;
+        r[HEADER_RAM_SIZE] = 0x02;
+        assert_eq!(cart_ram_size(&r), Ok(0x2000));
+        assert_eq!(Mapper::from_header(&r), Ok(Mapper::HuC1), "type FF is HuC1");
+    }
+
+    #[test]
+    fn huc1_rom_bank_is_6_bits_and_zero_is_bank_zero() {
+        // 128 banks, more than the register reaches, so that its width shows
+        // (with 64 the ROM-size mask would hide a wider register).
+        let r = rom(0xFF, 128);
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        // Power-on: bank 0 at 0000, bank 1 at 4000.
+        assert_eq!((c.read_rom(0x0000), bank(&c)), (0, 1));
+        for b in [2u8, 0x1F, 0x20, 0x3F] {
+            c.write_rom(0x2000, b, 0);
+            assert_eq!(bank(&c), b);
+        }
+        // Anywhere in 2000-3FFF, and nowhere else.
+        c.write_rom(0x3FFF, 0x05, 0);
+        assert_eq!(bank(&c), 5);
+        c.write_rom(0x1FFF, 0x06, 0);
+        c.write_rom(0x4000, 0x07, 0);
+        c.write_rom(0x6000, 0x08, 0);
+        assert_eq!(bank(&c), 5);
+        // Only 6 bits are kept.
+        c.write_rom(0x2000, 0xC9, 0);
+        assert_eq!(bank(&c), 9);
+        // 0 is not turned into 1 (SameBoy; unverified on hardware).
+        c.write_rom(0x2000, 0x00, 0);
+        assert_eq!(bank(&c), 0);
+        c.write_rom(0x2000, 0x40, 0);
+        assert_eq!(bank(&c), 0);
+        // 0000-3FFF is always bank 0.
+        c.write_rom(0x2000, 0x3F, 0);
+        assert_eq!(c.read_rom(0x0000), 0);
+    }
+
+    #[test]
+    fn huc1_rom_bank_masks_to_rom_size() {
+        // 8 banks: bank numbers wrap at the ROM size.
+        let r = rom(0xFF, 8);
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        c.write_rom(0x2000, 0x0B, 0);
+        assert_eq!(bank(&c), 3);
+        c.write_rom(0x2000, 0x3F, 0);
+        assert_eq!(bank(&c), 7);
+        c.write_rom(0x2000, 0x08, 0);
+        assert_eq!(bank(&c), 0);
+    }
+
+    #[test]
+    fn huc1_ram_banking() {
+        let r = rom(0xFF, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        for b in 0..4u8 {
+            c.write_rom(0x4000, b, 0);
+            c.write_ram(0xA000, 0x10 + b, 0);
+            c.write_ram(0xBFFF, 0x20 + b, 0);
+        }
+        for b in 0..4u8 {
+            c.write_rom(0x5FFF, b, 0);
+            assert_eq!(c.read_ram(0xA000), 0x10 + b);
+            assert_eq!(c.read_ram(0xBFFF), 0x20 + b);
+            assert_eq!(c.ram()[usize::from(b) * RAM_BANK], 0x10 + b);
+        }
+        // Bank numbers past the RAM size mirror; other ranges don't select.
+        c.write_rom(0x4000, 0x06, 0);
+        assert_eq!(c.read_ram(0xA000), 0x12);
+        c.write_rom(0x6000, 0x01, 0);
+        c.write_rom(0x2000, 0x01, 0);
+        assert_eq!(c.read_ram(0xA000), 0x12);
+    }
+
+    #[test]
+    fn huc1_ram_is_never_disabled() {
+        let r = rom(0xFF, 2);
+        let mut ram = [0u8; 0x8000];
+        ram[3] = 0x77; // a loaded save
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        // Readable and writable from power-on, with no 0A written.
+        assert_eq!(c.read_ram(0xA003), 0x77);
+        c.write_ram(0xA000, 0x42, 0);
+        assert_eq!(c.read_ram(0xA000), 0x42);
+        assert!(c.save_dirty);
+        // 00 ("disable" on other mappers) and 0A both leave the RAM mapped.
+        for v in [0x00u8, 0x0A, 0xFF, 0x0F] {
+            c.write_rom(0x0000, v, 0);
+            assert_eq!(c.read_ram(0xA000), 0x42, "select {v:02X}");
+            c.write_ram(0xA001, v, 0);
+            assert_eq!(c.read_ram(0xA001), v, "select {v:02X}");
+        }
+        // Battery RAM: a reset keeps it, and the buffer handed back holds it.
+        c.reset();
+        assert_eq!(c.read_ram(0xA000), 0x42);
+        let ej = c.into_ejected(0).unwrap();
+        assert_eq!((ej.save_ram()[0], ej.save_ram()[3]), (0x42, 0x77));
+        assert_eq!(ej.rtc, None);
+    }
+
+    #[test]
+    fn huc1_ir_mode_reads_no_light_and_ignores_writes() {
+        let r = rom(0xFF, 2);
+        let mut ram = [0u8; 0x8000];
+        let mut c = Cart::new(&r, &mut ram).unwrap();
+        c.write_ram(0xA000, 0x55, 0);
+        c.save_dirty = false;
+        c.write_rom(0x0000, 0x0E, 0);
+        // The IR register everywhere in A000-BFFF: C0 = no light.
+        assert_eq!(c.read_ram(0xA000), 0xC0);
+        assert_eq!(c.read_ram(0xBFFF), 0xC0);
+        assert_eq!(c.dma_block(0xA000), [0xC0; 16]);
+        // Writes drive the LED; they never reach the RAM or dirty the save.
+        c.write_ram(0xA000, 0x01, 0);
+        c.write_ram(0xA000, 0x00, 0);
+        assert_eq!(c.read_ram(0xA000), 0xC0);
+        assert!(!c.save_dirty);
+        assert_eq!(c.ram()[0], 0x55);
+        // Banking still works in IR mode.
+        c.write_rom(0x2000, 0x01, 0);
+        assert_eq!(bank(&c), 1);
+        // Anything else is RAM mode again.
+        c.write_rom(0x1FFF, 0x0A, 0);
+        assert_eq!(c.read_ram(0xA000), 0x55);
+        // The low nibble decides (SameBoy).
+        c.write_rom(0x0000, 0x1E, 0);
+        assert_eq!(c.read_ram(0xA000), 0xC0);
+        c.write_rom(0x0000, 0xE0, 0);
+        assert_eq!(c.read_ram(0xA000), 0x55);
+        // A reset returns to RAM mode.
+        c.write_rom(0x0000, 0x0E, 0);
+        c.reset();
+        assert_eq!(c.read_ram(0xA000), 0x55);
     }
 }

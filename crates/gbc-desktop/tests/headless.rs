@@ -169,13 +169,8 @@ fn unreadable_and_invalid_roms_exit_1() {
 /// always-enabled battery RAM and overwrite the save at exit.
 #[test]
 fn unsupported_mapper_exits_1_and_leaves_the_save_alone() {
-    // HuC1, HuC3, MBC7 (all "+BATTERY" types) and an unassigned code.
-    for (cart_type, name) in [
-        (0xFFu8, "HuC1"),
-        (0xFE, "HuC3"),
-        (0x22, "MBC7"),
-        (0x16, "unknown mapper"),
-    ] {
+    // HuC3, MBC7 (both "+BATTERY" types) and an unassigned code.
+    for (cart_type, name) in [(0xFEu8, "HuC3"), (0x22, "MBC7"), (0x16, "unknown mapper")] {
         let dir = Dir::new(&format!("unsupported-{cart_type:02x}"));
         let rom_path = dir.path("game.gbc");
         // No enable register on a mapper-less cartridge: the write to

@@ -330,7 +330,7 @@ impl<'a> Emulator<'a> {
     /// hands back `rom` and `cart_ram`.
     ///
     /// A cartridge whose header names a mapper the core does not emulate
-    /// (HuC1, HuC3, MBC6, MBC7, MMM01, TAMA5, the Pocket Camera, or an
+    /// (HuC3, MBC6, MBC7, MMM01, TAMA5, the Pocket Camera, or an
     /// unassigned type code; see [`MapperKind`]) is refused with
     /// [`LoadErrorKind::UnsupportedMapper`] rather than run without
     /// banking. [`cart_info`] and [`cart_ram_size`] fail the same way, so
@@ -976,7 +976,6 @@ mod tests {
         let emu = emulator();
         let before = (emu.clock(), emu.registers(), emu.cart_info());
         for (cart_type, mapper) in [
-            (0xFF, MapperKind::HuC1),
             (0xFE, MapperKind::HuC3),
             (0x22, MapperKind::Mbc7),
             (0x0D, MapperKind::Mmm01),

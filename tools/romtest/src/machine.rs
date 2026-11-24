@@ -1081,13 +1081,13 @@ mod tests {
     #[test]
     fn real_core_reports_an_unsupported_mapper_as_a_load_error() {
         let mut rom = vec![0u8; 0x8000];
-        rom[0x147] = 0xFF; // HuC1
+        rom[0x147] = 0x22; // MBC7
         rom[0x149] = 0x03;
         let mut st = RunState::default();
         assert_eq!(
             run_core(&rom, &plan(Exit::RunFrames { frames: 1 }), &mut st),
             Err(CoreFailure::Load(
-                "unsupported cartridge: HuC1 (header cartridge type FF)".into()
+                "unsupported cartridge: MBC7 (header cartridge type 22)".into()
             ))
         );
         assert_eq!(st.end, None);
