@@ -79,10 +79,12 @@ pub(crate) use render::ObjBuf;
 use render::{
     Colors, Held, Mixed, Planes, Regs, Renderer, SetLatch, Sources, pair_table, set_pair_color,
 };
+use stalls::{StallKind, Stalls};
 
 pub(crate) mod edges;
 mod objects;
 mod render;
+mod stalls;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
@@ -324,16 +326,13 @@ pub(crate) struct LineTiming {
     /// Mode 3 ends for the HBlank interrupt (the walk's `End`); STAT reads
     /// mode 0 (single speed) from `end + edge` ([`Self::stat_end`]).
     end: u16,
-    /// Pipeline stalls `(pixel x, dots)` in x order: objects and the
-    /// window start (two after a re-trigger, [`Ppu::retrigger`]).
-    stalls: [(u8, u8); 11],
-    n_stalls: u8,
-    /// Which stall is the window's (`NO_STALL`: none); the others are the
-    /// objects', in fetch order.
-    win_stall: u8,
+    /// Pipeline stalls `(pixel x, dots)` in x order: the objects', in
+    /// fetch order, and the window start's (two after a re-trigger,
+    /// [`Ppu::retrigger`]).
+    stalls: Stalls,
     /// WX + 1 of the line's earlier window start after a re-trigger (0:
     /// none; [`Ppu::retrigger`]). Its stall stays the first one at its x
-    /// ([`LineTiming::prev_stall`]), and objects between it and the new
+    /// ([`LineTiming::earlier_window`]), and objects between it and the new
     /// start keep its tile grid.
     prev_wx: u8,
     /// Stall dots at the last pixel (x = 159: the window at WX = 166,
@@ -354,8 +353,6 @@ pub(crate) struct LineTiming {
     /// ([`Ppu::wy_written`]). Here so LCD off and on clear it.
     wy_late: u8,
 }
-
-const NO_STALL: u8 = 0xFF;
 
 /// Dots after a tile's first pixel is output at which the next tile's
 /// map entry has been read (GET_TILE T1 ran in the dot before): a
@@ -463,9 +460,7 @@ impl LineTiming {
         mode3: 0,
         first_pixel: 0,
         end: 0,
-        stalls: [(0, 0); 11],
-        n_stalls: 0,
-        win_stall: NO_STALL,
+        stalls: Stalls::NONE,
         prev_wx: 0,
         edge: 0,
         wy_late: 0,
@@ -485,57 +480,71 @@ impl LineTiming {
         (self.first_pixel.wrapping_sub(u16::from(self.mode3) + 12)) as u8 & 7
     }
 
-    /// `edge` and `end` from the `n_stalls` stalls, `total` dots in all
-    /// (shared tail of
-    /// [`Ppu::set_stalls`] and [`Ppu::set_stalls_retriggered`]).
+    /// `edge` and `end` from the stalls, `total` dots in all (shared tail
+    /// of [`Ppu::set_stalls`] and [`Ppu::set_stalls_retriggered`]).
     #[inline(never)]
     fn finish(&mut self, total: u16) {
-        let k = usize::from(self.n_stalls) % 12;
         // The stalls at pixel 159 (the trailing ones) don't delay the
         // HBlank interrupt (`LineTiming::edge`); rare, out of line.
         self.edge = 0;
-        if k != 0 && self.stalls[(k - 1) % 11].0 >= 159 {
-            self.edge = edge_dots(&self.stalls[..k]);
+        if self.stalls.last().is_some_and(|s| s.0 >= 159) {
+            self.edge = edge_dots(self.stalls.as_slice());
         }
         self.end = self.first_pixel + 160 + total - u16::from(self.edge);
     }
 
-    /// Index in `stalls` of the earlier window start after a re-trigger
-    /// (`NO_STALL`: none): the first stall at its x (a window stalls before
+    /// Index in `stalls` of the earlier window start after a re-trigger,
+    /// if there was one: the first stall at its x (a window stalls before
     /// the objects at its x).
     #[cold]
     #[inline(never)]
-    fn prev_stall(&self) -> u8 {
-        if self.prev_wx == 0 {
-            return NO_STALL;
-        }
-        let x = (self.prev_wx - 1).saturating_sub(7);
-        let n = usize::from(self.n_stalls) % 12;
-        self.stalls[..n]
-            .iter()
-            .position(|s| s.0 == x)
-            .map_or(NO_STALL, |i| i as u8)
+    fn earlier_window(&self) -> Option<usize> {
+        let x = self.prev_wx.checked_sub(1)?.saturating_sub(7);
+        self.stalls.as_slice().iter().position(|s| s.0 == x)
+    }
+
+    /// The line's stalls in order, each with what it is and the line
+    /// position it begins at ([`Stalls::walk`]). Cold callers only.
+    fn walk(&self) -> impl Iterator<Item = (StallKind, stalls::Timed)> + '_ {
+        self.stalls.walk(self.first_pixel, self.earlier_window())
     }
 
     /// Pixels output before line position `t` (0-160), under the
-    /// per-object stall model above.
+    /// per-object stall model above. The walk of [`Stalls::timed`] written
+    /// out: this runs on every flush (each mid-line register write), and
+    /// through the iterator it measured 2 x86 Ir more per call
+    /// (`synth:cgb-raster` +0.01%, `synth:worst-case` +0.02%).
     fn pixels_before(&self, t: u32) -> u8 {
-        let mut clock = u32::from(self.first_pixel);
-        let mut x = 0u32;
-        for &(sx, d) in &self.stalls[..usize::from(self.n_stalls)] {
+        // The line position and pixel after the stalls so far.
+        let (mut clock, mut x) = (u32::from(self.first_pixel), 0u32);
+        for &(sx, d) in self.stalls.as_slice() {
             let run = u32::from(sx).saturating_sub(x);
             if t < clock + run {
                 return (x + t.saturating_sub(clock)) as u8;
             }
-            clock += run;
             x = x.max(u32::from(sx));
-            clock += u32::from(d);
+            clock += run + u32::from(d);
             if t < clock {
                 return x as u8;
             }
         }
         (x + t.saturating_sub(clock)).min(160) as u8
     }
+}
+
+/// [`Ppu::tile_lead`]'s result, for tile j of a line and a write.
+struct TileLead {
+    /// The stall dots before tile j's fetch window (from which tile j + 1
+    /// is fetched).
+    before: i32,
+    /// A window stall is inside that fetch window.
+    win_hit: bool,
+    /// An object stall is in tile j or j + 1, before or after the write
+    /// (for tile 0, also one among the junk pixels).
+    obj_hit: bool,
+    /// The slot of the last object whose stall is before the fetch window
+    /// (fetched before tile j + 1's reads).
+    last: Option<u8>,
 }
 
 pub(crate) struct Ppu {
@@ -1706,7 +1715,7 @@ impl Ppu {
             lt.first_pixel = first_pixel as u16;
             self.renderer.set_fine(n as u8);
             // The objects' stalls follow the new tile alignment (`n & 7`).
-            if lt.n_stalls != 0 {
+            if !lt.stalls.is_empty() {
                 self.set_stalls(n as u8, self.renderer.window_wx());
             }
             self.end_moved();
@@ -1728,10 +1737,11 @@ impl Ppu {
         // The window starting at pixel `x` (WX >= 7) is being fetched from
         // its activation, the first dot of its stall (SameBoy: after an
         // object left of tile 0, matched with the junk pixels before it).
-        let win_dots = i32::from(lt.stalls[usize::from(lt.win_stall) % 11].1);
+        let win = lt.stalls.window();
+        let win_dots = win.map_or(0, |w| i32::from(w.1));
         let win_now = wx.is_some_and(|wx| i32::from(wx) - 7 == x)
-            && lt.win_stall != NO_STALL
-            && t >= first_pixel + x + self.tile_lead(t, x, x).0 - win_dots;
+            && win.is_some()
+            && t >= first_pixel + x + self.tile_lead(t, x, x).before - win_dots;
         // As drawn up to `x` (no change after a `flush`), or up to the
         // window's first pixel once it is being fetched.
         let (active, start, skip) = self.renderer.window_after(
@@ -1751,10 +1761,20 @@ impl Ppu {
         // Dots since tile j's fetch window began (`Ppu::tile_lead`). A map
         // select or SCX write once tile j's first pixel and pixel 0 are out
         // misses tile j + 1 whatever the stalls (the common case: no walk).
-        let (before, win_hit, obj_hit, last) = if data || phase < FETCH_SAMPLED || x == 0 {
+        let TileLead {
+            before,
+            win_hit,
+            obj_hit,
+            last,
+        } = if data || phase < FETCH_SAMPLED || x == 0 {
             self.tile_lead(t, x, tile)
         } else {
-            (t - first_pixel - x, false, false, NO_STALL)
+            TileLead {
+                before: t - first_pixel - x,
+                win_hit: false,
+                obj_hit: false,
+                last: None,
+            }
         };
         let mut phase = t - first_pixel - tile - before;
         if phase < 0 && win_now {
@@ -1810,12 +1830,10 @@ impl Ppu {
                     phase == FETCH_LOW + late - 1,
                     phase == FETCH_HIGH + late - 1,
                 );
-                let set_latch = if last != NO_STALL {
-                    SetLatch::Object(last)
-                } else if obj_hit {
-                    SetLatch::NearObject
-                } else {
-                    SetLatch::Plain
+                let set_latch = match last {
+                    Some(slot) => SetLatch::Object(slot),
+                    None if obj_hit => SetLatch::NearObject,
+                    None => SetLatch::Plain,
                 };
                 Mixed::new(unread.without(glitched), glitched, set_latch)
             } else {
@@ -1887,7 +1905,7 @@ impl Ppu {
     /// stall is inside it, whether an object stall is in tile j or j + 1,
     /// before or after `t` (for tile 0, also one among the junk pixels),
     /// and the slot of the last object whose stall is before the window
-    /// (fetched before tile j + 1's reads; `NO_STALL`: none).
+    /// (fetched before tile j + 1's reads), if any ([`TileLead`]).
     ///
     /// Tile j + 1's VRAM reads run at fixed dots from the dot tile j's
     /// first pixel is output, or would be before a stall at that pixel:
@@ -1902,40 +1920,47 @@ impl Ppu {
     /// matches it with the junk pixels, after tile 0's fetch began, so it
     /// counts for tile 0 on, not for the junk tile before it: gambatte
     /// `scx_during_m3_spx*`, step F rule 1). A window stall inside tile j
-    /// finishes tile j + 1 (approximation kept from step 1). Object stall
-    /// `i` is the line's object `i` in fetch order, less the window stalls
-    /// before it. Cold: mid-mode-3 writes only.
+    /// finishes tile j + 1 (approximation kept from step 1). Cold:
+    /// mid-mode-3 writes only.
     #[cold]
     #[inline(never)]
-    fn tile_lead(&self, t: i32, x: i32, tile: i32) -> (i32, bool, bool, u8) {
+    fn tile_lead(&self, t: i32, x: i32, tile: i32) -> TileLead {
         let lt = &self.line;
-        let first_pixel = i32::from(lt.first_pixel);
         let r = &self.renderer;
-        let (win, prev) = (usize::from(lt.win_stall), usize::from(lt.prev_stall()));
-        let (mut before, mut win_hit, mut obj_hit, mut last) = (0, false, false, NO_STALL);
-        for (i, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls)].iter().enumerate() {
-            let sx = i32::from(sx);
-            let w = i == win || i == prev;
-            obj_hit |= !w && (tile..tile + 16).contains(&sx);
+        let mut lead = TileLead {
+            before: 0,
+            win_hit: false,
+            obj_hit: false,
+            last: None,
+        };
+        for (kind, s) in lt.walk() {
+            let sx = i32::from(s.x);
+            // An object's stall: its slot.
+            let slot = match kind {
+                StallKind::Object(k) => Some(r.order[k % objects::MAX_PER_LINE]),
+                StallKind::Window | StallKind::EarlierWindow => None,
+            };
+            let w = slot.is_none();
+            lead.obj_hit |= !w && (tile..tile + 16).contains(&sx);
             if sx > x {
                 continue;
             }
-            let obj = i - usize::from(i > win) - usize::from(i > prev);
-            let slot = r.order[obj % objects::MAX_PER_LINE];
-            let junk =
-                !w && i32::from(r.objects.get(usize::from(slot)).2) < 8 - i32::from(lt.fine());
+            let junk = slot.is_some_and(|slot| {
+                i32::from(r.objects.get(usize::from(slot)).2) < 8 - i32::from(lt.fine())
+            });
             if sx < tile || (w && sx == tile) || (junk && tile > -8) {
-                before += i32::from(d);
+                lead.before += i32::from(s.dots);
                 if !w {
-                    last = slot;
+                    lead.last = slot;
                 }
             } else {
-                win_hit |= w;
+                lead.win_hit |= w;
             }
         }
         // In the fine-scroll discard a window stall at pixel 0 is still
         // to come.
-        (before, win_hit && t >= first_pixel, obj_hit, last)
+        lead.win_hit &= t >= i32::from(lt.first_pixel);
+        lead
     }
 
     /// An SCY (`reg` 0x42) or SCX (0x43) write of `value` at clock `now`:
@@ -2205,8 +2230,7 @@ impl Ppu {
         } else {
             // No stall (most lines): no call.
             let t = &mut self.line;
-            t.win_stall = NO_STALL;
-            t.n_stalls = 0;
+            t.stalls.clear();
             t.edge = 0;
             t.end = t.first_pixel + 160;
         }
@@ -2228,7 +2252,7 @@ impl Ppu {
         (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx)
     }
 
-    /// The pipeline stalls of the current line (`line.stalls`, `win_stall`,
+    /// The pipeline stalls of the current line (`line.stalls`, and
     /// `end` from `first_pixel`): the renderer's objects in fetch order
     /// and the window start at WX `window`.
     #[inline(never)]
@@ -2243,38 +2267,31 @@ impl Ppu {
             *x = r.objects.get(usize::from(slot)).2;
         }
         let t = &mut self.line;
-        t.win_stall = NO_STALL;
-        // The objects' stalls straight into `stalls` (no objects and no
+        // The objects' stalls straight into the list (no objects and no
         // window: none).
-        let (objs, _) = t.stalls.split_first_chunk_mut::<10>().unwrap();
-        let (mut k, mut total) = sorted_object_stalls(&xs[..n], scx, window, objs);
+        let mut total = 0;
+        t.stalls.set_objects(|out| {
+            let (k, dots) = sorted_object_stalls(&xs[..n], scx, window, out);
+            total = dots;
+            k
+        });
         if let Some(wx) = window {
             // The window start stalls 6 dots; at WX = 0 with SCX & 7 != 0
             // one more (AGE `stat-mode-window`, verified on CGB B/C/E;
             // SameBoy display.c has the extra dot, `cycles_for_line += 1`,
-            // for DMG only).
+            // for DMG only). It goes before the first object at or after
+            // it (`Stalls::insert_window`).
             let fine = u8::from(scx & 7 != 0);
             let w = (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0));
-            // The window start goes before the first object at or after
-            // it (after all of them if none is): the objects are in x
-            // order, so shift up the ones at or after it.
-            let mut i = k.min(10);
-            k = i + 1;
-            while i > 0 && t.stalls[i - 1].0 >= w.0 {
-                t.stalls[i] = t.stalls[i - 1];
-                i -= 1;
-            }
-            t.stalls[i] = w;
-            t.win_stall = i as u8;
+            t.stalls.insert_window(w);
             total += u16::from(w.1);
         }
-        t.n_stalls = k as u8;
         t.finish(total);
     }
 
     /// [`Self::set_stalls`] after a re-trigger ([`Self::retrigger`]): the
     /// earlier window start keeps its stall as it ran
-    /// ([`LineTiming::prev_stall`]), the objects before the new start at
+    /// ([`LineTiming::earlier_window`]), the objects before the new start at
     /// WX `window` keep the earlier start's tile grid (the BG after it
     /// continues that grid, `Renderer::bg_fine`), the others take the new
     /// start's: two plain `set_stalls`, one per start, spliced at the new
@@ -2282,28 +2299,21 @@ impl Ppu {
     #[cold]
     #[inline(never)]
     fn set_stalls_retriggered(&mut self, scx: u8, window: Option<u8>) {
-        let prev = self.line.stalls[usize::from(self.line.prev_stall()) % 11];
+        let lt = &self.line;
+        let ran = lt.earlier_window().and_then(|i| lt.stalls.get(i));
         let pwx = core::mem::take(&mut self.line.prev_wx);
         self.set_stalls(scx, Some(pwx - 1));
-        let t = &mut self.line;
-        t.stalls[usize::from(t.win_stall) % 11] = prev;
-        t.win_stall = NO_STALL;
+        self.line.stalls.window_ran(ran);
         if window.is_some() {
-            // The earlier start's stalls before the new start (`j` objects
-            // and its own), then the new start's from there.
-            let a = t.stalls;
+            // The earlier start's stalls before the new start (the
+            // objects there and its own), then the new start's from there.
+            let earlier = self.line.stalls;
             self.set_stalls(scx, window);
-            let t = &mut self.line;
-            let (j, n) = (usize::from(t.win_stall) % 10, usize::from(t.n_stalls) % 11);
-            t.stalls.copy_within(j..n, j + 1);
-            t.stalls[..=j].copy_from_slice(&a[..=j]);
-            t.n_stalls += 1;
-            t.win_stall += 1;
+            self.line.stalls.splice_earlier(&earlier);
         }
         let t = &mut self.line;
         t.prev_wx = pwx;
-        let k = usize::from(t.n_stalls) % 12;
-        let total: u16 = t.stalls[..k].iter().map(|s| u16::from(s.1)).sum();
+        let total = t.stalls.total_dots();
         t.finish(total);
     }
 
@@ -2313,19 +2323,9 @@ impl Ppu {
     #[inline(never)]
     fn window_stall_at(&self) -> Option<i32> {
         let lt = &self.line;
-        let (mut clock, mut x) = (i32::from(lt.first_pixel), 0);
-        for (j, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls) % 12]
-            .iter()
-            .enumerate()
-        {
-            clock += (i32::from(sx) - x).max(0);
-            x = x.max(i32::from(sx));
-            if j == usize::from(lt.win_stall) {
-                return Some(clock);
-            }
-            clock += i32::from(d);
-        }
-        None
+        let win = lt.stalls.window_index()?;
+        let s = lt.stalls.timed(lt.first_pixel).nth(win)?;
+        Some(s.begin as i32)
     }
 
     /// A WX, WY or LCDC.5 write seen by the pixel pipeline at clock `now`
@@ -2367,14 +2367,16 @@ impl Ppu {
             // CGB only; `window/late_disable*_1` cgb04c out0, dmg08 out3).
             if let (Some(c), 0) = (at, self.lcdc & 0x20) {
                 let lt = &mut self.line;
-                let (x, d) = &mut lt.stalls[usize::from(lt.win_stall) % 11];
-                let keep = (t + WINDOW_OFF_LEAD - c).clamp(0, i32::from(*d)) as u8;
-                if *x >= 159 {
-                    lt.edge -= *d - keep;
-                } else {
-                    lt.end -= u16::from(*d - keep);
+                if let Some((x, d)) = lt.stalls.window_mut() {
+                    let keep = (t + WINDOW_OFF_LEAD - c).clamp(0, i32::from(*d)) as u8;
+                    let cut = *d - keep;
+                    *d = keep;
+                    if *x >= 159 {
+                        lt.edge -= cut;
+                    } else {
+                        lt.end -= u16::from(cut);
+                    }
                 }
-                *d = keep;
                 self.end_moved();
             } else if self.line.prev_wx == 0 {
                 self.retrigger(t, mem);
@@ -2451,7 +2453,7 @@ impl Ppu {
         let Some(wx) = self.window_wx(mem).filter(|&wx| wx >= 7) else {
             return;
         };
-        if active || start >= self.drawn || usize::from(lt.n_stalls) >= lt.stalls.len() {
+        if active || start >= self.drawn || lt.stalls.is_full() {
             return;
         }
         let saved = self.line;
@@ -2610,23 +2612,13 @@ impl Ppu {
     #[inline(never)]
     fn fix_attrs(&mut self, mem: &Memory, upto: u64) {
         let t = self.line;
-        let r = &mut self.renderer;
-        let mut slots = r.order[..r.objects.len()]
-            .iter()
-            .map(|&s| usize::from(s) % 10)
-            .filter(|&s| r.objects.get(s).2 < 168);
-        let prev = t.prev_stall();
-        let (mut clock, mut x) = (u32::from(t.first_pixel), 0u32);
-        for (j, &(sx, d)) in t.stalls[..usize::from(t.n_stalls) % 12].iter().enumerate() {
-            clock += u32::from(sx).saturating_sub(x);
-            x = x.max(u32::from(sx));
-            let begin = clock;
-            clock += u32::from(d);
-            if j == usize::from(t.win_stall) || j == usize::from(prev) {
-                continue;
-            }
-            let Some(slot) = slots.next() else { break };
-            let c = t.start.wrapping_add(u64::from(begin + u32::from(d) - 5));
+        let r = &self.renderer;
+        for (kind, s) in t.walk() {
+            // The object stalls are the fetches of the line's objects in
+            // fetch order (the ones on screen horizontally come first).
+            let StallKind::Object(k) = kind else { continue };
+            let slot = usize::from(r.order[k % objects::MAX_PER_LINE]) % objects::MAX_PER_LINE;
+            let c = t.start.wrapping_add(u64::from(s.end() - 5));
             if self.attr_final & (1 << slot) != 0 || c > upto {
                 continue;
             }
@@ -2751,22 +2743,16 @@ impl Ppu {
         {
             return;
         }
-        let (win, prev) = (usize::from(lt.win_stall), usize::from(lt.prev_stall()));
-        let (mut clock, mut px) = (u32::from(lt.first_pixel), 0);
-        for (i, &(sx, d)) in lt.stalls[..usize::from(lt.n_stalls)].iter().enumerate() {
-            // As `LineTiming::pixels_before`: `clock` is this stall's end.
-            clock += u32::from(sx).saturating_sub(px);
-            px = px.max(u32::from(sx));
-            clock += u32::from(d);
-            let obj = i - usize::from(i > win) - usize::from(i > prev);
+        for (kind, s) in lt.walk() {
             let Some((next, slot)) = self.renderer.next_object() else {
                 break;
             };
-            if i == win || i == prev || obj < next {
+            // The objects not fetched yet, in fetch order.
+            if !matches!(kind, StallKind::Object(k) if k >= next) {
                 continue;
             }
             let x = self.renderer.objects.get(slot).2;
-            let end = clock - u32::from(8u8.saturating_sub(x));
+            let end = s.end() - u32::from(8u8.saturating_sub(x));
             if t + OBJ_LOW_READ <= end {
                 break;
             }
@@ -4661,7 +4647,10 @@ mod tests {
             let x0 = usize::from(x.max(8) - 8);
             let row = &r.frame[ly as usize * SCREEN_WIDTH..];
             assert_eq!(row[92..100], [colors(1); 8], "second object");
-            (r.ppu.line.stalls[0], row[x0..usize::from(x)].to_vec())
+            (
+                r.ppu.line.stalls.as_slice()[0],
+                row[x0..usize::from(x)].to_vec(),
+            )
         };
         // X = 32: 11-dot stall at pixel 24, ending at 96 + 24 + 11 = 131.
         let cases = [
