@@ -191,6 +191,31 @@ tests. The human signed those 4 off as CGB-E results (2026-11-23, ADR
 instead was measured and rejected: it also costs SameSuite
 `channel_{1,2}_duty` and four gambatte `speedchange*_ds_1`.
 
+**A switch to double speed with the APU on flips `lf_div`.** While the
+frame sequencer runs 2 clocks late after such a switch
+(`Timer::apu_ds_delay`, below: AGE's `m_current_ds_delay`, hardware
+verified by AGE `spsw-ch2-lc-delay` on CGB B/C/E; it toggles at each
+switch to double speed and NR52 power on/off clears it), a double-speed
+trigger takes the other delay: one period plus `6 + 2 * (lf_div ^ 1)`
+(`Apu::trigger_delay`; `Apu::write` gets the flag in bit 0 of `ds`). The
+whole APU clock is one 2 MHz tick behind, so its 1 MHz phase is too.
+Source: gambatte cgb04c `speedchange_ch1_nr4init_duty0_pos6_to_pos7_
+timing_1`/`_2` (NR52 power on in single speed, switch, CH1 trigger at
+f = 0x7E0 at clock 0 mod 4, retrigger 900 or 902 clocks later to freeze
+the position: `_2` must see position 7, so the first step is at most 6
+clocks past the period, not the 8 the power-on phase gives). That the
+delay covers the 1 MHz phase as well as the frame sequencer is inferred
+from this one ROM pair (no other ROM here triggers in double speed with
+the flag set); AGE delays only its frame sequencer there.
+Alternative rejected (measured): AGE's own CGB-C trigger rule ties the
+phase to DIV instead (`gb_sound::should_align_frequency_timer`: one
+sample more when `(clock + div_offset) & 2`, double speed only; gambatte
+likewise keys `DutyUnit::nr4Change` to its DIV-aligned counter). As bit 2
+of the system counter it also passes this ROM and the gambatte `sound`/
+`speedchange` ROMs, but fails SameSuite `channel_{1,2}_duty` (CGB-E
+verified; power cycles in double speed at varying DIV phases), which the
+power-on phase plus the delay keeps.
+
 **The output bit is latched at each duty step.** `Square::high` holds the
 duty bit sampled when the position last moved; an NRx1 duty change shows
 only from the next step, and a retrigger or NRx2 write keeps it (gambatte
@@ -384,10 +409,7 @@ gambatte `sound/` and SameSuite APU ROMs:
 - SameBoy's envelope lock/clock model, the secondary DIV event and the
   CGB-C `_nrx2_glitch` (the classic model plus zombie mode is used).
 - The square trigger delay fit: the extra delay when retriggering an
-  active channel (gambatte `ch*_duty*_pos*`). A double-speed trigger
-  after a switch with the APU already on (`speedchange_ch1_nr4init_*_2`)
-  still fails with the linear rule; the grid rule in double speed flips it
-  but costs the ROMs named above.
+  active channel (gambatte `ch*_duty*_pos*`).
   The single-speed grid phase across switches is fitted, not derived: the
   APU is not ticked differently over the switch (the CPU's position
   against the APU and PPU is ADR 0020's).

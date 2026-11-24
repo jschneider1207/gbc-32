@@ -203,7 +203,7 @@ the extra delay when retriggering an active channel; `lf_div` derived from
 SameBoy `apu.c` (`lf_div`, square `sample_countdown` on trigger), ADR
 0021 section 12. Trigger path only, not the integrate loop.
 
-**Status (2026-11-23): 23 of 27 done**; plus 2 SameSuite ROMs outside
+**Status (2026-11-23): all 27 done** (every `gambatte/sound` and `speedchange*_ch1_*` ROM passes); plus 2 SameSuite ROMs outside
 the group's count, and 4 SameSuite ROMs signed off (below). The cause was not one mechanism
 (`docs/reference/apu.md` has the details):
 - Done: the duty output bit latches at each step, so an NRx1 change
@@ -226,10 +226,11 @@ the group's count, and 4 SameSuite ROMs signed off (below). The cause was not on
   (SameSuite `apu/README.md`: CPU-CGB-C fails most channel 1/2 tests;
   ADR 0003: CPU CGB C); excluded from `same-suite-apu` and kept running
   in the stretch group `same-suite-apu-cgbE`, not blocking Stage 1.
-- Open: `speedchange_ch1_nr4init_..._timing_2` triggers in double speed
-  after a switch with the APU on and still fails with the linear rule;
-  the grid rule in double speed flips it but also costs SameSuite
-  `channel_{1,2}_duty` and 4 `speedchange*_ds_1` (measured).
+- Done (2026-11-23): `speedchange_ch1_nr4init_..._timing_2` (power on,
+  switch to double speed, trigger): while the APU runs 2 clocks late
+  after the switch (`Timer::apu_ds_delay`, AGE) the trigger's `lf_div`
+  flips. AGE's DIV-keyed rule also fixes it but costs SameSuite
+  `channel_{1,2}_duty` (measured; `docs/reference/apu.md`).
 - Done (2026-11-23): the 2 sweep ROMs (`ch1_init_reset_sweep_counter_timing_10`,
   `_nr52_3`) and `ch2_init_reset_env_counter_timing_15`: the sweep step
   4 clocks after its edge, and the trigger windows for the sweep (8

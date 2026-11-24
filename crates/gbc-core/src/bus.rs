@@ -649,9 +649,10 @@ impl Ctx<'_, '_> {
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
                 let edge = self.sys.sched.deadline(EventKind::DivApu);
-                self.mem
-                    .apu
-                    .write(reg, value, now, self.hot.mcycle == 2, edge);
+                // The M-cycle length (bit 1: double speed), plus 1 with the
+                // APU's delay after a switch to double speed (`Apu::write`).
+                let ds = self.hot.mcycle as u8 | u8::from(self.sys.timer.apu_ds_delay);
+                self.mem.apu.write(reg, value, now, ds, edge);
             }
             // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,
@@ -4463,6 +4464,50 @@ mod dma_tests {
             assert_eq!(d.copied, 160);
             assert_eq!(d.ppu_at(t0 + 647), (Halted, 160));
             assert_eq!(d.ppu_at(t0 + 5000), (Halted, 160));
+        });
+    }
+
+    /// A switch to double speed with the APU on delays the APU by one
+    /// 2 MHz tick (`Timer::apu_ds_delay`): a CH1 trigger in double speed
+    /// then takes the other of its two delays than the power-on phase
+    /// gives (gambatte cgb04c
+    /// `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_1`/`_2`). A
+    /// power cycle in double speed clears the delay.
+    #[test]
+    fn a_switch_to_double_speed_with_the_apu_on_flips_the_trigger_phase() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            // CH1 DAC on, f = 0x700 (1024 clocks per step), triggered off
+            // at two consecutive M-cycles: the clocks to the first step
+            // against gambatte's linear rule with the power-on 1 MHz phase
+            // `lf_div` (`Apu::trigger_delay`), flipped by `flip`.
+            let check = |ctx: &mut Ctx, flip: u64| {
+                ctx.write(0xFF12, 0xF0);
+                for _ in 0..2 {
+                    let t = ctx.clock();
+                    ctx.write(0xFF14, 0x87);
+                    let apu = &ctx.mem.apu;
+                    let first = apu.out.synced + u64::from(apu.sq[0].countdown);
+                    let lf_div = ((t >> 1) ^ u64::from(apu.fs.phase) ^ 1) & 1;
+                    assert_eq!(first - t, 1024 + 6 + 2 * (lf_div ^ flip), "at {t}");
+                    // Off again (DAC off, on) for the next trigger.
+                    ctx.write(0xFF12, 0x00);
+                    ctx.write(0xFF12, 0xF0);
+                }
+            };
+            ctx.write(0xFF26, 0x00);
+            ctx.write(0xFF26, 0x80);
+            assert!(ctx.speed_switch(true, false));
+            while !ctx.speed_switch_over() {
+                ctx.idle_speed_switch();
+            }
+            ctx.speed_switch_end();
+            assert!(ctx.sys.timer.apu_ds_delay);
+            check(ctx, 1);
+            ctx.write(0xFF26, 0x00);
+            ctx.write(0xFF26, 0x80);
+            assert!(!ctx.sys.timer.apu_ds_delay);
+            check(ctx, 0);
         });
     }
 

@@ -122,7 +122,9 @@ pub(crate) struct Timer {
     /// The frame sequencer runs one double-speed M-cycle (2 clocks) behind
     /// the DIV-APU edge in double speed (`set_div_apu_deadline`). Each
     /// switch to double speed with the APU on toggles it: the 1st and 3rd
-    /// delay, the 2nd doesn't. NR52 power on/off clears it (AGE
+    /// delay, the 2nd doesn't. The square channels' 1 MHz phase in a
+    /// double-speed trigger follows it (`Apu::trigger_delay`). NR52 power
+    /// on/off clears it (AGE
     /// `spsw-ch2-lc-delay`, verified on CGB B/C/E; AGE emulator
     /// `gb_sound::after_speed_change`, `m_current_ds_delay`). Single speed
     /// ignores it but keeps it for the next switch. Toggled here even with
