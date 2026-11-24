@@ -186,7 +186,6 @@ mod irq;
 mod joypad;
 mod memory;
 mod ppu;
-mod rom;
 mod schedule;
 mod serial;
 mod timer;
@@ -726,7 +725,7 @@ impl<'a> Emulator<'a> {
     pub fn cart_info(&self) -> Option<CartInfo> {
         let cart = &self.hw.sys.cart;
         if cart.is_loaded() {
-            cart_info(cart.rom.into_inner()).ok() // check-rom-loads: allowed (reads via Rom::get)
+            cart_info(cart.rom).ok()
         } else {
             None
         }

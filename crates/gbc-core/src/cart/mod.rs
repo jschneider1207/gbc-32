@@ -268,7 +268,7 @@ impl core::fmt::Display for MapperKind {
 /// Header byte `at` of `rom` (0 past the end: callers check the length
 /// first).
 fn header(rom: &[u8], at: usize) -> u8 {
-    Rom::new(rom).get(at).unwrap_or(0)
+    rom.get(at).copied().unwrap_or(0)
 }
 
 /// Bytes of cartridge RAM the cartridge uses, from the header. The buffer
@@ -375,8 +375,6 @@ mod huc3;
 mod rtc;
 
 pub use huc3::Huc3RtcState;
-
-use crate::rom::Rom;
 
 /// The Nintendo logo every licensed cartridge carries at 0104-0133 (Pan
 /// Docs: The Cartridge Header, "0104-0133 - Nintendo logo"); the boot ROM
@@ -602,7 +600,7 @@ const ROM_BANK: usize = 0x4000;
 const RAM_BANK: usize = 0x2000;
 
 pub(crate) struct Cart<'a> {
-    pub(crate) rom: Rom<'a>,
+    pub(crate) rom: &'a [u8],
     /// The caller's whole RAM buffer, kept so that eject returns all of it.
     /// Emulation must use only `ram()`, so behavior and the save file
     /// depend on the header, not on the buffer length.
@@ -635,7 +633,7 @@ pub(crate) struct Cart<'a> {
     /// file ends; reads past the end of a window return 0xFF, as if the
     /// ROM were padded with 0xFF (the M0 short-ROM rule). Indexed by
     /// address bit 14, so a read selects its window with one shift.
-    rom_win: [Rom<'a>; 2],
+    rom_win: [&'a [u8]; 2],
     /// Offset of the RAM bank visible at A000-BFFF.
     ram_off: usize,
     ram_enabled: bool,
@@ -670,7 +668,7 @@ impl<'a> Cart<'a> {
     /// No cartridge: reads return open-bus 0xFF.
     pub(crate) const fn empty() -> Self {
         Self {
-            rom: Rom::EMPTY,
+            rom: &[],
             ram_buf: &mut [],
             ram_len: 0,
             rtc: RtcState::zero(),
@@ -680,7 +678,7 @@ impl<'a> Cart<'a> {
             save_dirty: false,
             mapper: Mapper::None,
             rom_mask: 0,
-            rom_win: [Rom::EMPTY; 2],
+            rom_win: [&[]; 2],
             ram_off: 0,
             ram_enabled: false,
             ram_or: 0,
@@ -701,7 +699,7 @@ impl<'a> Cart<'a> {
             Ok((needed, mapper)) if ram.len() >= needed => {
                 let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
                 let mut cart = Self {
-                    rom: Rom::new(rom),
+                    rom,
                     ram_buf: ram,
                     ram_len: needed,
                     mapper,
@@ -767,7 +765,7 @@ impl<'a> Cart<'a> {
         let rtc = self.has_rtc().then(|| self.rtc_at(now));
         let huc3_rtc = self.has_huc3_rtc().then(|| self.huc3_at(now));
         Some(EjectedCart {
-            rom: self.rom.into_inner(), // check-rom-loads: allowed (hand-back)
+            rom: self.rom,
             cart_ram: self.ram_buf,
             rtc,
             huc3_rtc,
@@ -805,10 +803,15 @@ impl<'a> Cart<'a> {
     #[inline(always)]
     pub(crate) fn read_rom(&self, addr: u16) -> u8 {
         let window = self.rom_win[usize::from(addr >> 14) & 1];
-        // One compare against the window length (ADR 0008).
-        window
-            .get(usize::from(addr) & (ROM_BANK - 1))
-            .unwrap_or(0xFF)
+        // One compare against the window length (ADR 0008). Written as an
+        // early return: `window.get(i).copied().unwrap_or(0xFF)` measured
+        // +0.03% to +1.7% Ir on the nine bench lines and +52 B of
+        // thumbv7em `.text` (docs/perf.md, "ROM reads").
+        let i = usize::from(addr) & (ROM_BANK - 1);
+        if i >= window.len() {
+            return 0xFF;
+        }
+        window[i]
     }
 
     /// A read of A000-BFFF.
@@ -848,7 +851,7 @@ impl<'a> Cart<'a> {
     /// same `.text`).
     #[inline(always)]
     pub(crate) fn rom_block(&self, addr: u16) -> [u8; 16] {
-        let mem = self.rom_win[usize::from(addr >> 14) & 1].into_inner();
+        let mem = self.rom_win[usize::from(addr >> 14) & 1];
         let off = usize::from(addr) & (ROM_BANK - 1);
         match mem.as_chunks::<16>().0.get(off >> 4) {
             Some(b) => *b,
@@ -1287,11 +1290,11 @@ impl<'a> Cart<'a> {
         self.ram_off = ram * RAM_BANK;
     }
 
-    fn rom_window(&self, bank: usize) -> Rom<'a> {
+    fn rom_window(&self, bank: usize) -> &'a [u8] {
         let start = (bank * ROM_BANK) & self.rom_mask;
         self.rom
-            .sub(start, self.rom.len().min(start + ROM_BANK))
-            .unwrap_or(Rom::EMPTY)
+            .get(start..self.rom.len().min(start + ROM_BANK))
+            .unwrap_or(&[])
     }
 }
 

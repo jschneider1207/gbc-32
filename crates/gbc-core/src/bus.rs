@@ -26,7 +26,6 @@ use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{self, Frame, Ppu, View, edges};
-use crate::rom::Rom;
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::{INT_TIMER, Timer};
@@ -157,7 +156,7 @@ impl Sys<'_> {
         self.cart.reset();
         self.config = config;
         self.buttons = buttons;
-        self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|f| f & 0x80 != 0);
+        self.cgb_mode = self.cart.rom.get(0x143).is_some_and(|&f| f & 0x80 != 0);
         self.timer = Timer::post_boot(self.cgb_mode);
         // P1 select bits: in DMG compatibility mode the boot ROM reads the
         // joypad (palette selection) and leaves both select lines high,
@@ -229,7 +228,7 @@ impl Sys<'_> {
 /// `m3_lcdc_obj_en_change` use tile 0x19 as an object (CGB C photos).
 /// Cold: once per reset.
 #[inline(never)]
-fn boot_logo(vram: &mut [u8; 0x4000], rom: Rom<'_>) {
+fn boot_logo(vram: &mut [u8; 0x4000], rom: &[u8]) {
     // Tile 0x19, plane 1 zero. The glyph bytes come from SameBoy
     // BootROMs/cgb_boot.asm (MIT, Copyright (c) 2015-2025 Lior Halphon).
     const TRADEMARK: [u8; 16] = [
@@ -242,7 +241,7 @@ fn boot_logo(vram: &mut [u8; 0x4000], rom: Rom<'_>) {
     ];
     // Each nibble (a row of 4 pixels) is two rows of tile data.
     for i in 0..96 {
-        let b = rom.get(0x104 + i / 2).unwrap_or(0);
+        let b = rom.get(0x104 + i / 2).copied().unwrap_or(0);
         let d = DOUBLED[usize::from(if i & 1 == 0 { b >> 4 } else { b & 0x0F })];
         vram[0x10 + 4 * i] = d;
         vram[0x12 + 4 * i] = d;
