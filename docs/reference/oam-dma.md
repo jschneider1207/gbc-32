@@ -4,7 +4,8 @@ Implemented in `crates/gbc-core/src/dma.rs` (state, conflict table) and
 `crates/gbc-core/src/bus.rs` (`Ctx::oam_dma`, `dma_sync`,
 `read_during_dma`, `write_during_dma`). The only model is CGB C (ADR 0003),
 in both CGB and DMG-compatibility mode: the conflicts follow the hardware,
-not the cartridge mode. HDMA/GDMA (FF51-FF55) is separate and not covered.
+not the cartridge mode. HDMA/GDMA (FF51-FF55) is separate; only its
+meeting with an OAM DMA is covered here ("During a VRAM DMA").
 
 ## Timing
 M-cycle numbers count from the FF46 write's M-cycle (0). `m` is the current
@@ -129,6 +130,29 @@ STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
     for DMA access flow").
 - **DMA from E000-FFFF** writes FF to OAM on CGB (SameBoy `GB_dma_run`; the
   DMG reads the echo instead). Pan Docs lists sources only up to DF.
+
+## During a VRAM DMA (CGB C)
+While a VRAM DMA (HDMA block or GDMA) runs, the OAM DMA keeps stepping
+once per M-cycle, but each step writes the VRAM DMA's byte of that moment
+to OAM at the VRAM DMA's *source* address & FF (if below A0), and the OAM
+DMA's own byte for that step is never written (OAM keeps what it had).
+The VRAM DMA moves 2 bytes per M-cycle at single speed and 1 at double
+speed, from the M-cycle it starts in (the stalled fetch, ADR 0017): the
+step `k` M-cycles later takes byte `2k - 1` (single) or `k - 1` (double)
+of the run. Its last stall M-cycle moves no bytes and that step is
+normal; so are steps before the VRAM DMA. Halted (paused) or in the
+speed-switch halt the OAM DMA doesn't step.
+Source: gambatte cgb04c `dma/hdma_transition_oamdma_1` (OAM DMA from
+C000, early in its transfer, during an HDMA block from ROM 0000: OAM 01/03 read
+9E/9C, the block's bytes 1 and 3, while 00/02 keep the OAM DMA's 50/52)
+and `oamdma/oamdmasrcC000_hdmasrc0000` (near the transfer's end: only
+OAM 0B takes block byte 0B); gambatte `Memory::dma` does this (read for
+behaviour only). SameBoy (`GB_dma_run`) also skips the step's own write
+during an HDMA, but writes nothing in its place.
+Implementation: `Ctx::oam_dma_during_vdma`, cold, after the VRAM DMA's
+bytes are copied; it reads them back from VRAM, writes the OAM bytes and
+moves `OamDma::copied` past the skipped steps. Not modelled: what the PPU
+reads of OAM during those steps.
 
 ## Implementation notes
 - Nothing runs per M-cycle (ADR 0011). `Hot::dma` (FE00 while a transfer

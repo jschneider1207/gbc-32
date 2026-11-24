@@ -766,7 +766,7 @@ impl<'a> Emulator<'a> {
 fn vdma_turn(cpu: &mut Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
     if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.running() {
         cpu.latch_fetch(ctx);
-        ctx.vram_dma();
+        ctx.vram_dma(true);
     }
     if ctx.sys.vdma.stall == 0 {
         return false;

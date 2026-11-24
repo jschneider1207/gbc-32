@@ -183,3 +183,15 @@ before" note on the `lcdoffset1` pair, which still passes.
 
 Still deferred: OAM DMA during a VRAM DMA (`hdma_transition_oamdma_1`).
 +11 ROMs, no regressions.
+
+## Amendment (2026-11-23): OAM DMA during a VRAM DMA
+
+No longer deferred. OAM DMA steps that fall in the VRAM DMA's stall
+(except its last M-cycle) write the VRAM DMA's byte of the moment to OAM
+at its source address & FF instead of their own byte, which is never
+written (gambatte cgb04c `dma/hdma_transition_oamdma_1`,
+`oamdma/oamdmasrcC000_hdmasrc0000`; rule, timing and sources in
+`docs/reference/oam-dma.md`, "During a VRAM DMA"). Done once, after the
+block copy, in a cold function (`Ctx::oam_dma_during_vdma`), only while
+an OAM DMA is active; `vram_dma` now also syncs the OAM DMA before it
+writes VRAM. +2 ROMs.

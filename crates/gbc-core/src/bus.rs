@@ -1629,7 +1629,7 @@ impl Ctx<'_, '_> {
         } else if self.sys.vdma.pending {
             if m == 2 {
                 let blocks = self.sys.vdma.blocks;
-                self.vram_dma();
+                self.vram_dma(false);
                 let v = &mut self.sys.vdma;
                 v.stall = 0;
                 v.blocks = blocks;
@@ -1661,15 +1661,24 @@ impl Ctx<'_, '_> {
     /// Sources: ROM, cartridge RAM and WRAM are read; VRAM and E000-FFFF
     /// read FF (SameBoy reads the CPU data bus there, which this core does
     /// not model).
+    ///
+    /// `running`: the CPU is not in the speed-switch halt, so an OAM DMA
+    /// transfer runs alongside ([`Self::oam_dma_during_vdma`]).
     #[inline(never)]
-    pub(crate) fn vram_dma(&mut self) {
+    pub(crate) fn vram_dma(&mut self, running: bool) {
         let now = self.clock();
         self.run_ppu_to_call(now);
         if self.sys.ppu.drawing() {
             self.sys.ppu.flush(now, self.mem, self.frame);
         }
+        // An OAM DMA's bytes due so far read their source before the
+        // VRAM DMA writes VRAM.
+        if self.hot.dma != 0 {
+            self.dma_sync(now);
+        }
         let bank = self.sys.vram_off;
         let mut v = self.sys.vdma;
+        let dest0 = v.dest;
         v.pending = false;
         let mut blocks = 0;
         loop {
@@ -1706,6 +1715,56 @@ impl Ctx<'_, '_> {
         };
         self.sys.vdma = v;
         self.vdma_sync_reg();
+        if self.hot.dma != 0 && running {
+            self.oam_dma_during_vdma(now, dest0, blocks);
+        }
+    }
+
+    /// An OAM DMA transfer whose steps fall inside a VRAM DMA that started
+    /// at `now` (`blocks` blocks to VRAM from `dest0`): each such step
+    /// writes the VRAM DMA's byte of that moment, not its own, to OAM at
+    /// the VRAM DMA's source address & FF (if below A0), and its own byte
+    /// is never written. The VRAM DMA moves 2 bytes per M-cycle at single
+    /// speed (the step after M-cycle `k` takes byte `2k - 1`), 1 at double
+    /// speed (byte `k - 1`); its last M-cycle (no bytes) and the steps
+    /// before `now` are normal. Source: gambatte cgb04c captures
+    /// `dma/hdma_transition_oamdma_1`, `oamdma/oamdmasrcC000_hdmasrc0000`
+    /// (gambatte `Memory::dma` does this; read for behaviour only).
+    /// SameBoy skips the step's write too but writes nothing in its place.
+    /// Not modelled: what the PPU reads of OAM meanwhile.
+    #[cold]
+    #[inline(never)]
+    fn oam_dma_during_vdma(&mut self, now: u64, dest0: u16, blocks: u32) {
+        let d = self.sys.ppu.dma;
+        // Halted (paused): no steps.
+        if d.paused != NEVER {
+            return;
+        }
+        let m = u64::from(d.mcycle);
+        let per = (self.hot.mcycle as u32 / 2).max(1);
+        let len = blocks * 16;
+        let bank = self.sys.vram_off;
+        let src0 = self.sys.vdma.src.wrapping_sub(len as u16);
+        let mut copied = d.copied;
+        for k in 1..=len / per {
+            let t = now + u64::from(k) * m;
+            if t < d.start {
+                continue;
+            }
+            let i = (t - d.start) / m;
+            if i >= u64::from(dma::LEN) {
+                break;
+            }
+            let b = (k * per - 1) as u16;
+            let p = usize::from(src0.wrapping_add(b) & 0xFF);
+            if p < usize::from(dma::LEN) {
+                let a = usize::from(dest0.wrapping_add(b) & 0x1FFF);
+                self.mem.oam[p] = self.mem.vram[(bank | a) & 0x3FFF];
+            }
+            copied = i as u8 + 1;
+        }
+        self.sys.ppu.dma.copied = copied;
+        self.sys.ppu.oam_written();
     }
 }
 
@@ -3652,6 +3711,35 @@ mod dma_tests {
             assert_eq!(ctx.read(0xFE10), 0x10 ^ 0xA5);
             assert_eq!(ctx.read(0xFE10), 0xFF);
         });
+    }
+
+    /// OAM DMA steps inside a VRAM DMA write the VRAM DMA's byte of that
+    /// moment to OAM at its source address & FF, not their own (gambatte
+    /// cgb04c `dma/hdma_transition_oamdma_1`).
+    #[test]
+    fn oam_dma_steps_during_a_vram_dma_take_its_bytes() {
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1); // bytes i ^ A5
+            for (reg, v) in [(0xFF51, 0x40), (0xFF52, 0), (0xFF53, 0), (0xFF54, 0)] {
+                ctx.write(reg, v);
+            }
+            ctx.write(0xFF55, 0x00); // a 1-block GDMA from ROM 4000
+            idle_to(ctx, t0, 10);
+            // At M-cycle 10 (bytes 0-8 due): the block's 8 M-cycles hold
+            // the steps of bytes 9-16, which take block bytes 1, 3, .. 15.
+            ctx.vram_dma(true);
+            idle_to(ctx, t0, 170);
+        });
+        for (p, &b) in emu.mem.oam.iter().enumerate() {
+            let want = match p {
+                1..=15 if p % 2 == 1 => p as u8 ^ 0x3C,
+                10 | 12 | 14 | 16 => 0x55,
+                _ => p as u8 ^ 0xA5,
+            };
+            assert_eq!(b, want, "{p:#x}");
+        }
     }
 
     #[test]
