@@ -128,8 +128,9 @@ pub(crate) struct Timer {
     /// `spsw-ch2-lc-delay`, verified on CGB B/C/E; AGE emulator
     /// `gb_sound::after_speed_change`, `m_current_ds_delay`). Single speed
     /// ignores it but keeps it for the next switch. Toggled here even with
-    /// the APU off, where it is unused until power-on clears it. Here, not
-    /// in `Sys`: it fits this struct's padding (`Hw` budget).
+    /// the APU off, where it is unused until power-on clears it. Placed
+    /// here, not in `Sys`, in this struct's padding while `Hw` had a size
+    /// cap (dropped 2026-11-24).
     pub(crate) apu_ds_delay: bool,
 }
 

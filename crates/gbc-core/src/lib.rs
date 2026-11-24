@@ -8,8 +8,8 @@
 //! # Construction
 //!
 //! The large RAM arrays (~49 KiB) are a separate type, [`Memory`], which
-//! the caller provides; [`Emulator`] itself is small (under 1 KiB plus a
-//! pointer) and borrows it, along with the cartridge ROM and RAM:
+//! the caller provides; [`Emulator`] itself is small (under 1 KiB) and
+//! borrows it, along with the cartridge ROM and RAM:
 //!
 //! - [`Memory::new`] is a `const fn` that is all zero bytes;
 //! - [`Emulator::new`]`(&'a mut Memory) -> Emulator<'a>` (powered off, no
@@ -263,13 +263,14 @@ pub struct Emulator<'a> {
 }
 
 /// Everything except the large RAM arrays, which live in [`Memory`]. It
-/// must stay small: at most 864 B (832 now), checked by a test. The limit protects the
-/// MCU, whose stack is a few KiB and is shared with interrupt handlers, and
-/// where the `Emulator` (and so `Hw`) may live on the stack. It is not
-/// tight: per-scanline PPU buffers, APU state and mapper registers fit with
-/// room to spare. Anything large belongs in `Memory` instead, as a field
-/// whose power-on value is all zeros (non-zero post-boot values are
-/// written by `reset`).
+/// should stay small: on the MCU the stack is a few KiB and is shared with
+/// interrupt handlers, and the `Emulator` (and so `Hw`) may live on it
+/// (ADR 0006). There is no fixed cap (dropped 2026-11-24, ADR 0006
+/// amendment); `scripts/check-code-size.sh` reports the on-target size of
+/// `Emulator` (824 B on thumbv7em). State belongs with the component that
+/// owns it; only something large (a buffer, a table) belongs in `Memory`
+/// instead, as a field whose power-on value is all zeros (non-zero
+/// post-boot values are written by `reset`).
 ///
 /// The CPU is kept apart from [`Sys`] (what its bus reaches) so a run call
 /// can borrow both mutably at once: `cpu.run(&mut Ctx { sys, mem, .. })`
@@ -828,14 +829,6 @@ mod tests {
             .into_boxed_slice()
             .try_into()
             .unwrap()
-    }
-
-    #[test]
-    fn emulator_is_small_enough_for_the_stack() {
-        // Only `Memory` is big (see the `Hw` docs for the limit).
-        assert!(size_of::<Hw<'_>>() <= 864, "{}", size_of::<Hw<'_>>());
-        assert!(size_of::<Emulator<'_>>() < 864 + 16);
-        assert!(size_of::<Memory>() > 48 * 1024);
     }
 
     #[test]

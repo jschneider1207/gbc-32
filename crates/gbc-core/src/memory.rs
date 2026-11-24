@@ -64,8 +64,8 @@ pub struct Memory {
     /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
     pub(crate) obj_pal: [u8; 64],
     /// OAM bytes cleared by conflicting CPU reads during an OAM DMA from
-    /// VRAM, not yet applied to `oam` ([`ReadClears`]). Here, not in `Sys`,
-    /// for `Hw`'s size limit. Empty outside a transfer and between run
+    /// VRAM, not yet applied to `oam` ([`ReadClears`]). Placed here, not in
+    /// `Sys`, while `Hw` had a size cap (dropped 2026-11-24). Empty outside a transfer and between run
     /// calls.
     pub(crate) dma_read_clears: ReadClears,
     /// The APU's internal state (ADR 0021 section 2): here, not in `Hw`, as

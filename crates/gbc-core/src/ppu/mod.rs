@@ -233,8 +233,8 @@ struct Cursor {
 /// `stat_interrupt_line`, `lyc_interrupt_line`), and the mode part of the
 /// line: `bits` [`IrqLine::STAT`] and [`IrqLine::MODE`], and `lyc`. Two
 /// bytes, as the two-`bool` struct before the mode part was: three `bool`s
-/// grow `Hw` past its limit (`lib.rs`), and the old layout keeps `Ppu` code
-/// 62 B smaller than one byte unaligned (thumbv7em). `lyc` in a byte of
+/// grew `Hw` past the size cap it had then (dropped 2026-11-24), and the
+/// old layout keeps `Ppu` code 62 B smaller than one byte unaligned (thumbv7em). `lyc` in a byte of
 /// its own is a plain store in [`IrqLine::eval`] (perf: one byte for all
 /// three cost ~3 Ir per update point).
 #[derive(Clone, Copy)]

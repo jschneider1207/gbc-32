@@ -1,133 +1,107 @@
-# Code-size budgets for hot gbc-core functions (thumbv7em-none-eabihf, release
-# with `codegen-units = 1` as pinned in Cargo.toml, -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh; see
-# docs/perf.md "Code-size budgets".
+# Code-size budgets for gbc-core functions on the MCU build
+# (thumbv7em-none-eabihf, release with `codegen-units = 1` as pinned in
+# Cargo.toml, -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh;
+# rules in docs/perf.md "Code-size budgets" (human, 2026-11-24).
 #
-# Format: <budget bytes> <exact demangled symbol name, as printed by nm -C>
-# Lines starting with '#' and blank lines are ignored.
-# Rules:
-#  - A symbol's size is the sum over all copies of it (one, with the pinned
-#    single codegen unit).
-#  - A listed symbol that is not found is a failure (renamed or inlined away):
+# Two kinds of line; '#' lines and blank lines are ignored:
+#   <bytes> <symbol>          gates: over budget, or symbol not found, fails.
+#                             Only for functions in the ITCM set
+#                             (perf/itcm-sections.txt); the script fails a
+#                             gating line for a function outside it.
+#   report <bytes> <symbol>   printed with its size, never fails. For
+#                             functions that stay in flash (the script fails
+#                             a `report` line for a function in the ITCM
+#                             set), and for the special name `(total .text)`.
+# <symbol> is the exact demangled name, as printed by nm -C.
+#
+# Gating lines:
+#  - A symbol that is not found (renamed or inlined away) is a failure:
 #    update this file, do not delete the line to make the check pass.
-#  - Raising a budget is committed with the change that needs it, with the
-#    measured size and the reason in the commit body.
-# Initial budgets are the measured size plus about 5% headroom.
-# Cpu::run / Cpu::execute_cb lowered to measured (25,504 / 12,078) + 5% so their
-# slack cannot eat the ITCM-set margin (scripts/check-itcm-set.sh, docs/perf.md).
-# execute_cb: 6,892 B after the CB (HL) forms were merged (size pass), + 5%.
-26800 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
-7240 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
-90 <gbc_core::bus::Ctx>::write_high
-930 <gbc_core::bus::Ctx>::write_io
-890 gbc_core::bus::read_high
-230 <gbc_core::bus::Ctx>::sync_ppu
-480 <gbc_core::bus::Ctx>::write_mapped
-735 <gbc_core::bus::Ctx>::write_timer_io
-380 <gbc_core::timer::Timer>::read
-# Event dispatch and DMA conflict paths (measured after the incremental
-# event-table minimum: 1776, 502, 814, 508, 892 bytes).
-2220 <gbc_core::bus::Ctx>::boundary
-615 gbc_core::bus::read_during_dma
-860 <gbc_core::bus::Ctx>::write_during_dma
-540 <gbc_core::bus::Ctx>::div_reset
-720 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
-# PPU mode timing (ADR 0014; measured 2720, 482, 412, 494, 1058 bytes):
-# the per-line event and its update-point walk, and the PPU register
-# writes moved out of write_io.
+#  - Budgets are at most the measured size + 5% (rounded up). Raising one is
+#    committed with the change that needs it, with the measured size and the
+#    reason in the commit body. What binds in the end is the ITCM-set total
+#    (scripts/check-itcm-set.sh); these keep one function from eating its
+#    margin unseen.
+#  - Every function in the ITCM set of 128 B or more has a line.
+#
+# ITCM set (gating). Measured 2026-11-24.
+25738 <gbc_core::cpu::Cpu>::run::<gbc_core::bus::Ctx>
+7237 <gbc_core::cpu::Cpu>::execute_cb::<gbc_core::bus::Ctx>
+84 <gbc_core::bus::Ctx>::write_high
+712 <gbc_core::bus::Ctx>::write_io
+866 gbc_core::bus::read_high
+204 <gbc_core::bus::Ctx>::sync_ppu
+347 <gbc_core::bus::Ctx>::write_mapped
+1183 <gbc_core::bus::Ctx>::boundary
 960 <gbc_core::ppu::Ppu>::sync
 590 <gbc_core::ppu::Ppu>::next_event
-605 <gbc_core::ppu::Ppu>::seek
-520 <gbc_core::ppu::Ppu>::point_irq
-# Line 0, 144 and 153 update points, split out of point_irq (m9-perf;
-# measured 214 bytes, + 10%).
-236 <gbc_core::ppu::Ppu>::point_irq_rare
-# codegen-units = 1 (2026-11-24): LLVM inlines more of the register
-# decode here, 1,262 -> 1,488 B (+5%).
-1565 <gbc_core::bus::Ctx>::write_ppu
-# CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
-# 304, 240 bytes): VRAM accesses leave the inlined bus path for these.
-# codegen-units = 1: `Ppu::vram_blocked` and `Ppu::oam_blocked` (58 and 68 B
-# thunks around `cpu_blocked`) are inlined into these four, so their two
-# lines are gone.
-230 gbc_core::bus::read_vram
-230 <gbc_core::bus::Ctx>::write_vram
-300 gbc_core::bus::read_oam
-320 <gbc_core::bus::Ctx>::write_oam
-# Scanline renderer (M3; measured 2668, 2208, 482, 122, 290 bytes): the
-# pixel loop, the per-line setup (object priority sort, buffer clear), the
-# OAM scan, and the PPU's draw/flush wrappers. write_ppu above grew from
-# 1058 to 1226 with the mid-line flush and palette resolution.
-# Object mixing fused into the tile decode (measured 2216, 792): render
-# went from 2684 to 2216 with the mixing copy of the tile loop moved out of
-# line into fill_mixed (2216 + 792 = 3008 in all, +324).
-1765 <gbc_core::ppu::render::Renderer>::render
+444 <gbc_core::ppu::Ppu>::point_irq
+1563 <gbc_core::bus::Ctx>::write_ppu
+124 gbc_core::bus::read_vram
+122 <gbc_core::bus::Ctx>::write_vram
+175 gbc_core::bus::read_oam
+192 <gbc_core::bus::Ctx>::write_oam
+1252 <gbc_core::ppu::render::Renderer>::render
 1050 gbc_core::ppu::render::fill_mixed
-# The plain tile copy out of line too, whole tiles in their own loop, two
-# pixels per palette lookup (measured 1680, 1000, 1104, 118, 430 bytes):
-# render 2216 + fill_mixed 792 -> 1680 + 1000 + 1104 + 548 (+1,324 B) for
-# -14% cgb-acid2, -2% worst-case Ir (docs/perf.md "Pixel-pair lookups").
-1160 gbc_core::ppu::render::fill_plain
-# codegen-units = 1: fill_partial::<false> 118 -> 218 B (+5%).
-230 gbc_core::ppu::render::fill_partial::<false>
-455 gbc_core::ppu::render::fill_partial::<true>
-4590 <gbc_core::ppu::Ppu>::latch
-# codegen-units = 1: `LineObjects::scan` has no out-of-line copy (it was
-# an uncalled 482 B duplicate with several units; every use is inlined).
-# OAM DMA as the PPU sees it (measured 138, 338): draw passes the
-# per-slot object attributes of a line OAM DMA touches, flush fixes
-# them first; the rest of that path is out of line (cold).
-155 <gbc_core::ppu::Ppu>::draw
+815 gbc_core::ppu::render::fill_plain
+229 gbc_core::ppu::render::fill_partial::<false>
+145 gbc_core::ppu::render::fill_partial::<true>
+1796 <gbc_core::ppu::Ppu>::latch
+154 <gbc_core::ppu::Ppu>::draw
 355 <gbc_core::ppu::Ppu>::flush
-# M5 review additions: the STOP pieces and the hot-path functions the M5
-# test-integrity review found unbudgeted (measured 92, 236, 776, 162, 182,
-# 356, 708, 210, 458 bytes; +5%).
-97 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop_begin
-248 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch_halt
-815 <gbc_core::ppu::render::Renderer>::fetch_objects
+782 <gbc_core::ppu::render::Renderer>::fetch_objects
 170 gbc_core::ppu::render::partial_tile::<false>
 192 gbc_core::ppu::render::partial_tile::<true>
-375 <gbc_core::bus::Ctx>::write_palette_data
-745 <gbc_core::bus::Ctx>::vram_dma
-221 <gbc_core::bus::Ctx>::vdma_arm
-# codegen-units = 1: Emulator::run 418 -> 520 B (+5%).
 546 <gbc_core::Emulator>::run
-# M6 APU (ADR 0021; measured 1456, 152, 398, 462, 276, 50, 42, 258 bytes
-# after the M6 code-size pass; +10%): the output sync and frame-sequencer
-# step, the channel register decode (`Square::write` is inlined into
-# `Apu::write`), the bus side of APU writes and reads, the DIV-APU event
-# and the deadline it sets.
-# M6 review (perf) lows, M8: `Apu::sync` tightened to its measured 760 B
-# +5% (after the mixer loop lost its panic paths), and the channel
-# integrators the sync calls, plus their shared DAC-only loop, budgeted
-# (measured 1142, 642, 410, 96 bytes; +5%).
-800 <gbc_core::apu::Apu>::sync
-1200 <gbc_core::apu::noise::Noise>::integrate
+771 <gbc_core::apu::Apu>::sync
+1191 <gbc_core::apu::noise::Noise>::integrate
 675 <gbc_core::apu::wave::Wave>::integrate
-431 <gbc_core::apu::square::Square>::integrate
-101 gbc_core::apu::mix::constant
-167 <gbc_core::apu::Apu>::step
-438 <gbc_core::apu::Apu>::write
+395 <gbc_core::apu::square::Square>::integrate
+93 gbc_core::apu::mix::constant
+160 <gbc_core::apu::Apu>::step
+322 <gbc_core::apu::Apu>::write
 508 <gbc_core::bus::Ctx>::write_apu
-304 gbc_core::apu::read_apu
-# Sweep lag (m9-triage group 7/15): div_apu_event also runs the sweep step
-# 4 clocks after the edge and calls the new set_apu_deadline (measured
-# 78, 56 bytes; +5%).
 82 <gbc_core::bus::Ctx>::div_apu_event
 59 <gbc_core::bus::Ctx>::set_apu_deadline
-46 <gbc_core::bus::Ctx>::apu_sync
-284 <gbc_core::bus::Sys>::set_div_apu_deadline
-# Total gbc-core code: the sum of all .text* sections in the rlib (the
-# special name below; M4 review / stage-1 plan task, a stricter check).
-# Measured 83,408 B at 2446bc2; budget +2%. ITCM is 64 KB, so this caps
-# growth while per-function ITCM placement is planned (docs/perf.md).
-# Cold paths kept out of line (measured 364, 624, 872, 176, 496; total
-# 95,608 -> 95,002): Sys::new and Cart::into_ejected shared by reset/load/
-# eject, and the RTC advance no longer inlined per caller.
-380 <gbc_core::bus::Sys>::new
-# codegen-units = 1: `Sys::reset` (628 B) is inlined into its callers.
-890 <gbc_core::Emulator>::load
-185 <gbc_core::cart::Cart>::into_ejected
-510 <gbc_core::cart::RtcTime>::add_seconds
-# Human (2026-11-24, session 15): 97,500 -> 99,000 for the last three
-# Mealybug ROMs (TILE_SEL latch across lines, CGB WX-match glitch).
-99000 (total .text)
+45 <gbc_core::bus::Ctx>::apu_sync
+280 <gbc_core::bus::Sys>::set_div_apu_deadline
+866 <gbc_core::ppu::Ppu>::set_stalls
+603 <gbc_core::cpu::Cpu>::step_not_running::<gbc_core::bus::Ctx>
+517 <gbc_core::ppu::Ppu>::stat
+244 <gbc_core::schedule::Schedule>::set
+225 <gbc_core::timer::Timer>::schedule_overflow
+225 <gbc_core::bus::Ctx>::start_audio
+198 <gbc_core::apu::noise::Noise>::advance
+196 <gbc_core::ppu::Ppu>::cpu_blocked
+194 <gbc_core::apu::square::Sweep>::clock
+173 <gbc_core::ppu::Ppu>::ly
+150 <gbc_core::bus::Ctx>::run_ppu_to_call
+143 <gbc_core::apu::wave::Wave>::advance
+139 <gbc_core::ppu::Ppu>::check_wy_at
+135 <gbc_core::apu::square::Square>::advance
+#
+# Flash functions (report only). The numbers are the budgets these lines
+# had while they gated; a size above one prints "over, report only".
+report 735 <gbc_core::bus::Ctx>::write_timer_io
+report 380 <gbc_core::timer::Timer>::read
+report 615 gbc_core::bus::read_during_dma
+report 860 <gbc_core::bus::Ctx>::write_during_dma
+report 540 <gbc_core::bus::Ctx>::div_reset
+report 720 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
+report 605 <gbc_core::ppu::Ppu>::seek
+report 236 <gbc_core::ppu::Ppu>::point_irq_rare
+report 97 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop_begin
+report 248 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch_halt
+report 375 <gbc_core::bus::Ctx>::write_palette_data
+report 745 <gbc_core::bus::Ctx>::vram_dma
+report 221 <gbc_core::bus::Ctx>::vdma_arm
+report 304 gbc_core::apu::read_apu
+report 380 <gbc_core::bus::Sys>::new
+report 890 <gbc_core::Emulator>::load
+report 185 <gbc_core::cart::Cart>::into_ejected
+report 510 <gbc_core::cart::RtcTime>::add_seconds
+# All of gbc-core: the sum of every .text* section in the rlib, alignment
+# padding included, before the linker drops what a front end does not use.
+# Flash is 1-2 MB, so this is a trend line, not a constraint (99,000 was the
+# last gating budget).
+report 99000 (total .text)

@@ -177,7 +177,7 @@ caller's `Memory`, which must never be required to live on the stack
 (ADR 0009). `Memory::new()` is all zero bytes, so on the MCU a
 `static MEM: Memory` goes to `.bss` (no flash image, no boot copy); the
 desktop and `romtest` use `Box::new(Memory::new())`. `Emulator` holds
-`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else, at most 864 B, 832 B now, checked by a test)
+`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else; 824 B with the pointer on thumbv7em, printed by `scripts/check-code-size.sh`, no fixed cap)
 and is small enough for the stack. Run calls copy the `mem` pointer into
 the per-call `Ctx`, so the hot path is the same as with an inline field.
 The APU's internal state is `Memory::apu` (all zero = powered off, at most 128 B, checked by a test; ADR 0021 section 2); its register bytes stay in `Memory::io`. Per-line PPU scratch (the object pixel buffer `Memory::obj_buf`, 176 B) lives in `Memory` too, and the CGB palette tables will follow; the renderer gets it as a `&mut` array per `render` call.

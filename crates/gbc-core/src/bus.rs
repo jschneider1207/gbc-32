@@ -39,7 +39,7 @@ const LYC_IRQ_PENDING: u8 = 0x20;
 const LYC_IRQ_PHASE: u8 = 0x40;
 
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
-/// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
+/// CPU itself. Lives in `Hw`.
 #[repr(C)]
 pub(crate) struct Sys<'a> {
     // Fields the inlined CPU bus path reads (`read`, `write_mapped`, the
@@ -830,8 +830,8 @@ impl Ctx<'_, '_> {
     /// one instruction later than at the write: out2, DMG out0).
     ///
     /// The request waits in IF's unused bits ([`LYC_IRQ_PENDING`], with the
-    /// parity of the write's M-cycle in [`LYC_IRQ_PHASE`]; `Hw` has no
-    /// room for a field) and the PPU deadline is moved to the due dot.
+    /// parity of the write's M-cycle in [`LYC_IRQ_PHASE`]; chosen while `Hw`
+    /// had a size cap, dropped 2026-11-24) and the PPU deadline is moved to the due dot.
     /// Out of line, off `write_ppu`.
     #[cold]
     #[inline(never)]

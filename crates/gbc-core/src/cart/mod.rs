@@ -386,7 +386,7 @@ enum Mapper {
     Mbc3,
     /// MBC3 with the RTC (types 0F-10). A variant rather than a `Cart`
     /// flag, and a unit one (two variants with data would make `Mapper` 2
-    /// bytes), to keep `Cart` at 128 bytes and `Hw` under 1 KiB (ADR 0015).
+    /// bytes), to keep `Cart` at 128 bytes (ADR 0015).
     Mbc3Rtc,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },

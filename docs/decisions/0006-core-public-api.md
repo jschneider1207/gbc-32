@@ -227,3 +227,22 @@ overshoot can each complete one), so that size never fills (550 for
 `run_frame`). Sample scale: 64 per unit of mixed level, full scale
 ±30,720, DC kept (`StereoSample` rustdoc). Details and rationale: ADR
 0021 sections 8-11 and its GDMA stall amendment.
+
+### `Hw` size cap dropped (2026-11-24)
+
+Decided by the human (docs/STATUS.md "Decided in session 16"; M10 review
+finding D1). The "`Hw` size limit raised from 512 bytes to 1 KiB"
+amendment above is withdrawn as a hard limit, and so is the 864 B it was
+later lowered to (ADRs 0019, 0021 and 0028 cite that number).
+Reasons: the assert ran in a host test on the x86-64 test-cfg layout,
+which is not the MCU's; nobody could derive 864 from the stack argument;
+and it had pushed six pieces of state into structs that do not own them
+(D1 lists them), each defensible alone.
+
+What stays: the reason for the limit. `Emulator` may be built and live on
+an MCU stack of a few KiB, so `Hw` should stay well under 1 KiB and
+anything large still goes in `Memory`. What replaces the assert:
+`scripts/check-code-size.sh` prints `size_of::<Emulator>()` and
+`size_of::<Memory>()` for thumbv7em-none-eabihf on every run, not gating
+(824 B and 50,960 B on 2026-11-24). Moving the misplaced state to its
+owners is separate, later work; this amendment moves none.

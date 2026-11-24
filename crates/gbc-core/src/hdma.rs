@@ -95,9 +95,9 @@ pub(crate) struct VramDma {
     /// (`Ctx::speed_switch`), the low 32 bits of the clock at which its
     /// last M-cycle (the wake-up) starts; the halt is far shorter than
     /// 2^31 clocks, so a wrapping compare is exact. After a [`RAN`] block,
-    /// the end of its full stall (the same way). Stale otherwise. Here
-    /// because it fits this struct's padding (the `Hw` size budget), next
-    /// to the other HALT state.
+    /// the end of its full stall (the same way). Stale otherwise. Placed
+    /// in this struct's padding while `Hw` had a size cap (dropped
+    /// 2026-11-24); it belongs in `Sys`.
     pub(crate) switch_end: u32,
     /// The mode-0 start clock of the last line whose HBlank trigger was
     /// scheduled or passed, so each line starts at most one block.

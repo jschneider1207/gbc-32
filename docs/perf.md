@@ -422,47 +422,67 @@ per call.
 
 ## Code-size budgets
 
-Hot CPU/bus functions in `gbc-core` have code-size budgets so the MCU build
-does not silently grow (flash and I-cache pressure on the Cortex-M7).
-Budgets are in `perf/code-size-budgets.txt` (`<bytes> <exact demangled symbol>`).
+Rules as of 2026-11-24 (human, STATUS "Decided in session 16"; M10 review
+C2-C4, D1). The scarce resource on the MCU is the 64 KiB ITCM, not flash
+(1-2 MB), so what gates is what goes in ITCM:
 
-Run: `scripts/check-code-size.sh` (about 0.3 s warm, a few seconds cold).
-Exit is non-zero if a symbol is over budget, is not found (renamed or
-inlined away: update the budget file, never drop the line to pass), or the
-build fails. It prints symbol, size, budget and % used.
+| Check | Gates? | Where |
+|---|---|---|
+| ITCM set fits 56 KiB; every glob matches; callee closure | yes | `scripts/check-itcm-set.sh`, `perf/itcm-sections.txt` ("ITCM placement plan (M8)" below) |
+| Per-function budget of a function in the ITCM set | yes | `scripts/check-code-size.sh`, plain lines of `perf/code-size-budgets.txt` |
+| Ir per bench at most 3% over baseline | yes | `scripts/check-bench.sh` ("Instruction-count benchmark" below) |
+| Per-function size of a function that stays in flash | no, printed | `report` lines of `perf/code-size-budgets.txt` |
+| Total `.text` of gbc-core | no, printed | `report 99000 (total .text)` |
+| `size_of` `Emulator` (`Hw` plus a pointer) and `Memory` on thumbv7em | no, printed | `scripts/check-code-size.sh` |
+
+There is no cap on `size_of::<Hw>()` any more (it was 864 B, asserted by
+a host test on the x86-64 layout; ADR 0006 amendment of 2026-11-24).
+
+Run: `scripts/check-code-size.sh` (about 1 s warm, a few seconds cold).
+`perf/code-size-budgets.txt` has two kinds of line:
+- `<bytes> <exact demangled symbol>` gates. Exit is non-zero if the symbol
+  is over budget or is not found (renamed or inlined away: update the
+  file, never drop the line to pass). The function must be in the ITCM
+  set: a gating line for a function outside it fails, and so does a
+  `report` line for a function inside it, so the split cannot drift from
+  `perf/itcm-sections.txt`. Every function in the set of 128 B or more
+  has a line (54 lines now; the script does not enforce the coverage).
+- `report <bytes> <symbol>` prints size, the old budget and % used, marks
+  a size above it "over, report only" and a missing symbol "MISSING
+  (report only)", and never fails. `(total .text)` must be a `report`
+  line.
 
 Measurement: `RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core
---release --target thumbv7em-none-eabihf --target-dir target/codesize`, then
-`nm -S -C --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
-on each object in the rlib. Sizes of same-named symbols (CGU copies) are
-summed. Sizes as of ADR 0011 step 4, unchanged by step 5 (lazy timer: the tick is only the
-countdown, so `run` dropped from 36,416 B and `execute_cb` from 15,254 B):
+--release --target thumbv7em-none-eabihf --target-dir target/codesize`
+(release is pinned to `codegen-units = 1` in `Cargo.toml`, the build the
+firmware will use; no LTO, there is no firmware crate to link yet), then
+`nm -S --radix=d` (GNU binutils; `llvm-nm`/`rust-nm` preferred if present)
+on the object in the rlib, once with `-C` for the names in the budgets
+file and once without for the mangled names the ITCM globs match.
+`(total .text)` is the sum of every `.text*` section (`size -A`),
+alignment padding included; the total without padding is not printed,
+because counting the `nop`s needs an ARM disassembler and none is
+installed (the M10 review measured 5.8 KB of padding with one). The struct
+sizes come from a three-line probe crate, compiled by `rustc` against the
+rlib, whose statics are `[u8; size_of::<T>()]`.
+
+Sizes on 2026-11-24 (the script prints all of them): total `.text`
+94,960 B; `Emulator` 824 B, `Memory` 50,960 B. Largest gating lines:
 
 | Symbol | Size (B) | Budget (B) |
 |---|---|---|
-| `Cpu::run::<Ctx>` | 27,760 | 29,150 |
-| `Cpu::execute_cb::<Ctx>` | 12,622 | 13,250 |
-| `Ctx::write_high` | 80 | 90 |
-| `Ctx::write_io` | 884 | 930 |
-| `bus::read_high` | 848 | 890 |
-| `Ctx::sync_ppu` | 214 | 230 |
-| `Ppu::sync` (cursor walk; 2,758 B with `latch` inlined) | 914 | 960 |
-| `Ppu::next_event` (`step` inlined; was 482 B calling `next_point`) | 562 | 590 |
-| `Ppu::seek` (cold: the division-based search, was `next_point` 412 B) | 576 | 605 |
-| `Ppu::point_irq` | 494 | 520 |
-| `Ctx::write_ppu` (PPU registers, out of `write_io`; mid-line flush) | 1,226 | 1,290 |
-| `Renderer::render` (pixel loop) | 2,216 | 2,330 |
-| `render::fill_mixed` (tile loop with object mixing) | 792 | 830 |
-| `Ppu::latch` (once per line: OAM scan, X sort, stalls; `Renderer::start_line`, 2,208 B out of line before, inlined) | 4,368 | 4,590 |
-| `LineObjects::scan` (OAM scan) | 482 | 510 |
-| `Ppu::draw`, `Ppu::flush` | 146, 290 | 155, 305 |
-| `Ctx::write_mapped` | 460 | 480 |
-| `bus::read_vram`, `Ctx::write_vram` | 218, 216 | 230, 230 |
-| `bus::read_oam`, `Ctx::write_oam` | 280, 304 | 300, 320 |
-| `Ppu::vram_blocked`, `Ppu::oam_blocked` | 196, 240 | 210, 260 |
-| `Ctx::write_timer_io` (cold) | 892 | 1,620 |
-| `Timer::read` (cold) | 362 | 380 |
-| All of gbc-core (`(total .text)`: every `.text*` section in the rlib, measured at 2446bc2) | 83,408 | 85,100 |
+| `cpu::Cpu::run` | 24512 | 25738 |
+| `cpu::Cpu::execute_cb` | 6892 | 7237 |
+| `ppu::Ppu::latch` | 1710 | 1796 |
+| `bus::Ctx::write_ppu` | 1488 | 1563 |
+| `ppu::render::Renderer::render` | 1192 | 1252 |
+| `apu::noise::Noise::integrate` | 1134 | 1191 |
+| `bus::Ctx::boundary` | 1126 | 1183 |
+| `ppu::render::fill_mixed` | 1030 | 1050 |
+| `ppu::Ppu::sync` | 930 | 960 |
+| `bus::read_high` | 824 | 866 |
+| `ppu::Ppu::set_stalls` | 824 | 866 |
+| `ppu::render::fill_plain` | 776 | 815 |
 
 OAM DMA (M2): every CPU access ORs `Hot::dma` (FE00 during a transfer)
 into its region dispatch, so a transfer sends every address to the
@@ -487,9 +507,11 @@ read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
 50,376 B. With the chosen layout `run` is back under the pre-DMA
 30,920 B; its budget is now 30,000 B (`perf/code-size-budgets.txt`).
 
-Rule: raising a budget is committed with the change that needs it, with the
-measured size and the reason in the commit body. Initial budgets are the
-measured size plus about 5%.
+Rule: a gating budget is the measured size plus 5%, rounded up. Raising
+one is committed with the change that needs it, with the measured size and
+the reason in the commit body; when a function shrinks for good, lower its
+line. A function that enters the ITCM set gets a gating line (if it is
+128 B or more); one that leaves becomes a `report` line or is dropped.
 
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
@@ -575,12 +597,11 @@ then the plain tile path, then `write_ppu`, then the APU set. Measure the
 firmware ELF, not the rlib, because LTO changes inlining.
 
 **DTCM** (128 KB, zero wait states, reachable by the CPU and MDMA only, not
-DMA1/2): the stack, `Hw`/`Emulator` (< 880 B), `Memory` (> 48 KB: WRAM,
+DMA1/2): the stack, `Hw`/`Emulator` (824 B), `Memory` (50,960 B: WRAM,
 VRAM, OAM) and the read-only tables `SPREAD` 1,024 B, `ATTR_FETCH` 1,024 B
 and `POP8` 256 B (2,304 B, copied from flash at boot like `.itcm`). Frame
 and audio buffers go in AXI SRAM, because the LCD and SAI DMA must reach
-them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5). The
-Stage 2 front end confirms these sizes with `size_of`.
+them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5). `check-code-size.sh` prints both sizes for thumbv7em.
 
 **H735 (Stage 3).** Configure 128 KB of ITCM. The set plus the warm `FLASH_OK`
 functions (~64 KB) plus the front end fit with room to spare; 192 KB would hold all of
@@ -691,7 +712,8 @@ On the H735 with 128 KB ITCM the question goes away.
 
 ## Instruction-count benchmark
 
-`scripts/check-bench.sh` runs `tools/bench` (release build) under
+`scripts/check-bench.sh` runs `tools/bench` (release build, one codegen
+unit as pinned in `Cargo.toml`) under
 `valgrind --tool=callgrind` and compares the instructions executed (Ir) per
 ROM with `perf/bench-baseline.txt`. It exits non-zero if any ROM is more than
 3% above its baseline; improvements are printed but pass. Ir is deterministic
