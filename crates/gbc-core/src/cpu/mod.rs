@@ -133,8 +133,8 @@ pub trait Bus {
     }
     /// Idles a halted, stopped, locked-up or powered-off CPU: at least one
     /// M-cycle, and at most up to the first M-cycle boundary at which
-    /// [`Bus::interrupt_flags`], [`Bus::interrupt_enable`],
-    /// [`Bus::stop_wakeup`] or [`Bus::run_done`] can change. The default
+    /// [`Bus::interrupt_flags`], [`Bus::interrupt_enable`], the result of
+    /// [`Bus::stop_halt`] or [`Bus::run_done`] can change. The default
     /// is one M-cycle ([`Bus::idle`]); the emulator skips straight to its
     /// next deadline (ADR 0011).
     fn idle_halted(&mut self) {
@@ -216,8 +216,19 @@ pub trait Bus {
         let _ = addr;
         0xFF
     }
-    /// Whether a stopped CPU wakes up (a button is pressed).
-    fn stop_wakeup(&self) -> bool {
+    /// STOP mode was entered ([`StopKind::Stop`]), after STOP's second
+    /// byte (if read). Free. The emulator pauses OAM DMA and HDMA here;
+    /// it stopped the timer in [`Bus::stop_begin`].
+    fn stop_enter(&mut self) {}
+    /// One step of a CPU in STOP mode. If a selected P1 line is low, STOP
+    /// mode ends: this returns true without an M-cycle (the emulator
+    /// starts the timer, OAM DMA and HDMA again), and the CPU runs again
+    /// after two wake-up M-cycles. Otherwise it idles like
+    /// [`Bus::idle_halted`] and returns false. Interrupts don't end STOP
+    /// mode. The default never wakes: one idle M-cycle. One cold call, as
+    /// [`Bus::speed_switch_halt`].
+    fn stop_halt(&mut self) -> bool {
+        self.idle();
         false
     }
     /// Whether [`Cpu::run`] returns, checked after every step. Free. The
@@ -231,7 +242,8 @@ pub trait Bus {
 /// SameBoy `stop()`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopKind {
-    /// STOP mode: DIV reset, the CPU stops until a button is pressed.
+    /// STOP mode: DIV reset, the CPU and the timer stop until a selected
+    /// P1 line goes low ([`Bus::stop_halt`]).
     Stop,
     /// A CGB speed switch (KEY1 armed, no button held): DIV reset.
     Switch,
@@ -257,7 +269,8 @@ enum Mode {
     /// The HALT bug: the next opcode fetch doesn't increment PC, so the
     /// byte after HALT is read twice (Pan Docs: halt, "Halt bug").
     HaltBug,
-    /// STOP (stub until M5): idles until a button is pressed.
+    /// STOP mode: idles until a selected P1 line goes low
+    /// ([`Bus::stop_halt`]); interrupts don't end it.
     Stopped,
     /// The opcode was fetched before a VRAM DMA block ([`Cpu::latch_fetch`],
     /// PC already past it): the step runs it after one idle M-cycle (the
@@ -511,17 +524,26 @@ impl Cpu {
                 Some(0)
             }
             Mode::Stopped => {
-                // A wake-up already due takes one M-cycle; otherwise the
-                // wake-up condition can't change before the skip ends.
-                if bus.stop_wakeup() {
-                    bus.idle();
-                } else {
-                    bus.idle_halted();
+                // Only a selected P1 line going low ends STOP mode (Pan
+                // Docs: "Using the STOP instruction"); a pending interrupt
+                // does not. SameBoy `GB_cpu_run`, the `stopped` branch:
+                // the line is sampled every M-cycle; once low,
+                // `leave_stop_mode`, 8 more T-cycles (two M-cycles at
+                // either speed), then the CPU runs: the instruction after
+                // STOP, or a dispatch (the press requested the joypad
+                // interrupt). ADR 0020, STOP mode amendment.
+                if !bus.stop_halt() {
+                    return None;
                 }
-                if bus.stop_wakeup() {
-                    self.mode = Mode::Running;
+                bus.idle();
+                bus.idle();
+                self.mode = Mode::Running;
+                // A VRAM DMA block the wake-up started runs first, as
+                // after HALT.
+                if bus.wake_stalls() {
+                    return None;
                 }
-                None
+                Some(1)
             }
             Mode::Latched => {
                 self.mode = Mode::Running;
@@ -634,10 +656,10 @@ impl Cpu {
     ///   pending the CPU halts (a plain HALT), else it just continues.
     /// - KEY1 armed (CGB): the speed switch, then, with nothing pending,
     ///   the speed-switch halt ([`Mode::SpeedSwitch`]).
-    /// - Otherwise STOP mode, entered after the second byte (if read). Until
-    ///   the STOP-accuracy task it is a stub: the CPU idles until a button
-    ///   is pressed. SingleStepTests expects STOP to be one byte even with
-    ///   nothing pending; its harness skips those cases (ADR 0020).
+    /// - Otherwise STOP mode ([`Mode::Stopped`]), entered after the second
+    ///   byte (if read), also with an interrupt pending. SingleStepTests
+    ///   expects STOP to be one byte even with nothing pending; its
+    ///   harness exempts PC and the bus cycles of those cases (ADR 0020).
     ///
     /// Cold and out of line: it keeps `Cpu::run` small.
     #[cold]
@@ -651,7 +673,10 @@ impl Cpu {
             self.regs.pc = pc.wrapping_add(1);
         }
         match kind {
-            StopKind::Stop => self.mode = Mode::Stopped,
+            StopKind::Stop => {
+                self.mode = Mode::Stopped;
+                bus.stop_enter();
+            }
             StopKind::Switch => {
                 if bus.speed_switch(self.ime, pending) {
                     if pending {

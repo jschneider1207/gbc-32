@@ -196,7 +196,7 @@ mod tests {
     use super::HBLANK_DELAY;
     use crate::bus::Ctx;
     use crate::ppu::Frame;
-    use crate::{Config, Emulator, Events};
+    use crate::{Buttons, Config, Emulator, Events};
     use std::boxed::Box;
     use std::vec;
 
@@ -454,6 +454,74 @@ mod tests {
         }
         assert!(!emu.hw.cpu.halted());
         assert_eq!(emu.mem.vram[..16], block(0));
+    }
+
+    /// STOP mode during an HBlank transfer: HBlanks start no blocks
+    /// (SameBoy `GB_display_run`: `!gb->stopped`), and the wake-up starts
+    /// one only in mode 0 after a STOP outside it (`leave_stop_mode`,
+    /// `allow_hdma_on_wake`). `wake_mode`: the STAT mode to wake up in;
+    /// 4: in the last two M-cycles of HDMA's HBlank period, so that the
+    /// two wake-up M-cycles end outside it. Returns whether a block ran
+    /// before the instruction after the wake-up.
+    fn stop_mode_wake_block(wake_mode: u8) -> bool {
+        let emu = setup(0x91, 0x80);
+        write(emu, 0xFF00, 0x10);
+        emu.hw.sys.iflags = 0;
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x81);
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x7100;
+        emu.hw.cpu.set_registers(r);
+        step(emu); // STOP, in mode 2
+        assert!(emu.hw.cpu.stopped());
+        // HBlanks pass in STOP mode: no block.
+        let t0 = emu.clock();
+        while emu.clock() < t0 + 3 * 456 {
+            step(emu);
+        }
+        loop {
+            let m0 = emu.hw.sys.ppu.mode0_start().unwrap();
+            let t = emu.clock();
+            let period = |t| {
+                let p = &emu.hw.sys.ppu;
+                p.hdma_period(t, HBLANK_DELAY, super::HBLANK_UNTIL)
+            };
+            let ok = match wake_mode {
+                0 => t >= m0 + 8 && t < m0 + 40,
+                4 => period(t) && !period(t + 8),
+                _ => true,
+            };
+            if ok && (wake_mode == 4 || emu.peek(0xFF41) & 3 == wake_mode) {
+                break;
+            }
+            step(emu);
+        }
+        assert_eq!(emu.mem.vram[0], 0);
+        emu.set_buttons(Buttons::A);
+        // The wake-up (two M-cycles) and the next instruction.
+        step(emu);
+        assert!(!emu.hw.cpu.stopped());
+        step(emu);
+        let ran = emu.mem.vram[..16] == block(0);
+        // The transfer goes on at the next HBlanks.
+        step_to_stall(emu);
+        step_to_stall(emu);
+        assert_eq!(emu.mem.vram[..16], block(0));
+        ran
+    }
+
+    #[test]
+    fn stop_mode_skips_hblanks_and_waking_in_mode_0_starts_a_block() {
+        assert!(!stop_mode_wake_block(3), "no block when waking in mode 3");
+        assert!(stop_mode_wake_block(0), "a block when waking in mode 0");
+        // SameBoy `leave_stop_mode` checks at the wake-up, before its 8
+        // T-cycles.
+        assert!(
+            stop_mode_wake_block(4),
+            "checked before the wake-up M-cycles"
+        );
     }
 
     /// Wakes a CPU halted (IME off) in an HBlank transfer at the next

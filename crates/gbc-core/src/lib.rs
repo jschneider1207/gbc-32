@@ -411,7 +411,7 @@ impl<'a> Emulator<'a> {
     /// Sets the buttons currently held. Pressing a button in a group the
     /// game has selected in P1 requests the joypad interrupt (Pan Docs:
     /// Interrupt Sources, "INT $60 - Joypad interrupt"), which also ends
-    /// HALT if enabled in IE.
+    /// HALT if enabled in IE. It also ends STOP mode, whatever IE says.
     ///
     /// The same as `set_buttons_at(self.clock(), buttons)`: changes
     /// already scheduled with [`Emulator::set_buttons_at`] stay pending.
@@ -555,6 +555,24 @@ impl<'a> Emulator<'a> {
     /// calls or buffers. An empty buffer discards audio: the APU only
     /// advances, and the next call with a buffer starts a new window at
     /// its start clock (the grid restarts).
+    ///
+    /// # STOP mode
+    ///
+    /// A game can stop the CPU and the timer with the STOP instruction
+    /// until a button is pressed in a group it has selected in P1 (ADR
+    /// 0020, "STOP mode"). Emulated time still passes, so nothing changes
+    /// for the caller: run calls end at their target or a stop event as
+    /// always, also when nothing can end the STOP (no P1 group selected;
+    /// on hardware only a reset recovers).
+    /// - Frames: the LCD keeps running on a CGB, so [`Events::FRAME_READY`]
+    ///   keeps its rate (with the LCD on). The frames completed in STOP
+    ///   mode are black (every pixel `0x0000`), unless the STOP was
+    ///   executed during mode 3: then they are drawn as usual.
+    /// - Audio: samples keep their rate. The channels keep playing what
+    ///   they played; lengths, envelopes and the sweep don't advance.
+    /// - A button change ([`Emulator::set_buttons`],
+    ///   [`Emulator::set_buttons_at`]) that pulls a selected P1 line low
+    ///   ends it: the CPU runs again two M-cycles after the change lands.
     pub fn run_until(
         &mut self,
         target: u64,
@@ -1579,8 +1597,16 @@ mod tests {
                 false
             }
         }
-        fn stop_wakeup(&self) -> bool {
-            self.0.stop_wakeup()
+        fn stop_enter(&mut self) {
+            self.0.stop_enter();
+        }
+        fn stop_halt(&mut self) -> bool {
+            if self.0.stop_wake() {
+                return true;
+            }
+            self.0.idle();
+            self.0.stop_frame();
+            false
         }
         fn hdma_refetch(&mut self) -> bool {
             cpu::Bus::hdma_refetch(self.0)
@@ -1719,8 +1745,9 @@ mod tests {
             let mut fb = frame();
             let mut target = 0;
             for i in 0..30 {
-                // A button held from the start wakes STOP after one idle
-                // M-cycle; otherwise a press between calls wakes it.
+                // A button held from the start makes STOP a HALT (nothing
+                // ends it here); otherwise a press between calls ends
+                // STOP mode.
                 let buttons = if i % 7 == 6 { Buttons::A } else { held };
                 a.set_buttons(buttons);
                 b.set_buttons(buttons);
@@ -2181,6 +2208,333 @@ mod tests {
         assert!(emu.hw.cpu.stopped());
     }
 
+    // --- STOP mode (ADR 0020, STOP mode amendment) ---
+
+    /// Steps `emu` until its CPU is in STOP mode.
+    fn to_stop(emu: &mut Emulator) {
+        let mut fb = frame();
+        for _ in 0..2000 {
+            if emu.hw.cpu.stopped() {
+                return;
+            }
+            let _ = emu.step(&mut fb, &mut []);
+        }
+        panic!("no STOP mode");
+    }
+
+    /// `P1 = p1; IF = 0`, then `rest`.
+    fn stop_program(p1: u8, rest: &[u8]) -> std::vec::Vec<u8> {
+        // LD A,p1; LDH (00),A; XOR A; LDH (0F),A.
+        let mut p = vec![0x3E, p1, 0xE0, 0x00, 0xAF, 0xE0, 0x0F];
+        p.extend_from_slice(rest);
+        p
+    }
+
+    #[test]
+    fn stop_mode_freezes_div_tima_and_the_serial_clock() {
+        // TAC = 05 (262 kHz), SC = 81 (a transfer on the internal clock),
+        // STOP with no P1 group selected. The counter is reset and held:
+        // DIV and TIMA don't count, no timer interrupt is requested, and
+        // the serial transfer doesn't finish (SameBoy `timers_run`
+        // returns while `stopped`).
+        let program = stop_program(
+            0x30,
+            &[
+                0x3E, 0x05, 0xE0, 0x07, 0x3E, 0x81, 0xE0, 0x02, 0x10, 0x00, 0x40,
+            ],
+        );
+        for cgb_flag in [0x80, 0x00] {
+            let emu = with_program(&program, cgb_flag);
+            emu.set_stop_events(Events::LD_B_B | Events::SERIAL_TX);
+            to_stop(emu);
+            let tima = emu.peek(0xFF05);
+            assert_eq!(emu.peek(0xFF0F) & 0x0C, 0);
+            let mut fb = frame();
+            let target = emu.clock() + u64::from(CLOCK_HZ);
+            while emu.clock() < target {
+                let r = emu.run_until(target, &mut fb, &mut []);
+                assert!(!r.events.intersects(Events::LD_B_B | Events::SERIAL_TX));
+            }
+            assert!(emu.hw.cpu.stopped());
+            assert_eq!(emu.hw.sys.timer.sc(emu.clock()) & 0xFFFF, 0);
+            assert_eq!((emu.peek(0xFF04), emu.peek(0xFF05)), (0, tima));
+            assert_eq!(emu.peek(0xFF0F) & 0x0C, 0, "no timer or serial request");
+            assert_eq!(emu.peek(0xFF02) & 0x80, 0x80, "transfer still running");
+        }
+    }
+
+    #[test]
+    fn stop_mode_is_not_ended_by_interrupts() {
+        // IE = 0F, the mode-0 STAT interrupt enabled, EI, STOP with no P1
+        // group selected. The PPU runs on and requests VBlank and STAT,
+        // but only a P1 line ends STOP mode (Pan Docs: "STOP is terminated
+        // by one of the P10 to P13 lines going low"; SameBoy `GB_cpu_run`,
+        // the `stopped` branch).
+        let program = stop_program(
+            0x30,
+            &[
+                0x3E, 0x0F, 0xE0, 0xFF, 0x3E, 0x08, 0xE0, 0x41, 0xFB, 0x10, 0x00, 0x40,
+            ],
+        );
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::LD_B_B);
+        to_stop(emu);
+        let pc = emu.registers().pc;
+        let mut fb = frame();
+        let target = emu.clock() + u64::from(CLOCK_HZ);
+        while emu.clock() < target {
+            let r = emu.run_until(target, &mut fb, &mut []);
+            assert!(!r.events.contains(Events::LD_B_B));
+        }
+        assert!(emu.hw.cpu.stopped());
+        assert_eq!(emu.registers().pc, pc);
+        assert_eq!(emu.peek(0xFF0F) & 0x03, 0x03, "VBlank and STAT requested");
+        assert_eq!(emu.clock(), target, "idle M-cycles end on the target");
+    }
+
+    #[test]
+    fn stop_mode_ends_only_on_a_selected_p1_line() {
+        // P1 = 10: the action buttons are selected, the d-pad is not.
+        let program = stop_program(0x10, &[0x10, 0x00, 0x40, 0x18, 0xFE]);
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::LD_B_B);
+        to_stop(emu);
+        let mut fb = frame();
+        emu.set_buttons(Buttons::DOWN | Buttons::LEFT);
+        let r = emu.run_cycles(60_000, &mut fb, &mut []);
+        assert!(r.events.is_empty() && emu.hw.cpu.stopped());
+        emu.set_buttons(Buttons::DOWN | Buttons::A);
+        let r = emu.run_cycles(60_000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        assert!(!emu.hw.cpu.stopped());
+
+        // P1 = 30: no group selected, so nothing ends it (review A1-01).
+        let program = stop_program(0x30, &[0x10, 0x00, 0x40, 0x18, 0xFE]);
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::LD_B_B);
+        to_stop(emu);
+        emu.set_buttons(Buttons::ALL);
+        let target = emu.clock() + u64::from(CLOCK_HZ);
+        while emu.clock() < target {
+            let r = emu.run_until(target, &mut fb, &mut []);
+            assert!(!r.events.contains(Events::LD_B_B));
+        }
+        assert!(emu.hw.cpu.stopped());
+    }
+
+    #[test]
+    fn run_until_in_stop_mode_returns_on_time_with_black_frames_and_audio() {
+        // No P1 group selected: nothing can end this STOP. Time still
+        // passes: run calls end at their target, frames complete at the
+        // normal rate and are black (Pan Docs: "On CGB, leaving the LCD
+        // enabled when invoking STOP will result in a black screen"), and
+        // audio samples keep their rate.
+        for cgb_flag in [0x80, 0x00] {
+            let emu = with_program(&stop_program(0x30, &[0x10, 0x00]), cgb_flag);
+            to_stop(emu);
+            let t0 = emu.clock();
+            let mut fb = frame();
+            fb.fill(0x1234);
+            let mut audio = [StereoSample::default(); 300];
+            let (mut frames, mut samples, mut full) = (0, 0, 0);
+            for k in 1..=5 {
+                let target = t0 + k * 100_000;
+                while emu.clock() < target {
+                    let r = emu.run_until(target, &mut fb, &mut audio);
+                    samples += r.audio_samples;
+                    full += usize::from(r.events.contains(Events::AUDIO_BUFFER_FULL));
+                    if r.events.contains(Events::FRAME_READY) {
+                        frames += 1;
+                        assert!(fb.iter().all(|&p| p == 0), "frame {frames} is black");
+                        fb.fill(0x1234);
+                    }
+                }
+                assert_eq!(emu.clock(), target);
+            }
+            assert!(emu.hw.cpu.stopped());
+            // 500,000 clocks: 7.12 frames, 3906.25 samples.
+            assert!((7..=8).contains(&frames), "{frames}");
+            assert!((3905..=3907).contains(&samples), "{samples}");
+            // A call ends at a full buffer or a frame, whichever is first.
+            assert!(full >= 5, "{full}");
+        }
+    }
+
+    #[test]
+    fn stop_in_mode_3_keeps_the_picture() {
+        // Pan Docs: "Except if the LCD is in Mode 3, where it will keep
+        // drawing the current screen." SameBoy `enter_stop_mode`: the PPU
+        // loses palette RAM unless the CPU's access was blocked at the
+        // STOP (`cgb_palettes_ppu_blocked = !cgb_palettes_blocked`).
+        // LCD off and on (line 0 restarts), then `pad` NOPs and STOP: one
+        // line of STOP positions.
+        const PADS: usize = 114;
+        let mut mode = [0u8; PADS + 2];
+        let mut black = [false; PADS + 2];
+        for pad in 0..PADS + 2 {
+            let mut rest = vec![0x3E, 0x11, 0xE0, 0x40, 0x3E, 0x91, 0xE0, 0x40];
+            rest.resize(rest.len() + pad, 0x00);
+            let stop_at = 0x200 + 7 + rest.len() as u16;
+            rest.extend_from_slice(&[0x10, 0x00]);
+            // At 0200, clear of the header: JP 0200 at the entry point.
+            let rom = vec![0u8; 0x8000].leak();
+            rom[0x100..0x103].copy_from_slice(&[0xC3, 0x00, 0x02]);
+            let program = stop_program(0x30, &rest);
+            rom[0x200..0x200 + program.len()].copy_from_slice(&program);
+            rom[0x143] = 0x80;
+            let emu = fresh();
+            emu.load(rom, &mut [], Config::default()).unwrap();
+            let mut fb = frame();
+            while emu.registers().pc != stop_at {
+                let _ = emu.step(&mut fb, &mut []);
+            }
+            // STAT's mode at the start of STOP's fetch; at its end it is
+            // the next pad's.
+            mode[pad] = emu.peek(0xFF41) & 3;
+            to_stop(emu);
+            // The second frame: the first after LCD on isn't displayed.
+            let mut frames = 0;
+            while frames < 2 {
+                fb.fill(0x1234);
+                let r = emu.run_cycles(u64::from(FRAME_CLOCKS), &mut fb, &mut []);
+                frames += usize::from(r.events.contains(Events::FRAME_READY));
+            }
+            black[pad] = fb.iter().all(|&p| p == 0);
+        }
+        let (mut kept, mut blanked) = (0, 0);
+        for pad in 1..PADS {
+            let around = &mode[pad - 1..pad + 2];
+            if around.iter().all(|&m| m == 3) {
+                assert!(!black[pad], "pad {pad}: mode 3 keeps drawing");
+                kept += 1;
+            } else if around.iter().all(|&m| m != 3) {
+                assert!(black[pad], "pad {pad}: black outside mode 3");
+                blanked += 1;
+            }
+        }
+        assert!(kept >= 30 && blanked >= 50, "{kept} {blanked}");
+    }
+
+    #[test]
+    fn stop_mode_resumes_two_mcycles_after_the_line_goes_low() {
+        // SameBoy `GB_cpu_run`: `leave_stop_mode`, then 8 T-cycles, then
+        // the next fetch. The counter runs again from the wake-up, from 0.
+        // P1 = 10; STOP 00; LD B,B.
+        let program = stop_program(0x10, &[0x10, 0x00, 0x40, 0x18, 0xFE]);
+        let mut fb = frame();
+        let mut clocks = [0; 2];
+        for (i, single_steps) in [false, true].into_iter().enumerate() {
+            let emu = with_program(&program, 0x80);
+            emu.set_stop_events(Events::LD_B_B);
+            to_stop(emu);
+            run_for(emu, 300_000);
+            assert!(emu.hw.cpu.stopped());
+            let d = emu.clock() + 4000;
+            // A clock inside an M-cycle rounds down to its start (ADR 0012).
+            assert!(emu.set_buttons_at(d + 3, Buttons::START));
+            if single_steps {
+                while !emu.step(&mut fb, &mut []).events.contains(Events::LD_B_B) {}
+            } else {
+                let (now, ..) = to_ld_b_b(emu);
+                assert_eq!(now, emu.clock());
+            }
+            clocks[i] = emu.clock();
+            // Two wake-up M-cycles from d, then LD B,B's fetch.
+            assert_eq!(emu.clock(), d + 12);
+            assert_eq!(emu.registers().pc, 0x10A);
+            assert_eq!(emu.hw.sys.timer.sc(emu.clock()) & 0xFFFF, 12);
+            assert_eq!(emu.peek(0xFF04), 0);
+            assert_eq!(emu.peek(0xFF0F) & 0x10, 0x10, "the joypad interrupt");
+        }
+        assert_eq!(clocks[0], clocks[1]);
+    }
+
+    #[test]
+    fn stop_mode_holds_the_frame_sequencer_but_not_the_channels() {
+        // CH2 with a 1/16 s length, then STOP. SameBoy `timers_run` on a
+        // CGB: no DIV events while `stopped` (the frame sequencer holds,
+        // so the length never expires), but `apu_cycles` still advance
+        // (the channel keeps its tone).
+        let program = stop_program(
+            0x30,
+            &[
+                0x3E, 0x30, 0xE0, 0x16, 0x3E, 0xF0, 0xE0, 0x17, 0xAF, 0xE0, 0x18, 0x3E, 0xC7, 0xE0,
+                0x19, 0x10, 0x00,
+            ],
+        );
+        let emu = with_program(&program, 0x80);
+        to_stop(emu);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        run_for(emu, u64::from(CLOCK_HZ));
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02, "length frozen");
+        let mut audio = [StereoSample::default(); 512];
+        let r = emu.run_cycles(60_000, &mut frame(), &mut audio);
+        let s = &audio[..r.audio_samples];
+        assert!(s.len() > 100);
+        assert!(s.iter().any(|x| x.left != s[0].left), "CH2 still plays");
+    }
+
+    #[test]
+    fn the_wake_up_restarts_the_serial_clock_and_the_frame_sequencer() {
+        // P1 = 10; SC = 81; CH2 with a 1/16 s length; STOP 00; then NOPs.
+        let program = stop_program(
+            0x10,
+            &[
+                0x3E, 0x81, 0xE0, 0x02, 0x3E, 0x30, 0xE0, 0x16, 0x3E, 0xF0, 0xE0, 0x17, 0xAF, 0xE0,
+                0x18, 0x3E, 0xC7, 0xE0, 0x19, 0x10, 0x00,
+            ],
+        );
+        let emu = with_program(&program, 0x80);
+        emu.set_stop_events(Events::SERIAL_TX);
+        to_stop(emu);
+        run_for(emu, u64::from(CLOCK_HZ));
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0x02);
+        assert_eq!(emu.peek(0xFF02) & 0x80, 0x80);
+        emu.set_buttons(Buttons::A);
+        // The byte: 8 bits of 512 clocks from the counter's 0.
+        let wake = emu.clock();
+        let mut fb = frame();
+        while !emu
+            .run_cycles(1000, &mut fb, &mut [])
+            .events
+            .contains(Events::SERIAL_TX)
+        {
+            assert!(emu.clock() < wake + 8192);
+        }
+        assert!(emu.clock() >= wake + 3584);
+        assert_eq!(emu.peek(0xFF0F) & 0x08, 0x08);
+        run_for(emu, u64::from(CLOCK_HZ) / 8);
+        assert_eq!(emu.peek(0xFF26) & 0x02, 0, "the length ran out");
+    }
+
+    #[test]
+    fn stop_mode_holds_a_tima_reload_in_flight() {
+        // TMA = 12, TAC = 05, TIMA = FF, then STOP, at the four phases of
+        // the 16-clock timer period. Where the overflow (or the DIV
+        // reset's glitch increment) falls on STOP's reset, cycle A is held
+        // with the counter: TIMA reads 00 and the interrupt waits until
+        // one M-cycle after the wake-up.
+        let mut held = 0;
+        for pad in 0..4 {
+            let mut rest = vec![0x3E, 0x12, 0xE0, 0x06, 0x3E, 0x05, 0xE0, 0x07];
+            rest.resize(rest.len() + pad, 0x00);
+            rest.extend_from_slice(&[0x3E, 0xFF, 0xE0, 0x05, 0x10, 0x00, 0x40, 0x18, 0xFE]);
+            let emu = with_program(&stop_program(0x10, &rest), 0x80);
+            to_stop(emu);
+            run_for(emu, 100_000);
+            assert!(emu.hw.cpu.stopped());
+            let state = (emu.peek(0xFF05), emu.peek(0xFF0F) & 0x04);
+            // Held, or reloaded before the reset (which may increment).
+            let reloaded = matches!(state, (0x12 | 0x13, 4));
+            assert!(state == (0x00, 0) || reloaded, "{pad}: {state:x?}");
+            held += usize::from(state.0 == 0);
+            emu.set_buttons(Buttons::A);
+            let (..) = to_ld_b_b(emu);
+            assert_eq!(emu.peek(0xFF0F) & 0x04, 4, "{pad}");
+            assert!(matches!(emu.peek(0xFF05), 0x12 | 0x13), "{pad}");
+        }
+        assert_eq!(held, 3);
+    }
     #[test]
     fn speed_switch_halt_pauses_oam_dma() {
         // A transfer from C000 starts, then the switch to double speed
@@ -2615,8 +2969,9 @@ mod tests {
 
     #[test]
     fn scheduled_input_wakes_stop_on_its_mcycle() {
-        // STOP (DMG mode: no speed switch); LD B,B; JR -2.
-        let program = [0x10, 0x00, 0x40, 0x18, 0xFE];
+        // XOR A; LDH (00),A (both P1 groups); LDH (0F),A; STOP (DMG mode:
+        // no speed switch); LD B,B; JR -2.
+        let program = [0xAF, 0xE0, 0x00, 0xE0, 0x0F, 0x10, 0x00, 0x40, 0x18, 0xFE];
         let mut fb = frame();
         let mut clocks = [0; 2];
         for (i, single_steps) in [false, true].into_iter().enumerate() {
@@ -2634,9 +2989,11 @@ mod tests {
             }
             clocks[i] = emu.clock();
             // The stopped step's check after its idle M-cycle ending at d
-            // sees the press; STOP read its 00 before stopping (nothing
-            // pending: two bytes), so LD B,B's fetch follows.
-            assert_eq!(emu.clock(), d + 4);
+            // sees the press; two wake-up M-cycles (SameBoy `GB_cpu_run`:
+            // 8 T-cycles after `leave_stop_mode`); STOP read its 00
+            // before stopping (nothing pending: two bytes), so LD B,B's
+            // fetch follows.
+            assert_eq!(emu.clock(), d + 12);
         }
         assert_eq!(clocks[0], clocks[1]);
     }

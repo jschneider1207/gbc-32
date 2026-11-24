@@ -83,6 +83,9 @@ pub(crate) struct Sys<'a> {
     pub(crate) inputs: InputQueue,
     /// CGB VRAM DMA (FF51-FF55, ADR 0017).
     pub(crate) vdma: VramDma,
+    /// STOP mode with the screen black: frames completed in it are black
+    /// ([`Ctx::stop_frame`]). Cold, so last.
+    pub(crate) stop_black: bool,
 }
 
 impl Sys<'_> {
@@ -93,6 +96,7 @@ impl Sys<'_> {
             sched: Schedule::new(),
             inputs: InputQueue::new(),
             vdma: VramDma::new(),
+            stop_black: false,
             ppu: Ppu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
@@ -556,6 +560,104 @@ impl Ctx<'_, '_> {
             self.sys.timer.stop_edge(now);
         }
         self.div_reset();
+    }
+
+    /// STOP mode begins, at the end of STOP's fetch and after its DIV
+    /// reset (SameBoy `enter_stop_mode`; ADR 0020, STOP mode amendment).
+    ///
+    /// - The system counter stops ([`Timer::freeze`]), and with it
+    ///   everything clocked from it: TIMA, the serial bit clock and the
+    ///   APU's frame sequencer have no deadline until the wake-up
+    ///   (SameBoy `timers_run` returns while `stopped`). Nothing may set
+    ///   one of the three before [`Self::stop_wake`]: only CPU writes and
+    ///   their own events do, and neither happens in STOP mode.
+    /// - The PPU and the APU's channels run on (on a CGB; SameBoy
+    ///   `GB_display_run`, "The PPU does not advance while in STOP mode
+    ///   on the DMG", and `timers_run`, which still advances `apu_cycles`
+    ///   on a CGB), so frames and samples keep their rate.
+    /// - The screen goes black, unless the PPU is in mode 3 (Pan Docs:
+    ///   "On CGB, leaving the LCD enabled when invoking STOP will result
+    ///   in a black screen. Except if the LCD is in Mode 3, where it will
+    ///   keep drawing the current screen"). SameBoy: the PPU loses
+    ///   palette RAM unless the CPU's access to it was blocked at the
+    ///   STOP (`cgb_palettes_ppu_blocked = !cgb_palettes_blocked`), and
+    ///   draws black without it, in either CGB mode. Whole frames here
+    ///   ([`Self::stop_frame`]).
+    #[cold]
+    #[inline(never)]
+    fn stop_freeze(&mut self) {
+        let now = self.clock();
+        self.sys.timer.freeze(now);
+        for kind in [EventKind::Timer, EventKind::Serial, EventKind::DivApu] {
+            self.sys.sched.set(kind, NEVER);
+        }
+        // Synced, for `drawing` (as `write_palette_data`); reschedules.
+        self.sync_ppu_to(now);
+        let double = self.hot.mcycle == 2;
+        let p = &self.sys.ppu;
+        self.sys.stop_black = p.lcd_enabled() && !p.drawing() && !p.palette_blocked(now, double);
+    }
+
+    /// STOP mode is entered, after STOP's second byte: OAM DMA pauses
+    /// and HBlanks start no VRAM DMA blocks, as in HALT (SameBoy
+    /// `GB_dma_run` returns while `stopped`; `GB_display_run` starts HDMA
+    /// only with `!gb->stopped`). A block already requested waits for the
+    /// wake-up. SameBoy decides both at the end of STOP's fetch; here the
+    /// second byte's read comes first, so that it isn't a read with the
+    /// transfer paused.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn stop_enter(&mut self) {
+        if self.hot.dma != 0 {
+            self.dma_pause();
+        }
+        if self.sys.vdma.hblank {
+            let in_hblank = self.hdma_period(self.clock());
+            let v = &mut self.sys.vdma;
+            v.halted = true;
+            v.wake_ok = !in_hblank;
+        }
+    }
+
+    /// The wake-up check of a CPU in STOP mode: whether a selected P1
+    /// line is low (Pan Docs: "STOP is terminated by one of the P10 to
+    /// P13 lines going low"; SameBoy `GB_cpu_run`: `JOYP & 0xF != 0xF`,
+    /// sampled every M-cycle). The lines were all high when STOP mode
+    /// began ([`Bus::stop_begin`]) and the select bits can't change in it,
+    /// so a low line is a button pressed in a selected group since: the
+    /// joypad interrupt's condition ([`p1_interrupt`]).
+    ///
+    /// If so, STOP mode ends here (SameBoy `leave_stop_mode`): the counter
+    /// runs again from the value it held, with the deadlines that follow
+    /// it; OAM DMA resumes as after HALT; and in mode 0, after a STOP
+    /// outside it, an HBlank transfer starts a block
+    /// (`allow_hdma_on_wake`). The CPU then idles two M-cycles.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn stop_wake(&mut self) -> bool {
+        if p1_lines(self.sys.buttons, self.sys.joyp_select) == 0x0F {
+            return false;
+        }
+        let now = self.clock();
+        self.sys.stop_black = false;
+        self.sys.timer.thaw(now);
+        self.set_apu_deadline(now);
+        self.schedule_timer();
+        self.schedule_serial();
+        self.halt_end();
+        let _ = self.wake_stalls();
+        true
+    }
+
+    /// After an idle in STOP mode: a frame completed in it is black
+    /// ([`Self::stop_freeze`]). A simplification of SameBoy's per-pixel
+    /// rule: the frame STOP mode begins in is black from its top, and the
+    /// one it ends in is drawn normally from its top.
+    #[inline]
+    pub(crate) fn stop_frame(&mut self) {
+        if self.sys.stop_black && self.events.contains(Events::FRAME_READY) {
+            self.frame.fill(0);
+        }
     }
 
     /// The APU part of a DIV write or STOP (`old`: the counter before it):
@@ -2206,8 +2308,25 @@ impl Bus for Ctx<'_, '_> {
         if self.sys.cgb_mode && self.sys.key1 & 0x01 != 0 {
             StopKind::Switch
         } else {
+            self.stop_freeze();
             StopKind::Stop
         }
+    }
+
+    fn stop_enter(&mut self) {
+        Ctx::stop_enter(self);
+    }
+
+    /// The skip is the halted one: in STOP mode only a deadline (a
+    /// scheduled button change) or the run's end can change anything the
+    /// CPU waits for.
+    fn stop_halt(&mut self) -> bool {
+        if self.stop_wake() {
+            return true;
+        }
+        self.idle_halted();
+        self.stop_frame();
+        false
     }
 
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
@@ -2225,7 +2344,8 @@ impl Bus for Ctx<'_, '_> {
     }
 
     /// The halted skip (ADR 0011): nothing but a deadline can change IE &
-    /// IF, the run's end or a stopped CPU's wake-up, so consume the whole
+    /// IF, the run's end or a stopped CPU's wake-up
+    /// ([`Self::stop_wake`]), so consume the whole
     /// countdown in one go and handle the deadline, on the same M-cycle
     /// as idling one M-cycle at a time would.
     fn idle_halted(&mut self) {
@@ -2234,10 +2354,6 @@ impl Bus for Ctx<'_, '_> {
         let h = &mut self.hot;
         h.budget = (i64::from(h.budget) - i64::from(n) * i64::from(h.mcycle)) as i32;
         self.boundary();
-    }
-
-    fn stop_wakeup(&self) -> bool {
-        !self.sys.buttons.is_empty()
     }
 
     /// The CPU's read, without the M-cycle's tick. Cold: only for a
@@ -4398,6 +4514,39 @@ mod dma_tests {
             ctx.idle();
             assert_eq!((ctx.clock(), ctx.hot.dma), (end, 0));
         });
+        assert!((0..0xA0).all(|i| emu.mem.oam[i] == i as u8 ^ 0xA5));
+    }
+
+    /// STOP mode pauses the transfer like HALT (SameBoy `GB_dma_run`
+    /// returns while `stopped`; `leave_stop_mode` takes one step).
+    #[test]
+    fn stop_mode_pauses_the_transfer() {
+        // P1 = 10 (action buttons); IF = 0; LD A,C1; LDH (46),A; STOP 00;
+        // LD B,B.
+        let emu = setup_with(&[
+            0x3E, 0x10, 0xE0, 0x00, 0xAF, 0xE0, 0x0F, 0x3E, 0xC1, 0xE0, 0x46, 0x10, 0x00, 0x40,
+        ]);
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        for _ in 0..7 {
+            let _ = emu.step(&mut fb, &mut []);
+        }
+        assert_eq!(emu.hw.cpu.registers().pc, 0x10D);
+        // A byte per M-cycle from the one after the FF46 write's: STOP's
+        // fetch and its second byte.
+        let copied = emu.hw.sys.ppu.dma.copied;
+        assert_eq!(copied, 2);
+        let _ = emu.run_cycles(10_000, &mut fb, &mut []);
+        assert_eq!(emu.hw.sys.ppu.dma.copied, copied);
+        assert_eq!(emu.hw.sys.hot.dma, 0xFE00);
+        assert_eq!(emu.mem.oam[usize::from(copied)], 0x55);
+        emu.set_buttons(Buttons::A);
+        emu.set_stop_events(Events::LD_B_B);
+        let r = emu.run_cycles(1000, &mut fb, &mut []);
+        assert_eq!(r.events, Events::LD_B_B);
+        // The two wake-up M-cycles and LD B,B's fetch: three more bytes.
+        assert_eq!(emu.hw.sys.ppu.dma.copied, copied + 3);
+        let _ = emu.run_cycles(4 * 160, &mut fb, &mut []);
+        assert_eq!(emu.hw.sys.hot.dma, 0);
         assert!((0..0xA0).all(|i| emu.mem.oam[i] == i as u8 ^ 0xA5));
     }
 

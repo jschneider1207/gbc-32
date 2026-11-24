@@ -146,6 +146,9 @@ pub(crate) struct Timer {
     /// here, not in `Sys`, in this struct's padding while `Hw` had a size
     /// cap (dropped 2026-11-24).
     pub(crate) apu_ds_delay: bool,
+    /// STOP mode froze the counter in cycle A ([`Self::freeze`]): the
+    /// reload is held with it and ends one M-cycle after the wake-up.
+    held: bool,
 }
 
 impl Timer {
@@ -162,6 +165,7 @@ impl Timer {
             overflow_at: NEVER,
             reloaded_at: NEVER,
             apu_ds_delay: false,
+            held: false,
         }
     }
 
@@ -444,6 +448,48 @@ impl Timer {
         if self.sc(now) & (2 * b - 1) == b - 4 {
             self.sync(now);
             self.increment(now);
+        }
+    }
+
+    /// STOP mode begins at `now`, after STOP's DIV reset: the oscillator
+    /// stops, so the counter holds its value until [`Self::thaw`]
+    /// (SameBoy `timers_run` returns while `stopped`; Pan Docs "Using the
+    /// STOP instruction"). `base_clock` is `NEVER` meanwhile, so `sc` is
+    /// constant and there is no overflow to schedule: nothing may ask for
+    /// a counter value's clock (`clock_of`) until the thaw.
+    ///
+    /// A reload in flight (cycle A at `now`: the overflow fell on STOP's
+    /// fetch, or the DIV reset's glitch increment overflowed) is held
+    /// with the counter, as across the speed-switch pause: TIMA reads 00
+    /// and the reload and its interrupt come one M-cycle after the thaw.
+    /// A choice: no reference covers it.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn freeze(&mut self, now: u64) {
+        self.catch_up(now);
+        self.held = self.in_cycle_a(now);
+        self.base = self.sc(now);
+        if self.held {
+            self.tima = 0;
+        } else {
+            self.sync(now);
+        }
+        self.tima_from = self.base;
+        self.base_clock = NEVER;
+        self.overflow_at = NEVER;
+    }
+
+    /// STOP mode ends at `now`: the counter runs again from the value it
+    /// held, and a held cycle A is this M-cycle.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn thaw(&mut self, now: u64) {
+        self.base_clock = now;
+        if self.held {
+            self.held = false;
+            self.overflow_at = now;
+        } else {
+            self.schedule_overflow();
         }
     }
 

@@ -411,6 +411,19 @@ mod tests {
                 }
                 crate::cpu::Bus::idle(&mut self.ctx);
             }
+            if !switch {
+                // STOP mode stops the counter, which the eager model
+                // doesn't mirror. End it on the same clock (a selected
+                // button pressed at once): STOP's DIV reset is all that
+                // remains, and a freeze and thaw with no time between
+                // must change nothing.
+                let s = &mut *self.ctx.sys;
+                let saved = (s.buttons, s.joyp_select);
+                (s.buttons, s.joyp_select) = (crate::Buttons::A, 0);
+                assert!(self.ctx.stop_wake());
+                let s = &mut *self.ctx.sys;
+                (s.buttons, s.joyp_select) = saved;
+            }
             self.eager.stop(switch);
             self.check("stop");
             if !switch {
