@@ -2,3 +2,22 @@
 # default (one job per core) exhausted WSL2 RAM and crashed the host.
 [build]
 jobs = 4
+# Raise LLVM's CodeGenPrepare limit on the memory uses of one address
+# (default 100) above which it stops folding the address into the
+# accesses. `Cpu::run` inlines ~140 ticks and ~90 reads of the same `Ctx`
+# fields; at the default each use pays a reload (x86: `lea; mov`; thumb:
+# a stack spill and reload). ADR 0008, amendments of 2026-11-24; adopted
+# by the human 2026-11-24 for every build: host (tests, bench, romtest,
+# desktop), the thumbv7em checks and the firmware.
+#
+# A hidden LLVM option, tied to the LLVM of the pinned toolchain
+# (rust-toolchain.toml): on any toolchain bump, re-run
+# scripts/check-bench.sh and scripts/check-code-size.sh with and without
+# it (docs/perf.md "Build flags"). An unknown option fails the build.
+#
+# Keep this a one-line array: scripts/lib/rustflags.sh reads it for the
+# scripts that set their own RUSTFLAGS (which replace these), and fails if
+# the option is missing. A RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS variable
+# in the environment also replaces it; scripts/check-bench.sh refuses
+# such a build.
+rustflags = ["-C", "llvm-args=-cgp-max-address-users-to-scan=100000"]

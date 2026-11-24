@@ -47,6 +47,21 @@ command -v valgrind >/dev/null || { echo "check-bench: valgrind not found" >&2; 
 bench=$(cargo build --release -p bench --quiet --message-format=json \
   | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
 [ -n "$bench" ] && [ -x "$bench" ] || { echo "check-bench: cannot find the bench binary cargo built" >&2; exit 2; }
+# The build must carry the flags of .cargo/config.toml (ADR 0008's LLVM
+# option, docs/perf.md "Build flags"): a RUSTFLAGS or
+# CARGO_ENCODED_RUSTFLAGS variable replaces them without a word, and the
+# numbers would be another build's. The binary reports what it was built
+# with (tools/bench/build.rs).
+source scripts/lib/rustflags.sh
+built=$("$bench" --rustflags)
+case " $built " in
+  *" $GBC_RUSTFLAGS "*) ;;
+  *)
+    echo "check-bench: FAIL: bench was built with rustflags '$built'," >&2
+    echo "  which lack '$GBC_RUSTFLAGS' (.cargo/config.toml); unset RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS" >&2
+    exit 1
+    ;;
+esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

@@ -19,6 +19,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+source scripts/lib/rustflags.sh
 
 BUDGETS=${CODE_SIZE_BUDGETS_FILE:-perf/code-size-budgets.txt}
 TARGET=thumbv7em-none-eabihf
@@ -27,7 +28,7 @@ TDIR=target/codesize
 NM=$(command -v llvm-nm || command -v rust-nm || command -v nm) || { echo "no nm found" >&2; exit 2; }
 SIZE=$(command -v llvm-size || command -v rust-size || command -v size) || { echo "no size found" >&2; exit 2; }
 
-if ! RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core --release \
+if ! with_mcu_rustflags cargo build -p gbc-core --release \
     --target "$TARGET" --target-dir "$TDIR" >&2; then
   echo "FAIL: gbc-core build for $TARGET failed" >&2
   exit 1
@@ -127,8 +128,10 @@ pub static GBC_SIZE_EMULATOR: [u8; size_of::<gbc_core::Emulator<'static>>()] =
 pub static GBC_SIZE_MEMORY: [u8; size_of::<gbc_core::Memory>()] =
     [0; size_of::<gbc_core::Memory>()];
 PROBE
+# The same flags as the build (word splitting intended).
+# shellcheck disable=SC2086
 if rustc --edition 2024 --crate-type rlib --crate-name size_probe --target "$TARGET" \
-    -C target-cpu=cortex-m7 --emit=obj -o "$work/size_probe.o" \
+    $GBC_MCU_RUSTFLAGS --emit=obj -o "$work/size_probe.o" \
     --extern gbc_core="$rlib" "$probe_src" 2> "$work/probe.err"; then
   "$NM" -S --radix=d "$work/size_probe.o" | awk '
     /GBC_SIZE_EMULATOR/ { printf "size_of::<Emulator>() on %s: %d B (report only)\n", t, $2 }

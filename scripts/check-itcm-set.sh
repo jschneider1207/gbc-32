@@ -28,6 +28,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+source scripts/lib/rustflags.sh
 
 SETFILE=${ITCM_SET_FILE:-perf/itcm-sections.txt}
 TARGET=thumbv7em-none-eabihf
@@ -36,7 +37,7 @@ TDIR=target/codesize
 SIZE=$(command -v llvm-size || command -v rust-size || command -v size) || { echo "no size found" >&2; exit 2; }
 READELF=$(command -v readelf || command -v llvm-readelf) || { echo "no readelf found" >&2; exit 2; }
 
-if ! RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core --release \
+if ! with_mcu_rustflags cargo build -p gbc-core --release \
     --target "$TARGET" --target-dir "$TDIR" >&2; then
   echo "FAIL: gbc-core build for $TARGET failed" >&2
   exit 1

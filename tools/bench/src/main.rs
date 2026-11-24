@@ -1,7 +1,8 @@
 //! Runs one ROM headless for a fixed number of emulated clocks.
 //!
 //! Wall-clock mode: `bench --wall` (wall.rs). Long run: `bench --long`
-//! (long.rs).
+//! (long.rs). `bench --rustflags` prints the rustc flags it was built with
+//! (build.rs; checked by scripts/check-bench.sh, docs/perf.md "Build flags").
 //!
 //! Usage: `bench <rom | synth:<name>> <emulated-seconds>` (synthetic ROMs:
 //! synth.rs), or `bench --fingerprint` (fingerprint.rs). It is meant to run
@@ -123,6 +124,10 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--long") {
         return long::main(&args[2..]);
+    }
+    if args.get(1).is_some_and(|a| a == "--rustflags") {
+        println!("{}", env!("BENCH_RUSTFLAGS"));
+        return ExitCode::SUCCESS;
     }
     if args.get(1).is_some_and(|a| a == "--fingerprint") {
         return fingerprint_main(&args[2..]);

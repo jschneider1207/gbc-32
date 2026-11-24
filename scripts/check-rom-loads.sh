@@ -15,6 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+source scripts/lib/rustflags.sh
 
 TARGET=thumbv7em-none-eabihf
 TDIR=target/romloads
@@ -42,7 +43,7 @@ rm -rf "$out"
 # `cargo rustc` passes --emit only to gbc-core itself; debug line tables
 # come from the release profile (debug = "line-tables-only"), forced here
 # so a profile change can't silently remove them.
-if ! RUSTFLAGS="-C target-cpu=cortex-m7" cargo rustc -p gbc-core --release \
+if ! with_mcu_rustflags cargo rustc -p gbc-core --release \
     --target "$TARGET" --target-dir "$TDIR" -- \
     --emit=asm -C debuginfo=line-tables-only >&2; then
   echo "FAIL: gbc-core build for $TARGET failed" >&2
