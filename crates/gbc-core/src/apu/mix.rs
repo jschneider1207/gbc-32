@@ -43,8 +43,6 @@ impl Output {
 /// paid on every sync: every APU write syncs).
 pub(crate) const BATCH: usize = 16;
 const _: () = assert!(15 * SAMPLE_PERIOD <= i16::MAX as u64);
-// `Apu::sync` masks span indices with `BATCH - 1`.
-const _: () = assert!(BATCH.is_power_of_two());
 
 /// Adds `level` times each span's clocks to `out`: a channel whose DAC is
 /// on while the channel is off (Pan Docs DAC: digital 0 -> +1). One copy
@@ -52,8 +50,7 @@ const _: () = assert!(BATCH.is_power_of_two());
 #[inline(never)]
 pub(crate) fn constant(segs: &[u8], out: &mut [i16], level: i32) {
     for (o, &dt) in out.iter_mut().zip(segs) {
-        // Opaque: no unrolling (code size).
-        *o += (level * i32::from(core::hint::black_box(dt))) as i16;
+        *o += (level * i32::from(dt)) as i16;
     }
 }
 
@@ -148,10 +145,6 @@ impl Apu {
             let mut lv = [[0; BATCH]; 4];
             self.integrate(&segs[..k], io, &mut lv);
             for i in 0..k {
-                // Opaque: no unrolling (code size). The mask is a no-op
-                // (`i < k <= BATCH`, a power of two) that bounds the opaque
-                // index for the compiler: no `lv` bounds-check panic path.
-                let i = core::hint::black_box(i) & (BATCH - 1);
                 let sums = mix(core::array::from_fn(|c| i32::from(lv[c][i])), &w);
                 acc_l += sums[0];
                 acc_r += sums[1];
