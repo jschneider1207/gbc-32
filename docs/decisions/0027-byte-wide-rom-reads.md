@@ -81,3 +81,22 @@ An unmarked `into_inner()` read and a removed marker also fail.
 - Volatile or atomic reads: need `unsafe` (ADR 0009).
 - Word reads when the ROM base is aligned: matches the erratum exactly,
   but adds a runtime branch and a check exemption for a cold path.
+
+## Amendments
+
+### 2026-11-24: ROM memory is HyperRAM on OCTOSPI
+
+Human decision, 2026-11-24: the Stage 3 ROM memory is HyperRAM on OCTOSPI,
+not FMC SDRAM (hardware ADR 0001 has not been updated yet). The erratum
+that motivated this ADR, ES0491 Rev 9 §2.7.3, applies to the FMC. With
+HyperRAM on OCTOSPI: ES0491 Rev 9 §2.8.4 ("Odd address alignment and odd
+byte number not supported at specific conditions", Table 5) allows
+memory-mapped reads at any address and with any byte number in HyperBus
+mode (and in octal-SPI RAM DTR mode with RDS); its alignment limits apply
+to indirect reads and writes and to memory-mapped writes in other modes,
+none of which the core's ROM reads are. No other OCTOSPI erratum on that
+sheet restricts memory-mapped read alignment (§2.8.12 is about a
+misaligned address written to `OCTOSPI_AR` before an indirect write). So
+on the planned ROM memory, unaligned or merged ROM reads would be
+supported. This ADR stays in force, and `scripts/check-rom-loads.sh` keeps
+gating, until the human retires it.

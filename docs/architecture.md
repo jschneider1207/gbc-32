@@ -48,8 +48,10 @@ decided when Stage 2 starts.
 | MCU | STM32H753ZI, 480 MHz, RM0433 | STM32H735IGK6, 520 MHz (550 with `CPU_FREQ_BOOST`), RM0468 |
 | Core supply | LDO | On-chip SMPS (different supply config at boot) |
 | Internal RAM / L1 cache | ~1 MB / 16 KB I + 16 KB D | 564 KB / 32 KB I + 32 KB D |
-| ITCM (fast code RAM) | 64 KB, fixed | 64 KB by default; configurable to 128, 192 or 256 KB, taken from AXI SRAM (RM0468 `TCM_AXI_SHARED`; `FLASH_OPTSR2_PRG`) |
-| ROM source | Shield's QSPI NOR, memory-mapped | eMMC → copied into external FMC SDRAM (32 MiB) at load |
+| ITCM (fast code RAM) | 64 KB, fixed | 64 KB by default; configurable to 128, 192 or 256 KB, taken from AXI SRAM (option byte `TCM_AXI_SHARED[1:0]` in `FLASH_OPTSR2_PRG`, RM0468 §2.4 Table 8, §4.9.25). Plan: 128 KB ITCM / 256 KB AXI SRAM |
+| Core code placement | Part of gbc-core in ITCM (`perf/itcm-sections.txt`), the rest in flash behind the I-cache | All of gbc-core in ITCM |
+| Code-size gate | none of its own: the H753 ITCM set's fit is reported (`scripts/check-itcm-set.sh`); this board may run slower (human, 2026-11-24) | gbc-core total `.text` <= 122,880 B (128 KiB minus an 8 KiB platform reserve; provisional), `scripts/check-code-size.sh` |
+| ROM source | Shield's QSPI NOR, memory-mapped | eMMC → copied at load into external HyperRAM on OCTOSPI, memory-mapped (human decision 2026-11-24; hardware ADR 0001 pending update) |
 | Saves | (Stage 2 choice) | eMMC |
 | Display | Shield's ILI9341V, 8-bit 8080 bus on FMC (stand-in only) | TBD by the hardware repo (FMC parallel or LTDC) |
 | Audio | (Stage 2 choice) | SAI → external DAC/amplifier |
@@ -58,7 +60,7 @@ What carries over from Stage 2: proof that the core runs at full speed on a
 Cortex-M7, the frame pacing / audio / input structure, and the cache and
 memory-placement findings. The latter are a starting point only, because
 the RAM layout and cache sizes differ. Reading the ROM from QSPI NOR is a
-conservative stand-in for SDRAM. The custom-board contract is
+conservative stand-in for HyperRAM. The custom-board contract is
 `../gbc-32-hardware/docs/firmware-interface.md`.
 
 ## Core ↔ platform boundary
