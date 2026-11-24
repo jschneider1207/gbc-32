@@ -32,12 +32,6 @@ use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::{INT_TIMER, Timer};
 use crate::{Buttons, Emulator, Events, RunResult};
 
-/// IF bits 5-7 don't exist (they read 1). Bit 5: a delayed LYC-write STAT
-/// interrupt is waiting ([`Ctx::lyc_irq_delay`]); bit 6: the parity of
-/// the M-cycle (clock bit 2) of the write that requested it.
-const LYC_IRQ_PENDING: u8 = 0x20;
-const LYC_IRQ_PHASE: u8 = 0x40;
-
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`.
 #[repr(C)]
@@ -52,7 +46,8 @@ pub(crate) struct Sys<'a> {
     wram_off: usize,
     /// IE (FFFF), all 8 bits.
     pub(crate) ie: u8,
-    /// IF (FF0F), low 5 bits.
+    /// IF (FF0F): bits 0-4, nothing else (bits 5-7 don't exist and read 1,
+    /// `read_io`). A request on its way to IF is not here (`irq::PendingIrq`).
     pub(crate) iflags: u8,
     /// The cartridge runs in CGB mode (header 0143 bit 7); otherwise DMG
     /// compatibility mode, where the CGB-only registers are locked (KEY0 =
@@ -573,7 +568,7 @@ impl Ctx<'_, '_> {
     /// Out of line: keeps `stop_begin` within its code-size budget.
     #[inline(never)]
     fn stop_div_reset(&mut self) {
-        if self.sys.ie & self.sys.iflags & INT_MASK == 0 {
+        if self.sys.ie & self.sys.iflags == 0 {
             let now = self.clock();
             self.sys.timer.stop_edge(now);
         }
@@ -971,61 +966,11 @@ impl Ctx<'_, '_> {
         s.schedule_inputs(m);
     }
 
-    /// Catches the PPU up to the current clock and reschedules; delivers a
-    /// delayed LYC-write interrupt ([`Self::lyc_irq_delay`]) once due.
+    /// Catches the PPU up to the current clock and reschedules.
     #[inline(never)]
     fn sync_ppu(&mut self) {
         let now = self.clock();
         self.sync_ppu_to(now);
-        if self.sys.iflags & LYC_IRQ_PENDING != 0 {
-            self.lyc_irq_due(now);
-        }
-    }
-
-    /// Single speed: the STAT interrupt a LYC write requests (LY = LYC
-    /// newly true with the LYC select set) reaches IF 5 dots after the
-    /// write's access, one dot into the next M-cycle: an interrupt check
-    /// or IF read at the end of the write's M-cycle doesn't see it, one an
-    /// M-cycle later does. gambatte (behaviour only, GPL)
-    /// `LCD::lycRegChange`: CGB single speed sets
-    /// `memevent_oneshot_statirq` at `cc + 5`, double speed and DMG flag
-    /// the interrupt at once. CGB04C
-    /// `lycEnable/lyc_ff45_trigger_delay_2` (the interrupt is dispatched
-    /// one instruction later than at the write: out2, DMG out0).
-    ///
-    /// The request waits in IF's unused bits ([`LYC_IRQ_PENDING`], with the
-    /// parity of the write's M-cycle in [`LYC_IRQ_PHASE`]; chosen while `Hw`
-    /// had a size cap, dropped 2026-11-24) and the PPU deadline is moved to the due dot.
-    /// Out of line, off `write_ppu`.
-    #[cold]
-    #[inline(never)]
-    fn lyc_irq_delay(&mut self, now: u64) {
-        let phase = if now & 4 != 0 { LYC_IRQ_PHASE } else { 0 };
-        let s = &mut *self.sys;
-        s.iflags = s.iflags & !ppu::INT_STAT | LYC_IRQ_PENDING | phase;
-        // Not rescheduled from the walk here: `sync_ppu` at the due
-        // boundary (or an earlier PPU deadline) does that.
-        let due = s.sched.deadline(EventKind::Ppu).min(now + 5);
-        s.sched.set(EventKind::Ppu, due);
-        self.reschedule();
-    }
-
-    /// A PPU event with a delayed LYC-write interrupt waiting: at the
-    /// M-cycle boundary 8 dots after the write's access (same M-cycle
-    /// parity) it reaches IF; at the one 4 dots after it (a walk point
-    /// came first), it waits one more M-cycle. Single speed only, so the
-    /// boundaries are 4 dots apart.
-    #[cold]
-    #[inline(never)]
-    fn lyc_irq_due(&mut self, now: u64) {
-        let s = &mut *self.sys;
-        let phase = if now & 4 != 0 { LYC_IRQ_PHASE } else { 0 };
-        if s.iflags & LYC_IRQ_PHASE == phase {
-            s.iflags = s.iflags & INT_MASK | ppu::INT_STAT;
-        } else {
-            let due = s.sched.deadline(EventKind::Ppu).min(now + 1);
-            s.sched.set(EventKind::Ppu, due);
-        }
     }
 
     /// Catches the PPU up to clock `at` (the current clock, or one dot
@@ -1036,27 +981,36 @@ impl Ctx<'_, '_> {
         self.schedule_ppu();
     }
 
-    /// [`Self::sync_ppu_to`] without the rescheduling.
+    /// [`Self::sync_ppu_to`] without the rescheduling. `POST` false: the
+    /// walk alone (`Ppu::walk_to`), for a caller that isn't an IF
+    /// observer; a timed interrupt request due by `at` then waits for the
+    /// next sync, which the PPU deadline (at or before the request) or an
+    /// IF observer's own check of that deadline runs.
     #[inline(always)]
-    fn run_ppu_to(&mut self, at: u64) {
+    fn run_ppu<const POST: bool>(&mut self, at: u64) {
         if self.hot.dma != 0 {
             self.dma_sync(self.clock());
         }
         let double = self.hot.mcycle == 2;
         let s = &mut *self.sys;
-        let events = s.ppu.sync(at, self.mem, self.frame, &mut s.iflags, double);
+        let events = if POST {
+            s.ppu.sync(at, self.mem, self.frame, &mut s.iflags, double)
+        } else {
+            s.ppu
+                .walk_to(at, self.mem, self.frame, &mut s.iflags, double)
+        };
         self.raise(events);
         if self.sys.vdma.hblank {
             self.vdma_arm(at, true);
         }
     }
 
-    /// [`Self::run_ppu_to`] as a call, for the callers other than
+    /// [`Self::run_ppu`] (posting) as a call, for the callers other than
     /// `write_palette_data` (the one hot enough to inline it, for raster
     /// palette effects), for the code-size budgets.
     #[inline(never)]
     fn run_ppu_to_call(&mut self, at: u64) {
-        self.run_ppu_to(at);
+        self.run_ppu::<true>(at);
     }
 
     /// Sets the Ppu deadline and reschedules.
@@ -1167,11 +1121,21 @@ impl Ctx<'_, '_> {
                 let at = now + edges::LYC_WRITE.delay(double);
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
-                let old = s.iflags;
-                s.ppu.write_lyc(at, value, &mut s.iflags, double);
-                if !double && s.iflags & !old & ppu::INT_STAT != 0 {
-                    self.lyc_irq_delay(now);
-                    return;
+                if double {
+                    s.ppu.write_lyc(at, value, &mut s.iflags, true);
+                } else {
+                    // Single speed: the STAT interrupt the write requests
+                    // (LY = LYC newly true with the LYC select set)
+                    // reaches IF `edges::LYC_WRITE_IRQ` dots after the
+                    // write lands, in the next M-cycle: the interrupt
+                    // check or IF read at the end of the write's M-cycle
+                    // doesn't see it, one an M-cycle later does.
+                    let mut requested = 0;
+                    s.ppu.write_lyc(at, value, &mut requested, false);
+                    if requested != 0 {
+                        let due = at + edges::LYC_WRITE_IRQ;
+                        s.ppu.request_irq(due, requested, &mut s.iflags);
+                    }
                 }
             }
             // SCY SCX BGP OBP0 OBP1 WY WX: the pixels already output in
@@ -1329,7 +1293,8 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn write_palette_data(&mut self, obj: bool, value: u8) {
         let now = self.clock();
-        self.run_ppu_to(now);
+        // Palette RAM only: not an IF observer.
+        self.run_ppu::<false>(now);
         let s = &mut *self.sys;
         let i = palette_index_step(&mut self.mem.io[if obj { 0x6A } else { 0x68 }]);
         // Synced to `now`: drawing (latched, so past the window start, and
@@ -1353,22 +1318,25 @@ impl Ctx<'_, '_> {
     /// after it, a whole dot on our grid) is cleared by it, one later is
     /// not. CGB04C `m2int_m0irq/m2int_m0irq_scx3_ifw_{1,2,3,4,ds_1,ds_2}`
     /// (the mode-0 interrupt with SCX = 3 against an IF write one M-cycle
-    /// apart). A delayed LYC-write interrupt still waiting stays
-    /// ([`Self::lyc_irq_delay`]).
+    /// apart). A request still on its way to IF at that dot
+    /// (`Ppu::request_irq`) is not in IF yet, so the write doesn't clear
+    /// it.
     #[inline(never)]
     fn write_if(&mut self, value: u8) {
         let at = self.clock() + 1;
-        if self.sys.sched.deadline(EventKind::Ppu) <= at
-            && self.sys.ppu.early_point(at, self.hot.mcycle == 2) == 0
-        {
-            // No reschedule: the PPU deadline, now passed, runs
-            // `sync_ppu` at the next boundary, which sets the next one
-            // (and delivers a waiting delayed LYC-write interrupt).
-            self.run_ppu_to_call(at);
+        if self.sys.sched.deadline(EventKind::Ppu) <= at {
+            if self.sys.ppu.early_point(at, self.hot.mcycle == 2) == 0 {
+                self.sync_ppu_to(at);
+            } else {
+                // The walk point at `at` counts as still ahead; a timed
+                // request due by `at` is in IF all the same.
+                let s = &mut *self.sys;
+                s.ppu.post_irqs(at, &mut s.iflags);
+            }
         }
         let s = &mut *self.sys;
         let old = s.iflags;
-        s.iflags = value & INT_MASK | old & !INT_MASK;
+        s.iflags = value & INT_MASK;
         if (old ^ value) & INT_TIMER != 0 {
             self.schedule_timer();
         }
@@ -1395,7 +1363,7 @@ impl Ctx<'_, '_> {
         let old = self.sys.iflags;
         self.write_mapped(addr, value);
         let iflags = if addr == 0xFF0F { old } else { self.sys.iflags };
-        let pending = ie & iflags & INT_MASK;
+        let pending = ie & iflags;
         let bit = pending.isolate_lowest_one();
         // The bit is cleared as in `push_acknowledge`.
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
@@ -2003,7 +1971,7 @@ impl Ctx<'_, '_> {
     /// per line. `fire_late`: a trigger at or before `now` fires at the
     /// next boundary (the PPU sync that latched the line ran late by less
     /// than an M-cycle); otherwise it is treated as passed.
-    /// Out of line and cold: `run_ppu_to` calls it only with an HDMA
+    /// Out of line and cold: `run_ppu` calls it only with an HDMA
     /// active, and must stay small enough to inline into the PPU register
     /// and palette write paths.
     #[cold]
@@ -2250,7 +2218,7 @@ impl Ctx<'_, '_> {
     /// writes, not of when it was last synced (ADR 0002, 0011, 0014, 0021
     /// section 3), so a build with this feature must behave identically
     /// (`scripts/check-sync-invariance.sh`). The PPU deadline is left
-    /// alone on purpose (`run_ppu_to`, not `sync_ppu_to`): where the lazy
+    /// alone on purpose (`run_ppu_to_call`, not `sync_ppu_to`): where the lazy
     /// build reschedules is part of what is being compared.
     #[inline(never)]
     fn eager_sync(&mut self) {
@@ -2331,7 +2299,7 @@ impl Bus for Ctx<'_, '_> {
             return self.push_acknowledge_reg(addr, value, ie);
         }
         self.write_mapped(addr, value);
-        let pending = ie & self.sys.iflags & INT_MASK;
+        let pending = ie & self.sys.iflags;
         let bit = pending.isolate_lowest_one();
         if bit & PPU != 0 {
             // Only if a PPU edge can fall there (its deadline).
@@ -2421,7 +2389,7 @@ impl Bus for Ctx<'_, '_> {
     }
 
     fn speed_switch_halt(&mut self) -> bool {
-        if self.sys.ie & self.sys.iflags & INT_MASK != 0 || self.speed_switch_over() {
+        if self.sys.ie & self.sys.iflags != 0 || self.speed_switch_over() {
             self.speed_switch_end();
             true
         } else {
@@ -3409,6 +3377,94 @@ mod tests {
                 ctx.idle();
             }
         }
+    }
+
+    /// Runs `f` right after a single-speed LYC write (its M-cycle done)
+    /// that requests the STAT interrupt: line 5, LY = LYC newly true with
+    /// the LYC select set, IF clear. The request is on its way to IF: not
+    /// there at the end of the write's M-cycle, there one M-cycle later
+    /// (`lyc_write_interrupt_reaches_if_one_mcycle_later_in_single_speed`).
+    fn after_requesting_lyc_write(f: impl FnOnce(&mut Ctx)) {
+        let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
+        let emu = load(rom(0x8000, 0, 0, 0x80));
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        let _ = emu.run_until(line5 - 40, &mut fb, &mut []);
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        ctx.write(0xFF41, 0x40);
+        while ctx.clock() < line5 + 100 {
+            ctx.idle();
+        }
+        ctx.sys.iflags = 0;
+        crate::cpu::Bus::write(&mut ctx, 0xFF45, 5);
+        assert_eq!(ctx.sys.iflags & crate::ppu::INT_STAT, 0);
+        f(&mut ctx);
+    }
+
+    /// Review A2-04 (1): a PPU register write in the M-cycle after the LYC
+    /// write (`PUSH`, `CALL` or a dispatch with SP = FF46 writes FF45, then
+    /// FF44) reschedules the PPU; the request still reaches IF on time
+    /// (gambatte, behaviour only: `memevent_oneshot_statirq` is an event
+    /// of its own, at `cc + 5` whatever is written next).
+    #[test]
+    fn lyc_write_request_survives_a_ppu_write_in_the_next_mcycle() {
+        for reg in [0xFF44, 0xFF43, 0xFF4B] {
+            after_requesting_lyc_write(|ctx| {
+                crate::cpu::Bus::write(ctx, reg, 0);
+                let stat = ctx.sys.iflags & crate::ppu::INT_STAT;
+                assert_eq!(stat, crate::ppu::INT_STAT, "then {reg:04X}");
+            });
+        }
+    }
+
+    /// Review A2-04 (2): `Bus::set_interrupt_flags` (the trait's IF setter)
+    /// while the request is on its way doesn't drop it: IF is written,
+    /// the request is not in IF yet.
+    #[test]
+    fn lyc_write_request_survives_the_if_setter() {
+        after_requesting_lyc_write(|ctx| {
+            Bus::set_interrupt_flags(ctx, 0);
+            ctx.idle();
+            let stat = ctx.sys.iflags & crate::ppu::INT_STAT;
+            assert_eq!(stat, crate::ppu::INT_STAT);
+        });
+    }
+
+    /// Review A2-04 (3): IF holds only bits 0-4 while a request is on its
+    /// way, so `IE & IF` is what is pending without a mask (IE has all 8
+    /// bits), and FF0F reads E0 | IF.
+    #[test]
+    fn lyc_write_request_is_not_in_if_before_its_clock() {
+        after_requesting_lyc_write(|ctx| {
+            ctx.sys.ie = 0xFF;
+            assert_eq!(ctx.sys.iflags, 0);
+            assert_eq!(Bus::interrupt_enable(ctx) & Bus::interrupt_flags(ctx), 0);
+            ctx.idle();
+            assert_eq!(Bus::interrupt_flags(ctx), crate::ppu::INT_STAT);
+            assert_eq!(Bus::read(ctx, 0xFF0F), 0xE0 | crate::ppu::INT_STAT);
+        });
+    }
+
+    /// Review A2-04 (4): turning the LCD off while the request is on its
+    /// way cancels it (gambatte, behaviour only: `LCD::lcdcChange`
+    /// disables every LCD event when the LCD goes off,
+    /// `memevent_oneshot_statirq` included); it doesn't come back when the
+    /// LCD is turned on again.
+    #[test]
+    fn lcd_off_cancels_a_lyc_write_request() {
+        after_requesting_lyc_write(|ctx| {
+            crate::cpu::Bus::write(ctx, 0xFF40, 0x11);
+            for _ in 0..8 {
+                ctx.idle();
+                assert_eq!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "LCD off");
+            }
+            crate::cpu::Bus::write(ctx, 0xFF40, 0x91);
+            // Lines 0-3 of the new frame (LYC = 5): no STAT interrupt.
+            for _ in 0..4 * 114 {
+                ctx.idle();
+                assert_eq!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "LCD on again");
+            }
+        });
     }
 
     /// An IF write lands one dot after its access (SameBoy

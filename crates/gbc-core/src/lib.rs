@@ -182,6 +182,7 @@ mod cpu;
 mod dma;
 mod events;
 mod hdma;
+mod irq;
 mod joypad;
 mod memory;
 mod ppu;
@@ -1688,9 +1689,7 @@ mod tests {
             cpu::Bus::speed_switch(self.0, ime, pending)
         }
         fn speed_switch_halt(&mut self) -> bool {
-            if self.interrupt_enable() & self.interrupt_flags() & cpu::INT_MASK != 0
-                || self.0.speed_switch_over()
-            {
+            if self.interrupt_enable() & self.interrupt_flags() != 0 || self.0.speed_switch_over() {
                 self.0.speed_switch_end();
                 true
             } else {

@@ -81,7 +81,7 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3bus*3Ctx18audio_buffer_event*               # Ctx::audio_buffer_event
 .text._R*8gbc_core3bus*3Ctx9write_apu*                         # Ctx::write_apu
 # Tier B (cheap, per-event PPU functions)
-.text._R*8gbc_core3ppu*3Ppu4sync*                              # Ppu::sync
+.text._R*8gbc_core3ppu*3Ppu7walk_to*                           # Ppu::walk_to (Ppu::sync without the timed-request post, which its callers inline)
 .text._R*8gbc_core3ppu*3Ppu10next_event*                       # Ppu::next_event
 .text._R*8gbc_core3ppu*3Ppu9point_irq*                         # Ppu::point_irq
 .text._R*8gbc_core3ppu*3Ppu4draw*                              # Ppu::draw

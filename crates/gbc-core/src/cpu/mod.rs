@@ -98,7 +98,9 @@ pub(crate) const FN: u8 = 0x40;
 pub(crate) const FH: u8 = 0x20;
 pub(crate) const FC: u8 = 0x10;
 
-/// The interrupt sources in IE/IF (bit 0 = VBlank ... bit 4 = joypad).
+/// The interrupt sources in IE/IF (bit 0 = VBlank ... bit 4 = joypad): the
+/// bits of IF that exist. A [`Bus`] masks IF writes with it, so that
+/// `IE & IF` needs no mask where the CPU tests it.
 pub(crate) const INT_MASK: u8 = 0x1F;
 
 /// What the CPU is connected to. Each of `read`, `write` and `idle` is one
@@ -156,7 +158,9 @@ pub trait Bus {
     }
     /// The IE register (FFFF). Free: no M-cycle.
     fn interrupt_enable(&self) -> u8;
-    /// The IF register (FF0F), low 5 bits significant. Free: no M-cycle.
+    /// The IF register (FF0F): bits 0-4, with bits 5-7 (which don't exist)
+    /// as 0, so `interrupt_enable() & interrupt_flags()` is what is
+    /// pending. Free: no M-cycle.
     fn interrupt_flags(&self) -> u8;
     /// Writes IF (used to acknowledge a dispatched interrupt). Free.
     fn set_interrupt_flags(&mut self, value: u8);
@@ -168,7 +172,7 @@ pub trait Bus {
     /// it is absorbed (at M-cycle granularity, ADR 0008).
     fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         self.write(addr, value);
-        let pending = ie & self.interrupt_flags() & INT_MASK;
+        let pending = ie & self.interrupt_flags();
         self.set_interrupt_flags(self.interrupt_flags() & !(pending.isolate_lowest_one()));
         pending
     }
@@ -430,7 +434,7 @@ impl Cpu {
             }
         }
         if latched.is_none() {
-            if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+            if self.ime && bus.interrupt_enable() & bus.interrupt_flags() != 0 {
                 self.dispatch(bus);
                 return;
             }
@@ -481,7 +485,7 @@ impl Cpu {
                 // or the next fetch (IME off): SameBoy `GB_cpu_run` samples
                 // IE & IF, then advances 4 clocks while halted, then takes
                 // either branch. See docs/reference/halt.md.
-                if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                if bus.interrupt_enable() & bus.interrupt_flags() != 0 {
                     bus.halt_end();
                     bus.idle();
                     let prefetched = self.wake_prefetched();
@@ -547,7 +551,7 @@ impl Cpu {
             }
             Mode::Latched => {
                 self.mode = Mode::Running;
-                if self.ime && bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0 {
+                if self.ime && bus.interrupt_enable() & bus.interrupt_flags() != 0 {
                     // gambatte `Interrupter::interrupt`: "undo prefetch".
                     self.regs.pc = self.regs.pc.wrapping_sub(1);
                     return Some(1);
@@ -607,7 +611,7 @@ impl Cpu {
 
     /// HALT (opcode 76), after its fetch.
     fn halt<B: Bus>(&mut self, bus: &mut B) {
-        if bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK == 0 {
+        if bus.interrupt_enable() & bus.interrupt_flags() == 0 {
             self.mode = Mode::Halted;
             bus.halt_begin();
             // A VRAM DMA block requested in HALT's M-cycle: the byte after
@@ -665,7 +669,7 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     fn stop<B: Bus>(&mut self, bus: &mut B) {
-        let pending = bus.interrupt_enable() & bus.interrupt_flags() & INT_MASK != 0;
+        let pending = bus.interrupt_enable() & bus.interrupt_flags() != 0;
         let kind = bus.stop_begin();
         if !pending {
             let pc = self.regs.pc;

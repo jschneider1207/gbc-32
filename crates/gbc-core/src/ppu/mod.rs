@@ -70,6 +70,7 @@
 //! source that changes between update points is seen at the next one.
 
 use crate::dma::{OamDma, PpuView};
+use crate::irq::PendingIrq;
 use crate::memory::{Held, Memory};
 use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
@@ -598,6 +599,11 @@ pub(crate) struct Ppu {
     /// not OAM as it is at the draw.
     attr_on: bool,
     obj_attr: [(u8, u8); objects::MAX_PER_LINE],
+    /// STAT interrupt requests that reach IF at a later clock than the one
+    /// they were made at ([`Self::request_irq`]). [`Self::next_event`]
+    /// includes the earliest and [`Self::sync`] posts those due, so IF never
+    /// depends on when the PPU was synced. Cold: last.
+    irq: PendingIrq,
 }
 
 /// See [`Ppu::scan`].
@@ -667,6 +673,7 @@ impl Ppu {
             attr_on: false,
             obj_attr: [(0, 0); objects::MAX_PER_LINE],
             dma: OamDma::new(),
+            irq: PendingIrq::NONE,
         }
     }
 
@@ -699,6 +706,7 @@ impl Ppu {
     #[cfg(feature = "clock-offset")]
     pub(crate) fn shift_clock(&mut self, by: u64) {
         debug_assert!(self.line.start == NEVER && self.scan.line == NEVER);
+        debug_assert!(self.irq.is_empty());
         self.frame_start = self.frame_start.wrapping_add(by);
         self.synced += by;
     }
@@ -1412,6 +1420,12 @@ impl Ppu {
     /// no ROM needs it and the test didn't fit this function's budget:
     /// [`Self::early_point`] covers its IF writes.)
     pub(crate) fn next_event(&self, double: bool) -> u64 {
+        self.next_walk_event(double).min(self.irq.next())
+    }
+
+    /// [`Self::next_event`] of the walk alone.
+    #[inline(always)]
+    fn next_walk_event(&self, double: bool) -> u64 {
         if !self.lcd_enabled() {
             return NEVER;
         }
@@ -1441,9 +1455,28 @@ impl Ppu {
     }
 
     /// Catches up to clock `now`: runs every update point up to it,
-    /// requesting the STAT and VBlank interrupts in `iflags`. Returns
+    /// requesting the STAT and VBlank interrupts in `iflags`, and posts
+    /// the timed requests due by `now` ([`Self::request_irq`]). Returns
     /// `FRAME_READY` if VBlank started on the way.
+    #[inline(always)]
     pub(crate) fn sync(
+        &mut self,
+        now: u64,
+        mem: &mut Memory,
+        frame: &mut Frame,
+        iflags: &mut u8,
+        double: bool,
+    ) -> Events {
+        let events = self.walk_to(now, mem, frame, iflags, double);
+        self.post_irqs(now, iflags);
+        events
+    }
+
+    /// [`Self::sync`] without posting the timed requests: for a caller
+    /// that looks at the PPU's state at `now` and not at IF. The requests
+    /// stay due ([`Self::next_event`]), so the sync that deadline runs, or
+    /// the one an IF observer runs first, posts them.
+    pub(crate) fn walk_to(
         &mut self,
         now: u64,
         mem: &mut Memory,
@@ -1502,6 +1535,26 @@ impl Ppu {
         }
         debug_assert_eq!(self.cursor, self.seek_point(double));
         events
+    }
+
+    /// IF bits `bits` are set at clock `at` (after the last sync), whenever
+    /// the PPU is next synced: [`Self::sync`] to `at` or later posts them,
+    /// and [`Self::next_event`] is at most `at` until then (the caller
+    /// reschedules). Until posted, turning the LCD off cancels the request
+    /// ([`Self::write_lcdc`]); once in IF it is an ordinary IF bit.
+    pub(crate) fn request_irq(&mut self, at: u64, bits: u8, iflags: &mut u8) {
+        debug_assert!(at > self.synced);
+        self.irq.request(at, bits, iflags);
+    }
+
+    /// Posts the timed requests that have reached IF by clock `now`
+    /// (every [`Self::sync`] does; also for a caller that must not run
+    /// the walk to `now`).
+    #[inline(always)]
+    pub(crate) fn post_irqs(&mut self, now: u64, iflags: &mut u8) {
+        if self.irq.next() <= now {
+            self.irq.post(now, iflags);
+        }
     }
 
     /// Frame position 0 of the next frame is reached (the cursor is in
@@ -3038,6 +3091,11 @@ impl Ppu {
             // during mode 3; SameBoy `GB_lcd_off` clears
             // `cgb_palettes_blocked`).
             self.cursor.pt = Pt::V0;
+            // A STAT interrupt request still on its way to IF is dropped
+            // (gambatte, behaviour only: `LCD::lcdcChange` disables every
+            // LCD event, `memevent_oneshot_statirq` included, when the LCD
+            // is turned off).
+            self.irq.clear();
         }
         self.lcdc = value;
         if !was_on && on {

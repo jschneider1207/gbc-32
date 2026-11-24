@@ -65,6 +65,18 @@ impl Observer {
 /// `GB_CONFLICT_READ_OLD` in double speed (at the access).
 pub(crate) const LYC_WRITE: Observer = Observer { ss: 1, ds: 0 };
 
+/// CGB single speed: the STAT interrupt a LYC write requests reaches IF
+/// this many dots after the write lands ([`LYC_WRITE`]; `Ctx::write_ppu`).
+/// gambatte (behaviour only, GPL) `LCD::lycRegChange`: on CGB in single
+/// speed `memevent_oneshot_statirq` at `cc + 5`, in double speed and on
+/// DMG the interrupt is flagged at once. CGB04C
+/// `lycEnable/lyc_ff45_trigger_delay_2` (the interrupt is dispatched one
+/// instruction later than at the write: out2, DMG out0). gambatte's `cc`
+/// is taken as the dot the write lands on, the grid an IF write lands on
+/// too (`Ctx::write_if`): one in the M-cycle after the LYC write lands 4
+/// dots after it, before the request, as in gambatte.
+pub(crate) const LYC_WRITE_IRQ: u64 = 5;
+
 /// The second phase of a STAT write (`GB_CONFLICT_STAT_CGB`, `_DOUBLE`):
 /// one T-cycle after the first.
 pub(crate) const STAT_PHASE2: Observer = Observer { ss: 1, ds: 1 };
