@@ -23,7 +23,10 @@ and AGB differences are noted only where the code deliberately differs.
   the duty step**, so an NRx4 write 0-4 clocks after a step sets the
   period running from that step (the position has already moved);
   `Square::write_nrx4`. A trigger's countdown counts as reloaded one period
-  before its first step (no ROM tests that case). Source: SameSuite
+  before its first step (no ROM tests that case). The window is measured
+  in the period the countdown was loaded with (`Square::reload`), not in
+  `freq`: an NRx3 write or a sweep write-back since the step has already
+  changed `freq`, and games write NRx3 then NRx4 (M10 review A3-3). Source: SameSuite
   `channel_1_freq_change_timing-*` (f 0x7FC -> 0x0FC written 22-29 M-cycles
   after a trigger, read back 16 M-cycles later): the final position
   matches CGB C in both speeds and D/E/AGB in single speed only with this

@@ -21,6 +21,11 @@ const LENGTH_MAX: u16 = 64;
 pub(crate) struct Square {
     /// Base clocks to the next duty step (>= 1 while on).
     pub(crate) countdown: u16,
+    /// The period now running, in base clocks: what the last duty step (or
+    /// an NRx4 write just after it, `write_nrx4`) loaded `countdown` with.
+    /// `freq` can have changed since (NRx3, a sweep write-back): it is the
+    /// next reload's.
+    pub(crate) reload: u16,
     /// The 11-bit frequency (NRx3, NRx4 bits 0-2): the period used at the
     /// next reload.
     pub(crate) freq: u16,
@@ -45,6 +50,7 @@ pub(crate) struct Square {
 impl Square {
     pub(crate) const ZERO: Self = Self {
         countdown: 0,
+        reload: 0,
         freq: 0,
         duty: 0,
         pos: 0,
@@ -61,11 +67,13 @@ impl Square {
         NonZeroU32::new(p).unwrap_or(NonZeroU32::MIN)
     }
 
-    /// Clocks since the last duty step (mod 2^16). After a trigger the
+    /// Clocks since the last duty step (mod 2^16): the running period
+    /// less what is left of it. Not from `freq`, which an NRx3 write since
+    /// the step has already changed (M10 review A3-3). After a trigger the
     /// countdown is over one period (a huge value) until `delay` clocks on.
     #[inline]
     fn since_step(&self) -> u16 {
-        ((2048 - (self.freq & 0x7FF)) * 4).wrapping_sub(self.countdown)
+        self.reload.wrapping_sub(self.countdown)
     }
 
     /// The digital output, 0-15 (PCM12/PCM34): the volume while the
@@ -118,6 +126,7 @@ impl Square {
         let rest = u32::try_from(rest).unwrap_or_else(|_| super::rem_long(rest, 8 * p.get()));
         self.step(rest / p + 1);
         self.countdown = (p.get() - rest % p) as u16;
+        self.reload = p.get() as u16;
     }
 
     /// Adds to `out[i]` the analog level times clocks over the `i`-th of
@@ -167,6 +176,7 @@ impl Square {
                 self.pos = (first + m) & 7;
                 self.high = last != 0;
                 self.countdown = (p.get() - r) as u16;
+                self.reload = p.get() as u16;
                 bit * cd + p.get() * ones + r * last
             };
             *o += (15 * dt as i32 - vol2 * high as i32) as i16;
@@ -219,7 +229,9 @@ impl Square {
         let since = self.since_step();
         self.freq = self.freq & 0xFF | u16::from(value & 7) << 8;
         if since <= 4 {
-            self.countdown = (self.period().get() - u32::from(since)).max(1) as u16;
+            let p = self.period().get();
+            self.countdown = (p - u32::from(since)).max(1) as u16;
+            self.reload = p as u16;
         }
         if self.len.write_nrx4(LENGTH_MAX, value, fs) {
             self.on = false;
@@ -237,7 +249,10 @@ impl Square {
     /// `docs/reference/apu.md` have the delay itself).
     fn trigger(&mut self, delay: u8) {
         let extra = u32::from(delay) - 4 * u32::from(self.on);
-        self.countdown = (self.period().get() + extra) as u16;
+        let p = self.period().get();
+        self.countdown = (p + extra) as u16;
+        // One period before the first step (`write_nrx4`).
+        self.reload = p as u16;
         if !self.on {
             // Digital 0 to the first step.
             self.high = false;
@@ -538,6 +553,82 @@ mod tests {
         sq.advance(9);
         sq.write(4, 0x00, 0, 10);
         assert_eq!(sq.countdown, 17, "trigger countdown kept");
+    }
+
+    /// The window is measured from the step that loaded the countdown, in
+    /// the period it was loaded with: an NRx3 write changes the next
+    /// reload, not the period running (M10 review A3-3). Games write NRx3
+    /// then NRx4.
+    #[test]
+    fn the_nrx4_window_counts_from_the_running_period_after_an_nrx3_write() {
+        // f 0x700 (1,024 clocks per step); NRx3 = 83 makes the next
+        // period 500 clocks, NRx4 = 06 then 1,524 (f 0x683).
+        // 526 clocks after the step (498 left): well outside the window,
+        // though 498 is within 4 of the new NRx3 period. The step keeps
+        // its time.
+        let mut sq = playing(0, 15, 0x700);
+        sq.advance(526);
+        assert_eq!((sq.countdown, sq.pos), (498, 1));
+        sq.write(3, 0x83, 0, 10);
+        sq.write(4, 0x06, 0, 10);
+        assert_eq!((sq.countdown, sq.freq), (498, 0x683), "outside");
+        // 2 clocks after the step: inside the window, so the new period
+        // (both writes: the reload takes the whole frequency) runs from
+        // the step.
+        let mut sq = playing(0, 15, 0x700);
+        sq.advance(2);
+        assert_eq!(sq.countdown, 1022);
+        sq.write(3, 0x83, 0, 10);
+        sq.write(4, 0x06, 0, 10);
+        assert_eq!(sq.countdown, 1524 - 2, "inside");
+        // A step under the NRx3 frequency makes its period (500) the
+        // running one, through either path: 2 clocks after such a step,
+        // NRx3 = 00 and NRx4 = 06 (f 0x600, 2,048) are inside the window.
+        for integrate in [false, true] {
+            let mut sq = playing(0, 15, 0x700);
+            sq.write(3, 0x83, 0, 10);
+            for _ in 0..(1024 + 3 * 500 + 2) / 2 {
+                if integrate {
+                    sq.integrate1(2);
+                } else {
+                    sq.advance(2);
+                }
+            }
+            assert_eq!(sq.countdown, 498);
+            sq.write(3, 0x00, 0, 10);
+            sq.write(4, 0x06, 0, 10);
+            assert_eq!(sq.countdown, 2048 - 2, "inside, integrate: {integrate}");
+        }
+        // A sweep write-back changes the next reload only, too: f 0x400
+        // (4,096) to 0x600 (2,048), 2,050 clocks after a step; then
+        // NR14 = 05 (f 0x500).
+        let (mut sw, mut sq) = ch1(0x11, 0x400);
+        let cd = u64::from(sq.countdown);
+        sq.advance(cd + 2050);
+        sw.clock(&mut sq);
+        assert_eq!((sq.freq, sq.countdown), (0x600, 2046));
+        sq.write(4, 0x05, 0, 10);
+        assert_eq!(sq.countdown, 2046, "outside, after a sweep step");
+        // An NRx4 write inside the window makes its period the running
+        // one: f 0x7FC (16) to 0x0FC (7,184) 1 clock after a step, then
+        // to 0x4FC (3,088) 2 clocks later, still inside.
+        let mut sq = playing(0, 15, 0x7FC);
+        sq.advance(1);
+        sq.write(4, 0x00, 0, 10);
+        assert_eq!(sq.countdown, 7184 - 1);
+        sq.advance(2);
+        sq.write(4, 0x04, 0, 10);
+        assert_eq!(sq.countdown, 3088 - 3, "inside, twice");
+        // A retrigger's period (f 0x7FC here) runs from `delay - 4` clocks
+        // after it: 2 clocks later is inside.
+        let mut sq = playing(0, 15, 0x700);
+        sq.advance(500);
+        sq.write(3, 0xFC, 0, 10);
+        sq.write(4, 0x87, 0, 10);
+        assert_eq!(sq.countdown, 16 + 6);
+        sq.advance(6 + 2);
+        sq.write(4, 0x00, 0, 10);
+        assert_eq!(sq.countdown, 7184 - 2, "inside, after a trigger");
     }
 
     #[test]

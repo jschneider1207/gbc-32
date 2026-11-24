@@ -178,6 +178,7 @@ impl Apu {
         ch1.pos = 6;
         ch1.high = true;
         ch1.countdown = 145;
+        ch1.reload = 252;
         ch1.env.nrx2 = 0xF3;
     }
 
@@ -498,6 +499,7 @@ mod tests {
         // ROMs allow 648-651; 649 is 1 mod 4, the trigger grid).
         let mut apu = Apu::new();
         apu.post_boot();
+        assert_eq!(apu.sq[0].reload, 252, "the running period is f 0x7C1's");
         let mut ch1 = apu.sq[0];
         ch1.advance(648);
         assert_eq!((ch1.pos, ch1.high), (0, true));
