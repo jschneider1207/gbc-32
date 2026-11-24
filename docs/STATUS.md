@@ -24,7 +24,9 @@ Waves (details in the triage file):
 2. Correctness fixes: done so far: A2-01 palette/LCD-off (86c2f98), A2-05
    (65f00bd), A4-1 unsupported mappers refused (35ff843, ADR 0031), A4-8
    (2de0ffb), A4-2 HDMA cancel (6094acb), A1-04 (0d64707), A4-4/A4-5,
-   speed-switch order A1-02/E8/A1-08 (e8d960e..7cc2345). **In flight:**
+   speed-switch order A1-02/E8/A1-08 (e8d960e..7cc2345), APU analytic
+   tests + A3-3/A3-6, STOP mode + RP (FF56). **In flight:** HuC1 + HuC3
+   (branch `m10-huc`). Old in-flight note:
    STOP mode + RP register (branch `m10-stop-mode`), APU analytic sample
    tests + A3-3/A3-6 (branch `m10-apu`). **Open:** HuC1 + HuC3 mappers
    (human asked for them; `MapperKind` already has the variants).
@@ -115,6 +117,10 @@ Open (M10, session 16):
 - **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
   0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
+- **STOP mode audio** (A1-01): in STOP the APU channel generators keep
+  playing their tone (frame sequencer frozen), as SameBoy does on CGB; no
+  hardware test decides whether a CGB goes silent. Recorded as open in the
+  ADR 0020 amendment.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
 - **Hardware repo** (C11): `docs/firmware-interface.md` says "~200 KiB
