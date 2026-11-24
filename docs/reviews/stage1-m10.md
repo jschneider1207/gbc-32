@@ -46,11 +46,11 @@ been seen failing on the old code; until then it is a reviewer claim.
 
 | ID | Sev | Finding | Outcome |
 |---|---|---|---|
-| A2-01 | high | CGB palette writes dropped while the LCD is off if it was turned off inside mode 3 (`Ppu::drawing` ignores LCD enable) | wave 2 |
+| A2-01 | high | CGB palette writes dropped while the LCD is off if it was turned off inside mode 3 (`Ppu::drawing` ignores LCD enable) | fixed 86c2f98 (confirmed: read back FF/00 instead of 1F; nothing else shared the hole) |
 | A2-02 | med | STAT IRQ model = two reference models spliced; walk a dot early at 0:4 and 153:12, five compensations | wave 5 (with E3/E4) |
 | A2-03 | med | Mid-line state in three structs, invariants held by `% 11` masks | wave 5 (after budget reform) |
 | A2-04 | low | Delayed LYC IRQ in IF bits 5-6 can be stranded/wiped/leaked | wave 5 (typed `Irq` event, E4) |
-| A2-05 | low | LCDC.5 clear early on the WY line loses the WY latch for the frame | wave 2 |
+| A2-05 | low | LCDC.5 clear early on the WY line loses the WY latch for the frame | fixed 65f00bd (confirmed; SameBoy `wy_check` + Pan Docs) |
 | A2-06 | low | `obj_size_fetch` patches VRAM to pass a parameter (= E10) | wave 5 |
 | A2-07 | low | Write landing at `now - 1` on the mode-3 end dot keeps the old value for pixel 159 | plan |
 | A2-08 | low | Window zero pixel on CGB rests on one Mealybug capture, against SameBoy | rejected: the capture is CGB C hardware, our target (ADR 0003); tagged as single-source (E7) |
@@ -64,14 +64,14 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A3-5 | low | Output headroom (±2x full scale after high-pass) not in the API contract | wave 2 (doc) |
 | A3-6 | low | Stale sweep overflow check survives a CH1 retrigger | wave 2 |
 | A3-7 | low | Desktop DC blocker starts from zero (click) | plan (desktop is throwaway) |
-| A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | wave 2; human: also add HuC1 + HuC3 |
+| A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | fixed 35ff843 (ADR 0031; independent API review: no high/medium). HuC1 + HuC3 (human): wave 2, open |
 | A4-2 | med | HDMA cancel with a block pending copies `value + 1` blocks | wave 2 |
 | A4-3 | med | Fuzz pass built without overflow checks / debug asserts (= D5) | fixed fc92df4 |
 | A4-4 | low | `dma_retime` underflow on a switch to single speed right after reset | fixed df7a7a9 (confirmed: test failed before) |
 | A4-5 | low | `RtcState::advance_seconds` underflow on an unmasked state | fixed f29659a (confirmed) |
 | A4-6 | low | Re-arming an active HDMA inside HBlank starts a second block (references disagree) | plan |
 | A4-7 | low | RP (FF56) unimplemented (= A1-03) | wave 2 |
-| A4-8 | low | MBC1M detection accepts two blank logo areas | wave 2 |
+| A4-8 | low | MBC1M detection accepts two blank logo areas | fixed 2de0ffb (confirmed) |
 | A4-9 | low | MBC3 latch edge rule unverified | plan (already a task) |
 | A4-10 | low | MBC5 rumble bit has no way out of the core | plan (Stage 3 board has no motor decision yet) |
 | A4-11 | low | Test gaps (list in report) | wave 3 where cheap |
@@ -134,7 +134,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | D9 | med | Test layout (inline 2.4k-line modules, duplicated helpers, test-only field in `Serial`) | wave 5 (helpers + the `Serial` field); file moves: plan |
 | D10 | low | Raw register/LCDC literals | plan |
 | D11 | low | `Bus` trait accretion, `LATCHED` sentinel | plan (with E5, stage 2) |
-| D12 | low | = A4-1 | wave 2 |
+| D12 | low | = A4-1 | fixed 35ff843 |
 | D13 | low | Inlining conventions undocumented | wave 5 (architecture.md) |
 | D14 | low | API nits (`Config` non_exhaustive, `run_until(u64::MAX)`) | wave 5 |
 | D15 | low | Lint suggestions | plan |
