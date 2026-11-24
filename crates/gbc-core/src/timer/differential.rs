@@ -8,9 +8,17 @@
 //! and CGB speed switches, with writes biased to the clocks around a TIMA
 //! overflow (`overflow_at - m`, `overflow_at` = cycle A, `reloaded_at` =
 //! cycle B). After every access and every M-cycle it compares the clock,
-//! DIV, TIMA, TMA, TAC, SB, SC, the timer and serial IF bits, and the
-//! Timer and Serial deadlines against the eager model's next reload and
-//! next serial shift (found by ticking a copy ahead).
+//! DIV, TIMA, TMA, TAC, SB, SC, the timer and serial IF bits, the serial
+//! port's bit count, bits sent and last byte, and the Timer and Serial
+//! deadlines against the eager model's next reload and the end of its
+//! serial transfer (found by ticking a copy ahead).
+//!
+//! The serial port's shifts are lazy too (ADR 0011, 2026-11-24 serial
+//! amendment): only a transfer's completion is an event, and SB is read
+//! here at every check without syncing the port (a read is a `peek`), so
+//! the SB/SC/DIV writes, speed switches and STOPs of a sequence land on a
+//! port with shifts not yet applied. STOP mode lasts a random number of
+//! M-cycles, in which the eager model isn't ticked.
 //!
 //! Reloads are lazy while IF bit 2 is set and IE bit 2 clear (ADR 0011,
 //! 2026-11-24 amendment), so the sequences also leave the IF bit set (per
@@ -48,6 +56,8 @@ mod tests {
         timer: Eager,
         serial: Serial,
         iflags: u8,
+        /// A serial byte completed since the last check.
+        tx: bool,
         /// IE: 00 or 04 (timer).
         ie: u8,
         mcycle: u64,
@@ -59,6 +69,7 @@ mod tests {
         fn clock_serial(&mut self, fell: u16) {
             if self.serial.clock(u64::from(fell)) {
                 self.iflags |= INT_SERIAL;
+                self.tx = true;
             }
         }
 
@@ -124,22 +135,33 @@ mod tests {
             }
         }
 
-        /// The clocks of the next reload (timer IF) and serial shift within
-        /// `w` M-cycles, by ticking a copy.
+        /// The clocks of the next reload (timer IF) within `w` M-cycles
+        /// and of the running serial transfer's completion (serial IF),
+        /// by ticking a copy.
         fn next_events(&self, w: u32) -> (u64, u64) {
             let mut c = self.clone();
             let (mut timer, mut serial) = (NEVER, NEVER);
             for _ in 0..w {
                 c.iflags = 0;
-                let before = (c.serial.bits, c.serial.sc);
                 c.tick();
                 if c.iflags & INT_TIMER != 0 && timer == NEVER {
                     timer = c.clock;
                 }
-                if (c.serial.bits, c.serial.sc) != before && serial == NEVER {
+            }
+            let mut c = self.clone();
+            // 8 bits of 128 M-cycles on the normal clock, and up to 128
+            // more to the first edge.
+            for _ in 0..SERIAL_WINDOW {
+                if !c.serial.running() {
+                    break;
+                }
+                c.iflags = 0;
+                c.tick();
+                if c.iflags & INT_SERIAL != 0 {
                     serial = c.clock;
                 }
             }
+            assert!(!c.serial.running(), "a transfer longer than the window");
             (timer, serial)
         }
     }
@@ -164,8 +186,10 @@ mod tests {
         }
     }
 
-    /// Look-ahead window for the deadline comparison, in M-cycles.
+    /// Look-ahead window for the Timer deadline comparison, in M-cycles.
     const WINDOW: u32 = 8;
+    /// And for the Serial deadline: longer than any transfer.
+    const SERIAL_WINDOW: u32 = 1200;
 
     struct Pair<'r, 'a> {
         ctx: Ctx<'r, 'a>,
@@ -210,6 +234,15 @@ mod tests {
         if_clear_lazy: u32,
         /// Checks with IF bit 2 set (the Timer deadline must be off).
         if_set: u32,
+        /// Checks, SB/SC writes, DIV writes, STOPs and speed switches with
+        /// serial shifts not yet applied (no event ran them).
+        serial_lazy: u32,
+        serial_lazy_write: u32,
+        serial_lazy_div: u32,
+        serial_lazy_stop: u32,
+        serial_lazy_switch: u32,
+        /// STOP modes of 100 M-cycles or more in a running transfer.
+        serial_stopped: u32,
     }
 
     impl Pair<'_, '_> {
@@ -235,7 +268,16 @@ mod tests {
             n
         }
 
+        /// Serial shifts up to `now` that no access has applied yet.
+        fn serial_lazy(&self) -> bool {
+            let s = &self.ctx.sys;
+            let (c, mut port) = (s.timer.sc(self.now()), s.serial.clone());
+            port.catch_up(c);
+            port.bits != s.serial.bits
+        }
+
         fn check(&mut self, at: &str) {
+            self.cov.serial_lazy += u32::from(self.serial_lazy());
             let c = &self.ctx;
             let lazy_read = |reg: u8| read::<true>(c.mem, c.sys, &c.hot, 0xFF00 | u16::from(reg));
             let mut fail = String::new();
@@ -272,6 +314,18 @@ mod tests {
             if li != ei {
                 fail += &format!("IF {li:02x} vs eager {ei:02x}; ");
             }
+            // The serial port as an access now would find it. A catch-up
+            // here completes nothing: the event ran first.
+            let mut port = c.sys.serial.clone();
+            let done = port.catch_up(c.sys.timer.sc(c.clock()));
+            let (l, e) = (port.state(), self.eager.serial.state());
+            if done || l != e {
+                fail += &format!("serial {l:02x?} (done: {done}) vs eager {e:02x?}; ");
+            }
+            let tx = c.events.contains(Events::SERIAL_TX);
+            if tx != self.eager.tx {
+                fail += &format!("SERIAL_TX {tx} vs eager {}; ", self.eager.tx);
+            }
             let now = c.clock();
             let horizon = now + u64::from(WINDOW) * self.eager.mcycle;
             let (et, es) = self.eager.next_events(WINDOW);
@@ -286,6 +340,11 @@ mod tests {
                     // can't be acknowledged.
                     if d != NEVER {
                         fail += &format!("Timer deadline {d} with IF bit 2 set, IE bit 2 clear; ");
+                    }
+                } else if kind == EventKind::Serial {
+                    // Exactly the completion; no deadline otherwise.
+                    if d != e {
+                        fail += &format!("Serial deadline {d} vs eager completion {e}; ");
                     }
                 } else if l != e {
                     fail += &format!("{name} deadline {d} vs eager next {e}; ");
@@ -303,6 +362,8 @@ mod tests {
             // by an IF write: the bus re-arms the Timer deadline there.
             self.ctx.sys.iflags &= INT_TIMER;
             self.eager.iflags &= INT_TIMER;
+            self.ctx.events = Events::EMPTY;
+            self.eager.tx = false;
             if self.clear_1_in != 0 && self.rng.below(self.clear_1_in) == 0 {
                 self.ctx.write_mapped(0xFF0F, 0);
                 self.eager.iflags = 0;
@@ -375,6 +436,9 @@ mod tests {
             let was_b = t.reloaded_at == now && !was_a;
             self.cov.write_a += u32::from(was_a);
             self.cov.write_b += u32::from(was_b);
+            let serial_lazy = u32::from(self.serial_lazy());
+            self.cov.serial_lazy_write += u32::from(reg < 4) * serial_lazy;
+            self.cov.serial_lazy_div += u32::from(reg == 4) * serial_lazy;
             if (4..=7).contains(&reg) {
                 let lazy = self.lazy_reloads(now);
                 self.cov.lazy_a += u32::from(was_a && lazy != 0);
@@ -393,6 +457,9 @@ mod tests {
             let (now, t) = (self.now(), &self.timer());
             self.cov.stop_in_window += u32::from(t.in_cycle_a(now) || t.reloaded_at == now);
             self.cov.switch += u32::from(switch);
+            let serial_lazy = u32::from(self.serial_lazy());
+            self.cov.serial_lazy_stop += u32::from(!switch) * serial_lazy;
+            self.cov.serial_lazy_switch += u32::from(switch) * serial_lazy;
             self.log += &format!(
                 " [{}] stop{}",
                 self.now(),
@@ -412,11 +479,26 @@ mod tests {
                 crate::cpu::Bus::idle(&mut self.ctx);
             }
             if !switch {
-                // STOP mode stops the counter, which the eager model
-                // doesn't mirror. End it on the same clock (a selected
-                // button pressed at once): STOP's DIV reset is all that
-                // remains, and a freeze and thaw with no time between
-                // must change nothing.
+                // STOP mode stops the counter: for the eager model, whose
+                // M-cycles are its counter's ticks, no time passes (after
+                // its DIV reset, below). Mostly ended on the same clock (a
+                // selected button pressed at once): a freeze and thaw
+                // with no time between must change nothing.
+                let n = if self.rng.below(3) == 0 {
+                    self.rng.below(400)
+                } else {
+                    0
+                };
+                self.log += &format!("({n})");
+                let running = self.ctx.sys.serial.running();
+                self.cov.serial_stopped += u32::from(n >= 100 && running);
+                for _ in 0..n {
+                    assert!(!self.ctx.stop_wake());
+                    self.ctx.idle();
+                    let s = &self.ctx.sys.sched;
+                    assert_eq!(s.deadline(EventKind::Serial), NEVER);
+                }
+                self.eager.clock += n * self.eager.mcycle;
                 let s = &mut *self.ctx.sys;
                 let saved = (s.buttons, s.joyp_select);
                 (s.buttons, s.joyp_select) = (crate::Buttons::A, 0);
@@ -480,6 +562,7 @@ mod tests {
                 timer: Eager::new(),
                 serial: Serial::new(),
                 iflags: 0,
+                tx: false,
                 ie: 0,
                 mcycle: 4,
                 clock: 0,
@@ -566,15 +649,21 @@ mod tests {
             c.if_set,
         ];
         assert!(floors.iter().all(|&n| n >= 20), "{cov:?}");
+        assert!(c.serial_stopped >= 20, "{cov:?}");
         // The lazy catch-up's cases. With the `eager-sync` test feature
-        // the timer is caught up every M-cycle, so none is ever reached
-        // there (the comparison above still ran).
+        // the timer and the serial port are caught up every M-cycle, so
+        // none is ever reached there (the comparison above still ran).
         let lazy = [
             c.lazy_a,
             c.lazy_b,
             c.lazy_multi,
             c.ie_on_lazy,
             c.if_clear_lazy,
+            c.serial_lazy,
+            c.serial_lazy_write,
+            c.serial_lazy_div,
+            c.serial_lazy_stop,
+            c.serial_lazy_switch,
         ];
         assert!(
             cfg!(feature = "eager-sync") || lazy.iter().all(|&n| n >= 20),

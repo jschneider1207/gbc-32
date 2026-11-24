@@ -5,7 +5,7 @@
 //! Each CPU bus call is one M-cycle: the access happens at the start of the
 //! cycle (it sees the state as of the current clock), then [`Ctx::tick`]
 //! advances the clock by one M-cycle and runs scheduled events (the TIMA
-//! reload, a serial bit, the PPU's next sync) when the clock reaches the
+//! reload, a serial byte's end, the PPU's next sync) when the clock reaches the
 //! earliest deadline in `Sys::sched` (the event table, ADR 0011). Nothing
 //! else runs per M-cycle: the timer and the serial bit clock are computed
 //! from the clock when their registers are accessed ([`crate::timer`]),
@@ -450,29 +450,38 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// Sets the Serial deadline to the bit clock's next shift (the
-    /// flip-flop's next 1 -> 0 edge, `serial` module docs) while a
-    /// transfer runs. The caller reschedules ([`Self::schedule_serial`]).
-    fn set_serial_deadline(&mut self) {
-        let at = self.serial_deadline(self.clock());
-        self.sys.sched.set(EventKind::Serial, at);
+    /// Brings the serial port's shift register up to the clock `now`
+    /// ([`Serial::catch_up`]): the shifts of a running transfer are no
+    /// events, only its completion is (`serial` module docs, "Lazy
+    /// shifts"). The completion's event runs before any access on its
+    /// clock, so no catch-up but the event's completes a byte.
+    fn serial_catch_up(&mut self, now: u64) {
+        let c = self.sys.timer.sc(now);
+        let done = self.sys.serial.catch_up(c);
+        self.serial_done(done);
     }
 
-    /// The Serial deadline at clock `now`: the bit clock's next shift
-    /// while a transfer runs, else [`NEVER`].
+    /// The Serial deadline: the clock at which the running transfer
+    /// completes (its eighth shift, the bit clock's 1 -> 0 edge that many
+    /// periods on), else [`NEVER`]. It needs no catch-up
+    /// ([`Serial::completion`] is the same before and after one), but a
+    /// counter that runs (not in STOP mode).
     #[inline(always)]
-    fn serial_deadline(&self, now: u64) -> u64 {
+    fn serial_deadline(&self) -> u64 {
         let s = &*self.sys;
-        match s.serial.next_shift(s.timer.sc(now)) {
+        match s.serial.completion() {
             None => NEVER,
             Some(v) => s.timer.clock_at(v),
         }
     }
 
-    /// [`Self::set_serial_deadline`], and reschedules.
+    /// Sets the Serial deadline ([`Self::serial_deadline`]) and
+    /// reschedules: after a change to the transfer, the counter or its
+    /// rate.
     #[inline(never)]
     fn schedule_serial(&mut self) {
-        self.set_serial_deadline();
+        let at = self.serial_deadline();
+        self.sys.sched.set(EventKind::Serial, at);
         self.reschedule();
     }
 
@@ -513,17 +522,25 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// Writes to SC, DIV, TIMA, TMA and TAC (by the low 7 address bits):
-    /// they move the Timer and Serial deadlines. Out of line so the
-    /// register logic stays off `write_high` (ADR 0011).
+    /// Writes to SB, SC, DIV, TIMA, TMA and TAC (by the low 7 address
+    /// bits): they need the system counter, and all but SB move the Timer
+    /// or the Serial deadline. Out of line so the register logic stays
+    /// off `write_high` (ADR 0011).
     #[inline(never)]
     fn write_timer_io(&mut self, reg: usize, value: u8) {
         let now = self.clock();
         let s = &mut *self.sys;
         match reg {
+            // The shifts before the write took the old SB's bits. The
+            // edges don't move: the deadline stays.
+            0x01 => {
+                let done = s.serial.write_sb(value, s.timer.sc(now));
+                return self.serial_done(done);
+            }
             0x02 => {
                 let c = s.timer.sc(now);
-                s.serial.write_sc(value, s.cgb_mode, c);
+                let done = s.serial.write_sc(value, s.cgb_mode, c);
+                self.serial_done(done);
                 self.schedule_serial();
                 return;
             }
@@ -537,8 +554,9 @@ impl Ctx<'_, '_> {
 
     /// A DIV write or STOP: every set counter bit falls (the TIMA glitch
     /// in [`Timer::write_div`], a serial flip-flop toggle in
-    /// [`Serial::div_reset`]; Pan Docs FF04), then both deadlines move
-    /// with the rebased counter.
+    /// [`Serial::div_reset`], after the shifts up to the old counter
+    /// value; Pan Docs FF04), then both deadlines move with the rebased
+    /// counter.
     fn div_reset(&mut self) {
         let now = self.clock();
         let old = self.sys.timer.write_div(now);
@@ -570,7 +588,10 @@ impl Ctx<'_, '_> {
     ///   APU's frame sequencer have no deadline until the wake-up
     ///   (SameBoy `timers_run` returns while `stopped`). Nothing may set
     ///   one of the three before [`Self::stop_wake`]: only CPU writes and
-    ///   their own events do, and neither happens in STOP mode.
+    ///   their own events do, and neither happens in STOP mode. The
+    ///   serial port's lazy shifts follow the counter's value, not the
+    ///   clock (`serial` module docs), so a running transfer holds with
+    ///   it; STOP's DIV reset caught it up just before.
     /// - The PPU and the APU's channels run on (on a CGB; SameBoy
     ///   `GB_display_run`, "The PPU does not advance while in STOP mode
     ///   on the DMG", and `timers_run`, which still advances `apu_cycles`
@@ -921,15 +942,17 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// A serial bit shift is due at `now` (`EventKind::Serial`). Out of
-    /// line, off `boundary`: only while a transfer runs. `boundary`
-    /// reschedules after the event loop.
+    /// A serial transfer completes at `now` (`EventKind::Serial`): the
+    /// catch-up applies the shifts since the last access, the eighth
+    /// among them. Out of line, off `boundary`: once a transfer.
+    /// `boundary` reschedules after the event loop.
     #[cold]
     #[inline(never)]
     fn serial_event(&mut self, now: u64) {
-        let done = self.sys.serial.shift();
-        self.serial_done(done);
-        let at = self.serial_deadline(now);
+        self.serial_catch_up(now);
+        debug_assert!(!self.sys.serial.running());
+        // `NEVER`, the transfer being over.
+        let at = self.serial_deadline();
         self.sys.sched.set_inline(EventKind::Serial, at);
     }
 
@@ -1395,8 +1418,7 @@ impl Ctx<'_, '_> {
         let cgb = s.cgb_mode;
         match reg {
             0x00 => s.set_joypad(s.buttons, value),
-            0x01 => s.serial.sb = value,
-            0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
+            0x01 | 0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
             0x0F => self.write_if(value),
             0x10..=0x3F => self.write_apu(reg, value),
             0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
@@ -1731,8 +1753,12 @@ impl Ctx<'_, '_> {
     ///    **old** speed's rules: the PPU, OAM DMA (`dma_pause`) and the
     ///    timer's reloads (`Timer::speed_switch` catches up before it
     ///    rebases). The APU runs on base clocks and has no rule that
-    ///    depends on the speed; the serial port and the scheduled inputs
-    ///    keep no lazy state (deadlines only).
+    ///    depends on the speed. Nor has the serial port: its lazy shifts
+    ///    follow the counter's value (`serial` module docs), which the
+    ///    switch leaves alone, so a catch-up before the switch and one
+    ///    after it apply the same shifts and it needs none here, only
+    ///    its deadline (step 3). The scheduled inputs keep no lazy state
+    ///    (deadlines only).
     /// 2. The speed changes (`hot.mcycle`, the timer's counter rate, the
     ///    PPU's walk, a paused OAM DMA's M-cycle length).
     /// 3. Every deadline that depends on the speed is set again for the
@@ -2213,7 +2239,8 @@ impl Ctx<'_, '_> {
 impl Ctx<'_, '_> {
     /// Brings every lazily synced component up to the current clock: the
     /// PPU (with a running OAM DMA's bytes first, as before every PPU
-    /// sync), the APU, the timer's reloads and the cartridge RTC. Called
+    /// sync), the APU, the timer's reloads, the serial port's shifts and
+    /// the cartridge RTC. Called
     /// at the start of every M-cycle, before its access, also inside the
     /// skips (HALT, STOP mode, the speed-switch halt, a VRAM DMA stall),
     /// which then go one M-cycle at a time ([`Self::mcycles_to_deadline`]).
@@ -2237,6 +2264,7 @@ impl Ctx<'_, '_> {
         }
         self.apu_sync(now);
         self.sys.timer.catch_up(now);
+        self.serial_catch_up(now);
         if self.sys.cart.has_rtc() {
             self.sys.cart.rtc_sync(now);
         }
@@ -2692,6 +2720,14 @@ fn read_high(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     }
 }
 
+/// SB at clock `now`, with the shifts of a running transfer up to it
+/// ([`Serial::read_sb`]). Out of line, so the counter arithmetic stays
+/// off `read_high` (as `Timer::read`).
+#[inline(never)]
+fn read_sb(sys: &Sys, now: u64) -> u8 {
+    sys.serial.read_sb(sys.timer.sc(now))
+}
+
 /// FF00-FF7F by the low 7 address bits. Unused bits read 1; registers
 /// that don't exist (or are CGB-only, in DMG compatibility mode) read FF.
 fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
@@ -2699,7 +2735,7 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
     match reg {
         // P1/JOYP (Pan Docs: Joypad Input).
         0x00 => 0xC0 | sys.joyp_select | p1_lines(sys.buttons, sys.joyp_select),
-        0x01 => sys.serial.sb,
+        0x01 => read_sb(sys, hot.clock()),
         0x02 => sys.serial.read_sc(cgb),
         0x04..=0x07 => sys.timer.read(hot.clock(), reg),
         0x0F => 0xE0 | sys.iflags,

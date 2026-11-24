@@ -211,7 +211,7 @@ impl Timer {
     }
 
     /// The clock at which the counter reaches `v` (`v >= sc(now)`, a
-    /// multiple of 4): the serial bit clock's next shift.
+    /// multiple of 4): a serial transfer's completion.
     #[inline]
     pub(crate) fn clock_at(&self, v: u64) -> u64 {
         self.clock_of(v)

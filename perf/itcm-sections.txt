@@ -109,6 +109,7 @@ ITCM_BUDGET_BYTES=57344
 # I/O register reads and writes (one call per access to that register)
 FLASH_OK .text._R*8gbc_core3bus13read_io_other*                # reads of the less common FFxx registers
 FLASH_OK .text._R*8gbc_core5timer*5Timer4read*                 # DIV/TIMA/TMA/TAC reads
+FLASH_OK .text._R*8gbc_core3bus7read_sb*                       # SB reads (a running transfer's lazy shifts)
 FLASH_OK .text._R*8gbc_core3apu8read_apu*                      # APU register reads (FF10-FF3F)
 FLASH_OK .text._R*8gbc_core3bus*3Ctx14write_timer_io*          # timer and serial register writes
 FLASH_OK .text._R*8gbc_core3bus*3Ctx8write_ie*                 # IE writes (re-arm the lazy timer)

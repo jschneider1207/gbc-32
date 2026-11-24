@@ -2068,7 +2068,13 @@ mod tests {
     /// every 16 clocks (262144 Hz). The serial interrupt ends the halt.
     #[test]
     fn serial_bit_in_flight_across_a_switch_to_single_speed_shifts_once() {
-        use crate::schedule::EventKind;
+        // The bit count and the clock of the next shift, as an access
+        // now would find them (the shifts are lazy: `serial` module docs).
+        let progress = |emu: &Emulator| {
+            let s = &emu.hw.sys;
+            let (bits, next) = s.serial.progress(s.timer.sc(emu.clock()));
+            (bits, next.map_or(u64::MAX, |v| s.timer.clock_at(v)))
+        };
         let mut seen = [false; 2];
         for pad in 0..4 {
             let mut program = vec![
@@ -2091,20 +2097,20 @@ mod tests {
             // Before STOP's fetch (2 clocks): the flip-flop is 1 iff the
             // next shift is at the clock bit's next fall, within 4 clocks.
             let s = emu.clock();
-            let ff = emu.hw.sys.sched.deadline(EventKind::Serial) <= s + 4;
+            let (bits, next) = progress(emu);
+            let ff = next <= s + 4;
             seen[usize::from(ff)] = true;
-            let bits = emu.hw.sys.serial.bits;
             assert!(bits < 6, "pad {pad}");
             // STOP: fetch, second byte, the switch, the halt's 3 odd clocks.
             let _ = emu.step(&mut fb, &mut []);
             let now = s + 4;
             assert_eq!((emu.clock(), emu.hw.sys.hot.mcycle), (now + 3, 4));
-            assert_eq!(emu.hw.sys.serial.bits, bits + u8::from(ff), "pad {pad}");
+            assert_eq!(progress(emu).0, bits + u8::from(ff), "pad {pad}");
             let mut shifts = std::vec::Vec::new();
-            let mut last = emu.hw.sys.serial.bits;
+            let mut last = progress(emu).0;
             while emu.peek(0xFF02) & 0x80 != 0 {
                 let _ = emu.step(&mut fb, &mut []);
-                let b = emu.hw.sys.serial.bits;
+                let b = progress(emu).0;
                 if b != last {
                     shifts.push(emu.clock() - now);
                     last = b;
