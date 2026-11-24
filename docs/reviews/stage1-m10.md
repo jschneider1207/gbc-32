@@ -58,11 +58,11 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A2-10 | low | TILE_SEL set-glitch falls back to the old calibration when the latch is unknown | plan (oracle, wave 6) |
 | A2-11 | low | `stat_during_dma`, `fix_attrs` `d - 5`, DMG `POST_BOOT_POS` single-source | plan (tag unpinned, E7) |
 | A3-1 | med | 128-clock box filter leaves aliasing on high notes | wave 6: measure first; a fix that costs Ir goes to the human with numbers |
-| A3-2 | med | No independent check of produced samples | wave 3 |
-| A3-3 | low | `Square::since_step` uses the next-reload period after an NRx3 write | wave 2 |
+| A3-2 | med | No independent check of produced samples | fixed: `tests/apu_output.rs`, 14 Pan Docs-derived tests, each mutation-checked; all passed on the unmodified core |
+| A3-3 | low | `Square::since_step` uses the next-reload period after an NRx3 write | fixed (confirmed: countdown 1522 vs 498) |
 | A3-4 | low | Five fitted trigger windows; the two square trigger rules are one rule | plan |
-| A3-5 | low | Output headroom (±2x full scale after high-pass) not in the API contract | wave 2 (doc) |
-| A3-6 | low | Stale sweep overflow check survives a CH1 retrigger | wave 2 |
+| A3-5 | low | Output headroom (±2x full scale after high-pass) not in the API contract | fixed: bound is exactly +-61,440 (2x full scale, 17 bits) in the API docs and ADR 0021 |
+| A3-6 | low | Stale sweep overflow check survives a CH1 retrigger | fixed (confirmed against SameBoy apu.c) |
 | A3-7 | low | Desktop DC blocker starts from zero (click) | plan (desktop is throwaway) |
 | A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | fixed 35ff843 (ADR 0031; independent API review: no high/medium). HuC1 + HuC3 (human): wave 2, open |
 | A4-2 | med | HDMA cancel with a block pending copies `value + 1` blocks | fixed (branch m10-hdma-cancel): the triggered block runs as one block (gambatte; SameBoy does value+1 as we did). Non-zero cancel values are single-source: Needs human FYI |
