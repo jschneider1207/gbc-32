@@ -99,9 +99,9 @@ been seen failing on the old code; until then it is a reviewer claim.
 | B8 | med | Plain memory access 14-27 Ir before the tick | wave 4 |
 | B9 | med (M7) | `Cpu::run` register pressure, single dispatch branch | stage 2 |
 | B10 | med (M7) | ITCM/DTCM placement still Proposed | stage 2 (ADR 0026 at link time) |
-| B11 | low | PPU sync fixed cost ~300-380 Ir, 3.6x per line | wave 5 (timeline table, E3) |
+| B11 | low | PPU sync fixed cost ~300-380 Ir, 3.6x per line | mostly fixed (m10-ppu-walk: inlined no-work test, quiet walk; cgb-raster -5.1%); `next_event` caching left as a lead |
 | B12 | low | Full four-channel APU sync per register write | fixed (m10-undo-apu): NR50/NR51 writes append a mixer span instead of syncing four channels; 917 -> 749 Ir per write. Per-channel sync for channel registers: not done (needs a bench that shows it) |
-| B13 | low | Bounds-check panics in per-line PPU/OAM code | plan |
+| B13 | low | Bounds-check panics in per-line PPU/OAM code | partly fixed (OAM paths panic-free); `latch`, `set_stalls`, `last_fetched`, `mix_planes`, `write_during_dma` keep 1-2 sites: plan |
 
 ## C. Code size and MCU fit
 

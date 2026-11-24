@@ -36,14 +36,19 @@ perf: lazy timer, serial one event per transfer, timed interrupt requests
 (ADR 0033), renderer tile-loop specialisation, APU loops + mixer spans,
 PPU fetch state out of `Memory` + `Stalls` type, interpreter loop
 (attention flag, offset-0 tick, little-endian register pairs).
-Numbers at 3607e6b: worst-case 288.0 M Ir (2.41 M/frame; 488.4 M this
-morning after the cgu=1 pin), cpu_instrs 1,486 M (1,703 M), `.text`
-112,110 B.
+Also landed: the LLVM address-folding option in every build (f4e16f5,
+human approved; guards in `check-code-size.sh` and `check-bench.sh`), and
+the PPU walk theme incl. the line-153 LYC=0 timed request (L5, c08c22a).
+Numbers at the last merge: worst-case 278.1 M Ir (2.33 M/frame; 488.4 M this
+morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
+113,154 B (margin 9,726 B).
 
 **Remaining, in order** (one agent per item, see "How work is run"):
 1. Bus access fast paths: review B8 + inventory A1 (`write_mapped`
    out of line), then L1 (CB (HL) merge) if bytes allow. Biggest byte
-   spend left (est. 8-10 KB of the ~10.8 KB margin): measure Ir per byte.
+   spend left (est. 8-10 KB of the 9.7 KB margin): measure Ir per byte; the
+   dearest revertable step so far is the separate no-STAT PPU walk
+   (85567d7-line commit in the walk theme, ~1 KB for 0.2-0.7%).
 2. Retire ADR 0027 (human: "Yes retire that ADR"): dated amendment marking
    it retired (ROM is in HyperRAM on OCTOSPI; ES0491 2.7.3 is FMC-only,
    2.8.4 Table 5 allows any-address HyperBus reads); undo inventory items
@@ -89,7 +94,7 @@ vs `perf/bench-baseline.txt`; fuzz under the `checked` profile; invariance
 checks; `check-rom-loads.sh` (until ADR 0027's retirement lands).
 Per-function size lines and the H753 ITCM hot set are report-only (the
 dev-board set is over its figure: expected, WARN only). Release profile:
-`codegen-units = 1` plus, once the in-flight commit lands,
+`codegen-units = 1` plus
 `-C llvm-args=-cgp-max-address-users-to-scan=100000` (human approved).
 
 **Human (session 14): the desktop client is a throwaway used to validate
@@ -126,20 +131,11 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-At the time of writing two agents were running; a fresh session cannot
-receive their reports, so check their state before anything else:
-- **LLVM flag** (working directly on `main`): look for commits
-  `infra: ...` after 3607e6b touching `.cargo/config.toml` and the three
-  `scripts/check-*.sh`, plus a new `perf/bench-baseline.txt`. If absent or
-  half-done (`git status`), redo: flag in `.cargo/config.toml` and the
-  scripts that set RUSTFLAGS, fingerprint identical, `check-bench.sh
-  --update-baseline`, docs.
-- **PPU walk theme**, branch `m10-ppu-walk` (worktree
-  `<session scratchpad>/wt-walk`, may be gone after a reboot; the branch
-  stays): inventory L3, L4, L8, L13, L14 (behaviour-preserving) and L5
-  (line-153 rule, a behaviour change). `git log main..m10-ppu-walk`; if it
-  has commits, rebase, re-verify as in "How work is run" and merge; L5 must
-  come with a failing-first test and an explanation of every differing ROM.
+- None. Session 16 ended at a clean point: every `m10-*` branch is merged
+  by fast-forward and its worktree removed; `main` builds, passes tests and
+  the checks listed under "How work is run" as of the last merge
+  (c08c22a + baseline). The full `gate-stage1.sh` has NOT been run since
+  the M10 work started: run it before tagging (remaining item 8).
 
 ## Needs human
 
