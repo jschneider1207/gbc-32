@@ -872,7 +872,7 @@ ROM list or durations also needs a baseline update in the same commit.
 
 ## Behavior fingerprint
 
-`bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N [--hash-samples]]` (N defaults to 3 and must be
+`bench --fingerprint [--seconds N] [--root DIR] [--audio-buffer N [--hash-samples]]` (also `--clock-offset N` and `--trace RUN`: "Invariance checks" below; N defaults to 3 and must be
 at least 1, root to `test-roms`) prints one line per run, `<16-hex FNV-1a
 hash> <path>`, sorted by path, so two builds can be compared bit for bit (ADR
 0011 "Verification"). Corpus: every `.gb`/`.gbc` under Mooneye `acceptance`,
@@ -923,6 +923,113 @@ the working tree has uncommitted changes under `crates/`, `tools/` or
 `Cargo.*` (the new side is the working tree, not HEAD), when the two sides
 have different run counts, and when ROMs fail to load. Use it on commits
 that restructure core timing, which must not change behavior.
+
+## Invariance checks
+
+The core is a lazy catch-up design (ADR 0002, 0011, 0014, 0021): a
+component's visible state is meant to be a function of the clock and the
+writes, not of when it was last synced, and not of the clock's absolute
+value. `scripts/check-sync-invariance.sh` checks both over the fingerprint
+corpus, against the product build (plain release `bench`), and exits 0 only
+if every line is identical. It uses two test-only Cargo features of
+`gbc-core` (passed through `tools/bench` features of the same names). No
+product build enables them, and with them off the core is byte-identical
+(the hooks are `#[cfg]`ed statements and functions: `.text`, every budgeted
+symbol and the bench Ir are unchanged).
+
+```
+TEST_ROMS=... scripts/check-sync-invariance.sh [--long] [--long-only]
+```
+
+About 4.5 minutes on 8 threads (three builds, 2 + 2 + 4 corpus passes), plus
+about 1 for `--long`. Heavy: run it alone. The feature builds use the
+`checked` profile (overflow checks and `debug_assert!`s on, so every pass
+is also a panic check, e.g. `Ppu::sync`'s cursor assertion at every sync)
+in their own target dir, `target/invariance`.
+
+### Sync-placement invariance (`eager-sync`)
+
+With the feature, `Ctx::eager_sync` runs at the start of every M-cycle,
+before its access (`Bus::read`, `write`, `idle`, the dispatch's
+acknowledge), and brings every lazily synced component up to the clock:
+the PPU walk (and a running OAM DMA's bytes, as before every PPU sync), the
+APU (samples included), the timer's lazy reloads (`Timer::catch_up`) and
+the cartridge RTC. The skips (HALT, STOP mode, the speed-switch halt, a
+VRAM DMA stall) go one M-cycle at a time, with the same sync in each. It
+sets no deadline and raises no event of its own; in particular the PPU
+deadline is left where the lazy build put it (`run_ppu_to`, not
+`sync_ppu_to`). Serial has no lazy state (each bit is an event).
+
+The script runs the corpus without audio and with `--audio-buffer 7
+--hash-samples`, and compares each with the product build's lines. What
+this proves: on everything the fingerprint hashes (registers, every I/O
+register, frames, samples, events, per-chunk clocks, memory at the end),
+no ROM in the corpus can tell a sync at every M-cycle from the syncs the
+lazy build happens to make. A change that moves or removes a sync (a
+`run_ppu_to` before a register write, an `apu_sync`, a `catch_up`) so that
+a later one computes something different shows up as differing ROMs.
+`cargo test -p gbc-core --features eager-sync` runs the unit tests in the
+same mode (two tests of the skip's length are ignored there).
+
+Known differences are listed in the script (`KNOWN_EAGER`), each with its
+diagnosis; a listed ROM that stops differing fails the check too. One
+today:
+
+- `gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1`: in single speed,
+  line 0's mode-2 pulse is walked at dot 4, but the CPU must see its IF
+  request a dot later. `Ppu::next_event` gets that by putting the deadline
+  one past the point, so the request is posted late only because nothing
+  syncs the PPU on the point itself. This ROM's IF read is at an M-cycle
+  boundary on that dot (0:4, CPU grid offset 3): an eager sync there posts
+  the request a dot early and the read sees it. So IF bit 1 at that one
+  dot depends on sync placement, by design (the doc comment of
+  `next_event` names the ROM). A refactor that adds a PPU sync at an
+  M-cycle start (for instance on an IF read) changes this ROM in the
+  product build; the clean form is a pending bit posted at the point + 1.
+
+Diagnosing a difference: `bench --fingerprint --trace <run>` prints one
+line per 456-clock chunk (the running hash, the clock, events, registers
+and a few I/O registers); run it with both builds and `diff` for the
+first chunk that parts.
+
+### Clock-offset invariance (`clock-offset`)
+
+With the feature, `Emulator::start_clock_at(clock)` (test hook, not
+product API; call it right after `load` or `reset`; a multiple of 4,
+because the APU's single-speed trigger grid is the clock mod 4) moves the
+power-on state to `clock`: the clock, every deadline, the timer's counter
+origin, the PPU's frame origin and sync clock, the APU's sync clock and
+power-on phase, the RTC's sync clock. Records of past events that have
+not happened (an OAM DMA, a speed switch, an HDMA trigger) keep their
+power-on values, as on a machine that got there without one.
+
+`bench --fingerprint --clock-offset N` (a build with `--features
+clock-offset`) powers every run on at N and takes every hashed or passed
+clock relative to it, so its lines must equal the run from 0. The script
+runs the corpus, with `--audio-buffer 7 --hash-samples`, at 2^31 - 400,004,
+2^32 - 700,000, 2^33 - 1,000,004 and 2^40 - 1,300,000: every run (the
+shortest is 1,572,864 clocks) crosses its boundary, and two offsets are 4
+mod 8. What this proves: nothing observable depends on the clock's
+absolute value, and no truncating cast or wrapped compare of a clock
+(`as u32`, `as i32`) misbehaves at those boundaries, on any path the corpus
+reaches within its 0.4-3 s per ROM. No difference is known. The unit test
+`a_run_from_a_moved_clock_matches_the_run_from_0` (core, with the feature)
+is the small version.
+
+### Long run (`--long`)
+
+`bench --long [--minutes N] [--root DIR]` runs ten workloads that keep
+working (the six synthetic programs, cgb-acid2, cpu_instrs, cgb_sound and
+rtc3test) from power-on for 30 emulated minutes, 7,549,747,200 clocks,
+past 2^32 (17 min 4 s), in frame-sized calls with an audio buffer. The
+script builds it with the `checked` profile and no feature (the product's
+code with overflow checks and debug assertions). It fails on a panic, a
+call that makes no progress, a sample count other than one per 128 clocks,
+or (for the workloads that keep the LCD on) a frame count more than one off
+one per 70,224 clocks. 60.5 s wall for all ten in parallel (2026-11-24, 8
+threads; the slowest, `synth:worst-case`, alone). It complements the
+offset check: that one covers the whole corpus near four boundaries, this
+one covers state that has actually lived for 2^32 clocks.
 
 ## Wall-clock benchmark (Stage 2 reference)
 

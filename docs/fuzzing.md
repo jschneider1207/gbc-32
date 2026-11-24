@@ -43,6 +43,14 @@ For a longer pass: `cargo run --profile checked -p fuzz --bin fuzz-pass --
 `cargo run --profile checked -p bench -- --fingerprint` or
 `cargo test --profile checked -p gbc-core`.
 
+The fuzz pass checks "no panic, no hang" on short runs of arbitrary input.
+Its complements for known-good ROMs are in `docs/perf.md`, "Invariance
+checks" (`scripts/check-sync-invariance.sh`): the fingerprint corpus under
+the `checked` profile with every lazy component synced at every M-cycle
+and with the clock started just below 2^31, 2^32, 2^33 and 2^40, and a
+30-emulated-minute run (`--long`) past 2^32 clocks. Neither fuzz target
+runs that long or starts the clock anywhere but 0.
+
 ## Coverage-guided (off the gate)
 
 `tools/fuzz/fuzz/` is a cargo-fuzz crate outside the workspace. It needs
