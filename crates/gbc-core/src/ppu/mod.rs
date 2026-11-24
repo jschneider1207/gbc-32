@@ -320,8 +320,10 @@ pub(crate) struct LineTiming {
     /// none).
     start: u64,
     /// STAT reads mode 3 from here.
-    mode3: u8,
-    /// The first pixel is output at this position (no stall before it).
+    mode3: u16,
+    /// The first pixel is output at this position (no stall before it):
+    /// 12 dots of tile fetches into mode 3, then the discarded pixels
+    /// ([`Self::fine`]).
     first_pixel: u16,
     /// Mode 3 ends for the HBlank interrupt (the walk's `End`); STAT reads
     /// mode 0 (single speed) from `end + edge` ([`Self::stat_end`]).
@@ -348,10 +350,6 @@ pub(crate) struct LineTiming {
     /// `sprites/10spritesPrLine_10xposA7_m0irq_*` (objects at X = 166
     /// still delay it: `10xposA6_m0irq_*`).
     edge: u8,
-    /// Line position of a WY write in mode 3 before the next line's
-    /// pipeline started (0: none): `latch` decides its window start
-    /// ([`Ppu::wy_written`]). Here so LCD off and on clear it.
-    wy_late: u8,
 }
 
 /// Dots after a tile's first pixel is output at which the next tile's
@@ -463,7 +461,6 @@ impl LineTiming {
         stalls: Stalls::NONE,
         prev_wx: 0,
         edge: 0,
-        wy_late: 0,
     };
 
     /// Mode 3 ends for the STAT mode bits and the CPU access windows: STAT
@@ -473,11 +470,14 @@ impl LineTiming {
         self.end + u16::from(self.edge)
     }
 
-    /// The line's fine scroll (the discard count & 7, from `latch` or an
-    /// SCX write in the discard, [`Ppu::hold_fetch`]): the tile alignment
-    /// its stalls are built with.
+    /// The line's fine scroll: the pixels discarded before the first one,
+    /// mod 8 (SCX & 7 at `latch`, or as an SCX write in the discard moved
+    /// it, [`Ppu::hold_fetch`]); the tile alignment its stalls are built
+    /// with. Read from `first_pixel`, which is the one copy: its readers
+    /// are cold (mid-mode-3 writes), and a field of its own cost a store
+    /// per line (measured: +1 x86 Ir per line, up to +0.03% per bench).
     fn fine(&self) -> u8 {
-        (self.first_pixel.wrapping_sub(u16::from(self.mode3) + 12)) as u8 & 7
+        (self.first_pixel.wrapping_sub(self.mode3 + 12)) as u8 & 7
     }
 
     /// `edge` and `end` from the stalls, `total` dots in all (shared tail
@@ -570,6 +570,10 @@ pub(crate) struct Ppu {
     lyc_flag_off: bool,
     /// The mode-3 timing of the current (or last) visible line.
     line: LineTiming,
+    /// Line position of a WY write in mode 3 before the next line's
+    /// pipeline started (0: none): `latch` decides its window start
+    /// ([`Ppu::wy_written`]). Dropped when the LCD goes off or on.
+    wy_late: u8,
     /// Pixels `0..drawn` of the line `line` describes are in the frame.
     drawn: u8,
     /// Per-frame and per-line drawing state; also the one copy of the WY
@@ -671,6 +675,7 @@ impl Ppu {
             },
             lyc_flag_off: false,
             line: LineTiming::NONE,
+            wy_late: 0,
             drawn: 0,
             renderer: Renderer::new(),
             colors: Colors::new(),
@@ -2135,7 +2140,7 @@ impl Ppu {
     /// ([`WY_LAST_AT`] here) a write no longer matches this line, and the
     /// next line's own check (`latch`) compares the next LY. A write in
     /// mode 3 before this line's pipeline starts is decided once the stalls
-    /// exist (`latch`, `LineTiming::wy_late`).
+    /// exist (`latch`, `Ppu::wy_late`).
     #[cold]
     #[inline(never)]
     pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, double: bool) {
@@ -2146,7 +2151,7 @@ impl Ppu {
                     self.check_wy(a.line, mem);
                 }
                 if a.t >= edges::MODE3 && self.line.start != now.wrapping_sub(u64::from(a.t)) {
-                    self.line.wy_late = a.t as u8;
+                    self.wy_late = a.t as u8;
                 }
             }
         }
@@ -2159,7 +2164,7 @@ impl Ppu {
     #[cold]
     #[inline(never)]
     fn wy_late_latched(&mut self, mem: &Memory, double: bool) {
-        let t = core::mem::take(&mut self.line.wy_late);
+        let t = core::mem::take(&mut self.wy_late);
         let at = self.line.start.wrapping_add(u64::from(t));
         self.window_write(at, mem, Some(wy_lead(double)));
     }
@@ -2213,7 +2218,7 @@ impl Ppu {
         // 12 dots of tile fetches, then SCX % 8 dots discarding pixels.
         let t = &mut self.line;
         t.start = start;
-        t.mode3 = mode3 as u8;
+        t.mode3 = mode3;
         t.first_pixel = mode3 + 12 + u16::from(scx & 7);
         // One window start so far ([`Self::retrigger`]).
         t.prev_wx = 0;
@@ -2239,7 +2244,7 @@ impl Ppu {
             self.attr_final = 0;
             self.attr_on = n != 0;
         }
-        if self.line.wy_late != 0 {
+        if self.wy_late != 0 {
             self.wy_late_latched(mem, double);
         }
     }
@@ -3046,6 +3051,7 @@ impl Ppu {
             self.blanked = true;
             self.skip_frame = false;
             self.line = LineTiming::NONE;
+            self.wy_late = 0;
             // No line is being drawn any more: off between a line's `Latch`
             // and `End`, the cursor would stay on `End` and `drawing` true
             // until the LCD is on again (palette RAM writes were dropped
@@ -3069,6 +3075,7 @@ impl Ppu {
             self.first_frame = true;
             self.renderer.start_frame();
             self.line = LineTiming::NONE;
+            self.wy_late = 0;
             self.seek(double);
             // SameBoy's first update, one dot after the write: no mode
             // source, LY = 0 against LYC.
