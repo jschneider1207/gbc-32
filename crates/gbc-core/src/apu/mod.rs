@@ -361,9 +361,8 @@ impl Apu {
             let (fs, delay) = (self.fs.step, self.trigger_delay(now, ds));
             self.sq[ch].write(i - 5 * ch, value, fs, delay);
         }
-        // NR10, CH1's trigger after the channel's own, or CH4. One
-        // unconditional tail call instead of a test on every exit (code
-        // size). The noise alignment: 2 MHz ticks since power on, mod 4,
+        // NR10, CH1's trigger after the channel's own, or CH4. The
+        // noise alignment: 2 MHz ticks since power on, mod 4,
         // and double speed in bit 2.
         let al = ((now >> 1) as u8).wrapping_sub(self.fs.phase) & 3 | (ds & 2) << 1;
         self.write_rest(reg, value, dist, al);
@@ -374,9 +373,7 @@ impl Apu {
     /// trigger (NR14 bit 7) after the channel's own, go to the sweep;
     /// FF1F-FF23 to CH4 (NR41-NR44 at offsets 1-4, FF1F unused); nothing
     /// for the others. Then a CH1, CH2 or CH4 trigger in the step before
-    /// the envelopes' step 0 (`Apu::env_late`) delays its envelope (here
-    /// rather than in the channels' trigger paths: code size). Out of
-    /// line, off `Apu::write`'s common path.
+    /// the envelopes' step 0 (`Apu::env_late`) delays its envelope.
     ///
     /// A CH1 trigger up to 8 clocks before the edge into step 3 or 7, or
     /// before the sweep step it causes (`Sweep::due`), resets the sweep
@@ -386,7 +383,6 @@ impl Apu {
     /// `ch1_init_reset_sweep_counter_timing_7` (12 clocks before: counts)
     /// vs `_10` (8 before: doesn't). SameBoy reloads its countdown at the
     /// trigger with no window.
-    #[inline(never)]
     fn write_rest(&mut self, reg: usize, value: u8, dist: u32, al: u8) {
         let fs = self.fs.step;
         match reg {

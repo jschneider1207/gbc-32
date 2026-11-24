@@ -156,7 +156,6 @@ impl Wave {
 
     /// Recomputes the cached waveform sum from wave RAM and NR32 (SWAR
     /// instead of a 32-nibble loop).
-    #[inline(never)]
     pub(crate) fn resum(&mut self, io: &[u8; 0x80]) {
         self.sum = self.words(io).into_iter().map(nibble_sum).sum::<u32>() as u16;
     }

@@ -67,7 +67,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3apu*3Apu5write*                             # Apu::write
 .text._R*8gbc_core3apu*9integrate*                             # Square/Wave/Noise::integrate (3)
 .text._R*8gbc_core3apu*7advance*                               # Square/Wave/Noise::advance (3)
-.text._R*8gbc_core3apu*10frame_step*                           # Noise::frame_step
 .text._R*8gbc_core3apu6square*5Sweep5clock*                    # Sweep::clock
 .text._R*8gbc_core3apu3mix8constant*                           # mix::constant
 .text._R*8gbc_core3bus*3Ctx13div_apu_event*                    # Ctx::div_apu_event
@@ -119,7 +118,6 @@ FLASH_OK .text._R*8gbc_core3ppu*3Ppu9write_lyc*                # LYC writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu10write_lcdc*              # LCDC writes
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu12scroll_write*            # SCX/SCY/WX writes that land inside mode 3
 FLASH_OK .text._R*8gbc_core3apu10write_wave*                   # wave RAM writes
-FLASH_OK .text._R*8gbc_core3apu*3Apu10write_rest*              # NR50-NR52 and the rarer channel registers
 # Cartridge registers
 FLASH_OK .text._R*8gbc_core4cart*4Cart9write_rom*              # MBC register writes (bank switches)
 FLASH_OK .text._R*8gbc_core4cart*4Cart9write_rtc*              # MBC3 RTC register writes
@@ -133,4 +131,3 @@ FLASH_OK .text._R*8gbc_core9vdma_turn*                         # Emulator::run, 
 # Rare events
 FLASH_OK .text._R*8gbc_core3ppu*3Ppu14point_irq_rare*          # update points of lines 0, 144 and 153 (a few per frame)
 FLASH_OK .text._R*8gbc_core3bus*3Bus17speed_switch_halt*       # the halt after a CGB speed switch
-FLASH_OK .text._R*8gbc_core3apu5noise*5Noise5clock*            # LFSR steps of Noise::advance (no audio buffer passed); integrate has its own loop

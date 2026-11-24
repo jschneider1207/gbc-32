@@ -284,7 +284,6 @@ impl Noise {
     /// clocks) plus one new period. A trigger (`trigger` > 0) keeps the
     /// counter as it is and has its next increment `trigger` clocks away
     /// (`trigger_delay`; SameBoy `prepare_noise_start`).
-    #[inline(never)]
     fn rebase(&mut self, nr43: u8, trigger: u32) {
         let d = self.divisor();
         // `k` more increments come before the one at `countdown` (at most
@@ -325,7 +324,6 @@ impl Noise {
     /// `n` steps of the LFSR; returns the number of steps after which bit
     /// 0 is 1. Shift 14 and 15 never clock it: SameBoy's divisor counter is
     /// 14 bits (`& 0x3FFF`), so those bits never rise; bit 0 just stays.
-    #[inline(never)]
     fn clock(&mut self, n: u32) -> u32 {
         if self.nr43 >> 4 >= 14 {
             return n * u32::from(self.lfsr & 1);
@@ -476,7 +474,6 @@ impl Noise {
 
     /// A write to NR41-NR44 (`off` 1-4; others are ignored) with the frame
     /// sequencer at `fs` and the trigger alignment `al` (`trigger_delay`).
-    #[inline(never)]
     pub(crate) fn write(&mut self, off: usize, value: u8, fs: u8, al: u8) {
         match off {
             1 => self.len.load(LENGTH_MAX, u16::from(value & 0x3F)),
@@ -510,7 +507,6 @@ impl Noise {
 
     /// Frame-sequencer step `step` (after the increment): length on odd
     /// steps (256 Hz), the envelope on step 0 (64 Hz).
-    #[inline(never)]
     pub(crate) fn frame_step(&mut self, step: u8) {
         if step & 1 == 1 && self.len.clock() {
             self.on = false;
