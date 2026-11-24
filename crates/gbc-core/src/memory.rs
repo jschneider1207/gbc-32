@@ -127,10 +127,13 @@ impl Memory {
         self.obj_rank.next = 0;
         self.obj_rank.sel_latch = (0, 0);
         self.obj_rank.sel_end = (0, 0);
+        self.obj_rank.hold = [Held::default(); 3];
+        self.obj_rank.win_zero = 0;
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
         self.apu = Apu::new();
+        self.dma_read_clears = ReadClears::new();
     }
 }
 
@@ -193,8 +196,9 @@ pub(crate) struct Held {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
 
-    use super::{Held, Memory};
+    use super::{Held, Memory, ObjRank};
     use crate::apu::Apu;
 
     #[test]
@@ -256,5 +260,112 @@ mod tests {
             size_of::<Memory>(),
             total.next_multiple_of(align_of::<Memory>())
         );
+    }
+    /// `clear` gives `Memory::new()` whatever the `Memory` held: every
+    /// field is dirtied first. The exhaustive patterns stop compiling when
+    /// a field is added, so each one must be dirtied (and compared) here.
+    #[test]
+    fn clear_restores_new_from_every_field_dirty() {
+        static NEW: Memory = Memory::new();
+        let mut m = std::boxed::Box::new(Memory::new());
+        {
+            let Memory {
+                bg_pairs,
+                wram,
+                vram,
+                oam,
+                oam_dma_old,
+                hram,
+                extra_oam,
+                io,
+                obj_buf,
+                obj_rank,
+                bg_pal,
+                obj_pal,
+                dma_read_clears,
+                apu,
+            } = &mut *m;
+            bg_pairs.as_flattened_mut().fill(0x1234_5678);
+            wram.fill(1);
+            vram.fill(2);
+            oam.fill(3);
+            oam_dma_old.fill(4);
+            hram.fill(5);
+            extra_oam.fill(6);
+            io.fill(7);
+            obj_buf.fill(8);
+            let ObjRank {
+                rank,
+                hold,
+                next,
+                sel_latch,
+                sel_end,
+                win_zero,
+            } = obj_rank;
+            rank.fill(9);
+            *hold = [Held {
+                end: 10,
+                lcdc: 11,
+                scx: 12,
+                scy: 13,
+                planes: 14,
+            }; 3];
+            *next = 15;
+            *sel_latch = (16, 17);
+            *sel_end = (18, 19);
+            *win_zero = 20;
+            bg_pal.fill(21);
+            obj_pal.fill(22);
+            dma_read_clears.record(23);
+            apu.post_boot();
+        }
+        m.clear();
+        // Which fields `clear` left dirty, by name.
+        let Memory {
+            bg_pairs,
+            wram,
+            vram,
+            oam,
+            oam_dma_old,
+            hram,
+            extra_oam,
+            io,
+            obj_buf,
+            obj_rank,
+            bg_pal,
+            obj_pal,
+            dma_read_clears,
+            apu,
+        } = &*m;
+        let same = [
+            ("bg_pairs", *bg_pairs == NEW.bg_pairs),
+            ("wram", *wram == NEW.wram),
+            ("vram", *vram == NEW.vram),
+            ("oam", *oam == NEW.oam),
+            ("oam_dma_old", *oam_dma_old == NEW.oam_dma_old),
+            ("hram", *hram == NEW.hram),
+            ("extra_oam", *extra_oam == NEW.extra_oam),
+            ("io", *io == NEW.io),
+            ("obj_buf", *obj_buf == NEW.obj_buf),
+            ("obj_rank.rank", obj_rank.rank == NEW.obj_rank.rank),
+            ("obj_rank.hold", obj_rank.hold == NEW.obj_rank.hold),
+            ("obj_rank.next", obj_rank.next == NEW.obj_rank.next),
+            (
+                "obj_rank.sel_latch",
+                obj_rank.sel_latch == NEW.obj_rank.sel_latch,
+            ),
+            ("obj_rank.sel_end", obj_rank.sel_end == NEW.obj_rank.sel_end),
+            (
+                "obj_rank.win_zero",
+                obj_rank.win_zero == NEW.obj_rank.win_zero,
+            ),
+            ("bg_pal", *bg_pal == NEW.bg_pal),
+            ("obj_pal", *obj_pal == NEW.obj_pal),
+            ("dma_read_clears", *dma_read_clears == NEW.dma_read_clears),
+            ("apu", *apu == NEW.apu),
+        ];
+        let dirty: std::vec::Vec<_> = same.iter().filter(|f| !f.1).map(|f| f.0).collect();
+        assert!(dirty.is_empty(), "left dirty by clear(): {dirty:?}");
+        assert!(*m == NEW);
     }
 }
