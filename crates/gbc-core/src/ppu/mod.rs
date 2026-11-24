@@ -71,12 +71,12 @@
 
 use crate::dma::{OamDma, PpuView};
 use crate::irq::PendingIrq;
-use crate::memory::{Held, Memory};
+use crate::memory::Memory;
 use crate::schedule::NEVER;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
-pub(crate) use render::OBJ_BUF_LEN;
-use render::{Colors, Regs, Renderer, Sources, pair_table, set_pair_color};
+pub(crate) use render::ObjBuf;
+use render::{Colors, Held, Regs, Renderer, Sources, pair_table, set_pair_color};
 
 pub(crate) mod edges;
 mod objects;
@@ -1622,7 +1622,6 @@ impl Ppu {
             &regs,
             &src,
             &mut mem.obj_buf,
-            &mut mem.obj_rank,
         );
     }
 
@@ -1646,7 +1645,7 @@ impl Ppu {
     /// LCDC (`reg` 0x40), SCY (0x42) or SCX (0x43): if it changes the map
     /// select (LCDC.3, LCDC.6), the tile data select (LCDC.4), SCY or SCX in
     /// mode 3, the tiles the fetcher already has keep the old values
-    /// (`ObjRank::hold`). The fetcher reads the map select, SCX and SCY at
+    /// (`Renderer::push_hold`). The fetcher reads the map select, SCX and SCY at
     /// each tile's GET_TILE step, and LCDC.4 and SCY again (CGB C) at the
     /// DATA_LOW and DATA_HIGH steps, `FETCH_LOW` and `FETCH_HIGH` dots in
     /// (SameBoy `advance_fetcher_state_machine`, MIT; Pan Docs: Pixel FIFO;
@@ -1664,7 +1663,7 @@ impl Ppu {
     pub(crate) fn hold_fetch(
         &mut self,
         now: u64,
-        mem: &mut Memory,
+        mem: &Memory,
         reg: usize,
         value: u8,
         deferred: bool,
@@ -1777,7 +1776,7 @@ impl Ppu {
         // pixels), else 0. An empty object high plane as the latch is what
         // the old calibration (a set "on time" next to an object stall)
         // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7. With the
-        // latch unknown (`ObjRank::sel_end`: BG reads with 8000 addressing
+        // latch unknown (`Renderer::sel`: BG reads with 8000 addressing
         // to an earlier line's end), 15 and 0 keep that calibration's
         // plane (old, else new); the lines it was fitted to (Mealybug
         // `m3_lcdc_tile_sel_change` X = 16-17, `_win_change` X = 8-17,
@@ -1833,16 +1832,7 @@ impl Ppu {
             scy: mem.io[0x42],
             planes,
         };
-        let hold = &mut mem.obj_rank.hold;
-        let last = hold[2];
-        if i32::from(last.end) <= x {
-            *hold = [Held::default(), Held::default(), seg];
-        } else if seg.end > last.end || (seg.end == last.end && last.planes != 0 && planes == 0) {
-            // Same end: the held tile's planes read after the earlier
-            // write were read with the values before this one, which the
-            // (empty) new part keeps for `Renderer::mix_planes`.
-            *hold = [hold[1], last, seg];
-        }
+        self.renderer.push_hold(seg, x);
         true
     }
 
@@ -1857,16 +1847,13 @@ impl Ppu {
     /// glitched read at the old address included; else tile j's high
     /// plane), objects fetched later than it replace it
     /// (`Renderer::tile_sel_glitch`, `Renderer::carry_sel`). A set's glitched
-    /// read takes the latch as of the set (`ObjRank::sel_latch`); from
-    /// then on BG reads with 8000 addressing replace it (unknown: 0xFF).
+    /// read takes the latch as of the set (`Renderer::sel_set`); from
+    /// then on BG reads with 8000 addressing replace it (unknown).
     #[cold]
     #[inline(never)]
-    fn tile_sel_latch(&mut self, mem: &mut Memory, tile: i32, phase: i32, win_hit: bool) {
-        let r = &mut mem.obj_rank;
+    fn tile_sel_latch(&mut self, mem: &Memory, tile: i32, phase: i32, win_hit: bool) {
         if self.lcdc & 0x10 == 0 {
-            r.sel_latch = r.sel_end;
-            r.sel_end.1 = 0xFF;
-            return;
+            return self.renderer.sel_set();
         }
         let (x, plane) = if phase >= FETCH_LOW + LCDC_TILES_LATE - 1 || win_hit {
             let high = phase >= FETCH_HIGH + LCDC_TILES_LATE - 1 || win_hit;
@@ -1878,7 +1865,7 @@ impl Ppu {
         let byte = self
             .renderer
             .tile_byte_8000(&mem.vram, x as u8, self.lcdc, scx, scy, plane);
-        mem.obj_rank.sel_end = (byte, (x + 8).max(1) as u8);
+        self.renderer.sel_clear(byte, x);
     }
 
     /// For [`Ppu::hold_fetch`] at line position `t`, pixel `x` next out, in
@@ -1957,7 +1944,7 @@ impl Ppu {
         reg: usize,
         value: u8,
     ) {
-        if !self.attr_on && mem.obj_rank.hold[2].end == 0 {
+        if !self.attr_on && !self.renderer.holding() {
             if !self.hold_fetch(now, mem, reg, value, true) {
                 self.flush(now, mem, frame);
             }
@@ -2113,7 +2100,7 @@ impl Ppu {
     /// exist (`latch`, `LineTiming::wy_late`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_written(&mut self, now: u64, mem: &mut Memory, double: bool) {
+    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, double: bool) {
         if self.lcd_enabled() {
             let a = self.at(now);
             if a.line < LINES {
@@ -2133,7 +2120,7 @@ impl Ppu {
     /// after it.
     #[cold]
     #[inline(never)]
-    fn wy_late_latched(&mut self, mem: &mut Memory, double: bool) {
+    fn wy_late_latched(&mut self, mem: &Memory, double: bool) {
         let t = core::mem::take(&mut self.line.wy_late);
         let at = self.line.start.wrapping_add(u64::from(t));
         self.window_write(at, mem, Some(wy_lead(double)));
@@ -2193,14 +2180,10 @@ impl Ppu {
         // One window start so far ([`Self::retrigger`]).
         t.prev_wx = 0;
         self.drawn = 0;
-        mem.obj_rank.hold[2].end = 0;
-        mem.obj_rank.next = 0;
         // Before the renderer starts the line: the TILE_SEL glitch latch
         // (no call while LCDC.4 stays set).
-        if mem.obj_rank.sel_end.1 != 0xFF || self.lcdc & 0x10 == 0 {
-            let latch = &mut mem.obj_rank.sel_end;
-            self.renderer
-                .carry_sel(&mem.oam, &mem.vram, self.lcdc, latch);
+        if self.renderer.sel_carries(self.lcdc) {
+            self.renderer.carry_sel(&mem.oam, &mem.vram, self.lcdc);
         }
         // The pixels follow the window start the stalls are built with.
         self.renderer.start_line(l as u8, scx, &objs, order, window);
@@ -2348,7 +2331,7 @@ impl Ppu {
     /// LCDC.5 set: `WINDOW_ON_LEAD`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn window_write(&mut self, now: u64, mem: &mut Memory, on_lead: Option<i32>) {
+    pub(crate) fn window_write(&mut self, now: u64, mem: &Memory, on_lead: Option<i32>) {
         let lt = &self.line;
         let a = self.at(now);
         let t = a.t as i32;
@@ -2398,7 +2381,7 @@ impl Ppu {
             self.set_stalls(scx, None);
             self.renderer.set_window(None);
         }
-        self.window_cuts_holds(mem);
+        self.window_cuts_holds();
         self.end_moved();
     }
 
@@ -2424,10 +2407,10 @@ impl Ppu {
     /// 100's (x = 93), not line 92's (x = 85).
     #[cold]
     #[inline(never)]
-    fn window_zero(&mut self, mem: &mut Memory) {
+    fn window_zero(&mut self, mem: &Memory) {
         let z = mem.io[0x4B].wrapping_sub(7);
         let due = z >= self.drawn && z < 160 && self.renderer.window_tile_edge(z);
-        self.renderer.set_zero(&mut mem.obj_rank, due.then_some(z));
+        self.renderer.set_zero(due.then_some(z));
     }
 
     /// The window starts again on the line (SameBoy display.c: once a
@@ -2444,7 +2427,7 @@ impl Ppu {
     /// two window starts and up to 9 objects then).
     #[cold]
     #[inline(never)]
-    fn retrigger(&mut self, t: i32, mem: &mut Memory) {
+    fn retrigger(&mut self, t: i32, mem: &Memory) {
         // The window has started and gone back to the BG: a fetch after the
         // start saw LCDC.5 clear (`hold_fetch`, LCDC.5 held), so SameBoy's
         // `wx_triggered` is clear. Approximation: only once the pixels have
@@ -2469,21 +2452,15 @@ impl Ppu {
             return;
         }
         self.renderer.set_window(Some(wx));
-        self.window_cuts_holds(mem);
+        self.window_cuts_holds();
         self.end_moved();
     }
 
     /// The window's first tile is fetched after it starts: no held part
     /// ([`Self::hold_fetch`]) reaches past a start decided after it.
-    fn window_cuts_holds(&self, mem: &mut Memory) {
+    fn window_cuts_holds(&mut self) {
         if let Some(wx) = self.renderer.window_wx() {
-            let s = wx.saturating_sub(7);
-            for h in &mut mem.obj_rank.hold {
-                if h.end > s {
-                    h.end = s;
-                    h.planes = 0;
-                }
-            }
+            self.renderer.cut_holds(wx.saturating_sub(7));
         }
     }
 
@@ -2769,12 +2746,12 @@ impl Ppu {
             px = px.max(u32::from(sx));
             clock += u32::from(d);
             let obj = i - usize::from(i > win) - usize::from(i > prev);
-            if i == win || i == prev || obj < usize::from(mem.obj_rank.next) {
-                continue;
-            }
-            let Some(slot) = self.renderer.next_object(mem.obj_rank.next) else {
+            let Some((next, slot)) = self.renderer.next_object() else {
                 break;
             };
+            if i == win || i == prev || obj < next {
+                continue;
+            }
             let x = self.renderer.objects.get(slot).2;
             let end = clock - u32::from(8u8.saturating_sub(x));
             if t + OBJ_LOW_READ <= end {
@@ -2804,7 +2781,7 @@ impl Ppu {
                 pairs: &mem.bg_pairs,
             };
             self.renderer
-                .fetch_next_object(&mut mem.obj_buf, &mut mem.obj_rank, &src, self.lcdc);
+                .fetch_next_object(&mut mem.obj_buf, &src, self.lcdc);
             mem.vram[old_hi] = keep;
         }
     }
@@ -3421,15 +3398,15 @@ mod tests {
                 match reg {
                     0x40 => {
                         r.ppu.lcdc = v;
-                        r.ppu.window_write(now, &mut r.mem, None);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
                     0x4A => {
                         r.mem.io[0x4A] = v;
-                        r.ppu.wy_written(now, &mut r.mem, false);
+                        r.ppu.wy_written(now, &r.mem, false);
                     }
                     _ => {
                         r.mem.io[0x4B] = v;
-                        r.ppu.window_write(now, &mut r.mem, None);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
                 }
             }
@@ -4071,7 +4048,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.ppu.lcdc &= !0x20;
-                r.ppu.window_write(now, &mut r.mem, None);
+                r.ppu.window_write(now, &r.mem, None);
             }
             let irq = r
                 .irqs(l5 + 455)
@@ -4140,7 +4117,7 @@ mod tests {
                 } else {
                     r.mem.io[reg] = v;
                 }
-                r.ppu.window_write(now, &mut r.mem, None);
+                r.ppu.window_write(now, &r.mem, None);
             }
             let mut irqs = r.irqs(l5 + u64::from(mid));
             irqs.extend(r.irqs(l5 + 455));
@@ -4237,7 +4214,7 @@ mod tests {
             r.sync(now);
             r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = 0xFF;
-            r.ppu.wy_written(now, &mut r.mem, ds);
+            r.ppu.wy_written(now, &r.mem, ds);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
@@ -4279,7 +4256,7 @@ mod tests {
             r.sync(now);
             r.ppu.wy_write(now, &r.mem, ds);
             r.mem.io[0x4A] = line as u8;
-            r.ppu.wy_written(now, &mut r.mem, ds);
+            r.ppu.wy_written(now, &r.mem, ds);
             let l = clock(on, 1, (line + next) * LINE);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
@@ -4332,7 +4309,7 @@ mod tests {
             r.sync(now);
             r.ppu.lcdc |= 0x20;
             r.ppu.check_wy_at(now, &r.mem, ds);
-            r.ppu.window_write(now, &mut r.mem, None);
+            r.ppu.window_write(now, &r.mem, None);
             let l = clock(on, 1, (line + 1) * LINE);
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
@@ -4380,12 +4357,12 @@ mod tests {
                     r.mem.io[reg] = v;
                 }
                 match reg {
-                    0x4A => r.ppu.wy_written(now, &mut r.mem, false),
+                    0x4A => r.ppu.wy_written(now, &r.mem, false),
                     0x40 => {
                         r.ppu.check_wy_at(now, &r.mem, false);
-                        r.ppu.window_write(now, &mut r.mem, None);
+                        r.ppu.window_write(now, &r.mem, None);
                     }
-                    _ => r.ppu.window_write(now, &mut r.mem, None),
+                    _ => r.ppu.window_write(now, &r.mem, None),
                 }
             }
             r.sync(l5 + 455);
@@ -4457,13 +4434,13 @@ mod tests {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(r, now, 0x40, v);
                 r.ppu.check_wy_at(now, &r.mem, false);
-                r.ppu.window_write(now, &mut r.mem, None);
+                r.ppu.window_write(now, &r.mem, None);
             };
             let now = l5 + 122;
             r.sync(now);
             r.ppu.flush(now, &mut r.mem, &mut r.frame);
             r.mem.io[0x4B] = 0x67;
-            r.ppu.window_write(now, &mut r.mem, None);
+            r.ppu.window_write(now, &r.mem, None);
             lcdc(&mut r, 132, 0xF1 & !0x20);
             lcdc(&mut r, on, 0xF1);
             r.sync(l5 + 300);
@@ -4514,7 +4491,7 @@ mod tests {
                 r.ppu.flush(now, &mut r.mem, &mut r.frame);
                 if v != 0 {
                     r.mem.io[0x4B] = v;
-                    r.ppu.window_write(now, &mut r.mem, Some(WX_ON_LEAD));
+                    r.ppu.window_write(now, &r.mem, Some(WX_ON_LEAD));
                 }
             }
             r.sync(l5 + 455);
@@ -4561,12 +4538,12 @@ mod tests {
             r.sync(now);
             r.ppu.flush(now, &mut r.mem, &mut r.frame);
             r.mem.io[0x4B] = 0x67;
-            r.ppu.window_write(now, &mut r.mem, None);
+            r.ppu.window_write(now, &r.mem, None);
             for &(t, v) in writes {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(&mut r, now, 0x40, v);
                 r.ppu.check_wy_at(now, &r.mem, false);
-                r.ppu.window_write(now, &mut r.mem, None);
+                r.ppu.window_write(now, &r.mem, None);
             }
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
         };
@@ -4605,7 +4582,7 @@ mod tests {
             let now = l5 + u64::from(t);
             write_fetch_reg(&mut r, now, 0x40, 0xF1);
             r.ppu.check_wy_at(now, &r.mem, false);
-            r.ppu.window_write(now, &mut r.mem, None);
+            r.ppu.window_write(now, &r.mem, None);
             r.sync(l5 + 2 * u64::from(LINE));
             let px = |x: usize| r.frame[5 * SCREEN_WIDTH + x];
             (px(63), px(64), px(71))
@@ -4638,7 +4615,7 @@ mod tests {
     fn write_fetch_reg(r: &mut Rig, now: u64, reg: usize, value: u8) {
         r.sync(now);
         r.ppu.flush(now, &mut r.mem, &mut r.frame);
-        r.ppu.hold_fetch(now, &mut r.mem, reg, value, false);
+        r.ppu.hold_fetch(now, &r.mem, reg, value, false);
         if reg == 0x40 {
             if (value ^ r.ppu.lcdc) & 0x04 != 0 {
                 r.ppu.obj_size_fetch(now, value, &mut r.mem);
@@ -5017,7 +4994,7 @@ mod tests {
                 let now = l5 + u64::from(t);
                 r.sync(now);
                 r.mem.io[0x4B] = 0x77;
-                r.ppu.window_write(now, &mut r.mem, None);
+                r.ppu.window_write(now, &r.mem, None);
             }
             r.sync(l5 + 455);
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)

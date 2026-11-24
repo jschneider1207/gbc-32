@@ -62,7 +62,6 @@
 use super::objects::{LineObjects, MAX_PER_LINE};
 use super::{Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::DmgPalettes;
-use crate::memory::{Held, ObjRank};
 
 const W: usize = SCREEN_WIDTH;
 
@@ -135,6 +134,43 @@ const BG_ATTR_BANK: u8 = 0x08;
 /// The object line buffer covers screen x -8..168, so an object at any X
 /// below 168 is written without clipping: buffer index = screen x + 8.
 pub(crate) const OBJ_BUF_LEN: usize = W + 16;
+
+/// The object line buffer: the object pixels of the current line and,
+/// per pixel, the drawing-priority rank of the object that owns it. Line
+/// scratch that [`Renderer::render`] fills and reads; the caller keeps it
+/// (`Memory::obj_buf`) and passes the same one for every span of a line.
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct ObjBuf {
+    /// At screen x + 8: 0 = transparent, else bits 0-1 color (1-3), bits
+    /// 2-4 palette, bit 7 the OAM "behind BG" bit.
+    pub(crate) pix: [u8; OBJ_BUF_LEN],
+    /// Meaningful only where `pix` is opaque.
+    pub(crate) rank: [u8; OBJ_BUF_LEN],
+}
+
+impl ObjBuf {
+    pub(crate) const NEW: Self = Self {
+        pix: [0; OBJ_BUF_LEN],
+        rank: [0; OBJ_BUF_LEN],
+    };
+}
+
+/// One held part of a line ([`Renderer::hold`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub(crate) end: u8,
+    pub(crate) lcdc: u8,
+    pub(crate) scx: u8,
+    pub(crate) scy: u8,
+    /// The bit planes of the part's last tile (`[end - 8, end)`) that the
+    /// fetcher read after the write, with the next part's LCDC.4 and SCY:
+    /// bit 0 the low plane, bit 1 the high plane (its map entry was read
+    /// before; `docs/design/mid-line-ppu.md` step 3). Bits 2 (low) and 3
+    /// (high): planes read on an LCDC.4 change's dot (CGB TILE_SEL glitch:
+    /// a clear gives the tile index as their data, a set the latch); bits
+    /// 4-7 for a set's latch (`Ppu::hold_fetch`).
+    pub(crate) planes: u8,
+}
 
 /// The PPU registers the renderer reads, as of the span being drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -283,16 +319,41 @@ pub(crate) struct Renderer {
     /// Slots of `objects` from highest to lowest drawing priority.
     pub(crate) order: [u8; MAX_PER_LINE],
     /// Work for [`Renderer::render`] before its spans, one byte so the
-    /// common case is one test: `OBJ_DIRTY`, `obj_buf` (object pixels of
-    /// the line, at screen x + 8: 0 = transparent, else bits 0-1 color
-    /// (1-3), bits 2-4 palette, bit 7 OAM "behind BG") still holds the
-    /// previous line's objects (cleared by the next `render`); `ZERO_DUE`,
-    /// a window zero pixel is due at `ObjRank::win_zero`
-    /// ([`Renderer::render_zero`]; dropped at the frame start).
+    /// common case is one test: `OBJ_DIRTY`, the object buffer
+    /// ([`ObjBuf`]) still holds the previous line's objects (cleared by
+    /// the next `render`); `ZERO_DUE`, a window zero pixel is due at
+    /// `win_zero` ([`Renderer::render_zero`]; dropped at the frame start).
     slow: u8,
-    /// An object was fetched into `obj_buf` on this line (else it is all
-    /// transparent).
+    /// An object was fetched into the object buffer on this line (else it
+    /// is all transparent).
     obj_fetched: bool,
+    /// Position in the fetch order (`order`) of the line's first object
+    /// not yet fetched or skipped ([`Renderer::fetch_objects`]).
+    next_obj: u8,
+    /// Pixels of the current line the fetcher had already fetched (in
+    /// part) with older map-select (LCDC.3/6), tile-data (LCDC.4), SCX and
+    /// SCY values when those were written in mode 3 (`Ppu::hold_fetch`):
+    /// the pixels before `end` are drawn with these values. In `end`
+    /// order; `[2]` is the last; `[2].end == 0`: none. Three parts: a part
+    /// whose planes were read after a write keeps the next part's values
+    /// even when a later write lands before its end.
+    hold: [Held; 3],
+    /// CGB TILE_SEL glitch latch (the last byte the PPU read with
+    /// 8000-8FFF addressing) as far as modelled, as (byte, key)
+    /// (`Ppu::tile_sel_latch`, [`Renderer::carry_sel`]): key 8-175, the BG
+    /// or window read of the tile at screen x key - 8 on this line, the
+    /// last with 8000 addressing before an LCDC.4 clear (objects from that
+    /// x on were fetched after it); 1, a read on an earlier line (before
+    /// this line's objects); 0, unknown; 0xFF, BG reads with 8000
+    /// addressing since (unknown, after every object). Kept across lines.
+    sel: (u8, u8),
+    /// `sel` as of the last LCDC.4 set in mode 3, for that set's glitched
+    /// read ([`Renderer::tile_sel_glitch`]; a later clear changes `sel`
+    /// before the tile is drawn).
+    sel_at_set: (u8, u8),
+    /// Screen x + 1 of the window zero pixel due on the current line
+    /// ([`Renderer::render_zero`]), 0: none.
+    win_zero: u8,
     /// CGB mode (else DMG compatibility mode), fixed from reset (`Ppu::reset`).
     pub(crate) cgb: bool,
 }
@@ -312,6 +373,17 @@ impl Renderer {
             order: [0; MAX_PER_LINE],
             slow: 0,
             obj_fetched: false,
+            next_obj: 0,
+            hold: [Held {
+                end: 0,
+                lcdc: 0,
+                scx: 0,
+                scy: 0,
+                planes: 0,
+            }; 3],
+            sel: (0, 0),
+            sel_at_set: (0, 0),
+            win_zero: 0,
             cgb: false,
         }
     }
@@ -422,10 +494,12 @@ impl Renderer {
         self.set_window(window);
         self.objects = *objects;
         self.order = order;
-        // The buffer (`Memory::obj_buf`) is all transparent unless an object
-        // was fetched; it is cleared by the first `render` of the line.
+        // The object buffer is all transparent unless an object was
+        // fetched; it is cleared by the first `render` of the line.
         self.slow |= u8::from(self.obj_fetched);
         self.obj_fetched = false;
+        self.next_obj = 0;
+        self.hold[2].end = 0;
     }
 
     /// An SCX write moved the line's fine-scroll discard to `n` pixels
@@ -454,9 +528,6 @@ impl Renderer {
 
     /// Draws pixels `[x0, x1)` of the current line into `row` with the
     /// registers `regs`. Spans must be consecutive and in order.
-    // The object buffer and its ranks are separate `&mut`s (they live in
-    // `Memory`, while `Sources` is shared borrows of other parts of it).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
         row: &mut [u16; W],
@@ -464,21 +535,20 @@ impl Renderer {
         x1: usize,
         regs: &Regs,
         src: &Sources,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut ObjRank,
+        obj: &mut ObjBuf,
     ) {
         let x1 = x1.min(W);
         if x0 >= x1 {
             return;
         }
-        if usize::from(obj_rank.hold[2].end) > x0 {
-            return self.render_held(row, x0, x1, regs, src, obj_buf, obj_rank);
+        if usize::from(self.hold[2].end) > x0 {
+            return self.render_held(row, x0, x1, regs, src, obj);
         }
         if self.slow != 0 {
             if self.slow & ZERO_DUE != 0 {
-                return self.render_zero(row, x0, x1, regs, src, obj_buf, obj_rank);
+                return self.render_zero(row, x0, x1, regs, src, obj);
             }
-            *obj_buf = [0; OBJ_BUF_LEN];
+            obj.pix = [0; OBJ_BUF_LEN];
             self.slow = 0;
         }
         let lcdc = regs.lcdc;
@@ -525,8 +595,8 @@ impl Renderer {
         // pixel, in priority order; a pixel keeps the first opaque object
         // written to it. Fetching per span (not per line) keeps split and
         // whole-line rendering identical.
-        if usize::from(obj_rank.next) < self.objects.len() {
-            self.fetch_objects(obj_buf, obj_rank, src, lcdc, x1);
+        if usize::from(self.next_obj) < self.objects.len() {
+            self.fetch_objects(obj, src, lcdc, x1);
         }
 
         // LCDC.1 is checked when pixels are output, not at the scan (CGB;
@@ -539,7 +609,7 @@ impl Renderer {
         } else {
             // Mixed while the BG/window tiles are decoded, 8 pixels at a
             // time; tiles with no object pixel take the plain path.
-            self.bg_span::<true>(out, &obj_buf[x0 + 8..x1 + 8], x0, win_from, regs, src);
+            self.bg_span::<true>(out, &obj.pix[x0 + 8..x1 + 8], x0, win_from, regs, src);
         }
     }
 
@@ -553,7 +623,6 @@ impl Renderer {
     /// and cold: only after such a write.
     #[cold]
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
     fn render_held(
         &mut self,
         row: &mut [u16; W],
@@ -561,8 +630,7 @@ impl Renderer {
         x1: usize,
         regs: &Regs,
         src: &Sources,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut ObjRank,
+        obj: &mut ObjBuf,
     ) {
         const FETCHED: u8 = LCDC_BG_MAP | LCDC_TILES_8000 | LCDC_WIN_MAP | LCDC_WIN_ON;
         let regs_of = |h: &Held| Regs {
@@ -572,7 +640,7 @@ impl Renderer {
             ..*regs
         };
         // Taken while the parts are drawn, so they are drawn as usual.
-        let hold = core::mem::take(&mut obj_rank.hold);
+        let hold = core::mem::take(&mut self.hold);
         for (i, h) in hold.iter().enumerate() {
             let end = usize::from(h.end);
             if end <= x0 {
@@ -580,17 +648,16 @@ impl Renderer {
             }
             let held = regs_of(h);
             let to = end.min(x1);
-            self.render(row, x0, to, &held, src, obj_buf, obj_rank);
+            self.render(row, x0, to, &held, src, obj);
             let from = x0.max(end.saturating_sub(8));
             if h.planes != 0 && from < to {
                 let next = hold.get(i + 1).map_or(*regs, regs_of);
-                let latch = obj_rank.sel_latch;
-                self.mix_planes(row, obj_buf, from, to, &held, &next, h.planes, src, latch);
+                self.mix_planes(row, &obj.pix, from, to, &held, &next, h.planes, src);
             }
             x0 = to;
         }
-        self.render(row, x0, x1, regs, src, obj_buf, obj_rank);
-        obj_rank.hold = hold;
+        self.render(row, x0, x1, regs, src, obj);
+        self.hold = hold;
     }
 
     /// Whether screen x `z` is the first pixel of a window tile after the
@@ -608,8 +675,8 @@ impl Renderer {
 
     /// A window zero pixel is due at screen x `z` (`None`: none is), see
     /// [`Renderer::render_zero`]; `Ppu::window_zero` decides it.
-    pub(crate) fn set_zero(&mut self, obj_rank: &mut ObjRank, z: Option<u8>) {
-        obj_rank.win_zero = z.map_or(0, |z| z + 1);
+    pub(crate) fn set_zero(&mut self, z: Option<u8>) {
+        self.win_zero = z.map_or(0, |z| z + 1);
         self.slow |= ZERO_DUE;
     }
 
@@ -623,7 +690,6 @@ impl Renderer {
     /// FIFO's end"). Out of line and cold: only after a WX write in mode 3.
     #[cold]
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
     fn render_zero(
         &mut self,
         row: &mut [u16; W],
@@ -631,30 +697,29 @@ impl Renderer {
         x1: usize,
         regs: &Regs,
         src: &Sources,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut ObjRank,
+        obj: &mut ObjBuf,
     ) {
         self.slow &= !ZERO_DUE;
         // The zero pixel's x + 1 (0: none).
-        let z1 = usize::from(obj_rank.win_zero);
+        let z1 = usize::from(self.win_zero);
         // Up to it as usual first: its objects are fetched.
         let cut = z1.min(x1).max(x0);
-        self.render(row, x0, cut, regs, src, obj_buf, obj_rank);
+        self.render(row, x0, cut, regs, src, obj);
         if z1 > x1 {
             // Not reached yet (the rest is empty).
             self.slow |= ZERO_DUE;
         } else if z1 > x0 {
-            obj_rank.win_zero = 0;
+            self.win_zero = 0;
             // Not at a (re)start: the window's first tile is still fetched.
             if self.window_active && z1 > usize::from(self.window_start()) + 1 {
-                if let (Some(p), Some(&o)) = (row.get_mut(z1 - 1), obj_buf.get(z1 + 7)) {
+                if let (Some(p), Some(&o)) = (row.get_mut(z1 - 1), obj.pix.get(z1 + 7)) {
                     let o = if regs.lcdc & LCDC_OBJ_ON != 0 { o } else { 0 };
                     *p = mix(0, o, 0, &src.colors.bg[0], src.colors);
                 }
                 self.window_skip = self.window_skip.wrapping_sub(1);
             }
         }
-        self.render(row, cut, x1, regs, src, obj_buf, obj_rank);
+        self.render(row, cut, x1, regs, src, obj);
     }
 
     /// Redraws pixels `[x0, x1)` of one BG or window tile, just drawn with
@@ -676,7 +741,6 @@ impl Renderer {
         next: &Regs,
         planes: u8,
         src: &Sources,
-        latch: (u8, u8),
     ) {
         let lcdc = held.lcdc;
         let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
@@ -721,7 +785,7 @@ impl Renderer {
         let glitch = if g != 0 {
             let index =
                 src.vram[(map | (usize::from(y >> 3) << 5) | usize::from(col >> 3)) & 0x1FFF];
-            self.tile_sel_glitch(src, latch, lcdc, planes, index, attr, old, new)
+            self.tile_sel_glitch(src, lcdc, planes, index, attr, old, new)
         } else {
             0
         };
@@ -751,7 +815,7 @@ impl Renderer {
     ///   (Mealybug: "bitplane 1 data from the most recently drawn sprite
     ///   ... or tile"): the high plane of the last object fetched before
     ///   this tile's reads (slot + 1 in `planes` bits 4-7) unless the
-    ///   latch `latch` (`ObjRank::sel_latch`) was read after it. With
+    ///   latch as of the set (`sel_at_set`) was read after it. With
     ///   neither known (key 0 or 0xFF), the row as `old` (bits 4-7 = 15:
     ///   an object stall in tile j or j + 1, `Ppu::hold_fetch`) or `new`,
     ///   which the earlier `LCDC_TILES_LATE` calibration fitted.
@@ -761,7 +825,6 @@ impl Renderer {
     fn tile_sel_glitch(
         &self,
         src: &Sources,
-        latch: (u8, u8),
         lcdc: u8,
         planes: u8,
         index: u8,
@@ -769,7 +832,7 @@ impl Renderer {
         old: u16,
         new: u16,
     ) -> u16 {
-        let (byte, key) = latch;
+        let (byte, key) = self.sel_at_set;
         let data = if lcdc & LCDC_TILES_8000 != 0 {
             if index >= 0x80 {
                 return old;
@@ -821,7 +884,7 @@ impl Renderer {
         vram[a & 0x3FFF]
     }
 
-    /// The CGB TILE_SEL glitch latch `latch` (`ObjRank::sel_end`) at the
+    /// The CGB TILE_SEL glitch latch (`sel`) at the
     /// start of a line, LCDC `lcdc`, before the renderer leaves the line
     /// that ended: the high plane of that line's last object fetch (OAM as
     /// it is now, `Renderer::obj_high_addr`) if it came after the latched
@@ -834,16 +897,11 @@ impl Renderer {
     /// line 128 (line 127's clear), 129-135 (line 128's object),
     /// `m3_lcdc_tile_sel_win_change` line 64 (line 63's BG read before the
     /// clear), gambatte `bgtiledata_spx*` (the same). Cold: called only
-    /// on lines with LCDC.4 clear or after one (`Ppu::latch`).
+    /// on lines with LCDC.4 clear or after one ([`Renderer::sel_carries`]).
     #[cold]
     #[inline(never)]
-    pub(crate) fn carry_sel(
-        &self,
-        oam: &[u8; 0xA0],
-        vram: &[u8; 0x4000],
-        lcdc: u8,
-        latch: &mut (u8, u8),
-    ) {
+    pub(crate) fn carry_sel(&mut self, oam: &[u8; 0xA0], vram: &[u8; 0x4000], lcdc: u8) {
+        let mut latch = self.sel;
         let mut key = u8::from(latch.1.wrapping_sub(1) < 0xFE);
         if let Some(s) = self.last_fetched()
             && u16::from(self.objects.get(s).2) + 8 >= u16::from(latch.1)
@@ -856,6 +914,64 @@ impl Renderer {
         } else {
             key
         };
+        self.sel = latch;
+    }
+
+    /// Whether the line that starts with LCDC `lcdc` changes the TILE_SEL
+    /// glitch latch at its start ([`Renderer::carry_sel`]): not while
+    /// LCDC.4 stays set (most lines: one test, no call).
+    #[inline]
+    pub(crate) const fn sel_carries(&self, lcdc: u8) -> bool {
+        self.sel.1 != 0xFF || lcdc & LCDC_TILES_8000 == 0
+    }
+
+    /// An LCDC.4 set in mode 3 ([`Renderer::tile_sel_glitch`] reads the
+    /// latch as of now for its glitched plane): from here on BG reads with
+    /// 8000 addressing replace the latch (unknown).
+    pub(crate) const fn sel_set(&mut self) {
+        self.sel_at_set = self.sel;
+        self.sel.1 = 0xFF;
+    }
+
+    /// An LCDC.4 clear in mode 3: the latch holds `byte`, the BG or window
+    /// read of the tile at screen x `x` (its first pixel; may be left of
+    /// the screen), the last with 8000 addressing.
+    pub(crate) fn sel_clear(&mut self, byte: u8, x: i32) {
+        self.sel = (byte, (x + 8).max(1) as u8);
+    }
+
+    /// The line has a held part still to draw ([`Renderer::render_held`]).
+    #[inline]
+    pub(crate) const fn holding(&self) -> bool {
+        self.hold[2].end != 0
+    }
+
+    /// A new held part `seg` for a write with pixel `x` next out
+    /// (`Ppu::hold_fetch`): the line's last part, or none when an earlier
+    /// write already holds further.
+    pub(crate) fn push_hold(&mut self, seg: Held, x: i32) {
+        let hold = &mut self.hold;
+        let last = hold[2];
+        if i32::from(last.end) <= x {
+            *hold = [Held::default(), Held::default(), seg];
+        } else if seg.end > last.end || (seg.end == last.end && last.planes != 0 && seg.planes == 0)
+        {
+            // Same end: the held tile's planes read after the earlier
+            // write were read with the values before this one, which the
+            // (empty) new part keeps for `Renderer::mix_planes`.
+            *hold = [hold[1], last, seg];
+        }
+    }
+
+    /// The window's first tile is fetched after it starts: no held part
+    /// reaches past a start at screen x `start` decided after it.
+    pub(crate) fn cut_holds(&mut self, start: u8) {
+        for h in &mut self.hold {
+            if h.end > start {
+                h.end = start;
+                h.planes = 0;
+            }
+        }
     }
 
     /// BG/window pixels `[x0, x0 + out.len())`, the window from `win_from`
@@ -946,20 +1062,13 @@ impl Renderer {
     /// Fetches the objects whose first visible pixel is in `[x0, x1)`, in
     /// fetch order. `order` is ascending X and the spans of a line are
     /// consecutive from pixel 0, so the objects of a span are the next ones
-    /// in `order` from `ObjRank::next`: each object is looked at once per line,
+    /// in `order` from `next_obj`: each object is looked at once per line,
     /// not once per span. Out of line: once per span with objects, and
     /// forced into `render` it measured slower (cpu_instrs +0.06%,
     /// worst-case +0.04%, cgb-acid2 -0.01% x86 Ir) for 568 B more.
     #[inline(never)]
-    fn fetch_objects(
-        &mut self,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut ObjRank,
-        src: &Sources,
-        lcdc: u8,
-        x1: usize,
-    ) {
-        let mut k = usize::from(obj_rank.next);
+    fn fetch_objects(&mut self, obj: &mut ObjBuf, src: &Sources, lcdc: u8, x1: usize) {
+        let mut k = usize::from(self.next_obj);
         while k < self.objects.len() {
             let slot = usize::from(self.order[k % MAX_PER_LINE]);
             let (index, y, x) = self.objects.get(slot);
@@ -969,40 +1078,40 @@ impl Renderer {
                 break;
             }
             if x != 0 {
-                self.fetch_object(obj_buf, &mut obj_rank.rank, src, lcdc, slot, index, y, x);
+                self.fetch_object(obj, src, lcdc, slot, index, y, x);
             }
             k += 1;
         }
-        obj_rank.next = k as u8;
+        self.next_obj = k as u8;
     }
 
-    /// Fetches the line's next object in fetch order (`ObjRank::next`)
+    /// Fetches the line's next object in fetch order (`next_obj`)
     /// now, with LCDC `lcdc`: an LCDC.2 write lands after its fetch read
     /// the tile row (`Ppu::obj_size_fetch`). Cold: only on such writes.
     #[cold]
     #[inline(never)]
-    pub(crate) fn fetch_next_object(
-        &mut self,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut ObjRank,
-        src: &Sources,
-        lcdc: u8,
-    ) {
+    pub(crate) fn fetch_next_object(&mut self, obj: &mut ObjBuf, src: &Sources, lcdc: u8) {
         if self.slow & OBJ_DIRTY != 0 {
-            *obj_buf = [0; OBJ_BUF_LEN];
+            obj.pix = [0; OBJ_BUF_LEN];
             self.slow &= !OBJ_DIRTY;
         }
         // `fetch_objects` up to that object only.
         let all = self.objects;
-        self.objects = all.with_len(obj_rank.next.wrapping_add(1));
-        self.fetch_objects(obj_buf, obj_rank, src, lcdc, usize::MAX);
+        self.objects = all.with_len(self.next_obj.wrapping_add(1));
+        self.fetch_objects(obj, src, lcdc, usize::MAX);
         self.objects = all;
     }
 
-    /// The slot of the object at fetch-order position `next`, if any.
-    pub(crate) fn next_object(&self, next: u8) -> Option<usize> {
-        (usize::from(next) < self.objects.len())
-            .then(|| usize::from(self.order[usize::from(next) % MAX_PER_LINE]) % MAX_PER_LINE)
+    /// The fetch-order position and the slot of the line's next object to
+    /// fetch, if any is left.
+    pub(crate) fn next_object(&self) -> Option<(usize, usize)> {
+        let next = usize::from(self.next_obj);
+        (next < self.objects.len()).then(|| {
+            (
+                next,
+                usize::from(self.order[next % MAX_PER_LINE]) % MAX_PER_LINE,
+            )
+        })
     }
 
     /// The VRAM address of the high bit plane byte of line `ly`'s row of
@@ -1032,11 +1141,10 @@ impl Renderer {
 
     /// Decodes one object's row into the object buffer.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)] // Object fields plus the buffers.
+    #[allow(clippy::too_many_arguments)] // Object fields plus the buffer.
     fn fetch_object(
         &mut self,
-        obj_buf: &mut [u8; OBJ_BUF_LEN],
-        obj_rank: &mut [u8; OBJ_BUF_LEN],
+        obj: &mut ObjBuf,
         src: &Sources,
         lcdc: u8,
         slot: usize,
@@ -1090,10 +1198,10 @@ impl Renderer {
         // (a higher rank).
         let x = usize::from(x);
         if let (Some(dst), Some(ranks)) = (
-            obj_buf
+            obj.pix
                 .get_mut(x..x + 8)
                 .and_then(|s| <&mut [u8; 8]>::try_from(s).ok()),
-            obj_rank
+            obj.rank
                 .get_mut(x..x + 8)
                 .and_then(|s| <&mut [u8; 8]>::try_from(s).ok()),
         ) {
@@ -1489,8 +1597,7 @@ mod tests {
         colors: Colors,
         regs: Regs,
         r: Renderer,
-        obj_buf: [u8; OBJ_BUF_LEN],
-        obj_rank: ObjRank,
+        obj: ObjBuf,
     }
 
     impl Scene {
@@ -1507,15 +1614,7 @@ mod tests {
                     ..Regs::default()
                 },
                 r,
-                obj_buf: [0; OBJ_BUF_LEN],
-                obj_rank: ObjRank {
-                    rank: [0; OBJ_BUF_LEN],
-                    hold: [Held::default(); 3],
-                    next: 0,
-                    sel_latch: (0, 0),
-                    sel_end: (0, 0),
-                    win_zero: 0,
-                },
+                obj: ObjBuf::NEW,
             }
         }
 
@@ -1543,7 +1642,6 @@ mod tests {
 
         /// Starts line `ly` (WY check, OAM scan) without drawing.
         fn begin(&mut self, ly: u8) {
-            self.obj_rank.next = 0;
             self.r.check_wy(ly, &self.regs);
             let objs = LineObjects::scan(&self.oam, ly, self.regs.lcdc & LCDC_OBJ_TALL != 0);
             // As `Ppu::window_wx` at the line start.
@@ -1562,15 +1660,7 @@ mod tests {
                 colors: &self.colors,
                 pairs: &core::array::from_fn(|p| pair_table(&self.colors.bg[p])),
             };
-            self.r.render(
-                row,
-                x0,
-                x1,
-                &self.regs,
-                &src,
-                &mut self.obj_buf,
-                &mut self.obj_rank,
-            );
+            self.r.render(row, x0, x1, &self.regs, &src, &mut self.obj);
         }
 
         fn line(&mut self, ly: u8) -> [u16; W] {
@@ -2020,7 +2110,7 @@ mod tests {
         s.begin(0);
         s.r.set_fine(7);
         s.regs.scx = 0x67;
-        s.obj_rank.hold[2] = Held {
+        s.r.hold[2] = Held {
             end: 1,
             lcdc: s.regs.lcdc,
             scx: 3,
@@ -2308,15 +2398,7 @@ mod tests {
                 colors: s.colors,
                 regs: s.regs,
                 r: Renderer::new(),
-                obj_buf: [0; OBJ_BUF_LEN],
-                obj_rank: ObjRank {
-                    rank: [0; OBJ_BUF_LEN],
-                    hold: [Held::default(); 3],
-                    next: 0,
-                    sel_latch: (0, 0),
-                    sel_end: (0, 0),
-                    win_zero: 0,
-                },
+                obj: ObjBuf::NEW,
             };
             split.r.start_frame();
             split.r.cgb = cgb;

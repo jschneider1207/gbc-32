@@ -2,7 +2,7 @@
 
 use crate::apu::Apu;
 use crate::dma::ReadClears;
-use crate::ppu::OBJ_BUF_LEN;
+use crate::ppu::ObjBuf;
 
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
 /// area and the I/O register backing store), about 49 KiB, provided by the
@@ -49,14 +49,10 @@ pub struct Memory {
     /// most PPU and CGB palette registers until M3/M5). Indexed by the
     /// low address byte; registers with behavior live in their component.
     pub(crate) io: [u8; 0x80],
-    /// Object pixels of the current line (`ppu::render::Renderer`): screen x + 8;
-    /// 0 = transparent, else bits 0-1 color, bits 2-4 palette, bit 7 BG
-    /// priority. Per-line scratch lives here, not in `Hw` (ADR 0009).
-    pub(crate) obj_buf: [u8; OBJ_BUF_LEN],
-    /// Per `obj_buf` pixel, the drawing-priority rank of the object that
-    /// owns it (`ppu::render::Renderer::render`; meaningful only where
-    /// `obj_buf` is opaque).
-    pub(crate) obj_rank: ObjRank,
+    /// The renderer's object line buffer: the object pixels of the current
+    /// line and their drawing-priority ranks ([`ObjBuf`]; ADR 0019). Line
+    /// scratch, kept here with the other large arrays (ADR 0009).
+    pub(crate) obj_buf: ObjBuf,
     /// CGB BG palette RAM (BCPD, FF69): 8 palettes of 4 colors, RGB555
     /// little-endian, bytes as written (bit 15 included, for read-back).
     /// Pan Docs: LCD Color Palettes (CGB only).
@@ -88,21 +84,7 @@ impl Memory {
             hram: [0; 0x7F],
             extra_oam: [0; 0x60],
             io: [0; 0x80],
-            obj_buf: [0; OBJ_BUF_LEN],
-            obj_rank: ObjRank {
-                rank: [0; OBJ_BUF_LEN],
-                hold: [Held {
-                    end: 0,
-                    lcdc: 0,
-                    scx: 0,
-                    scy: 0,
-                    planes: 0,
-                }; 3],
-                next: 0,
-                sel_latch: (0, 0),
-                sel_end: (0, 0),
-                win_zero: 0,
-            },
+            obj_buf: ObjBuf::NEW,
             bg_pal: [0; 64],
             obj_pal: [0; 64],
             bg_pairs: [[0; 16]; 8],
@@ -122,13 +104,8 @@ impl Memory {
         self.hram.fill(0);
         self.extra_oam.fill(0);
         self.io.fill(0);
-        self.obj_buf.fill(0);
-        self.obj_rank.rank.fill(0);
-        self.obj_rank.next = 0;
-        self.obj_rank.sel_latch = (0, 0);
-        self.obj_rank.sel_end = (0, 0);
-        self.obj_rank.hold = [Held::default(); 3];
-        self.obj_rank.win_zero = 0;
+        self.obj_buf.pix.fill(0);
+        self.obj_buf.rank.fill(0);
         self.bg_pal.fill(0);
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
@@ -137,69 +114,13 @@ impl Memory {
     }
 }
 
-/// Per [`Memory::obj_buf`] pixel, the drawing-priority rank of the object
-/// that owns it, and the renderer's held fetches. Both reach
-/// `Renderer::render` through one pointer: a second one would grow
-/// `Ppu::draw` past its code-size budget, and placed here (after the hot
-/// arrays in this `repr(C)` struct) the hold moves no offset that the bus
-/// or the PPU address with Thumb-2 immediates.
-#[cfg_attr(test, derive(PartialEq))]
-pub(crate) struct ObjRank {
-    /// Meaningful only where `obj_buf` is opaque.
-    pub(crate) rank: [u8; OBJ_BUF_LEN],
-    /// Pixels of the current line the fetcher had already fetched (in
-    /// part) with older map-select (LCDC.3/6), tile-data (LCDC.4), SCX and
-    /// SCY values when those were written in mode 3 (`ppu::Ppu::hold_fetch`):
-    /// the pixels before `end` are drawn with these values. In `end`
-    /// order; `[2]` is the last; `[2].end == 0`: none. Three parts: a part whose
-    /// planes were read after a write keeps the next part's values even
-    /// when a later write lands before its end.
-    pub(crate) hold: [Held; 3],
-    /// Position in the renderer's object fetch order of the line's first
-    /// object not yet fetched or skipped (`Renderer::fetch_objects`); 0 at
-    /// the line start (`Ppu::latch`).
-    pub(crate) next: u8,
-    /// CGB TILE_SEL glitch latch (the last byte the PPU read with 8000-8FFF
-    /// addressing) as far as modelled: `sel_end` as of the last LCDC.4 set
-    /// in mode 3, for that set's glitched read (`Renderer::tile_sel_glitch`;
-    /// a later clear changes `sel_end` before the tile is drawn).
-    pub(crate) sel_latch: (u8, u8),
-    /// The latch now, as (byte, key) (`Ppu::hold_fetch`, `Renderer::carry_sel`):
-    /// key 8-175, the BG or window read of the tile at screen x key - 8
-    /// on this line, the last with 8000 addressing before an LCDC.4 clear
-    /// (objects from that x on were fetched after it); 1, a read on an
-    /// earlier line (before this line's objects); 0, unknown; 0xFF, BG
-    /// reads with 8000 addressing since (unknown, after every object).
-    pub(crate) sel_end: (u8, u8),
-    /// Screen x + 1 of the window zero pixel due on the current line
-    /// (`Renderer::render_zero`), 0: none.
-    pub(crate) win_zero: u8,
-}
-
-/// One held part of a line ([`ObjRank::hold`]).
-#[derive(Clone, Copy, Default)]
-#[cfg_attr(test, derive(PartialEq, Debug))]
-pub(crate) struct Held {
-    pub(crate) end: u8,
-    pub(crate) lcdc: u8,
-    pub(crate) scx: u8,
-    pub(crate) scy: u8,
-    /// The bit planes of the part's last tile (`[end - 8, end)`) that the
-    /// fetcher read after the write, with the next part's LCDC.4 and SCY:
-    /// bit 0 the low plane, bit 1 the high plane (its map entry was read
-    /// before; `docs/design/mid-line-ppu.md` step 3). Bits 2 (low) and 3
-    /// (high): planes read on an LCDC.4 change's dot (CGB TILE_SEL glitch:
-    /// a clear gives the tile index as their data, a set the latch); bits
-    /// 4-7 for a set's latch (`Ppu::hold_fetch`).
-    pub(crate) planes: u8,
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
 
-    use super::{Held, Memory, ObjRank};
+    use super::Memory;
     use crate::apu::Apu;
+    use crate::ppu::ObjBuf;
 
     #[test]
     fn memory_new_is_all_zero_bytes() {
@@ -216,7 +137,6 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
-            obj_rank,
             bg_pal,
             obj_pal,
             bg_pairs,
@@ -232,28 +152,18 @@ mod tests {
             hram,
             extra_oam,
             io,
-            obj_buf,
-            &obj_rank.rank,
+            &obj_buf.pix,
+            &obj_buf.rank,
             bg_pal,
             obj_pal,
         ];
         assert!(fields.iter().all(|f| f.iter().all(|&b| b == 0)));
         assert!(bg_pairs.as_flattened().iter().all(|&w| w == 0));
-        assert!(obj_rank.hold.iter().all(|&h| h == Held::default()));
-        assert_eq!(obj_rank.next, 0);
-        assert_eq!(obj_rank.sel_latch, (0, 0));
-        assert_eq!(obj_rank.sel_end, (0, 0));
-        assert_eq!(obj_rank.win_zero, 0);
         assert_eq!(*apu, Apu::new());
         // The fields cover every byte: nothing else, and no padding but
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
         let total: usize = fields.iter().map(|f| f.len()).sum::<usize>()
             + size_of_val(bg_pairs)
-            + size_of_val(&obj_rank.hold)
-            + size_of_val(&obj_rank.next)
-            + size_of_val(&obj_rank.sel_latch)
-            + size_of_val(&obj_rank.sel_end)
-            + size_of_val(&obj_rank.win_zero)
             + size_of::<Apu>()
             + size_of_val(dma_read_clears);
         assert_eq!(
@@ -279,7 +189,6 @@ mod tests {
                 extra_oam,
                 io,
                 obj_buf,
-                obj_rank,
                 bg_pal,
                 obj_pal,
                 dma_read_clears,
@@ -293,27 +202,9 @@ mod tests {
             hram.fill(5);
             extra_oam.fill(6);
             io.fill(7);
-            obj_buf.fill(8);
-            let ObjRank {
-                rank,
-                hold,
-                next,
-                sel_latch,
-                sel_end,
-                win_zero,
-            } = obj_rank;
+            let ObjBuf { pix, rank } = obj_buf;
+            pix.fill(8);
             rank.fill(9);
-            *hold = [Held {
-                end: 10,
-                lcdc: 11,
-                scx: 12,
-                scy: 13,
-                planes: 14,
-            }; 3];
-            *next = 15;
-            *sel_latch = (16, 17);
-            *sel_end = (18, 19);
-            *win_zero = 20;
             bg_pal.fill(21);
             obj_pal.fill(22);
             dma_read_clears.record(23);
@@ -331,7 +222,6 @@ mod tests {
             extra_oam,
             io,
             obj_buf,
-            obj_rank,
             bg_pal,
             obj_pal,
             dma_read_clears,
@@ -346,19 +236,8 @@ mod tests {
             ("hram", *hram == NEW.hram),
             ("extra_oam", *extra_oam == NEW.extra_oam),
             ("io", *io == NEW.io),
-            ("obj_buf", *obj_buf == NEW.obj_buf),
-            ("obj_rank.rank", obj_rank.rank == NEW.obj_rank.rank),
-            ("obj_rank.hold", obj_rank.hold == NEW.obj_rank.hold),
-            ("obj_rank.next", obj_rank.next == NEW.obj_rank.next),
-            (
-                "obj_rank.sel_latch",
-                obj_rank.sel_latch == NEW.obj_rank.sel_latch,
-            ),
-            ("obj_rank.sel_end", obj_rank.sel_end == NEW.obj_rank.sel_end),
-            (
-                "obj_rank.win_zero",
-                obj_rank.win_zero == NEW.obj_rank.win_zero,
-            ),
+            ("obj_buf.pix", obj_buf.pix == NEW.obj_buf.pix),
+            ("obj_buf.rank", obj_buf.rank == NEW.obj_buf.rank),
             ("bg_pal", *bg_pal == NEW.bg_pal),
             ("obj_pal", *obj_pal == NEW.obj_pal),
             ("dma_read_clears", *dma_read_clears == NEW.dma_read_clears),
