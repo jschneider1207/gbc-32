@@ -644,6 +644,22 @@ which is where the 5% comes from; code running from ROM gains only on
 its data and stack reads (the other lines). `Cpu::run` 25,414 ->
 26,128 B.
 
+Measured on top of that (06e3750, `.text` 113,908 B) and not taken:
+
+| Step | cpu_instrs | cgb_sound | cgb-acid2 | event-storm | dma-storm | halt-irq | worst-case | cgb-raster | apu-writes | `.text` (B) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 06e3750 | -7.52% | -5.22% | -0.04% | -0.39% | -5.24% | -1.14% | -0.67% | -1.50% | -0.53% | |
+| WRAM store inlined for stack pushes only (a `Bus::write_stack` with the C000-DFFF store inline, used by `Cpu::push`) | -8.27% | -5.47% | -0.05% | -0.73% | -5.24% | -1.14% | -0.72% | -1.81% | -0.57% | +1,664 |
+| Inventory L1: the 32 CB (HL) forms each in their own arm again | -7.52% | -5.22% | -0.06% | -0.39% | -5.24% | -1.14% | -0.67% | -1.50% | -0.53% | +4,738 |
+
+The push-only inline gets all of what the middle form gave (the stack is
+where the WRAM writes of these ROMs go) for half its bytes and without
+its regressions, but it is still 1.7 KB for 0.75% on one line and
+0.05-0.35% on the rest, and it adds a method to the public `Bus` trait:
+left out, the first candidate if `.text` room is left at the end of M10.
+L1 moves only cgb-acid2, by 0.02%, for 4.7 KB (`execute_cb` 6,860 ->
+11,598 B): the shared (HL) body stays.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change
