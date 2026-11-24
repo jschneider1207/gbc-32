@@ -503,7 +503,6 @@ final chip does not have.
 | Total `.text` of gbc-core <= 122,880 B (H735: 128 KiB ITCM minus an 8 KiB platform reserve; provisional) | yes | `scripts/check-code-size.sh`, the `122880 (total .text)` line of `perf/code-size-budgets.txt` |
 | Ir per bench at most 3% over baseline | yes | `scripts/check-bench.sh` ("Instruction-count benchmark" below) |
 | Every glob of the Stage 2 placement list matches a function | yes | `scripts/check-itcm-set.sh`, `perf/itcm-sections.txt` |
-| ROM reads are byte loads (ADR 0027) | yes | `scripts/check-rom-loads.sh` |
 | Per-function size (size, the old cap, % of it) | no, printed; a missing symbol is a `WARN` | `report` lines of `perf/code-size-budgets.txt` |
 | H753 ITCM set fits 56 KiB; its callee closure | no, printed with a `WARN` line | `scripts/check-itcm-set.sh` |
 | `size_of` `Emulator` (`Hw` plus a pointer) and `Memory` on thumbv7em | no, printed | `scripts/check-code-size.sh` |
@@ -683,6 +682,40 @@ Unused lever: about 5.8 KB of `.text` is `nop` alignment padding (2,919
 to 8 bytes. Removing it is a build-flag choice (an LLVM alignment
 option) whose cost on the real M7 fetch path callgrind can't show; it
 needs an MCU measurement and the human.
+
+## ROM reads
+
+The core reads the ROM as a plain `&[u8]`: loads of any width, at any
+address. ADR 0027 (byte loads only, behind a `compiler_fence`, for the
+FMC erratum ES0491 §2.7.3) was retired on 2026-11-24 because the ROM
+memory is HyperRAM on OCTOSPI (ES0491 §2.8.4 Table 5: memory-mapped
+HyperBus reads at any address and byte number). Undoing its code shapes,
+each step measured on its own (2026-11-24, branch `m10-rom-wide`;
+`.text` is thumbv7em, 113,154 B before):
+
+| Step | Ir (`check-bench.sh`) | `.text` |
+|---|---|---|
+| VRAM DMA takes a ROM block as one `[u8; 16]` chunk of the bank window (was 16 byte loads) | `synth:worst-case` 278,145,324 -> 278,059,754 (-0.03%); others identical | -254 B |
+| `Cart::rom_block` (inline) and `Cart::ram_block` instead of one `dma_block` | `synth:worst-case` -> 277,991,298 (-0.025%); others identical | 0 |
+| MBC1M logo test as slice compares | identical | -32 B |
+| `header` left to the inliner | identical | -114 B (`Emulator::load` 948 -> 892) |
+| `rom::Rom` and its fence removed | identical | +72 B (`boot_logo` 264 -> 328, unrolled by two; `cart_info` +8) |
+
+Result: 112,826 B (-328); `synth:worst-case` -0.055%, the other eight
+lines identical (`synth:dma-storm` is OAM DMA from WRAM and has no ROM
+block copy; only `synth:worst-case` runs VRAM DMA from ROM).
+
+Measured and not taken:
+- `Cart::read_rom` as `window.get(i).copied().unwrap_or(0xFF)` instead
+  of compare, early return, index: cpu_instrs +0.06%, cgb_sound +0.04%,
+  cgb-acid2 +0.05%, event-storm +1.71%, dma-storm +0.03%, halt-irq
+  +0.47%, worst-case +0.95%, cgb-raster +1.12%, apu-writes +0.28%, and
+  +52 B (`Cpu::run` +48). An `if i < len { window[i] } else { 0xFF }`
+  expression measured the same as `get`. The fence itself cost nothing on
+  this path: removing it alone left all nine counts unchanged.
+- The VRAM DMA block written through an out pointer into its VRAM slot
+  instead of returned by value: `synth:worst-case` +17,114 Ir (+0.006%),
+  +40 B.
 
 ## ITCM placement plan
 
@@ -987,7 +1020,7 @@ Where it is set, and how it can't be lost unnoticed:
   firmware. Keep it a one-line array.
 - A `RUSTFLAGS` (or `CARGO_ENCODED_RUSTFLAGS`) variable *replaces* the
   config's flags. The scripts that set their own (`check-code-size.sh`,
-  `check-itcm-set.sh`, `check-rom-loads.sh`: `-C target-cpu=cortex-m7`)
+  `check-itcm-set.sh`: `-C target-cpu=cortex-m7`)
   source `scripts/lib/rustflags.sh`, which reads the config line and adds
   to it, so the two cannot drift; it fails (exit 1) if the line is
   missing or lacks the option.

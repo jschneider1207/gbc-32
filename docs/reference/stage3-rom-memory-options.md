@@ -69,7 +69,7 @@ to a marking note). Read `DBGMCU_IDC.REV_ID` (0x1000 = A, 0x1001 = Z) on deliver
 | 2.5.1, 2.6.x DMA/DMAMUX | — | UART/DMAMUX-specific; SDMMC IDMA and MDMA unaffected |
 | 2.9.1 SDMMC end bits not checked | loader | data CRC still checked; add a whole-file CRC check after load (also catches RAM faults) |
 | 2.7.1 FMC two dummy reads after a burst | SDRAM | +2 SDCLK per line fill |
-| 2.7.3 FMC unaligned reads unsupported | SDRAM | already handled by byte reads (gbc-32 ADR 0027) |
+| 2.7.3 FMC unaligned reads unsupported | SDRAM | not handled: the core's ROM reads may be unaligned since gbc-32 ADR 0027 (byte reads) was retired, 2026-11-24 |
 | 2.8.2 / 2.8.3 hybrid wrap broken by REFRESH etc.; WP* registers dead | OSPI | **keep WRAPSIZE=0** (no memory-side wrap) |
 | 2.8.15 wrap then linear read to same MSB address: corruption, **no workaround** | OSPI | only with wrap transactions → WRAPSIZE=0. My reading; confirm on the DK |
 | 2.8.4 odd address/length combinations | OSPI | memory-mapped reads at any address are fine in DTR-with-DQS and HyperBus; mm writes fine in HyperBus or with DM |

@@ -1,6 +1,7 @@
 # 0027: Byte-wide ROM reads
 
 Status: Accepted (2026-11-22)
+Status: Retired (2026-11-24, human decision; see the amendment "Retired" below)
 
 ## Context
 
@@ -100,3 +101,46 @@ misaligned address written to `OCTOSPI_AR` before an indirect write). So
 on the planned ROM memory, unaligned or merged ROM reads would be
 supported. This ADR stays in force, and `scripts/check-rom-loads.sh` keeps
 gating, until the human retires it.
+
+### 2026-11-24: Retired
+
+Human decision, 2026-11-24 ("Yes retire that ADR"): this ADR is retired.
+Reason: the ROM will be in HyperRAM on OCTOSPI, not FMC SDRAM. ES0491
+Rev 9 §2.7.3 is an FMC erratum ("Compile the software that accesses the
+fmc region ..."); for OCTOSPI, §2.8.4 Table 5 lists memory-mapped reads
+in HyperBus mode with address "any" and byte number "any" (both checked
+against `../gbc-32-hardware/datasheets/es0491-stm32h72x-73x-errata.pdf`).
+The core may read the ROM with loads of any width and alignment.
+
+A platform that does put the ROM behind the FMC (the SDRAM option of
+`docs/reference/stage3-rom-memory-options.md`) would need this rule
+back; nothing in the core provides it any more.
+
+What was undone, each step measured on its own (x86 Ir from
+`check-bench.sh`, thumbv7em `.text` from `check-code-size.sh`; before:
+113,154 B):
+
+| Step | Ir | `.text` |
+|---|---|---|
+| VRAM DMA takes a ROM block as one `[u8; 16]` chunk; `rom_block`, `rom_tail`, `rom_byte` removed | `synth:worst-case` -0.03% (278,145,324 -> 278,059,754), others identical | -254 B |
+| `Cart::dma_block` split into `rom_block` (inline) and `ram_block` | `synth:worst-case` -0.025% (-> 277,991,298), others identical | 0 |
+| MBC1M logo test as two slice compares | identical (load time) | -32 B |
+| `header` no longer `#[inline(never)]` | identical (load time) | -114 B |
+| `rom::Rom`, its `compiler_fence`, `into_inner` and the marker comments removed; the ROM is `&[u8]` | identical | +72 B (`boot_logo` 264 -> 328: its loop is unrolled by two without the fence) |
+
+Total: `.text` 112,826 B (-328); `synth:worst-case` -0.055%, the other
+eight bench lines identical; `diff-fingerprint.sh main --audio-buffer 7
+--hash-samples` identical.
+
+Not taken:
+- `read_rom` as `window.get(i).copied().unwrap_or(0xFF)`: +0.03% to
+  +1.71% Ir on the nine lines (`synth:event-storm` +1.71%,
+  `synth:cgb-raster` +1.12%, `synth:worst-case` +0.95%) and +52 B. It
+  keeps the compare-then-index shape `Rom::get` had, as an early return.
+- The VRAM DMA block written into its VRAM slot through an out pointer
+  instead of returned as `[u8; 16]`: `synth:worst-case` +0.006%
+  (+17,114 Ir) and +40 B.
+
+`scripts/check-rom-loads.sh` no longer has anything to check (its marker
+file `rom.rs` is gone, so it fails). The script and its step in
+`scripts/gate-stage1.sh` are the human's to remove.

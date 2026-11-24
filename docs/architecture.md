@@ -114,14 +114,18 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
 - **ROM:** a `&'a [u8]` borrowed from the caller; on desktop, a `Vec`. On
   the MCU it is `'static` and lives in external memory:
   - Stage 2: the shield's QSPI NOR, memory-mapped.
-  - Stage 3+: external FMC SDRAM, filled from eMMC when the game loads.
+  - Stage 3+: external HyperRAM on OCTOSPI (human decision 2026-11-24;
+    hardware ADR 0001 still says FMC SDRAM), filled from eMMC when the
+    game loads.
 
   The core must not assume the ROM is in internal RAM, or that it is
-  aligned beyond a byte. On the custom board, unaligned reads from the FMC
-  region are unsupported (STM32H735 erratum ES0491 §2.7.3). Code that reads
-  the ROM therefore has to be built so the compiler never merges byte reads
-  into an unaligned halfword or word read, and the platform has to map the
-  SDRAM as normal, cacheable memory through the MPU.
+  aligned beyond a byte. It reads the ROM with loads of any width at any
+  address (a VRAM DMA block is a 16-byte copy, and the compiler may merge
+  adjacent byte reads), so the platform must put the ROM in memory that
+  supports unaligned reads, mapped as normal, cacheable memory through
+  the MPU. Memory-mapped HyperBus reads do (ES0491 §2.8.4 Table 5); the
+  FMC does not (ES0491 §2.7.3), and the byte-wide rule that covered it
+  (ADR 0027) was retired on 2026-11-24.
 - **Mapper:** resolved once at load from the cartridge type (0147), plus
   the ROM contents for MBC1 multicarts (ADR 0016). Emulated: no mapper,
   MBC1 (and MBC1M), MBC2, MBC3/MBC30 (with the RTC), MBC5, HuC1 and HuC3
