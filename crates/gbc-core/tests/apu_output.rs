@@ -523,3 +523,60 @@ fn the_mixer_adds_the_channels() {
     assert_eq!(extremes(&s), (4 * TOP, 4 * TOP));
     assert_eq!(4 * TOP, 30_720);
 }
+
+/// The headroom a front end needs (the `StereoSample` contract; M10
+/// review A3-5). The stream keeps DC, so it can sit at +full scale (four
+/// idle DACs) and then drop to -full scale (four channels at digital 15):
+/// a swing of 61,440. A DC-blocking high-pass has by then settled on the
+/// +30,720, so its output goes towards -61,440: twice the core's full
+/// scale and outside `i16`. That is also the bound: the filter's output
+/// is the input less a weighted average of earlier inputs, so it cannot
+/// exceed the input's whole range. Here with the filter Pan Docs gives
+/// for the CGB ("Mixer": the capacitor keeps 0.998943 of its charge per
+/// clock), which is fast (about 7 samples): each sample the drop takes
+/// costs it some of the swing. A slower blocker, or a drop within one
+/// sample, comes as close to -61,440 as one likes.
+#[test]
+fn after_a_dc_blocker_the_signal_reaches_twice_full_scale() {
+    // All four channels output digital 0 for 60 samples (7,680 clocks)
+    // after their triggers, then digital 15 for 50 or more: squares at
+    // f = 128 (60 samples per duty step; digital 0 until the first step,
+    // then duty 75% is high for 6 steps); the wave at 4 samples per step,
+    // 15 samples of 0 then 17 of F; the 15-bit LFSR at 4 samples per
+    // step, whose first 15 steps from the all-zero start output 0 and the
+    // next 14 output 1. The four triggers are the last four writes (80
+    // clocks), so the drop takes a few samples at most (the LFSR's first
+    // step need not come a whole period after the trigger).
+    let mut ram = [0xFF; 16];
+    ram[..7].fill(0x00);
+    ram[7] = 0x0F;
+    let parts = [
+        square(1, 3, 0xF0, 128),
+        square(2, 3, 0xF0, 128),
+        wave(&ram, 1, 1792),
+        noise(0xF0, 0x51),
+    ];
+    let mut prog = master(0xFF);
+    for part in &parts {
+        prog.extend(&part[..part.len() - 1]);
+    }
+    prog.extend(parts.iter().map(|part| part[part.len() - 1]));
+    let s = mono(&render(&prog, 110));
+    let full = 4 * TOP;
+    assert_eq!(extremes(&s), (-full, full), "both ends of the scale");
+    assert!(s[..56].iter().all(|&x| x == full), "+full scale first");
+    assert!(s[64..].iter().all(|&x| x == -full), "then -full scale");
+    let charge = 0.998943_f64.powi(AUDIO_SAMPLE_CLOCKS as i32);
+    let mut cap = 0.0;
+    let low = s
+        .iter()
+        .map(|&x| {
+            let out = f64::from(x) - cap;
+            cap = f64::from(x) - out * charge;
+            out
+        })
+        .fold(0.0, f64::min);
+    assert!(low < -50_000.0, "{low}");
+    assert!(low >= -2.0 * f64::from(full), "{low}");
+    assert!(low < f64::from(i16::MIN), "does not fit in i16");
+}

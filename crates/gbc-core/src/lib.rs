@@ -227,8 +227,9 @@ pub const FRAME_CLOCKS: u32 = 70_224;
 /// job. A run call of `n` clocks completes at most `n / 128 + 2` samples
 /// (the partial window carried in from the last call and the overshoot
 /// past the target can each complete one more), so a buffer that size
-/// never fills; [`run_frame`](Emulator::run_frame) needs 550. Sample scale:
-/// see [`StereoSample`].
+/// never fills; [`run_frame`](Emulator::run_frame) needs 550. Sample scale
+/// and the headroom the high-pass filter needs (its output reaches
+/// ±61,440, beyond `i16`): see [`StereoSample`].
 pub const AUDIO_SAMPLE_RATE: u32 = CLOCK_HZ >> apu::SAMPLE_PERIOD_LOG2;
 
 /// Base clocks per audio sample (128).

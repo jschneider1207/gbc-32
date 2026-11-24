@@ -43,6 +43,23 @@ use wave::Wave;
 /// clamping. DC is kept (a silent but powered DAC is a constant, not 0):
 /// the DC-blocking high-pass filter and resampling to the device rate are
 /// the front end's job.
+///
+/// # Headroom
+///
+/// Each side lies in `-M..=M` with `M = 960 * n * (v + 1)`, for `n`
+/// channels panned to it with their DACs on and NR50 volume `v`: at most
+/// 30,720. Both ends are reached, and not symmetrically in time: four
+/// idle DACs are a constant +30,720 and four channels at digital 15 are
+/// -30,720. A DC-blocking high-pass outputs the input less a weighted
+/// average of earlier inputs, so its output is bounded by the input's
+/// whole range, `2 * M`: **up to ±61,440, twice the core's full scale**,
+/// approached whenever the mix sits at one end and then swings to the
+/// other (`tests/apu_output.rs`,
+/// `after_a_dc_blocker_the_signal_reaches_twice_full_scale`). That does
+/// not fit in `i16` (±32,767). Run the filter in a wider type (`i32`, or
+/// floats) and then halve (61,440 / 2 = 30,720) or saturate; filtering in
+/// `i16` wraps. A resampling filter with negative coefficients can
+/// overshoot beyond that and needs its own margin.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StereoSample {

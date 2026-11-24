@@ -574,3 +574,38 @@ the CGB-C branches are used (ADR 0003): this keeps SameSuite
 `channel_4_align` failing (it expects CGB E's double-speed term) and is
 the one choice here that a CGB E fit would reverse. Not modelled: the
 background counting while CH4 is off and the terms that depend on it.
+
+### 2026-11-24: output headroom is part of the contract (M10 review A3-5)
+
+Section 8 says the stream is ±30,720 with DC kept and that the front end
+high-passes it. It did not say what that costs downstream. From the mixer
+(`apu/mix.rs`): a channel's level is -15..=15 while its DAC is on, a
+side's weight is `NR50 volume + 1` (1-8), and a sample is the window's
+average times 64, so a side lies in `-M..=M` with
+`M = 64 * 15 * n * (v + 1) = 960 * n * (v + 1)` for `n` routed channels
+with DACs on; `M <= 960 * 4 * 8 = 30,720`. Both ends are reached: four
+idle DACs give a constant +30,720 (digital 0 is the positive extreme) and
+four channels at digital 15 give -30,720.
+
+A DC blocker `y[n] = x[n] - x[n-1] + a * y[n-1]` (0 <= a < 1) is
+`x[n] - (1 - a) * sum(a^k * x[n-1-k])`: the input less a weighted average
+of earlier inputs (weights summing to at most 1; a zero start state is
+inside the range). So `|y| <= max(x) - min(x) <= 2 * M`: **±61,440, twice
+the core's nominal full scale**, and the bound is tight (a mix resting at
++30,720 that drops to -30,720 within a sample gives -61,440 less the
+filter's residue). 61,440 needs 17 bits signed.
+
+Consequences, now stated next to `StereoSample`:
+- the high-pass must run in a wider type than `i16` (`i32` or floats);
+  an `i16` filter wraps;
+- after it, a fixed halving (-6.02 dB) maps the bound back to ±30,720, or
+  the front end saturates; desktop already does `0.5 / 30,720` in `f32`
+  with a clamp (`gbc-desktop/src/audio.rs`);
+- a resampler with negative coefficients adds its own overshoot on top.
+
+The decision itself (no high-pass in the core, DC kept) is unchanged.
+`tests/apu_output.rs` (`after_a_dc_blocker_the_signal_reaches_twice_full_scale`)
+shows a stream that spans both ends and, through Pan Docs' CGB capacitor
+(0.998943 per clock), goes below -50,000. A shared, tested integer DC
+blocker for Stage 2 (the review's other proposal) is not part of this
+amendment.
