@@ -5,91 +5,93 @@
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
-  review on Fable, started by the human; plan added 2026-11-23). M8 is `stage1-m8`
-  (ad56c23). M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, end of session 13 (log
-  `logs/2026-11-23-13-m9-stat-hdma.md`). Baseline 1b4e0f8 (must 86/86,
-  should 40/40, stretch 3,376/3,461); full gate passed at f584639 + the
-  human-approved bench rebaseline.
+  review on Fable, started by the human). M8 is `stage1-m8` (ad56c23).
+  M1-M7 tagged likewise.
+- **Last updated:** 2026-11-23, session 14 (log
+  `logs/2026-11-23-14-m9-stat-dma-mealybug-pacing.md`). Baseline 186d4bc
+  (must 86/86, should 40/40, stretch 3,404/3,461).
 
-## Next up (session 14): M9
+## Next up (session 15): M9
 
-`docs/plan/stage-1.md` M9 + `docs/plan/m9-triage.md` (17 groups). Real-game
-checklist findings from the human become the first fixes when they arrive.
-Failing at 1b4e0f8 (90 incl. 5 no-reference, 23 signed off): SameSuite 28
-(20 signed off, 8 fix targets), Mealybug 20, gambatte m0enable 11,
-`scx_during_m3` 7 (3 signed off, 4 = `scx_0367c0` PNG), oamdma 4,
-lcd_offset 4, m2int_m0irq 3, cgbpal_m3 2, singles (window, speedchange,
-oam_access, miscmstatirq, lycEnable, lyc153int_m2irq, ly0, irq_precedence,
-dma), cgb-acid-hell 1, AGE 1.
-1. **Perf headroom is thin; measure every fix.** Bench rebaselined at
-   f584639 (worst-case 4.007 M Ir/frame, 99.7% of the 4.02 M line; cgb-acid2
-   682.33 M). `.text` 93,984 of 97,500 B. `Hw` is exactly at its 864 B
-   limit. A second entry into the opcode dispatch costs ~1 Ir/instruction
-   (route special opcodes through `Bus::fetch`).
-2. `gambatte/m0enable` (11): `disable_*`, `lycdisable_ff4{1,5}_*`, where
-   mode 0 starts against a STAT/LYC write per SCX (triage group 12). Same
-   gambatte T to t mapping as ADR 0029.
-3. Line-0 mode-2 pulse in double speed at t = 5 (needs a ds-only walk
-   point; hot path): `window/late_enable_afterVblank_ds_lcdoffset1_2`,
-   `lyc153int_m2irq_late_retrigger_ds_1`, `lycint152_lyc0irq_late_retrigger_ds_1`.
-   Then lcd-offset design steps 6-9 (`lcd_offset` 4).
-4. STAT singles: `lyc_ff45_trigger_delay_2` (delayed IF request 5 cycles
-   after an LYC write, CGB single speed; a bus-scheduled event),
-   `lycstatwirq_trigger_ly00_10_50_1` (phase 2 vs the walk at line 0, open
-   in `docs/reference/stat-irq.md`), `m2int_m0irq` 3.
-5. Window/Mealybug: `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change`,
-   `m3_wx_4_change_sprites` (SameBoy `cgb_wx_glitch`); step F leftovers
-   (BGP/OBP0/LCDC.1/LCDC.2 in an object fetch), step G, `LCDC_TILES_LATE`.
-6. OAM DMA: `hdma_transition_oamdma_1` (OAM DMA during a VRAM DMA, ADR 0017
-   deferred), `oamdma` 4 incl. `srcchange0000_busyinc`.
-7. SameSuite group 15 fix targets (8): `channel_1_freq_change_timing-cgb0BC`
-   and the 7 unclear. APU budgets near full (219.5k/230k, 908/950 per write).
-8. Size ideas unused: share the `set_stalls`/`set_stalls_retriggered` tail
-   (~60-100 B); de-unroll `set_stalls` copy loops (~500 B, re-check Ir). M8
-   review lows still open.
-After M9: M10, in-depth review (human starts it on Fable).
+33 open fix targets (57 stretch fails minus 24 signed off; the 5
+no-reference Mealybug ROMs are signed off too). By area:
+1. **Mealybug 7** (`docs/design/mid-line-ppu.md`, last section, groups
+   C-F): C `m3_lcdc_tile_sel_change`, `m3_scy_change` and D
+   `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` likely need one
+   model (SameBoy keeps the BG fetcher running during an object fetch, so
+   the next tile's reads land at fixed dots inside the stall); E step G
+   (`*_tile_sel_change2`, `*_tile_sel_win_change2`); F `cgb_wx_glitch`
+   (`m3_wx_4_change_sprites`). E/F need per-dot fetcher detail.
+2. **SameSuite APU 7** (group 15 "unclear"): ch1 `sweep`, `sweep_restart`;
+   ch1/2 `volume`; ch4 `align`, `delay`, `equivalent_frequencies`. May turn
+   out E-only (then evidence + sign-off request).
+3. **STAT singles:** `m2int_m0irq_scx3_ifw_{2,4,ds_2}` (3),
+   `lycEnable/lyc_ff45_trigger_delay_2` (IF request 5 cycles after an LYC
+   write), `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1`,
+   `irq_precedence/if_and_ie_0_vector_4` (IE cleared during the push ->
+   vector 0000; note dispatch now pushes in M-cycles 4-5, 9fb207f).
+4. **lcd_offset 3:** `offset{1,2}_lyc8fint_m1stat_1` (line-144 STAT mode
+   read edge, design steps 6-9), `offset3_lyc99int_m2irq_count_1` (single
+   speed version of the ds fix regresses 4 `m2enable/*ly0*`).
+5. `scx_during_m3` 4 (all the `scx_0367c0` PNG), `cgbpal_m3` 2 (ds
+   lcdoffset1 m3start), `oam_access/prewrite_lcdoffset1_1`,
+   `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_2`, `cgb-acid-hell`,
+   AGE `m3-bg-lcdc`.
+6. M8 review lows still open (plan M9 bullets).
+After M9: M10, in-depth review (human starts it on Fable). Items for it:
+`obj_size_fetch` temporarily swaps one VRAM byte for one object fetch
+(unobservable, but unusual); boot-tile setup (`bus.rs` `boot_logo`).
+
+**Budgets (main e2c908e+):** `.text` 95,652 of 97,500 B (1,848 free after
+the session 14 size pass). Worst-case 476.57 M Ir (~3.99 M Ir/frame, 99.2%
+of the 4.02 M line). cgb-acid2 684.33 M (baseline 682.33, guard +3%). APU
+per-write 905.6 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size
+lever (needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment
+`nop` padding (`docs/perf.md` code size).
+
+**Desktop front end (session 14):** audio-driven pacing now reads a
+smoothed fill (WASAPI's 10 ms chunks made frames land 10/20 ms apart;
+ADR 0024 amendments). `GBC_FRAME_STATS=1` prints per-4 s frame stats and
+a `hitch:` line per gap (blank frames = game turned the LCD off; busy/step
+= our code blocked; wake late = OS; high fill + few frames = pacer).
+Saves are written on a `SaveWriter` thread (ADR 0023 amendment). Human
+still finds Wario Land 3 slightly less smooth than SameBoy (vsync off in
+SameBoy too). A long Shantae run (town + levels, build e2c908e, before the
+hitch line) was clean: frame interval p1 ~16.0 / p99 ~17.5 ms, no gaps
+after startup. Wario Land 3 gaps (67-469 ms, whole frames) look like the
+game turning the LCD off; confirm with `hitch:` lines. Next
+candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
+(human: "decide after the stall fix").
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
 tests use `scripts/run-windows.sh <rom> --frames N [--out shot.png]` on a
-scratch ROM copy; short, and only for front-end changes. Windows Update
-can shut WSL down mid-session (it did at 22:57 on 2026-11-22, installing
-WSL 3.0.5.0): commit often; agents resume from their transcripts.
+scratch ROM copy (it forwards `GBC_FRAME_STATS`/`GBC_AUDIO_STATS` via
+WSLENV); short, and only for front-end changes. Windows Update can shut WSL
+down mid-session: commit often.
 
 Desktop front end (`crates/gbc-desktop`): `gbc-desktop <rom> [--scale K]
 [--frames N] [--screenshot out.png] [--dmg-palette auto|gray]
-[--headless]`. `--frames N` = N complete frames. Blank LCD shows white.
-Save: `<stem>.sav`, or `<file name>.sav` when `game.gb` and `game.gbc` sit
-side by side (ADR 0023 amendment). Ctrl+C/SIGTERM/panic still write the
-exit save (`ctrlc` crate). Audio: cpal, audio-driven pacing (ADR 0024),
-device reopen with 2-16 s backoff after a stream loss (amendment). Keys:
-arrows, Z = B, X = A, Enter = Start, Right Shift/Backspace = Select, Esc
-quits. Real-game headless smoke (scratch copies of `/mnt/x/gbc-roms`,
-3600 frames) is clean at c8e8626.
-
-Perf watch (`perf/bench-baseline.txt`, rebaselined f584639+, human-approved):
-`synth:worst-case` 478.60 M Ir = 4.007 M Ir/frame, 99.7% of the 4.02 M x86
-line. cgb-acid2 682.33 M (guard +3% from there). APU 219.5k of 230k Ir/frame; 908.3 of 950 Ir per APU write;
-`Ctx::write_apu` 498/508 B. `.text` 93,984 of 97,500 B (f584639). The 50% bar
-covers realistic worst cases; dense mid-mode-3 writes are outside it
-(docs/perf.md). ITCM set 49,066 of 57,344 B (ADR 0026 Proposed). Gate checks:
-code size, ITCM set, byte-wide ROM loads (ADR 0027), bench. Fingerprint corpus
-4,020 runs. Wall-clock baseline: `bench --wall` (docs/perf.md).
+[--headless]`. Default scale 4. Blank LCD shows white. Raw RGB555->888
+colours, no colour correction (human decision, session 14). Save:
+`<stem>.sav` (ADR 0023). Keys: arrows, Z = B, X = A, Enter = Start, Right
+Shift/Backspace = Select, Esc quits (same game keys as SameBoy).
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
-- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change"; every
-  changed ROM is listed and explained.
-- Resources: at most 2 concurrent builds, heavy steps (check-bench,
-  diff-fingerprint, gate) alone; core work in scratch worktrees with their
-  own target dir, merged by `--ff-only` after a rebase.
-- Parallel agents can collide on ADR numbers: check `docs/decisions/`
-  right before committing an ADR (next free: 0030).
+- `scripts/diff-fingerprint.sh <rev>` proves "no behavior change" (in a
+  worktree pass `--root /home/jess/gbc-32/test-roms`).
+- Resources: at most 2 concurrent builds; heavy steps (check-bench,
+  diff-fingerprint, gate) alone. Session 14 used a shared flock
+  (`flock -s` for builds, `flock -x` for heavy steps) on one lock file in
+  the session scratchpad; it serialises heavy steps but doesn't cap builds
+  at 2, so launch at most 2 building agents.
+- Core work in scratch worktrees, merged by rebase + `--ff-only`.
+- ADR numbers: check `docs/decisions/` before committing one (next free 0030).
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None (session 13 ended with no worktrees or unmerged agent branches).
+- None (no worktrees or unmerged agent branches at session 14 end).
 
 ## Needs human
 Open:
@@ -100,11 +102,12 @@ Open:
   the human's call. Also found: the ADR 0002 pin draft puts SDNE0 on PC2_C,
   which adds 4.5 ns (DS13312 Table 76 note 2, checked) and breaks 95 MHz
   SDRAM timing if SDRAM stays.
-- **Real-game checklist** (plan, bottom; M9 task), on native Windows. Extra
-  checks: Ctrl+C in the window still saves; change the default audio output
-  device mid-game (expect `audio stopped`, then within ~2 s `output device
-  back; resuming audio pacing`, no burst); a battery `.sav` survives a
-  restart; a gamepad.
+- **Real-game checklist** (plan, bottom; M9 task), on native Windows.
+  Session 14: Wario Land 3 and Shantae played (look and sound right);
+  Ctrl+C and Esc saves, `.sav` across restart and the audio device switch
+  all passed. Open: smoothness vs SameBoy (see Next up, desktop), a
+  gamepad, Pokémon Crystal (RTC across a restart), Alone in the Dark, Link's
+  Awakening DX, and Pokémon Red (DMG compat palette; not in the plan table).
 - **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
   `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`,
   `ppu-edges-step1b` and `hdma-trigger` (landed as rebased copies in
@@ -123,6 +126,20 @@ Open:
   mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 14 (2026-11-23), human:
+- SameSuite `channel_1_freq_change_timing-cgb0BC`: sign off ("Sign off
+  target"): it needs the CGB C PCM12 read glitch; a model fitted to it broke
+  14 passing SameSuite ROMs that expect CGB E reads. Own stretch group
+  `same-suite-apu-pcm-glitch` (22fe162). The frequency-timing half landed
+  (91ff0de).
+- Mealybug `m3_lcdc_win_en_change_multiple_wx`, `m3_wx_{4,5,6}_change`,
+  `win_without_bg`: sign off, no CGB C reference upstream ("yes do #1").
+  Own group `mealybug-no-cgb-reference` (d801a6c), still run.
+- Desktop: no colour correction; raw colours stay ("dont do that color
+  correction"). Copied SameBoy (R) glyph bytes with notice: "fine".
+- Display sync (vsync, would supersede ADR 0024's audio-driven pacing):
+  "Decide after stall fix".
 
 Decided in session 13 (2026-11-23), human:
 - cgb-acid2 bench at +3.37% after the STAT 144/153/0 correctness fixes
@@ -285,12 +302,12 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 1b4e0f8 (`acceptance/results/stage1.json`, session 13 end; M8 tag
-`stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at f584639 with the rebaselined bench.
-(.text 93,984 B, worst-case 4.007 M Ir/frame.)
+Baseline 186d4bc (`acceptance/results/stage1.json`, session 14; session 13
+ended at 3,376; M8 tag `stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at
+bc07793 (session 14 end). (.text 95,652 B, worst-case ~3.99 M Ir/frame.)
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 40 | 40 | |
-| stretch | 3,376 | 3,461 | 85 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 3 in `gambatte-uninit-palram` |
+| stretch | 3,404 | 3,461 | 57 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 1 in `same-suite-apu-pcm-glitch`, 3 in `gambatte-uninit-palram`, 5 no-reference in `mealybug-no-cgb-reference`. 33 open fix targets |
