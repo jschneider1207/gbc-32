@@ -58,8 +58,11 @@ Saves are written on a `SaveWriter` thread (ADR 0023 amendment). Human
 still finds Wario Land 3 slightly less smooth than SameBoy (vsync off in
 SameBoy too). A long Shantae run (town + levels, build e2c908e, before the
 hitch line) was clean: frame interval p1 ~16.0 / p99 ~17.5 ms, no gaps
-after startup. Wario Land 3 gaps (67-469 ms, whole frames) look like the
-game turning the LCD off; confirm with `hitch:` lines. Next
+after startup. Wario Land 3 gaps (67-469 ms) confirmed on bc07793: every `hitch:` line
+is LCD-off blank frames (e.g. 28 frames, 27 blank), busy/wake late <2 ms.
+Present step ~2 ms adds +-1 ms jitter (present p1 15.0 / p99 18.5 vs
+frame p1 16.1 / p99 17.4); occasional `step max` 5-9 ms (one frame's
+emulation; normal ~0.3 ms) is unexplained but within budget. Next
 candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
 (human: "decide after the stall fix").
 
