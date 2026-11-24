@@ -267,10 +267,6 @@ impl core::fmt::Display for MapperKind {
 
 /// Header byte `at` of `rom` (0 past the end: callers check the length
 /// first).
-///
-/// Out of line (code size): header parsing runs once per load, and a call
-/// in a loop keeps LLVM from unrolling it (`is_mbc1m`).
-#[inline(never)]
 fn header(rom: &[u8], at: usize) -> u8 {
     Rom::new(rom).get(at).unwrap_or(0)
 }
@@ -404,12 +400,7 @@ fn is_mbc1m(rom: &[u8]) -> bool {
     if rom.len() < 0x4_4000 {
         return false;
     }
-    // Byte by byte through `Rom::get` (`header`), not a slice compare (a
-    // `memcmp` may read words; ADR 0027). Both copies are inside the ROM.
-    NINTENDO_LOGO
-        .iter()
-        .zip(0x104..)
-        .all(|(&b, i)| header(rom, i) == b && header(rom, 0x4_0000 + i) == b)
+    rom[0x104..0x134] == NINTENDO_LOGO && rom[0x4_0104..0x4_0134] == NINTENDO_LOGO
 }
 
 /// Whether the cartridge type has an MBC3 real-time clock.
