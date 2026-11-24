@@ -443,6 +443,66 @@ off by the human (2026-11-23, session 12): "CGB E result", group
 `same-suite-apu-cgbE` (cde49e4).** Fix targets: the 1 C ROM and the 7
 unclear.
 
+**Status (`m9-apu-15`, 2026-11-23): the 7 unclear resolved.** Each ROM's
+`CorrectResults` were diffed against our `$C000` dump, and the failing
+cells traced through SameBoy `Core/apu.c` (ea667ad, MIT) for both its
+`GB_MODEL_CGB_C` and CGB-E paths. SameSuite (f15645f) `apu/README.md`:
+"CPU-CGB-C ... Most other tests fail" and "The NRX2 glitch ... behaves
+differently across CPU-CGB revisions. Currently, only revision E is
+tested and documented". No gambatte cgb04c capture covers any of these
+behaviours (the gambatte ch1 sweep captures test the sweep timer, the
+ch2 envelope ones the envelope timer; none writes NRx2 during play, NR10
+in a check window, or triggers CH4 in double speed).
+- **Fixed (3):** `channel_1_sweep` (b217092: the step's overflow check
+  `shift` 1 MHz ticks after the write-back; SameBoy
+  `trigger_sweep_calculation` / `sweep_calculation_done`, no revision
+  branch), `channel_4_delay`, `channel_4_equivalent_frequencies`
+  (49ff774: SameBoy's `prepare_noise_start` trigger phase; in single
+  speed at alignment 0, which both ROMs use, the C and E branches agree).
+  Side effect: the signed-off `channel_4_lfsr_7_15`, `_lfsr_restart`,
+  `_lfsr_restart_fast` and `_frequency_alignment` pass too (their
+  manifest group is unchanged).
+- **`channel_1_volume`, `channel_2_volume`: sign-off candidates (CGB E
+  result).** They write NRx2 right after a trigger (NR12 x0/x1/x8/x9 ->
+  F0/F1/F8/F9; NR22 80 -> F0, whose comment says "without triggering the
+  NRx2 write glitch") and read the volume through PCM12. SameBoy
+  `nrx2_glitch` (apu.c:555-569): on `model <= GB_MODEL_CGB_C` a write goes
+  through an intermediate 0xFF (`_nrx2_glitch(volume, 0xFF, old)`, then
+  `(value, 0xFF)`); on D/E it is one step. Worked through
+  `_nrx2_glitch`, the C path gives X^F then X+1 for x0 -> F0 (and X+2 for
+  x1 -> F0, 15-X for x8 -> F0, X+1 / X+2 for x0/x1 -> F1); the E path
+  leaves X (x8: 16-X; x0 -> F1: X-1). Every failing cell of both ROMs is
+  the C value in our output and the E value in `CorrectResults`
+  (`channel_1_volume` rows 0-2, 4, 5; `channel_2_volume` 9 vs 8); every
+  passing cell is one where C and E agree. Our zombie rule (Pan Docs
+  CGB-02/04) already is SameBoy's CGB-C result here.
+- **`channel_4_align`: sign-off candidate (CGB E result).** Double speed,
+  NR43 = 08 (r = 0), trigger 0-3 M-cycles after power on, reads PCM34.
+  SameBoy `prepare_noise_start` (apu.c:1347-1397): r = 0 loads 6 ticks,
+  +1 at odd alignment; at even alignment in double speed `model <=
+  GB_MODEL_CGB_C` adds 2 (apu.c:1395-1396), D/E add nothing. With 49ff774
+  (CGB-C branches) the odd-alignment rows (3, 7) pass and the
+  even-alignment rows (1, 5) are exactly 2 M-cycles late (`F0` from
+  offset $16 instead of $14): the expected values are E's. Dropping the
+  one CGB-C term would pass it, which is a CGB-E fit.
+- **`channel_1_sweep_restart`: sign-off candidate (CGB E result).** Rounds
+  3-5 (rows 4-9, NR52 copy rows 12-17) write NR10 (00, 11, 17: negate
+  clear) inside the overflow-check window after a step from 7F0 to 7FF
+  (shift 7) and expect CH1 to stay on. SameBoy NR10 write (apu.c:1852-1865):
+  on `model <= GB_MODEL_CGB_C` `old_negate` is forced true, so
+  `shadow (7F0) + completed addend (0F) + 1 = 800 > 7FF` with negate clear
+  turns CH1 off at the write; on D/E `old_negate` is the old NR10 bit 3
+  (0) and 7FF does not overflow. On CGB C those 48 cells read 00/F0 (the
+  NR10 write is before or after the step: either way the shadow and the
+  completed addend are 7F0 and 0F). We pass them only because the core
+  has the classic negate quirk, not this CGB-C rule (no capture covers
+  it). Still failing besides: rows 1, 2, 10 (restart inside the window):
+  the trigger's own overflow check is not delayed (SameBoy: `shift` +
+  2 ticks, the reload 3 on CGB C only at `lf_div` 0, which single-speed
+  writes never see), plus one cell of the active-retrigger square delay
+  (row 1, offset F). A C-applicable gap, but it cannot make the ROM a C
+  pass.
+
 ### 16. SameSuite APU for other revisions (7) - sign-off candidate
 `channel_{1,2,4}_extra_length_clocking-cgb0B`,
 `channel_3_extra_length_clocking-cgb0`, `-cgbB`,
@@ -470,6 +530,11 @@ an interrupt pending and IME on. Not a sign-off candidate.
    (hardware on our revision), so this needs a decision, not a waiver.
 3. Possibly group 17 (1) and any group-15 ROM shown to be CGB-E-only,
    after the source is read.
+4. Group 15 (`m9-apu-15`), 4 ROMs whose expected values are SameBoy's
+   CGB-E path where its CGB-C path differs: `channel_1_volume`,
+   `channel_2_volume` (NRx2 glitch via 0xFF on C), `channel_4_align`
+   (C's double-speed noise trigger term), `channel_1_sweep_restart` (C's
+   forced `old_negate` on NR10 writes). Evidence in group 15's status.
 
 ## Recommended order
 1. Group 1 (33 ROMs, S, fits in the remaining 270 B).
