@@ -865,6 +865,26 @@ impl Ppu {
         if v & 3 == 2 { v & !3 } else { v }
     }
 
+    /// Whether an IF write landing at `at` (one dot after its access)
+    /// sees, and so clears, the interrupt of a walk point at `at`. Not in
+    /// single speed at line 153's comparison against 0 and line 0's mode-2
+    /// pulse: gambatte (behaviour only, `lyc_irq.cpp`, `video.cpp`
+    /// `mode2_irq_line_cycle_ly0`) has those events a dot later, our
+    /// `t = 13` and `5`, as our double-speed walk ([`edges::l153_zero_walk`],
+    /// [`edges::ly0_pulse`]); the single-speed walk keeps 12 and 4 for the
+    /// STAT and LYC write views. CGB04C (IF write accessed a dot before the
+    /// point: interrupt) `ly0/lycint152_lyc0irq_ifw_1`,
+    /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`; `_2` (4 dots later): none.
+    pub(crate) fn if_write_sees(&self, at: u64, double: bool) -> bool {
+        if double || !self.lcd_enabled() {
+            return true;
+        }
+        const ZERO: u32 = edges::l153_zero_walk(false);
+        const PULSE: u32 = edges::ly0_pulse(false);
+        let a = self.at(at);
+        !matches!((a.line, a.t), (153, ZERO) | (0, PULSE)) || a.first
+    }
+
     /// STAT bit 2 (LY=LYC) at `a`: 0 while the comparison is off in single
     /// speed (CGB C), held in double speed (SameBoy `GB_STAT_update`). In
     /// double speed a LYC write during the off window is approximated (the

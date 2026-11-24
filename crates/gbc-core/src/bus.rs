@@ -1161,6 +1161,34 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// IF (FF0F): lands one T-cycle into the M-cycle (SameBoy
+    /// `GB_CONFLICT_WRITE_CPU` in `cgb_conflict_map`, both speeds), so a
+    /// PPU interrupt requested at the access dot (double speed: half a dot
+    /// after it, a whole dot on our grid) is cleared by it, one later is
+    /// not. CGB04C `m2int_m0irq/m2int_m0irq_scx3_ifw_{1,2,3,4,ds_1,ds_2}`
+    /// (the mode-0 interrupt with SCX = 3 against an IF write one M-cycle
+    /// apart). A delayed LYC-write interrupt still waiting stays
+    /// ([`Self::lyc_irq_delay`]).
+    #[inline(never)]
+    fn write_if(&mut self, value: u8) {
+        let at = self.clock() + 1;
+        if self.sys.sched.deadline(EventKind::Ppu) <= at
+            && self.sys.ppu.if_write_sees(at, self.hot.mcycle == 2)
+        {
+            self.sync_ppu_to(at);
+            // The sync rescheduled from the walk: keep a waiting delayed
+            // LYC-write interrupt due at the next boundary.
+            if self.sys.iflags & LYC_IRQ_PENDING != 0 {
+                let s = &mut *self.sys;
+                let due = s.sched.deadline(EventKind::Ppu).min(at);
+                s.sched.set(EventKind::Ppu, due);
+                self.reschedule();
+            }
+        }
+        let s = &mut *self.sys;
+        s.iflags = value & INT_MASK | s.iflags & !INT_MASK;
+    }
+
     /// FF00-FF7F, by the low 7 address bits.
     fn write_io(&mut self, reg: usize, value: u8) {
         let s = &mut *self.sys;
@@ -1169,8 +1197,7 @@ impl Ctx<'_, '_> {
             0x00 => s.set_joypad(s.buttons, value),
             0x01 => s.serial.sb = value,
             0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
-            // A delayed LYC-write interrupt still waiting stays.
-            0x0F => s.iflags = value & INT_MASK | s.iflags & !INT_MASK,
+            0x0F => self.write_if(value),
             0x10..=0x3F => self.write_apu(reg, value),
             0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
             0x46 => self.oam_dma(value),
@@ -2965,6 +2992,85 @@ mod tests {
                 assert_eq!(stat, i >= later, "{m}, {scx}, {t}, {if_write}, {i}");
                 ctx.idle();
             }
+        }
+    }
+
+    /// An IF write lands one dot after its access (SameBoy
+    /// `GB_CONFLICT_WRITE_CPU`): it clears a mode-0 interrupt requested
+    /// up to that dot, not one after it (CGB04C
+    /// `m2int_m0irq/m2int_m0irq_scx3_ifw_*`). Single speed, line 153's
+    /// LYC=0 point and line 0's mode-2 pulse (one dot past an M-cycle
+    /// boundary here) count as a dot later: an IF write accessed the dot
+    /// before them doesn't clear them (`ly0/lycint152_lyc0irq_ifw_1`,
+    /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`).
+    #[test]
+    fn if_write_lands_one_dot_after_its_access() {
+        let line1 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 456;
+        let fresh = |scx: u8, stat: u8, lyc: u8| {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let _ = emu.run_until(line1 - 40, &mut fb, &mut []);
+            write(emu, 0xFF43, scx);
+            write(emu, 0xFF45, lyc);
+            write(emu, 0xFF41, stat);
+            emu
+        };
+        // The mode-0 interrupt's dot against the M-cycle grid, per SCX:
+        // cleared exactly when it is one dot past the write's access.
+        let mut seen = [false; 2];
+        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+        // A fresh emulator's context at M-cycle boundary `at`.
+        macro_rules! ctx_at {
+            ($ctx:ident, $emu:expr, $at:expr) => {
+                let emu = $emu;
+                let Emulator { mem, hw } = &mut *emu;
+                let mut $ctx =
+                    Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+                while $ctx.clock() < $at {
+                    $ctx.idle();
+                }
+            };
+        }
+        for scx in 0..8 {
+            let b = {
+                ctx_at!(ctx, fresh(scx, 0x08, 0xFF), line1 + 200);
+                ctx.sys.iflags = 0;
+                let mut b = ctx.clock();
+                while ctx.sys.iflags & crate::ppu::INT_STAT == 0 {
+                    b = ctx.clock();
+                    ctx.idle();
+                }
+                b
+            };
+            // The interrupt's dot: in (b, b + 4].
+            let e = {
+                ctx_at!(ctx, fresh(scx, 0x08, 0xFF), b);
+                ctx.sys.iflags = 0;
+                let mut e = b + 1;
+                ctx.run_ppu_to_call(e);
+                while ctx.sys.iflags & crate::ppu::INT_STAT == 0 {
+                    e += 1;
+                    ctx.run_ppu_to_call(e);
+                }
+                e
+            };
+            // An IF write accessed at `b`.
+            ctx_at!(ctx, fresh(scx, 0x08, 0xFF), b);
+            crate::cpu::Bus::write(&mut ctx, 0xFF0F, 0);
+            let cleared = ctx.sys.iflags & crate::ppu::INT_STAT == 0;
+            assert_eq!(cleared, e == b + 1, "SCX {scx}: access {b}, interrupt {e}");
+            seen[usize::from(cleared)] = true;
+        }
+        assert_eq!(seen, [true, true]);
+        // (STAT, LYC, interrupt dot): line 153's LYC=0 at 12, line 0's
+        // mode-2 pulse at 4; the IF write accessed a dot before it.
+        let line0 = line1 + 153 * 456;
+        for (stat, lyc, edge) in [(0x40, 0, line0 - 456 + 12), (0x20, 0xFF, line0 + 4)] {
+            ctx_at!(ctx, fresh(0, stat, lyc), edge - 1);
+            assert_eq!(ctx.clock(), edge - 1);
+            ctx.sys.iflags = 0;
+            crate::cpu::Bus::write(&mut ctx, 0xFF0F, 0);
+            assert_ne!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "STAT {stat:02X}");
         }
     }
 
