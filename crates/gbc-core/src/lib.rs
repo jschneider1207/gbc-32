@@ -1993,6 +1993,80 @@ mod tests {
         assert_eq!(seen, [true; 2], "both flip-flop phases");
     }
 
+    /// Runs a CGB program that enables the window (WX = `wx`, WY = FF,
+    /// its map filled with a solid black tile on a white background),
+    /// pads with `pad` NOPs, writes WY = `wy`, then runs `tail` (two
+    /// bytes, KEY1 armed) and loops. Returns the write's (line, dot) and
+    /// the frame it is in.
+    fn late_wy_frame(wx: u8, wy: u8, pad: usize, tail: [u8; 2]) -> ((u64, u64), Box<Frame>) {
+        let mut program = vec![
+            0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A: arm the switch
+            0x3E, 0xFF, 0xE0, 0x4A, // LD A,FF; LDH (4A),A: WY
+            0x3E, wx, 0xE0, 0x4B, // LD A,wx; LDH (4B),A: WX
+            0x3E, 0xF1, 0xE0, 0x40, // LD A,F1; LDH (40),A: window on, map 9C00
+        ];
+        program.extend(std::iter::repeat_n(0x00, pad)); // NOPs
+        program.extend([0x3E, wy, 0xE0, 0x4A]); // LD A,wy; LDH (4A),A
+        let write_pc = 0x100 + program.len() as u16 - 2;
+        program.extend(tail);
+        program.extend([0x18, 0xFE]); // JR -2
+        let emu = with_program(&program, 0x80);
+        // Tile 1 solid color 3, the window map all tile 1; BG palette 0:
+        // color 0 white, color 3 black.
+        emu.mem.vram[0x10..0x20].fill(0xFF);
+        emu.mem.vram[0x1C00..0x2000].fill(1);
+        write_reg(emu, 0xFF68, 0x80);
+        for v in [0xFF, 0x7F, 0, 0, 0, 0, 0, 0] {
+            write_reg(emu, 0xFF69, v);
+        }
+        let start = u64::from(FRAME_CLOCKS - ppu::POST_BOOT_POS);
+        let mut fb = frame();
+        let mut at = None;
+        loop {
+            if emu.hw.cpu.regs.pc == write_pc && at.is_none() {
+                // LDH's write is its third M-cycle's access.
+                let c = emu.clock() + 8 - start;
+                at = Some((c / 456, c % 456));
+            }
+            let r = emu.step(&mut fb, &mut []);
+            if r.events.contains(Events::FRAME_READY) && at.is_some() {
+                return (at.unwrap(), fb);
+            }
+            assert!(emu.clock() < 3 * u64::from(FRAME_CLOCKS));
+        }
+    }
+
+    /// The PPU is synced to the switch clock with the old speed's rules
+    /// before the speed changes (review E8). A WY write in mode 3 before
+    /// the pixel pipeline starts (dots 84-88) is decided when the pipeline
+    /// starts (`Ppu::latch`), with the write's speed: 5 dots of lead in
+    /// single speed, 1 in double (`wy_lead`). With WX = 2 and the write at
+    /// dot 87 that is too late for the line in single speed, and the
+    /// window starts on the next one. A STOP right after the write
+    /// switches to double speed 8 dots later, past the pipeline start,
+    /// with no PPU event in between: the line must come out as without the
+    /// switch (the same two M-cycles as NOPs), not with the window drawn
+    /// by the double-speed rule.
+    #[test]
+    fn speed_switch_syncs_the_ppu_with_the_old_speed_first() {
+        let pad = 4400;
+        let ((_, t), _) = late_wy_frame(2, 0xFF, pad, [0, 0]);
+        // A NOP moves the write 4 dots.
+        let pad = pad + (456 + 87 - t as usize) % 456 / 4;
+        let ((line, _), _) = late_wy_frame(2, 0xFF, pad, [0, 0]);
+        let ly = line as u8;
+        let (at, nops) = late_wy_frame(2, ly, pad, [0x00, 0x00]);
+        assert_eq!(at, (u64::from(ly), 87));
+        let (at, stop) = late_wy_frame(2, ly, pad, [0x10, 0x00]);
+        assert_eq!(at, (u64::from(ly), 87));
+        let row = |f: &Frame, l: u8| f[usize::from(l) * 160 + 80];
+        let (white, black) = (0x7FFF, 0);
+        // No switch: the window is too late for the WY line.
+        assert_eq!((row(&nops, ly), row(&nops, ly + 1)), (white, black));
+        assert_eq!((row(&stop, ly), row(&stop, ly + 1)), (white, black));
+        assert!(*stop == *nops);
+    }
+
     /// The Input deadline follows the new speed before the halt's 3 odd
     /// clocks are idled (review A1-02): a change inside the first
     /// normal-speed M-cycle after the switch (`T + 3` to `T + 7`) lands

@@ -1186,9 +1186,10 @@ impl Ppu {
 
     /// A speed switch: the walk's line-0 and line-153 points differ per
     /// speed ([`edges::ly0_pt`], [`edges::l153_zero_walk`]), so the cursor
-    /// is re-sought at the new one (positions already passed keep the
-    /// lazy sync's rule: a point runs with the speed of the sync that
-    /// reaches it).
+    /// is re-sought at the new one. The caller has synced to the switch
+    /// clock with the old speed first (`Ctx::speed_switch`, step 1): a
+    /// point runs with the speed of the sync that reaches it, so none from
+    /// before the switch may be left for a later sync.
     #[cold]
     pub(crate) fn speed_changed(&mut self, double: bool) {
         // (While the LCD is off the cursor is meaningless: set on enable.)

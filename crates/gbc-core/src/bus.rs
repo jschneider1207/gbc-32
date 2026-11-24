@@ -1615,7 +1615,7 @@ impl Ctx<'_, '_> {
     /// every deadline, so the switch goes in four steps, in this order:
     ///
     /// 1. Everything lazy is brought up to the switch clock with the
-    ///    **old** speed's rules: OAM DMA (`dma_pause`) and the
+    ///    **old** speed's rules: the PPU, OAM DMA (`dma_pause`) and the
     ///    timer's reloads (`Timer::speed_switch` catches up before it
     ///    rebases). The APU runs on base clocks and has no rule that
     ///    depends on the speed; the serial port and the scheduled inputs
@@ -1630,10 +1630,19 @@ impl Ctx<'_, '_> {
     /// A deadline left from the old speed must never reach `boundary`: its
     /// handler would run at a clock the component isn't due at and re-arm
     /// from there (review A1-02: a fast-clock serial bit shifted twice).
+    /// Lazy work left from before the switch must never run after step 2:
+    /// it would run with the new speed's rules (review E8: the PPU's
+    /// update points; `Ppu::sync` takes the speed of the sync that reaches
+    /// a point, and only points that raise an interrupt or end a line or
+    /// frame are deadlines).
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
         let now = self.clock();
         let m = 6 - self.hot.mcycle as u64;
         // Step 1 (the timer's part is in `Timer::speed_switch` below).
+        // The PPU first, as before any change to what it sees: its walk's
+        // points up to `now` belong to the old speed (a pipeline start's
+        // late-WY decision, line 0's and line 153's points).
+        self.run_ppu_to_call(now);
         if self.hot.dma != 0 {
             self.dma_pause();
         }

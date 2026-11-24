@@ -211,7 +211,7 @@ rescheduled"). The speed is an input to every lazily evaluated component
 and to every deadline, so the switch now goes in four steps:
 
 1. Everything lazy is brought up to the switch clock under the **old**
-   speed's rules (OAM DMA, the timer's reloads).
+   speed's rules (the PPU, OAM DMA, the timer's reloads).
 2. The speed changes (the M-cycle length, the counter rate, the PPU's
    walk, a paused OAM DMA's M-cycle length).
 3. Every speed-dependent deadline is set again under the **new** speed
@@ -235,3 +235,17 @@ it ran with the deadlines of the old speed:
 
 Tests: `serial_bit_in_flight_across_a_switch_to_single_speed_shifts_once`,
 `scheduled_input_in_the_first_mcycle_after_a_switch_lands_there`.
+
+The PPU's part of step 1 (M10 review E8): `Ppu::sync` runs an update point
+with the speed of the sync that reaches it, and only the points that raise
+an interrupt or end a line or the frame are deadlines. The switch re-sought
+the walk from the last sync, so points between that sync and the switch ran
+later under the new speed's rules, and the result depended on where the
+last sync happened to be. Reproduced: WX = 2, WY written to LY at dot 87
+of a line (mode 3, before the pipeline start at 89) and STOP right after.
+The pipeline start decides that write with `wy_lead`, 5 dots in single
+speed (too late: the window starts on the next line), 1 in double. It was
+decided 8 dots later with the double-speed lead and the window was drawn on
+the WY line. Now the PPU is synced to the switch clock before the speed
+changes. Test: `speed_switch_syncs_the_ppu_with_the_old_speed_first` (the
+frame equals the one with two NOPs in place of the STOP).
