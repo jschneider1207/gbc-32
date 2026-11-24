@@ -32,6 +32,12 @@ use crate::serial::{INT_SERIAL, Serial};
 use crate::timer::Timer;
 use crate::{Buttons, Emulator, Events, RunResult};
 
+/// IF bits 5-7 don't exist (they read 1). Bit 5: a delayed LYC-write STAT
+/// interrupt is waiting ([`Ctx::lyc_irq_delay`]); bit 6: the parity of
+/// the M-cycle (clock bit 2) of the write that requested it.
+const LYC_IRQ_PENDING: u8 = 0x20;
+const LYC_IRQ_PHASE: u8 = 0x40;
+
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`, so it counts toward the 1 KiB limit there.
 #[repr(C)]
@@ -798,11 +804,61 @@ impl Ctx<'_, '_> {
         s.schedule_inputs(m);
     }
 
-    /// Catches the PPU up to the current clock and reschedules.
+    /// Catches the PPU up to the current clock and reschedules; delivers a
+    /// delayed LYC-write interrupt ([`Self::lyc_irq_delay`]) once due.
     #[inline(never)]
     fn sync_ppu(&mut self) {
         let now = self.clock();
         self.sync_ppu_to(now);
+        if self.sys.iflags & LYC_IRQ_PENDING != 0 {
+            self.lyc_irq_due(now);
+        }
+    }
+
+    /// Single speed: the STAT interrupt a LYC write requests (LY = LYC
+    /// newly true with the LYC select set) reaches IF 5 dots after the
+    /// write's access, one dot into the next M-cycle: an interrupt check
+    /// or IF read at the end of the write's M-cycle doesn't see it, one an
+    /// M-cycle later does. gambatte (behaviour only, GPL)
+    /// `LCD::lycRegChange`: CGB single speed sets
+    /// `memevent_oneshot_statirq` at `cc + 5`, double speed and DMG flag
+    /// the interrupt at once. CGB04C
+    /// `lycEnable/lyc_ff45_trigger_delay_2` (the interrupt is dispatched
+    /// one instruction later than at the write: out2, DMG out0).
+    ///
+    /// The request waits in IF's unused bits ([`LYC_IRQ_PENDING`], with the
+    /// parity of the write's M-cycle in [`LYC_IRQ_PHASE`]; `Hw` has no
+    /// room for a field) and the PPU deadline is moved to the due dot.
+    /// Out of line, off `write_ppu`.
+    #[cold]
+    #[inline(never)]
+    fn lyc_irq_delay(&mut self, now: u64) {
+        let phase = if now & 4 != 0 { LYC_IRQ_PHASE } else { 0 };
+        let s = &mut *self.sys;
+        s.iflags = s.iflags & !ppu::INT_STAT | LYC_IRQ_PENDING | phase;
+        self.schedule_ppu();
+        let s = &mut *self.sys;
+        let due = s.sched.deadline(EventKind::Ppu).min(now + 5);
+        s.sched.set(EventKind::Ppu, due);
+        self.reschedule();
+    }
+
+    /// A PPU event with a delayed LYC-write interrupt waiting: at the
+    /// M-cycle boundary 8 dots after the write's access (same M-cycle
+    /// parity) it reaches IF; at the one 4 dots after it (a walk point
+    /// came first), it waits one more M-cycle. Single speed only, so the
+    /// boundaries are 4 dots apart.
+    #[cold]
+    #[inline(never)]
+    fn lyc_irq_due(&mut self, now: u64) {
+        let s = &mut *self.sys;
+        let phase = if now & 4 != 0 { LYC_IRQ_PHASE } else { 0 };
+        if s.iflags & LYC_IRQ_PHASE == phase {
+            s.iflags = s.iflags & INT_MASK | ppu::INT_STAT;
+        } else {
+            let due = s.sched.deadline(EventKind::Ppu).min(now + 1);
+            s.sched.set(EventKind::Ppu, due);
+        }
     }
 
     /// Catches the PPU up to clock `at` (the current clock, or one dot
@@ -925,7 +981,12 @@ impl Ctx<'_, '_> {
                 let at = now + edges::LYC_WRITE.delay(double);
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
+                let old = s.iflags;
                 s.ppu.write_lyc(at, value, &mut s.iflags, double);
+                if !double && s.iflags & !old & ppu::INT_STAT != 0 {
+                    self.lyc_irq_delay(now);
+                    return;
+                }
             }
             // SCY SCX BGP OBP0 OBP1 WY WX: the pixels already output in
             // mode 3 are drawn with the old value first. Where in the
@@ -1108,7 +1169,8 @@ impl Ctx<'_, '_> {
             0x00 => s.set_joypad(s.buttons, value),
             0x01 => s.serial.sb = value,
             0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
-            0x0F => s.iflags = value & INT_MASK,
+            // A delayed LYC-write interrupt still waiting stays.
+            0x0F => s.iflags = value & INT_MASK | s.iflags & !INT_MASK,
             0x10..=0x3F => self.write_apu(reg, value),
             0x40..=0x45 | 0x47..=0x4B => self.write_ppu(reg, value),
             0x46 => self.oam_dma(value),
@@ -2860,6 +2922,49 @@ mod tests {
                 stat, !absorbed,
                 "M-cycle {m}, edge {edge}, last from - {before}"
             );
+        }
+    }
+
+    /// A LYC write that makes LY = LYC with the LYC select set: in single
+    /// speed the interrupt reaches IF one M-cycle after the write's
+    /// (gambatte `cc + 5`, CGB04C `lycEnable/lyc_ff45_trigger_delay_2`),
+    /// also when a walk point syncs the PPU in between; in double speed at
+    /// once. An IF write in between doesn't cancel it.
+    #[test]
+    fn lyc_write_interrupt_reaches_if_one_mcycle_later_in_single_speed() {
+        let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
+        // (M-cycle clocks, SCX, write at line 5 dot, IF write after it,
+        // M-cycles to IF). Around the mode-3 end (a PPU deadline, 256 +
+        // SCX % 8 here), with SCX 1-3 it falls inside the next M-cycle.
+        let end = (240..270).flat_map(|t| (0..8).map(move |scx| (4, scx, t, false, 1)));
+        let fixed = [
+            (4, 0, 100, false, 1),
+            (4, 0, 100, true, 1),
+            (2, 0, 100, false, 0),
+        ];
+        for (m, scx, t, if_write, later) in fixed.into_iter().chain(end) {
+            let emu = load(rom(0x8000, 0, 0, 0x80));
+            let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
+            let _ = emu.run_until(line5 - 40, &mut fb, &mut []);
+            let Emulator { mem, hw } = &mut *emu;
+            let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+            ctx.hot.mcycle = m;
+            ctx.sys.ppu.speed_changed(m == 2);
+            ctx.write(0xFF41, 0x40);
+            ctx.write(0xFF43, scx);
+            while ctx.clock() < line5 + t {
+                ctx.idle();
+            }
+            ctx.sys.iflags = 0;
+            crate::cpu::Bus::write(&mut ctx, 0xFF45, 5);
+            if if_write {
+                ctx.write_mapped(0xFF0F, 0);
+            }
+            for i in 0..3 {
+                let stat = ctx.sys.iflags & crate::ppu::INT_STAT != 0;
+                assert_eq!(stat, i >= later, "{m}, {scx}, {t}, {if_write}, {i}");
+                ctx.idle();
+            }
         }
     }
 
