@@ -221,6 +221,12 @@ Decided in session 16 (2026-11-24, M10 review), human:
   hardware ADR 0003 (HyperRAM on OCTOSPI, supersedes 0001), ADR 0001 status
   line, `firmware-interface.md`, `requirements.md`: left UNCOMMITTED in
   `../gbc-32-hardware` for the human to review and commit.
+- Use the hidden LLVM option `-C llvm-args=-cgp-max-address-users-to-scan=100000`
+  in every build (bench, size check, firmware): "Sure go ahead and use
+  that flag". It lets LLVM fold the hot-struct address in `Cpu::run`
+  (measured on the cpu-loop branch: cpu_instrs -18.2% vs -12.3% without,
+  thumb `.text` smaller). Tied to the pinned toolchain: re-check on any
+  toolchain bump.
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.
