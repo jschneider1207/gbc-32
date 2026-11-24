@@ -399,6 +399,11 @@ SameBoy `apu.c` has a separate `model <= GB_MODEL_CGB_C` path for it.
 - `channel_1_freq_change_timing-cgb0BC`: **applies to C** (suffix names
   0/B/C). Missing: the frequency-change timing against the duty step on
   C and older (not investigated; its `-cgbDE` sibling is signed off).
+  **Status (`m9-ch1-freq`):** the frequency half is done (NRx4 high bits
+  latched up to 4 clocks after the step; the final positions now match C
+  in both speeds). The rest is the CGB-C PCM12 read glitch, which fails
+  14 passing SameSuite ch1/ch2 ROMs (CGB-E reads): needs the human
+  (`docs/reference/apu.md`, PCM12 / PCM34).
 - `channel_1_nrx2_glitch`, `channel_2_nrx2_glitch`: **E-only**. README
   (NRX2 glitch only tested on E); SB-C: `nrx2_glitch` on C goes through an
   intermediate 0xFF write; our zombie rule is Pan Docs' CGB-02/04 one.

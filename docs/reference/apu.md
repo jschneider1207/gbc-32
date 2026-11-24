@@ -18,7 +18,19 @@ and AGB differences are noted only where the code deliberately differs.
   noise divisor countdown n fires after **n** ticks.
 - A frequency write changes the period used at the next reload, not the
   running countdown (SameBoy keeps `sample_countdown`). NR43 writes
-  follow the noise divisor counter instead (noise section).
+  follow the noise divisor counter instead (noise section). Exception:
+  the square reload takes the **high frequency bits up to 4 clocks after
+  the duty step**, so an NRx4 write 0-4 clocks after a step sets the
+  period running from that step (the position has already moved);
+  `Square::write_nrx4`. A trigger's countdown counts as reloaded one period
+  before its first step (no ROM tests that case). Source: SameSuite
+  `channel_1_freq_change_timing-*` (f 0x7FC -> 0x0FC written 22-29 M-cycles
+  after a trigger, read back 16 M-cycles later): the final position
+  matches CGB C in both speeds and D/E/AGB in single speed only with this
+  window (writes 3 clocks after the step in single speed and 4 in double
+  speed count, 6 and 7 don't). SameBoy's NRx4 write likewise re-times a
+  "just reloaded" countdown and steps the index back for 7 -> <7 writes
+  (its TODO calls it a hack for its write timing).
 - State is a function of the clock and the register writes only; register
   reads are pure (ADR 0021 section 3).
 
@@ -281,6 +293,21 @@ digital output (0-15) if it is on, else 0 (SameBoy `GB_IO_PCM12`/`PCM34`:
 the channel (`read_apu`). A new square channel reads 0 until its first
 duty step; a new wave channel reads the kept buffer's output at once.
 
+**CGB C read glitch (not modelled).** SameSuite `apu/README.md`: on CPU
+CGB C and older, PCM12/PCM34 report a glitched amplitude for CH1, CH2
+and CH4 when read in the M-cycle the output changes, which is why real
+CGB C fails most of its channel 1/2/4 tests (their expected values are
+CGB E's). `channel_1_freq_change_timing-cgb0BC` sees it: a read 3 clocks
+after a 0 -> 15 duty step (single speed) and 0, 2 or 4 clocks after one
+(double speed) returns 0, one 7 clocks after returns 15 (SameBoy's CGB-C
+`pcm_mask` masks a nibble to 0 when a step from sample 0 lands at the end
+of a run). Modelled as "a square read within 4 clocks of a step returns
+the AND of the old and new bit", it passes that ROM but fails 14 SameSuite
+ROMs that pass now (measured, 2026-11-23): the single-speed part alone
+`channel_{1,2}_{delay,duty_delay,freq_change,restart,stop_div,stop_restart}`
+(12), the double-speed part `channel_{1,2}_duty` (2). Those expect CGB E
+reads; choosing between them needs the human (STATUS "Needs human").
+
 ## NR52 and CGB power off
 
 - NR52 reads `0x70 | power << 7 | channel-on bits` (Pan Docs FF26). Only
@@ -331,6 +358,8 @@ clock on CGB) that the front end applies. See ADR 0021 section 8.
 Exactness no M6 acceptance ROM needs, tracked in the plan for the
 gambatte `sound/` and SameSuite APU ROMs:
 
+- The CGB-C PCM12/PCM34 read glitch (PCM12 / PCM34 section): the one
+  missing piece of SameSuite `channel_1_freq_change_timing-cgb0BC`.
 - SameBoy's envelope lock/clock model, the secondary DIV event and the
   CGB-C `_nrx2_glitch` (the classic model plus zombie mode is used).
 - The square trigger delay fit: the extra delay when retriggering an

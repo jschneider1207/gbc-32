@@ -61,6 +61,13 @@ impl Square {
         NonZeroU32::new(p).unwrap_or(NonZeroU32::MIN)
     }
 
+    /// Clocks since the last duty step (mod 2^16). After a trigger the
+    /// countdown is over one period (a huge value) until `delay` clocks on.
+    #[inline]
+    fn since_step(&self) -> u16 {
+        ((2048 - (self.freq & 0x7FF)) * 4).wrapping_sub(self.countdown)
+    }
+
     /// The digital output, 0-15 (PCM12/PCM34): the volume while the
     /// latched duty bit is 1, 0 while off or before the first step.
     #[inline]
@@ -191,16 +198,34 @@ impl Square {
                 }
             }
             3 => self.freq = self.freq & 0x700 | u16::from(value),
-            4 => {
-                self.freq = self.freq & 0xFF | u16::from(value & 7) << 8;
-                if self.len.write_nrx4(LENGTH_MAX, value, fs) {
-                    self.on = false;
-                }
-                if value & 0x80 != 0 {
-                    self.trigger(delay);
-                }
-            }
+            4 => self.write_nrx4(value, fs, delay),
             _ => {}
+        }
+    }
+
+    /// An NRx4 write: first the frequency's high bits. The reload takes them
+    /// up to 4 clocks after the duty step, so a write that soon after a
+    /// step sets the period now running (the position has already moved).
+    /// SameSuite `channel_1_freq_change_timing-*` (f 0x7FC -> 0x0FC, the
+    /// channel's final position: both speeds on CGB C, single speed on
+    /// D/E/AGB); SameBoy's NRx4 write likewise re-times a just-reloaded
+    /// countdown (`docs/reference/apu.md`). `max(1)`: a 4-clock period 4
+    /// clocks on steps 1 clock late (no ROM). A trigger's countdown counts
+    /// as reloaded one period before its first step (`delay` clocks on; no
+    /// ROM). Then the length (`Length::write_nrx4`) and the trigger. Out
+    /// of line: one copy for both squares, off `Apu::write` (code size).
+    #[inline(never)]
+    fn write_nrx4(&mut self, value: u8, fs: u8, delay: u8) {
+        let since = self.since_step();
+        self.freq = self.freq & 0xFF | u16::from(value & 7) << 8;
+        if since <= 4 {
+            self.countdown = (self.period().get() - u32::from(since)).max(1) as u16;
+        }
+        if self.len.write_nrx4(LENGTH_MAX, value, fs) {
+            self.on = false;
+        }
+        if value & 0x80 != 0 {
+            self.trigger(delay);
         }
     }
 
@@ -471,6 +496,28 @@ mod tests {
         // And back: duty 0 is low at position 3, but the 1 stays latched.
         sq.write(1, 0x00, 0, 10);
         assert_eq!(sq.digital(), 9);
+    }
+
+    #[test]
+    fn an_nrx4_write_up_to_4_clocks_after_a_step_sets_the_running_period() {
+        // f 0x7FC (16 clocks) -> 0x0FC (7,184): at 0-4 clocks after the
+        // step the new period runs from the step; from 5 on, the next one.
+        for (since, want) in [(0, 7_184), (3, 7_181), (4, 7_180), (5, 11), (8, 8)] {
+            let mut sq = playing(0, 15, 0x7FC);
+            sq.advance(16 + since);
+            assert_eq!(sq.pos, 2);
+            sq.write(4, 0x00, 0, 10);
+            assert_eq!((sq.countdown, sq.pos), (want as u16, 2), "{since} after");
+        }
+        // A trigger's countdown counts as reloaded `delay` clocks after
+        // it, one period before the first step: kept until then.
+        let mut sq = Square::ZERO;
+        sq.write(2, 0xF0, 0, 10);
+        sq.write(3, 0xFC, 0, 10);
+        sq.write(4, 0x87, 0, 10);
+        sq.advance(9);
+        sq.write(4, 0x00, 0, 10);
+        assert_eq!(sq.countdown, 17, "trigger countdown kept");
     }
 
     #[test]
