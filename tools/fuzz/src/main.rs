@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use gbc_fuzz::{CTRL_LEN, Rng, TARGETS, generate};
+use gbc_fuzz::{CTRL_LEN, Rng, TARGETS, generate, huc3_command};
 
 const DEFAULT_SEED: u64 = 0x0006_BC32_F022;
 const DEFAULT_COUNT: u64 = 5000;
@@ -127,6 +127,23 @@ fn emit_corpus(dir: &Path) -> ExitCode {
         halt.extend_from_slice(&[0xF3, 0x76]);
         write(&d, "halt", &halt);
         write(&d, "empty", &[]);
+        // HuC3 (type FE), a hostile clock state (all control bytes FF from
+        // the RTC fields on) and clock commands: set the access address
+        // to FE, read and write across the FF -> 00 wrap, copy the time
+        // out and in, then every extended command.
+        let mut huc3 = vec![0xFFu8; CTRL_LEN];
+        huc3[..10].copy_from_slice(&[0x1C, 0, 0, 0, 0, 0xFE, 1, 3, 0x80, 0]);
+        huc3[10..22].fill(0); // save buffer: exactly the header's size
+        huc3[20..22].copy_from_slice(&4000u16.to_le_bytes());
+        let commands = [0x4E, 0x5F, 0x10, 0x3A, 0x3B, 0x2C, 0x60, 0x61]
+            .into_iter()
+            .chain(0x60..=0x6F)
+            .chain([0x00, 0x7F, 0xFF]);
+        for c in commands {
+            huc3.extend_from_slice(&huc3_command(c));
+        }
+        huc3.extend_from_slice(&[0x18, 0xFE]); // JR -2
+        write(&d, "huc3-clock", &huc3);
     }
     ExitCode::SUCCESS
 }

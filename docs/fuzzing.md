@@ -5,7 +5,9 @@ ROM bytes (header fields and the code the CPU executes), the save RAM buffer
 (length and contents), RTC restore as a front end does it (raw, unmasked
 field values from a save file through `RtcState::advance_seconds` with up
 to `u64::MAX` elapsed seconds, then `set_rtc_state`; again mid-run from
-`rtc_state()`), and button input. The property: no panic and no hang (a run call that stops
+`rtc_state()`; the HuC3 clock the same way through
+`Huc3RtcState::advance_seconds`, `set_huc3_rtc_state` and
+`huc3_rtc_state()`), and button input. The property: no panic and no hang (a run call that stops
 making progress trips an assertion) for any input.
 
 ## Targets
@@ -19,7 +21,8 @@ resets, loads a second cartridge over the first, ejects and reloads.
 
 - `load`: header and buffer handling; short runs.
 - `run`: long runs of arbitrary code.
-- `rtc`: MBC3+timer cartridge types forced, arbitrary RTC state, longer runs.
+- `rtc`: a cartridge type with a clock forced (MBC3+timer 0F/10 or HuC3
+  FE), arbitrary clock state, longer runs.
 
 ## Gate pass (stable, deterministic)
 

@@ -8,8 +8,8 @@
 //! and the coverage-guided cargo-fuzz targets (`fuzz/`).
 
 use gbc_core::{
-    Buttons, Config, DmgPalettes, EjectedCart, Emulator, Events, Frame, Memory, RtcState, RtcTime,
-    SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, cart_ram_size,
+    Buttons, Config, DmgPalettes, EjectedCart, Emulator, Events, Frame, Huc3RtcState, Memory,
+    RtcState, RtcTime, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample, cart_ram_size,
 };
 
 /// Number of control bytes at the start of an input.
@@ -29,7 +29,8 @@ pub enum Profile {
     Load,
     /// The ROM's code executes for a long time, with button input.
     Run,
-    /// MBC3+timer cartridge with arbitrary RTC state.
+    /// A cartridge with a clock (MBC3+timer or HuC3) with arbitrary clock
+    /// state.
     Rtc,
 }
 
@@ -118,6 +119,21 @@ fn rtc_state(r: &mut Reader) -> RtcState {
     }
 }
 
+/// A HuC3 clock state as a front end would read it from a hostile save
+/// file: built from the same control bytes as the MBC3 state (so the
+/// control-byte offsets stay fixed), every field unmasked.
+fn huc3_state(rtc: &RtcState) -> Huc3RtcState {
+    let mut s = Huc3RtcState::default();
+    s.minutes = rtc.live.days;
+    s.days = rtc.latched.days;
+    s.alarm_minutes = u16::from_le_bytes([rtc.live.seconds, rtc.live.minutes]);
+    s.alarm_days = u16::from_le_bytes([rtc.latched.seconds, rtc.latched.minutes]);
+    s.alarm_enabled = rtc.live.halted;
+    // Often past one minute on purpose (set_huc3_rtc_state clamps it).
+    s.subminute_clocks = rtc.subsecond_clocks;
+    s
+}
+
 /// Wall-clock seconds a front end adds to a restored RTC
 /// (`RtcState::advance_seconds`): none, hours, around the 512-day
 /// overflow, or any `u64` (up to `u64::MAX`).
@@ -189,7 +205,7 @@ fn scenario(data: &[u8], profile: Profile) {
     let len = rom_len(&mut r);
     let (cart_type, rom_size, ram_size, cgb, patch) = (r.u8(), r.u8(), r.u8(), r.u8(), r.u8());
     let cart_type = if profile == Profile::Rtc {
-        [0x0F, 0x10][usize::from(cart_type & 1)]
+        [0x0F, 0x10, 0xFE][usize::from(cart_type % 3)]
     } else {
         cart_type
     };
@@ -248,6 +264,7 @@ fn scenario(data: &[u8], profile: Profile) {
         Profile::Rtc => cycles * 8,
     };
     let rtc = rtc_state(&mut r);
+    let huc3 = huc3_state(&rtc);
     let stop = Events::from_bits_truncate(r.u16());
     let audio_len = [0, 1, 7, 512][usize::from(r.u8() % 4)];
     let rtc_secs = rtc_seconds(&mut r);
@@ -263,8 +280,9 @@ fn scenario(data: &[u8], profile: Profile) {
     // Operations before a cartridge exists must be harmless.
     emu.set_buttons(Buttons::from_bits_truncate(0xFF));
     emu.reset();
-    let _ = emu.rtc_state();
+    let _ = (emu.rtc_state(), emu.huc3_rtc_state());
     emu.set_rtc_state(rtc.advance_seconds(rtc_secs));
+    emu.set_huc3_rtc_state(huc3.advance_seconds(rtc_secs));
     assert!(emu.eject().is_none());
 
     let rom: &[u8] = &rom;
@@ -292,6 +310,11 @@ fn scenario(data: &[u8], profile: Profile) {
         // A front end's restore: the saved state as read from a file, raw
         // (unmasked), advanced by the wall-clock time since the save.
         emu.set_rtc_state(rtc.advance_seconds(rtc_secs));
+        emu.set_huc3_rtc_state(huc3.advance_seconds(rtc_secs));
+        // Half the time without the advance: the raw state goes in.
+        if huc3.alarm_enabled {
+            emu.set_huc3_rtc_state(huc3);
+        }
         emu.set_stop_events(stop);
         if r.bool() {
             emu.set_dmg_palettes(DmgPalettes::default());
@@ -300,6 +323,9 @@ fn scenario(data: &[u8], profile: Profile) {
         // Save and restore mid-run, with time passing in between.
         if let Some(saved) = emu.rtc_state() {
             emu.set_rtc_state(saved.advance_seconds(rtc_secs));
+        }
+        if let Some(saved) = emu.huc3_rtc_state() {
+            emu.set_huc3_rtc_state(saved.advance_seconds(rtc_secs));
         }
         let _ = (emu.registers(), emu.serial_byte(), emu.lcd_enabled());
         let _ = (emu.screen_blank(), emu.cpu_locked(), emu.cart_ram().len());
@@ -354,14 +380,14 @@ impl Rng {
 
 /// Header values that exercise the interesting branches: every cartridge
 /// type the core loads, ROM/RAM size codes, and a few wild values.
-const TYPES: [u8; 19] = [
+const TYPES: [u8; 21] = [
     0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x19, 0x1A, 0x1B,
-    0x1C, 0x1D, 0x1E,
+    0x1C, 0x1D, 0x1E, 0xFE, 0xFF,
 ];
 /// Types the core refuses (`LoadErrorKind::UnsupportedMapper`, ADR 0031):
 /// one per unsupported mapper and two unassigned codes. Kept a minority
 /// of the generated inputs, since a refused cartridge never runs.
-const REFUSED_TYPES: [u8; 9] = [0x0B, 0x0D, 0x20, 0x22, 0xFC, 0xFD, 0xFE, 0xFF, 0x16];
+const REFUSED_TYPES: [u8; 7] = [0x0B, 0x0D, 0x20, 0x22, 0xFC, 0xFD, 0x16];
 
 /// One structure-aware input for the gate pass: control bytes biased
 /// towards interesting header values, then a body of random bytes mixed
@@ -430,6 +456,15 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
                 v.extend_from_slice(&[0xFA, addr as u8, (addr >> 8) as u8]);
                 i += 3;
             }
+            // One HuC3 clock command the way games send it (Pan Docs:
+            // HuC-3): the command in mode B, the semaphore write in mode
+            // D, the response read in mode C. Any command and argument,
+            // so the access address and every location get hit. On other
+            // mappers these are just register and RAM writes.
+            8 if rng.below(2) == 0 => {
+                v.extend_from_slice(&huc3_command(rng.byte()));
+                i += HUC3_COMMAND_LEN;
+            }
             // EI / HALT / STOP / LD (HL+),A style noise
             7 => {
                 v.push([0xFB, 0x76, 0x10, 0x22, 0x08, 0xE8, 0xF8][rng.below(7) as usize]);
@@ -442,6 +477,29 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
         }
     }
     v
+}
+
+/// Length of [`huc3_command`]'s code.
+pub const HUC3_COMMAND_LEN: usize = 28;
+
+/// Code that runs HuC3 clock command `command` and reads its response:
+/// `LD A,0B; LD (0000),A; LD A,command; LD (A000),A; LD A,0D; LD (0000),A;
+/// LD A,FE; LD (A000),A; LD A,0C; LD (0000),A; LD A,(A000)`.
+pub fn huc3_command(command: u8) -> [u8; HUC3_COMMAND_LEN] {
+    let ld = |value: u8, hi: u8| [0x3E, value, 0xEA, 0x00, hi];
+    let mut code = [0u8; HUC3_COMMAND_LEN];
+    let steps = [
+        ld(0x0B, 0x00),
+        ld(command, 0xA0),
+        ld(0x0D, 0x00),
+        ld(0xFE, 0xA0),
+        ld(0x0C, 0x00),
+    ];
+    for (chunk, step) in code.chunks_mut(5).zip(steps) {
+        chunk.copy_from_slice(&step);
+    }
+    code[25..].copy_from_slice(&[0xFA, 0x00, 0xA0]);
+    code
 }
 
 #[cfg(test)]
