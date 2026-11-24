@@ -1087,3 +1087,49 @@ the PPU, so line 0 of `_2` is the other lines of `_3`).
   Ir per emulated frame, 99.6% of the 4.02 M line), `cgb-acid2`
   688,152,942 -> 689,060,632 (+0.13%), `synth:cgb-raster` 321,691,149 ->
   321,827,995 (+0.04%).
+
+### TILE_SEL clear glitch (step G, part; branch `m9-acid-hell-lcdc`)
+
+AGE `m3-bg-lcdc` (lines 64-95 toggle LCDC.4 from 1 to 0 and back every
+28 dots, 16 dots apart, on tile 0x55: 0 at 8000, FF at 9000; source
+`c-sp/age-test-roms` `src/m3-bg-lcdc/m3-bg-lcdc.inc`) failed by two tiles
+per line drawn black where CGB B/C/E show colors 2 3 2 3 ...: low plane
+0x55, high plane 9000's FF. `cgb-acid-hell` failed by pixel 80 of lines
+68-69, the same glitch in the high plane.
+
+- **Rule.** An LCDC.4 clear on a bit plane's read dot makes the tile
+  index that plane's data (Mealybug TILE_SEL notes, "all revisions except
+  CPU CGB D"; SameBoy `data_for_tile_sel_glitch`, MIT: `tile_sel_glitch`
+  for the dot after the write), X-flipped like the plane at the push. Not
+  for an index >= 0x80 (SameBoy `!(current_tile & 0x80)`): both data
+  areas put it at 8800-8FFF, so the address doesn't change.
+- **Where.** In `hold_fetch`'s phase terms the read dot is the one before
+  the `LCDC_TILES_LATE` threshold: `phase == FETCH_LOW + late - 1` (low,
+  3; the AGE writes) and `FETCH_HIGH + late - 1` (high, 5; acid-hell).
+  So a clear's T1 sees the old value one dot later than a set's would;
+  the glitch dot is where the old model said "new" for that plane.
+  `Held::planes` bits 2-3 mark the glitched planes; the cold `mix_planes`
+  reads the map entry again and puts the index in them. Sets are
+  unchanged (their CGB glitch, "bitplane 1 data from the most recent
+  sprite" or tile, is not modelled).
+- **Calibration.** None new: the two dots fall out of the existing
+  thresholds. Double speed unchanged and still passing
+  (`m3-bg-lcdc-ds`).
+- **Result.** Full manifest: 2 fail -> pass (`m3-bg-lcdc`,
+  `cgb-acid-hell`), 0 regressions. Mealybug `m3_lcdc_tile_sel_change2`
+  261 -> 95 px, `m3_lcdc_tile_sel_win_change2` 272 -> 106 px (the rest:
+  the set glitch).
+- **Test** (mutation-checked: glitch off; any LCDC.4 change instead of a
+  clear; low plane only; one dot later; no X flip; no index >= 0x80
+  exception): `tile_data_clear_on_a_plane_read_dot_uses_the_tile_index`;
+  `tile_data_write_mixes_the_planes_of_the_tile_being_fetched` line 3
+  (clear on the low plane's read dot, index 0) now expects color 2.
+- **Fingerprint** (`diff-fingerprint.sh main`): 5 ROMs differ (10 runs
+  with `#input`): the four above and AGE `m3-bg-lcdc-nocgb` (not in the
+  manifest; against its `-ncmBCE.png` in an ad hoc manifest: fail before,
+  pass after).
+- **Cost.** `.text` 96,986 -> 97,098 B of 97,500 (+112, cold
+  `hold_fetch` and `mix_planes`). Bench (x86 Ir, `check-bench.sh`):
+  `synth:worst-case` 478,037,092 (main at the previous step 478,066,560:
+  unchanged, the render path is untouched), `cgb-acid2` 689,053,234
+  (689,060,632), `synth:cgb-raster` 321,789,726 (321,827,995).
