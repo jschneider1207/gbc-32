@@ -665,9 +665,23 @@ Zero regressions per commit. Work in a worktree, one cargo job at a time.
    - VRAM read/write start at r = 1 (2). **Done** (with step 10): single
      speed from 86, two dots after the mode-3 STAT change (gambatte
      `vramReadable` `< 79`); double speed 85 (with step 3).
-   - OAM write start at r = 2 (1)
-   - OAM read in double speed (1)
-   - palette mode-3 start in double speed (2)
+   - OAM write start at r = 2 (1). **Done** (branch `m9-m3start-access`):
+     single speed from 3, not SameBoy's line start (gambatte
+     `oamWritable`, CGB: blocked once `lineCycles + 4 >= 456`; its
+     `lineCycles` L is our `t = L + 7`). `prewrite_lcdoffset1_1` writes
+     at 2 (allowed), `_2` at 6; the default grid (`t ≡ 3`) can't tell
+     0 from 3.
+   - OAM read in double speed (1). Already passing on main (OAM read
+     from 4 in double speed).
+   - palette mode-3 start in double speed (2). **Done** (same branch):
+     double speed from 86, single speed still 87 (gambatte
+     `cgbpAccessible`: `lineCycles + ds < 80`). From the test sources
+     (gambatte-core `test/hwtests/cgbpal_m3`): the read lands at
+     `.text@101d` / `@101e` for `_ds_{1,2}` and `@101c` / `@101d` for
+     `_ds_lcdoffset1_{1,2}`, so the default pair brackets the edge in
+     (85, 87] and the lcdoffset1 pair in (84, 86]: 86. The
+     `palette_blocked` fast path now stops at `LINE + 86` so double speed
+     at the next line's 86 takes the slow path. +3 / -0, +10 B.
 
    One sweep per observer. These are independent of the IRQ views.
 8. **Mode-0 edges:** the m0 STAT read per SCX at r = 1 (2), the m0 write

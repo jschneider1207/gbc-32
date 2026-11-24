@@ -33,11 +33,15 @@ this, CGB games that never write BCPD would show a black BG.
 BCPD/OCPD reads give FF and writes are dropped while the PPU reads
 palettes, but a write still steps the index (Pan Docs: LCD Color
 Palettes; SameBoy `cgb_palettes_blocked`). Window (`Ppu::palette_blocked`):
-from line position 87 (first line after LCD enable: 88) to 4 dots after
-the mode-3 end (double speed: 2 after its one-dot-later end). Calibrated
-by gambatte `cgbpal_m3/*`, `enable_display/ly{0,1}_late_cgbp*`; the two
-`*_ds_lcdoffset1_2` variants still fail (CPU/PPU phase in double speed,
-as the other `ds_lcdoffset1` groups).
+from line position 87, 86 in double speed (first line after LCD enable:
+88 in both) to 4 dots after the mode-3 end (double speed: 2 after its
+one-dot-later end). Calibrated by gambatte `cgbpal_m3/*`,
+`enable_display/ly{0,1}_late_cgbp*`. The double-speed start is gambatte's
+`cgbpAccessible` (`lineCycles + ds < 80`, behaviour only; its `lineCycles`
+L is our `t = L + 7`): the default double-speed grid (odd dots) can't
+tell 86 from 87, the `ds_lcdoffset1` grid (even dots) can:
+`cgbpal_{read,write}_m3start_ds_lcdoffset1_1` access at 84 (open), `_2`
+at 86 (blocked), from the sources in gambatte-core `test/hwtests/`.
 
 ## Not yet (M5)
 Per-tile palettes from BG attributes, OBJ colors
