@@ -94,8 +94,8 @@ been seen failing on the old code; until then it is a reviewer claim.
 | B3 | high | 4.02 M x86-Ir line is not a stand-in for 50% of the M7 | human: line stays until an M7 measurement; relative +3% guard is the gate. Better proxies (QEMU thumb counts, i686 valgrind) need an install: Needs human |
 | B4 | high (M7) | u64 time arithmetic on every event/IO path | stage 2 (u32 epoch-relative stamps; needs the clock-offset net, E6) |
 | B5 | med | Scheduler bookkeeping 9-12% inside `boundary` | wave 4 |
-| B6 | med | Four checks before every instruction (= C6) | wave 4 |
-| B7 | med | Tick is load-sub-store-test in memory per M-cycle | wave 4 |
+| B6 | med | Four checks before every instruction (= C6) | fixed (m10-cpu-loop): one attention test per instruction |
+| B7 | med | Tick is load-sub-store-test in memory per M-cycle | fixed: `Hot::t_minus` at offset 0, 4 thumb instructions per tick (was 7) |
 | B8 | med | Plain memory access 14-27 Ir before the tick | wave 4 |
 | B9 | med (M7) | `Cpu::run` register pressure, single dispatch branch | stage 2 |
 | B10 | med (M7) | ITCM/DTCM placement still Proposed | stage 2 (ADR 0026 at link time) |
@@ -112,8 +112,8 @@ been seen failing on the old code; until then it is a reviewer claim.
 | C3 | med | Total `.text` cap is not an MCU constraint | fixed be036b7 |
 | C4 | low | 17 budgets with large slack; `LineObjects::scan` line measures a dead copy | fixed be036b7 (hot caps = measured +5%) |
 | C5 | med | Frame buffer kept out of DTCM for a reason that does not hold | stage 2 (placement plan in docs/perf.md corrected in wave 5) |
-| C6 | med | 40 instructions from loop top to dispatch (= B6) | wave 4 |
-| C7 | low | Register pairs stored big-endian (-214 B, 47 fewer `rev`) | wave 4 |
+| C6 | med | 40 instructions from loop top to dispatch (= B6) | fixed with B6: 28 thumb instructions handler-end to dispatch (was 40) |
+| C7 | low | Register pairs stored big-endian (-214 B, 47 fewer `rev`) | fixed: `rev` in `Cpu::run` 71 -> 28 |
 | C8 | low | `Memory` field order costs ~500 B of large-offset setup | wave 5 |
 | C9 | low | One save-dirty bit for 128 KiB | plan (Stage 2 API, needs an ADR) |
 | C10 | low | Three one-level mutual recursions block a static stack bound | plan |
