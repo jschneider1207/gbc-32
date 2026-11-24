@@ -4,6 +4,17 @@
 # glob must match at least one function section (a rename or inlining shows up
 # as MISSING), and the summed size of all matched sections must fit
 # ITCM_BUDGET_BYTES. A section matched by two globs is counted once.
+#
+# Callee closure: a direct call or tail call (R_ARM_THM_CALL / R_ARM_THM_JUMP*
+# relocation) from a section in the set to a gbc-core function outside it
+# fails, unless the callee is `#[cold]` (rustc puts it in `.text.unlikely.`)
+# or matches a `FLASH_OK <glob>  # <reason>` line of the set file. Such a call
+# crosses ITCM -> flash through a linker veneer and runs behind the I-cache.
+# A FLASH_OK line with no reason, or that no longer matches such a callee,
+# fails too. Not seen: calls through function pointers (gbc-core has none on
+# these paths) and callees outside the rlib (`__aeabi_mem*`, core's panic
+# paths; the front end's ITCM reserve and the post-link veneer count cover
+# those, docs/perf.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -13,6 +24,7 @@ TARGET=thumbv7em-none-eabihf
 TDIR=target/codesize
 
 SIZE=$(command -v llvm-size || command -v rust-size || command -v size) || { echo "no size found" >&2; exit 2; }
+READELF=$(command -v readelf || command -v llvm-readelf) || { echo "no readelf found" >&2; exit 2; }
 
 if ! RUSTFLAGS="-C target-cpu=cortex-m7" cargo build -p gbc-core --release \
     --target "$TARGET" --target-dir "$TDIR" >&2; then
@@ -38,7 +50,7 @@ fail=0
 nglobs=0
 printf '%-64s %5s %8s\n' glob match bytes
 while read -r glob rest; do
-  case "$glob" in ''|'#'*|ITCM_BUDGET_BYTES=*) continue;; esac
+  case "$glob" in ''|'#'*|ITCM_BUDGET_BYTES=*|FLASH_OK) continue;; esac
   nglobs=$((nglobs + 1))
   n=0; b=0
   while IFS='|' read -r obj sec sz; do
@@ -62,8 +74,77 @@ if [ "$total" -gt "$budget" ]; then
   echo "FAIL: ITCM set is over budget by $((-margin)) B (docs/perf.md 'ITCM placement plan (M8)')" >&2
   fail=1
 fi
+
+# Callee closure. Edges "<calling section>|<target symbol>" from the
+# relocation sections (`.rel.text.<fn>` holds the relocations of `.text.<fn>`).
+"$READELF" -rW "$work"/*.o | awk '
+  /^Relocation section/ { src = $3; gsub(/\x27/, "", src); sub(/^\.rela?/, "", src); next }
+  $3 == "R_ARM_THM_CALL" || $3 ~ /^R_ARM_THM_JUMP/ { print src "|" $5 }' | sort -u > "$work/edges"
+cut -d'|' -f2,3 "$work/secs" | sort -u > "$work/secsz"
+cut -d'|' -f2 "$work/matched" | sort -u > "$work/inset"
+# Calls out of the set to a gbc-core function that is neither in it nor cold:
+# "<callee section>|<size>|<one calling section>".
+awk -F'|' '
+  FILENAME == ARGV[1] { inset[$1] = 1; next }
+  FILENAME == ARGV[2] { sz[$1] = $2; next }
+  ($1 in inset) {
+    nedges++
+    t = $2
+    if (t ~ /^\.text\./) s = t                      # a section symbol
+    else if ((".text." t) in sz) s = ".text." t
+    else if ((".text.unlikely." t) in sz) s = ".text.unlikely." t
+    else next                                        # not defined in gbc-core
+    ncore++
+    if ((s in inset) || s ~ /^\.text\.unlikely\./ || (s in out)) next
+    out[s] = $1
+  }
+  END {
+    for (s in out) print s "|" sz[s] "|" out[s]
+    print nedges + 0, ncore + 0 > "/dev/stderr"
+  }' "$work/inset" "$work/secsz" "$work/edges" 2> "$work/nedges" | sort > "$work/out"
+read -r nedges ncore < "$work/nedges"
+# A parse that finds no calls must not pass: Cpu::run alone has hundreds.
+if [ "${ncore:-0}" -lt 50 ]; then
+  echo "FAIL: only ${ncore:-0} gbc-core call relocations read from the ITCM set (readelf output not understood?)" >&2
+  fail=1
+fi
+demangle() { if command -v c++filt >/dev/null; then c++filt; else cat; fi; }
+: > "$work/allowed"
+nallow=0
+while read -r key glob rest; do
+  [ "$key" = FLASH_OK ] || continue
+  nallow=$((nallow + 1))
+  case "$rest" in
+    '#'*[![:space:]#]*) ;;
+    *) echo "FAIL: FLASH_OK $glob has no '# <reason>'" >&2; fail=1 ;;
+  esac
+  n=0
+  while IFS='|' read -r sec sz caller; do
+    # shellcheck disable=SC2053
+    if [[ $sec == $glob ]]; then n=$((n + 1)); echo "$sec" >> "$work/allowed"; fi
+  done < "$work/out"
+  if [ "$n" -eq 0 ]; then
+    echo "FAIL: FLASH_OK $glob matches no non-ITCM, non-cold function called from the ITCM set (stale: remove it)" >&2
+    fail=1
+  fi
+done < "$SETFILE"
+sort -u -o "$work/allowed" "$work/allowed"
+nopen=0; allowed_bytes=0
+while IFS='|' read -r sec sz caller; do
+  if grep -qxF -- "$sec" "$work/allowed"; then
+    allowed_bytes=$((allowed_bytes + sz))
+    continue
+  fi
+  nopen=$((nopen + 1))
+  echo "FAIL: ITCM function calls a non-ITCM, non-cold gbc-core function ($sz B):" >&2
+  printf '  callee %s\n  caller %s\n' "${sec#.text.}" "${caller#.text.}" | demangle >&2
+  echo "  add the callee to the set, or a 'FLASH_OK <glob>  # <reason>' line, in $SETFILE" >&2
+  fail=1
+done < "$work/out"
+echo "ITCM closure: $nedges call relocations in the set, $ncore to gbc-core; $(wc -l < "$work/allowed") warm callees left in flash by FLASH_OK ($allowed_bytes B, $nallow lines), $nopen not allowed"
+
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: ITCM set check (perf/itcm-sections.txt)" >&2
   exit 1
 fi
-echo "OK: every ITCM glob matches and the set fits"
+echo "OK: every ITCM glob matches, the set fits and its warm callees are in it or allowed"

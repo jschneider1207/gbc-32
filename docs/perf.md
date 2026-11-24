@@ -517,9 +517,10 @@ needs an MCU measurement and the human.
 
 ## ITCM placement plan (M8)
 
-Measured 2026-11-22 at 5e65f6f, same build as `check-code-size.sh`
-(thumbv7em-none-eabihf, release, `-C target-cpu=cortex-m7`, 6 CGUs, no
-LTO), section sizes from `readelf -S` on the rlib objects. The decision and
+Measured 2026-11-24 on the same build as `check-code-size.sh`
+(thumbv7em-none-eabihf, release with `codegen-units = 1` as pinned in
+`Cargo.toml`, `-C target-cpu=cortex-m7`, no LTO), section sizes from
+`size -A` on the rlib object. The decision and
 its reasons are ADR 0026 (Proposed). Memory facts: RM0433 (H753) ITCM 64 KB
 at 0x0000_0000 and DTCM 128 KB at 0x2000_0000, both zero-wait and not
 cached; flash at 240 MHz AXI needs 4 wait states (5 flash clocks per
@@ -527,53 +528,51 @@ cached; flash at 240 MHz AXI needs 4 wait states (5 flash clocks per
 about 10+ CPU cycles at 480 MHz before bus latency. The H753 L1 I-cache is
 16 KiB. H735: ITCM configurable to 128/192/256 KB (`TCM_AXI_SHARED`, RM0468).
 
-**Totals.** gbc-core `.text` 94,770 B (all `.text*` sections, 190 functions;
-budget 96,000), `.rodata` 4,078 B. `run` + `execute_cb` = 25,568 + 12,078 =
-37,646 B.
+**Totals.** gbc-core `.text` 94,960 B (all `.text*` sections, 224
+functions, 54 of them `#[cold]` in `.text.unlikely.*`, 15,696 B),
+`.rodata` 3,865 B. `run` + `execute_cb` = 24,512 + 6,892 = 31,404 B.
 
-**Hot set** (runs every frame in a typical game), by tier:
+**The ITCM set** (`perf/itcm-sections.txt`, 63 globs, 68 functions), by
+tier:
 
 | Tier | Contents | Size (B) |
 |---|---|---|
-| A: per instruction/access | `Cpu::run`, `execute_cb`, `step_not_running`, `fetches_next`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`; `vram_blocked`, `oam_blocked`; `halt_begin/end`, `idle_halted`; `Schedule::set` | 43,210 |
-| B: PPU, per line | `Ppu::{sync, latch, scan_to, next_event, point_irq, draw, flush, stat, ly, check_wy_at, scan_line}`, `Renderer::{render, fetch_objects, last_fetched}`, `fill_{plain, mixed, partial<_>}`, `partial_tile<_>`, `LineObjects::scan`, `frame_row`, `cgb_color`, `Ctx::write_ppu` | 15,844 |
-| C: APU, per sync | `Apu::{sync, step, write}`, the three `integrate`s and `advance`s, `frame_step` x2, `Sweep::clock`, `mix::constant`, `div_apu_event`, `set_apu_deadline`, `apu_sync`, `set_div_apu_deadline`, `start_audio`, `finish`, `audio_buffer_event`, `write_apu` | 5,722 |
-| D: frame driver | `Emulator::{run, run_frame, run_until, run_cycles}` | 602 |
-| W: warm (most games, not every frame) | OAM DMA (`oam_dma`, `dma_sync`, `read/write_during_dma`, `ppu_read`), `Cart::{write_rom, update_banks, read_ram}`, `Timer::read`, `vram_dma`, `write_palette_data`, `Noise::clock` | 4,414 |
+| A: per instruction/access | `Cpu::run`, `execute_cb`, `step_not_running`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`, `run_ppu_to_call`; `Ppu::cpu_blocked`; `Cart::{read_ram, read_rtc}`; `halt_begin/end`, `idle_halted`; `Schedule::set`, `Timer::schedule_overflow` | 36,834 |
+| B: PPU, per event | `Ppu::{sync, next_event, point_irq, draw, flush, stat, ly, check_wy_at}`, `Ctx::write_ppu`, `cgb_color` | 4,722 |
+| B: PPU, plain tile path | `Renderer::render`, `fill_plain`, `fill_partial::<false>`, `partial_tile::<false>` | 2,348 |
+| B: PPU, per line with objects | `Ppu::{latch, set_stalls}`, `LineTiming::finish`, `Renderer::fetch_objects`, `fill_mixed`, `fill_partial::<true>`, `partial_tile::<true>` | 4,720 |
+| C: APU, per sync | `Apu::{sync, step, write}`, the three `integrate`s and `advance`s, `frame_step` x2, `Sweep::clock`, `mix::constant`, `div_apu_event`, `set_apu_deadline`, `apu_sync`, `set_div_apu_deadline`, `start_audio`, `finish`, `audio_buffer_event`, `write_apu` | 5,624 |
+| D: frame driver | `Emulator::{run, run_frame, run_until, run_cycles}` | 726 |
 
-A+B+C+D = 65,378 B, more than the H753's whole ITCM; with W 69,792 B. The
-other 25,052 B (load, reset, register decode, RTC, serial, STOP, Debug
-impls) are cold.
-
-Top 10 hot functions: `Cpu::run` 25,568; `execute_cb` 12,078;
-`Ppu::latch` 4,240; `Ppu::scan_to` 2,190; `Ctx::boundary` 1,250;
-`Noise::integrate` 1,142; `fill_mixed` 1,036; `Renderer::render` 1,018;
-`Ppu::sync` 914; `Ctx::write_ppu` 862 (`read_high` 854 next).
+Total 54,974 B. Largest: `Cpu::run` 24,512; `execute_cb` 6,892;
+`Ppu::latch` 1,710; `Ctx::write_ppu` 1,488; `Renderer::render` 1,192;
+`Noise::integrate` 1,134; `Ctx::boundary` 1,126; `fill_mixed` 1,030;
+`Ppu::sync` 930; `read_high` 824; `Ppu::set_stalls` 824.
 
 **H753 placement.** Assumed ITCM reserve for the front end: 8 KiB (ISRs for
 audio/LCD DMA and SysTick, the line/frame blit, the `compiler_builtins` the
-hot set calls: `__aeabi_memcpy*`, `__aeabi_memclr*`, `__aeabi_memset8`,
-`__aeabi_uldivmod`, plus linker veneers). The vector table stays in flash
-(VTOR). That leaves **56 KiB (57,344 B) for gbc-core**, filled in this order:
+set calls: `__aeabi_memcpy*`, `__aeabi_memclr*`, plus linker veneers). The vector table stays in flash
+(VTOR). That leaves **56 KiB (57,344 B) for gbc-core**:
 
-1. ITCM, 55,806 B (1,538 B margin): all of tier A and D; tier C (the M6
-   review's APU integrate set); from tier B the cheap per-event PPU
-   functions (`Ppu::{sync, next_event, point_irq, draw, flush, stat, ly,
-   check_wy_at, scan_line}`, `write_ppu`, `frame_row`, `cgb_color`) and the
-   plain tile path (`render`, `fill_plain`, `fill_partial::<false>`,
-   `partial_tile::<false>`).
-2. Flash behind the I-cache, 13,986 B (85% of 16 KiB): the per-line heavy
-   PPU set (`latch` 4,240, `scan_to` 2,190, `fill_mixed` 1,036,
-   `fetch_objects` 776, `LineObjects::scan` 482, `fill_partial::<true>` 450,
-   `last_fetched` 216, `partial_tile::<true>` 182 = 9,572) and tier W. These
-   run in loop-heavy bursts once per line. With the interpreter in ITCM it no
-   longer evicts them, so they should stay mostly resident.
-3. Flash, cold: everything else.
+1. ITCM, 54,974 B (2,370 B margin): the whole set above.
+2. Flash behind the I-cache, 9,236 B (56% of 16 KiB): the 26 warm
+   functions the set calls directly, listed with a reason each as
+   `FLASH_OK` lines in `perf/itcm-sections.txt`: I/O register reads and
+   writes other than the per-access ones (`write_stat`, `write_lyc`,
+   `write_lcdc`, `write_timer_io`, `Timer::read`, `read_apu`, ...), MBC
+   register writes (`Cart::write_rom`), the OAM DMA and VRAM DMA paths
+   (`read/write_during_dma`, `dma_sync`, `vdma_turn`), and
+   `Ppu::point_irq_rare` (lines 0, 144 and 153).
+3. Flash, cold: everything else, including every `#[cold]` function the
+   set calls (24 of them, 8,928 B: `Ppu::scan_to`, `scan_line`,
+   `hold_fetch`, `Ctx::oam_dma`, `Cpu::stop`, ...). `__aeabi_uldivmod`
+   stays in flash too: its three callers (`noise::long_steps`,
+   `apu::rem_long`, `Ctx::oam_dma_during_vdma`) are all `#[cold]`.
 
-If the firmware build (LTO, `codegen-units = 1`) makes the ITCM set larger
-than 56 KiB, take things out in reverse order: the plain tile path, then
-`write_ppu`, then the APU set. Measure the firmware ELF, not the rlib,
-because LTO changes inlining.
+If the firmware build (LTO) makes the ITCM set larger
+than 56 KiB, take things out in reverse order: the per-line object path,
+then the plain tile path, then `write_ppu`, then the APU set. Measure the
+firmware ELF, not the rlib, because LTO changes inlining.
 
 **DTCM** (128 KB, zero wait states, reachable by the CPU and MDMA only, not
 DMA1/2): the stack, `Hw`/`Emulator` (< 880 B), `Memory` (> 48 KB: WRAM,
@@ -583,8 +582,8 @@ and audio buffers go in AXI SRAM, because the LCD and SAI DMA must reach
 them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5). The
 Stage 2 front end confirms these sizes with `size_of`.
 
-**H735 (Stage 3).** Configure 128 KB of ITCM. Tiers A to D plus W (~70 KB)
-plus the front end fit with room to spare; 192 KB would hold all of
+**H735 (Stage 3).** Configure 128 KB of ITCM. The set plus the warm `FLASH_OK`
+functions (~64 KB) plus the front end fit with room to spare; 192 KB would hold all of
 gbc-core. The I-cache (32 KiB) then only serves cold code.
 
 **Mechanism.** gbc-core cannot name its own sections. In edition 2024
@@ -608,7 +607,7 @@ SECTIONS {
   .itcm : ALIGN(8) {
     __sitcm = .;
     *(.text.itcm.*)                                /* front-end ISRs, blit */
-    *(.text.__aeabi_memcpy* .text.__aeabi_memclr* .text.__aeabi_uldivmod*)
+    *(.text.__aeabi_memcpy* .text.__aeabi_memclr*)
     /* gbc-core tier A (generated from perf/itcm-sections.txt) */
     *(.text._R*8gbc_core3cpu*3Cpu3run*)
     *(.text._R*8gbc_core3cpu*3Cpu10execute_cb*)
@@ -616,7 +615,7 @@ SECTIONS {
     *(.text._R*8gbc_core3bus*3Ctx12write_mapped*)
     *(.text._R*8gbc_core3apu*9integrate*)          /* 3 channels */
     *(.text._R*8gbc_core3ppu6render12fill_partial*Kb0_*)  /* ::<false> */
-    /* ... one line per entry, 56 in all at 5e65f6f ... */
+    /* ... one line per glob in the file ... */
     . = ALIGN(8);
     __eitcm = .;
   } > ITCM AT > FLASH
@@ -649,14 +648,28 @@ There is one source of truth, `perf/itcm-sections.txt`, with
 `<glob>  # <demangled name>` per line. The front end's `build.rs` generates
 the `.itcm` rule list from it, so the script and the check cannot drift.
 Then two checks:
-- *Pre-link (rlib, possible now, extends `check-code-size.sh`):* every
-  glob must match at least one `.text.*` section of the rlib, otherwise it
-  fails as MISSING, like the budgets. Multi-match globs list the expected
-  count. The matched total must be within the 56 KiB core budget. Each
-  glob is tested with the shell's `case` pattern, which has the same `*`
-  semantics as the linker's. A prototype did this for the 56 globs above:
-  all matched (55,806 B), and the one typo (`12div_apu_event`, really
-  `13div_apu_event`) was caught as 0 matches.
+- *Pre-link (rlib): `scripts/check-itcm-set.sh`, in `gate-stage1.sh`.*
+  Three hard failures:
+  - a glob that matches no `.text.*` section of the rlib (MISSING: the
+    function was renamed or inlined away, so fix the list). Each glob is
+    tested with the shell's `[[ == ]]` pattern, which has the same `*`
+    semantics as the linker's.
+  - the matched total over `ITCM_BUDGET_BYTES` (56 KiB).
+  - *callee closure*: a direct call or tail call from a function in the set
+    (an `R_ARM_THM_CALL` or `R_ARM_THM_JUMP*` relocation in its
+    `.rel.text.*` section, read with `readelf -r`) to a gbc-core function
+    that is not in the set, not `#[cold]` (`.text.unlikely.*`), and not on
+    a `FLASH_OK <glob>  # <reason>` line of the same file. A `FLASH_OK`
+    line without a reason, or one that no longer matches such a callee,
+    fails too. So a hot helper that LLVM (or an edit) moves out of line
+    cannot land in flash unnoticed. Not seen by it: calls through function
+    pointers (the core has none on these paths) and callees outside the
+    rlib (`__aeabi_mem*`, core's panic paths).
+
+  Mutation-checked 2026-11-24: removing the `Ppu::cpu_blocked` glob,
+  removing a `FLASH_OK` line, adding a stale one, deleting a reason, and a
+  relocation parse that finds nothing each fail; earlier, a typo in a glob
+  and a budget of 55,000.
 - *Post-link (firmware ELF, Stage 2):* every demangled name in the file must
   exist in `nm -C` of the ELF and have an address in
   `[0x0000_0000, 0x0001_0000)`. A name inlined away under LTO fails, so
@@ -666,18 +679,13 @@ Then two checks:
   also does this).
 
 **Is a <= 40 KB target for `execute`/`execute_cb` still needed?** No, as a
-separate goal. They are 37,646 B now, already under it. With the
+separate goal. They are 31,404 B now. With the
 interpreter in ITCM, its I-cache footprint (the M2 "2.6x the I-cache"
 concern) no longer matters, because TCM fetches bypass the cache. The
-binding constraint is the H753 ITCM total: 55.8 of 56 KiB. Two stricter
-follow-ups replace the target:
-1. Lower the `run`/`execute_cb` budgets to measured + 5% (26,850 / 12,700
-   from 29,150 / 13,250), so their ~4.7 KB of headroom can't silently eat
-   the 1.5 KB ITCM margin.
-2. Add the ITCM-set total (56 KiB) to `check-code-size.sh`, read from
-   `perf/itcm-sections.txt`.
-
-   Done 2026-11-22 (`scripts/check-itcm-set.sh`, wired into `gate-stage1.sh`; the `run`/`execute_cb` budgets are now 26,800 / 12,700 for measured 25,504 / 12,078). `perf/itcm-sections.txt` has 55 globs (grouped: one glob covers the three `integrate`s, the three `advance`s and the two `frame_step`s; `Ppu::scan_line` needs a `.text.unlikely.` glob), matching 55,742 B of the 57,344 B budget (margin 1,602 B) at 54e7f26. Mutation-checked: a typo in a glob and a budget of 55,000 both fail.
+binding constraint is the H753 ITCM total: 54,974 of 57,344 B, which
+`check-itcm-set.sh` gates. The per-function budgets of the functions in
+the set (`perf/code-size-budgets.txt`) keep one function's growth from
+eating the 2,370 B margin unseen.
 
 On the H735 with 128 KB ITCM the question goes away.
 

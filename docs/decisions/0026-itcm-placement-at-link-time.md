@@ -50,3 +50,27 @@ attribute in edition 2024, and `forbid(unsafe_code)` rejects it.
   edges. The post-link check reports how many there are.
 - The 1.5 KB of margin on the H753 is thin. Core growth on the hot path now
   has an ITCM cost, which the total budget makes visible.
+
+## Amendments
+
+### 2026-11-24: set re-derived under `codegen-units = 1`; callee-closure check
+
+M10 review finding C1. The numbers above (65.4 KB hot set, 1.5 KB margin)
+are from 5e65f6f; later size work shrank the set, and the release profile
+is now pinned to one codegen unit. Current numbers are in docs/perf.md
+"ITCM placement plan (M8)": the set is 54,974 B of the 57,344 B budget
+(margin 2,370 B). What changed:
+
+- Added: the functions the set called on per-access paths but left in
+  flash (`Ppu::cpu_blocked`, `Cart::read_ram`, `Cart::read_rtc`,
+  `Ctx::run_ppu_to_call`, `Timer::schedule_overflow`), and the per-line
+  object path that the fill order above left in flash for lack of room
+  (`Ppu::latch`, `Ppu::set_stalls`, `LineTiming::finish`,
+  `Renderer::fetch_objects`, `fill_mixed`, `fill_partial::<true>`,
+  `partial_tile::<true>`). New drop order if the firmware build is over:
+  that per-line object path first, then the plain tile path.
+- Removed: `Ppu::scan_line`, which is `#[cold]`.
+- The pre-link check gained a third condition: a direct call from the set
+  to a gbc-core function outside it fails unless the callee is `#[cold]`
+  or has a `FLASH_OK` line with a reason in `perf/itcm-sections.txt`. So
+  "veneers are fine on cold edges" is now checked, not assumed.
