@@ -727,7 +727,8 @@ impl Renderer {
         };
         let w = ((old & !m & !g) | (new & m) | (glitch & g)) << (2 * (col & 7));
         // One instance (mixed with no object pixels when none are shown):
-        // calling the plain one too grows it past its size budget.
+        // at most 8 pixels on a cold path, where a plain twin measured no
+        // Ir difference on any bench.
         let obj = if lcdc & LCDC_OBJ_ON != 0 && self.obj_fetched {
             &obj_buf[x0 + 8..x1 + 8]
         } else {
