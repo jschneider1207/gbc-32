@@ -836,8 +836,8 @@ impl Ctx<'_, '_> {
         let phase = if now & 4 != 0 { LYC_IRQ_PHASE } else { 0 };
         let s = &mut *self.sys;
         s.iflags = s.iflags & !ppu::INT_STAT | LYC_IRQ_PENDING | phase;
-        self.schedule_ppu();
-        let s = &mut *self.sys;
+        // Not rescheduled from the walk here: `sync_ppu` at the due
+        // boundary (or an earlier PPU deadline) does that.
         let due = s.sched.deadline(EventKind::Ppu).min(now + 5);
         s.sched.set(EventKind::Ppu, due);
         self.reschedule();
@@ -1175,15 +1175,10 @@ impl Ctx<'_, '_> {
         if self.sys.sched.deadline(EventKind::Ppu) <= at
             && self.sys.ppu.if_write_sees(at, self.hot.mcycle == 2)
         {
-            self.sync_ppu_to(at);
-            // The sync rescheduled from the walk: keep a waiting delayed
-            // LYC-write interrupt due at the next boundary.
-            if self.sys.iflags & LYC_IRQ_PENDING != 0 {
-                let s = &mut *self.sys;
-                let due = s.sched.deadline(EventKind::Ppu).min(at);
-                s.sched.set(EventKind::Ppu, due);
-                self.reschedule();
-            }
+            // No reschedule: the PPU deadline, now passed, runs
+            // `sync_ppu` at the next boundary, which sets the next one
+            // (and delivers a waiting delayed LYC-write interrupt).
+            self.run_ppu_to_call(at);
         }
         let s = &mut *self.sys;
         s.iflags = value & INT_MASK | s.iflags & !INT_MASK;

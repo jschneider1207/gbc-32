@@ -876,13 +876,17 @@ impl Ppu {
     /// point: interrupt) `ly0/lycint152_lyc0irq_ifw_1`,
     /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`; `_2` (4 dots later): none.
     pub(crate) fn if_write_sees(&self, at: u64, double: bool) -> bool {
-        if double || !self.lcd_enabled() {
-            return true;
-        }
-        const ZERO: u32 = edges::l153_zero_walk(false);
+        const ZERO: u32 = 153 * LINE + edges::l153_zero_walk(false);
         const PULSE: u32 = edges::ly0_pulse(false);
-        let a = self.at(at);
-        !matches!((a.line, a.t), (153, ZERO) | (0, PULSE)) || a.first
+        // As `at` (frame position; line 0 of the first frame has no pulse),
+        // without its division.
+        let mut p = at.wrapping_sub(self.frame_start) as u32;
+        let mut first = self.first_frame;
+        if p >= FRAME {
+            p -= FRAME;
+            first = false;
+        }
+        double || !self.lcd_enabled() || !(p == ZERO || (p == PULSE && !first))
     }
 
     /// STAT bit 2 (LY=LYC) at `a`: 0 while the comparison is off in single
