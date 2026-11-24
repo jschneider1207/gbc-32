@@ -847,36 +847,48 @@ impl<'a> Cart<'a> {
             .unwrap_or(0xFF)
     }
 
-    /// The 16 bytes [`Self::read_rom`] or [`Self::read_ram`] return for
-    /// `addr..addr + 16` (`addr` 16-aligned, below C000), for VRAM DMA
-    /// blocks: one copy from the ROM bank window or the RAM bank. The RTC
-    /// and Hudson registers don't depend on the address. A ROM window
-    /// starts at a multiple of the bank size, and every RAM size is 0 or
-    /// a power of two of at least 512 (`cart_ram_size`), so the
-    /// `ram_len - 1` mask keeps the low 4 bits: either way the 16 bytes
-    /// are one 16-aligned run of the slice.
-    pub(crate) fn dma_block(&self, addr: u16) -> [u8; 16] {
-        let (mem, off): (&[u8], usize) = if addr < 0x8000 {
-            let window = self.rom_win[usize::from(addr >> 14) & 1];
-            (window.into_inner(), usize::from(addr) & (ROM_BANK - 1))
-        } else if !self.ram_enabled || (self.ram_mapped() && self.ram_len == 0) {
-            return [0xFF; 16];
-        } else if !self.ram_mapped() {
-            return [self.read_rtc(addr); 16];
-        } else {
-            debug_assert!(self.ram_len.is_multiple_of(16));
-            (self.ram_buf, self.ram_index(addr))
-        };
+    /// The 16 bytes [`Self::read_rom`] returns for `addr..addr + 16`
+    /// (`addr` 16-aligned, below 8000), for VRAM DMA blocks: one copy
+    /// from the ROM bank window. A window starts at a multiple of the
+    /// bank size, so the block is one 16-aligned chunk of it.
+    ///
+    /// Apart from [`Self::ram_block`] and inline (measured: as one
+    /// function for ROM and RAM, `synth:worst-case` is +0.025% Ir at the
+    /// same `.text`).
+    #[inline(always)]
+    pub(crate) fn rom_block(&self, addr: u16) -> [u8; 16] {
+        let mem = self.rom_win[usize::from(addr >> 14) & 1].into_inner();
+        let off = usize::from(addr) & (ROM_BANK - 1);
         match mem.as_chunks::<16>().0.get(off >> 4) {
             Some(b) => *b,
             None => Self::block_tail(mem, off),
         }
     }
 
+    /// The 16 bytes [`Self::read_ram`] returns for `addr..addr + 16`
+    /// (`addr` 16-aligned, A000-BFFF), for VRAM DMA blocks: one copy from
+    /// the RAM bank. The RTC and Hudson registers don't depend on the
+    /// address. Every RAM size is 0 or a power of two of at least 512
+    /// (`cart_ram_size`), so the `ram_len - 1` mask keeps the low 4 bits
+    /// and the 16 bytes are one 16-aligned chunk of `ram_buf`.
+    pub(crate) fn ram_block(&self, addr: u16) -> [u8; 16] {
+        if !self.ram_enabled || (self.ram_mapped() && self.ram_len == 0) {
+            return [0xFF; 16];
+        } else if !self.ram_mapped() {
+            return [self.read_rtc(addr); 16];
+        }
+        debug_assert!(self.ram_len.is_multiple_of(16));
+        let off = self.ram_index(addr);
+        match self.ram_buf.as_chunks::<16>().0.get(off >> 4) {
+            Some(b) => *b,
+            None => Self::block_tail(self.ram_buf, off),
+        }
+    }
+
     /// A block from `off` in `mem` that ends inside it or starts past its
     /// end: the missing bytes read FF, as in [`Self::read_rom`] (a ROM
     /// whose size isn't a multiple of 16, or a bank past the end of the
-    /// file). Never taken for the RAM bank (see [`Self::dma_block`]);
+    /// file). Never taken for the RAM bank (see [`Self::ram_block`]);
     /// there the fallback replaces a panic path.
     #[cold]
     #[inline(never)]
@@ -2344,7 +2356,7 @@ mod huc_tests {
         // The IR register everywhere in A000-BFFF: C0 = no light.
         assert_eq!(c.read_ram(0xA000), 0xC0);
         assert_eq!(c.read_ram(0xBFFF), 0xC0);
-        assert_eq!(c.dma_block(0xA000), [0xC0; 16]);
+        assert_eq!(c.ram_block(0xA000), [0xC0; 16]);
         // Writes drive the LED; they never reach the RAM or dirty the save.
         c.write_ram(0xA000, 0x01, 0);
         c.write_ram(0xA000, 0x00, 0);
@@ -2485,7 +2497,7 @@ mod huc_tests {
         assert_eq!(c.read_ram(0xA006), 0x00);
         let mut want = [0u8; 16];
         want[5] = 0x22;
-        assert_eq!(c.dma_block(0xA000), want);
+        assert_eq!(c.ram_block(0xA000), want);
         // A reset returns to mode 0 from any mode.
         c.write_rom(0x0000, 0x0A, 0);
         c.reset();
@@ -2516,7 +2528,7 @@ mod huc_tests {
         c.write_rom(0x0000, 0x0E, 0);
         assert_eq!(c.read_ram(0xA000), 0xC0);
         assert_eq!(c.read_ram(0xBFFF), 0xC0);
-        assert_eq!(c.dma_block(0xB000), [0xC0; 16]);
+        assert_eq!(c.ram_block(0xB000), [0xC0; 16]);
         c.write_ram(0xA000, 0x01, 0);
         assert_eq!(c.read_ram(0xA000), 0xC0);
         assert!(!c.save_dirty);
@@ -2531,7 +2543,7 @@ mod huc_tests {
         for m in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 0x0F, 0xF1, 0x2F] {
             c.write_rom(0x0000, m, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF, "mode {m:02X}");
-            assert_eq!(c.dma_block(0xA000), [0xFF; 16], "mode {m:02X}");
+            assert_eq!(c.ram_block(0xA000), [0xFF; 16], "mode {m:02X}");
             c.write_ram(0xA000, 0x00, 0);
         }
         assert!(!c.save_dirty);
@@ -2549,7 +2561,7 @@ mod huc_tests {
         for m in [0x00u8, 0x0A] {
             c.write_rom(0x0000, m, 0);
             assert_eq!(c.read_ram(0xA000), 0xFF);
-            assert_eq!(c.dma_block(0xA000), [0xFF; 16]);
+            assert_eq!(c.ram_block(0xA000), [0xFF; 16]);
             c.write_ram(0xA000, 0x12, 0);
         }
         assert!(!c.save_dirty);
@@ -2738,7 +2750,7 @@ mod huc_tests {
         // the result in bits 0-3; the same everywhere in A000-BFFF.
         assert_eq!(command(&mut c, 0x10, 0), 0x80 | 0x10 | 0x0C);
         assert_eq!(c.read_ram(0xBFFF), 0x9C);
-        assert_eq!(c.dma_block(0xA000), [0x9C; 16]);
+        assert_eq!(c.ram_block(0xA000), [0x9C; 16]);
         // Bit 7 of the command written is not connected: 90 is command 1
         // (read), here of the next location.
         assert_eq!(command(&mut c, 0x90, 0), 0x9A);

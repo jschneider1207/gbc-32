@@ -2694,7 +2694,8 @@ fn dma_read_clear(mem: &Memory, i: u8) {
 fn vdma_block(mem: &Memory, sys: &Sys, src: u16) -> [u8; 16] {
     debug_assert!(src & 0xF == 0);
     match src >> 13 {
-        0..=3 | 5 => sys.cart.dma_block(src),
+        0..=3 => sys.cart.rom_block(src),
+        5 => sys.cart.ram_block(src),
         6 => *wram_block(mem, sys, usize::from(src)),
         // VRAM and E000-FFFF: FF (see `Ctx::vram_dma`).
         _ => [0xFF; 16],
