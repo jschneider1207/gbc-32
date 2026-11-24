@@ -1356,6 +1356,15 @@ impl Ctx<'_, '_> {
         }
         let dma_paused = self.sys.ppu.dma.paused != NEVER;
         if dma_paused {
+            // Unlike HALT, the transfer's last step (its end) is held for
+            // the PPU even with every byte written: gambatte's STOP brings
+            // the transfer only up to this M-cycle (HALT: one further),
+            // and its cgb04c `oamdma_late_speedchange_stat_1` (the switch
+            // in the last byte's M-cycle) misses the object the PPU finds
+            // in `_2` (the switch in the end's M-cycle: no pause).
+            self.sys.ppu.dma.ppu_to = NEVER;
+        }
+        if dma_paused {
             self.dma_retime(m);
         }
         self.hot.mcycle = m as i32;
@@ -4039,6 +4048,25 @@ mod dma_tests {
             assert_eq!(d.ppu_to, d.end - 2);
             assert_eq!(d.ppu_at(d.end - 2), (Running, 160));
             assert_eq!(d.ppu_at(d.end - 1), (Off, 160));
+        });
+    }
+
+    /// The speed-switch halt after the last byte, before the end: unlike
+    /// HALT, the transfer's last step is held for the PPU through the
+    /// halt (gambatte cgb04c `oamdma/oamdma_late_speedchange_stat_1`).
+    #[test]
+    fn speed_switch_after_the_last_byte_holds_the_ppu() {
+        use crate::dma::PpuView::*;
+        let emu = setup();
+        with_ctx(emu, |ctx| {
+            let t0 = ctx.clock();
+            ctx.write(0xFF46, 0xC1);
+            idle_to(ctx, t0, 161);
+            assert!(ctx.speed_switch(true, false));
+            let d = ctx.sys.ppu.dma;
+            assert_eq!(d.copied, 160);
+            assert_eq!(d.ppu_at(t0 + 647), (Halted, 160));
+            assert_eq!(d.ppu_at(t0 + 5000), (Halted, 160));
         });
     }
 

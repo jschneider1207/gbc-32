@@ -82,7 +82,11 @@ STAT mode-2 IRQs; it passes (throwaway harness, M3), as does
 - **Speed-switch pause:** in SameBoy the CPU is `halted` through
   `speed_switch_halt_countdown` (no IRQ pending), so the DMA pauses; that
   halt ends inside `GB_advance_cycles` with no extra wake-up step. Ours
-  rescales instead (`dma_rescale`); M5 replaces it.
+  pauses it too (`Ctx::speed_switch`: `dma_pause`, then `dma_retime` for
+  the new M-cycle length) and resumes it one M-cycle after the wake-up
+  (`speed_switch_end`; gambatte cgb04c `oamdmasrcC0_speedchange_readC000`,
+  `dma/hdma_transition_speedchange_oamdma`). For the PPU see "HALT and
+  the PPU" (the last step is held here, unlike HALT).
 - **Lockup:** SameBoy's `ill` sets `halted` with IE = 0, so a transfer
   freezes forever. That is SameBoy's way to model a hung CPU, not a
   hardware claim; we keep the DMA running. Unverified.
@@ -233,6 +237,13 @@ before (1 byte left) or at (0 left) the transfer's last M-cycle, halted
 through line 4's read of OAM entry 0 (woken by the timer at t = 23);
 the object (entry 0) on line 4 is missed in `_1` and found in `_2`. SameBoy holds `dma_current_dest = 0xA0` through
 the halt, which would miss it in `_2` too.
+**The speed-switch halt differs:** the last step *is* held for the PPU,
+even with every byte written, as long as the switch comes before the
+transfer's end (the pause point is the end of STOP's second byte).
+gambatte's `Memory::stop` brings the transfer up to that point only,
+where its `halt` goes one M-cycle further, and its cgb04c captures
+`oamdma_late_speedchange_stat_1` (out0: switch in the last byte's
+M-cycle, object missed) and `_2` (out3: switch at the end, found) pin it.
 
 **Object fetches (mode 3).** The fetch reads the object's tile index and
 attributes from OAM, or, while bytes 1-159 are being written, the 16-bit
