@@ -5,9 +5,9 @@
 //! the serial bit clock derive from is a linear function of the clock
 //! between DIV writes and speed switches, so the timer's state is computed
 //! from the clock when a register is read or written, and its one effect
-//! (the TIMA reload with the timer interrupt) is the `EventKind::Timer`
-//! deadline, at [`Timer::deadline`]. The serial bit clock's deadlines come
-//! from [`Timer::clock_at`].
+//! on the rest of the machine (the timer interrupt requested at a TIMA
+//! reload) is the `EventKind::Timer` deadline, at [`Timer::deadline`]. The
+//! serial bit clock's deadlines come from [`Timer::clock_at`].
 //!
 //! # The system counter
 //! It counts CPU clocks, 4 per M-cycle in both speeds: 1 per base clock at
@@ -45,6 +45,20 @@
 //! it and every bit below it are 0 at cycle A's access, and neither a DIV
 //! nor a TAC write sees a 1 -> 0 edge on it. That is why this model never
 //! syncs TIMA in cycle A.
+//!
+//! # Reloads are lazy (ADR 0011, 2026-11-24 amendment)
+//! A reload changes only this struct (`tima`, `tima_from`, `reloaded_at`,
+//! `overflow_at`) and requests the interrupt. The state part needs no
+//! event: [`Timer::catch_up`] runs every reload due by a clock, in closed
+//! form, and every access that reads or changes that state calls it first
+//! (the TIMA read on a copy, the register writes, STOP and the speed
+//! switch). The request part is the Timer event, which the bus schedules
+//! at [`Timer::deadline`], except while IF bit 2 is already set and IE
+//! bit 2 is clear: a request that is already pending, and that no
+//! dispatch can acknowledge, makes later ones unobservable until one of
+//! the two bits changes, where the bus catches up and schedules again
+//! (`Ctx::schedule_timer`). A timer whose interrupt nobody takes (TMA =
+//! FF at 262 kHz reloads every 4 M-cycles) costs nothing.
 //!
 //! The eager per-M-cycle model this replaced is [`reference`], kept for
 //! the differential test.
@@ -207,13 +221,23 @@ impl Timer {
     pub(crate) fn read(&self, now: u64, reg: usize) -> u8 {
         match reg & 3 {
             0 => self.div(now),
-            1 => self.tima(now),
+            1 => {
+                // The reloads since the last access, on a copy: reads
+                // have no side effects (`peek`). `sync` (00 in cycle A)
+                // rather than `tima`: shared code, out of line.
+                let mut t = *self;
+                t.catch_up(now);
+                t.sync(now);
+                t.tima
+            }
             2 => self.tma,
             _ => 0xF8 | self.tac,
         }
     }
 
-    /// The access at `now` is in cycle A (module docs).
+    /// The access at `now` is in cycle A (module docs). As everything
+    /// below that takes `now`: of a timer caught up to `now`
+    /// ([`Self::catch_up`]).
     #[inline]
     fn in_cycle_a(&self, now: u64) -> bool {
         self.overflow_at <= now
@@ -221,7 +245,7 @@ impl Timer {
 
     /// TIMA at clock `now`.
     #[inline]
-    pub(crate) fn tima(&self, now: u64) -> u8 {
+    fn tima(&self, now: u64) -> u8 {
         if self.in_cycle_a(now) {
             return 0;
         }
@@ -234,13 +258,46 @@ impl Timer {
         (u64::from(self.tima) + falls) as u8
     }
 
-    /// The Timer deadline: the reload at the end of cycle A, or `NEVER`.
+    /// The clock of the next reload, at the end of cycle A, or `NEVER`:
+    /// the Timer deadline, when the bus sets one (module docs, "Reloads
+    /// are lazy").
     #[inline]
     pub(crate) fn deadline(&self) -> u64 {
         self.overflow_at.saturating_add(self.mcycle())
     }
 
-    /// Makes `tima` exact at `now` (not in cycle A).
+    /// Runs every reload due at or before `now` (module docs, "Reloads are
+    /// lazy"): the state is then what running each at its own clock would
+    /// have left. After the first, TIMA counts from TMA, and nothing else
+    /// changes in between (every access catches up first): the reloads
+    /// are `256 - TMA` falls of the selected bit apart, a whole number of
+    /// clocks, so only the second and the last need running. The last is
+    /// the second plus the whole periods that fit before `now`.
+    // Out of line (code size): one copy for the register accesses, STOP,
+    // the speed switch and the IF paths.
+    #[inline(never)]
+    pub(crate) fn catch_up(&mut self, now: u64) {
+        let first = self.deadline();
+        if first > now {
+            return;
+        }
+        // Reloads are at M-cycle boundaries, as are the accesses.
+        debug_assert!((now - first).is_multiple_of(self.mcycle()));
+        self.reload(first);
+        // `NEVER` if the timer is off.
+        let second = self.deadline();
+        if second > now {
+            return;
+        }
+        // log2 of the clocks per fall of the selected bit.
+        let fall = self.tima_bit.trailing_zeros() + 1 - self.shift;
+        let falls = (now - second) >> fall;
+        let whole = falls - rem(falls, 256 - u32::from(self.tma));
+        self.reload(second + (whole << fall));
+    }
+
+    /// Makes `tima` exact at `now` (not in cycle A, except for a read on
+    /// a copy).
     // Out of line (code size): shared by the register writes and STOP,
     // none of them on a hot path.
     #[inline(never)]
@@ -271,19 +328,20 @@ impl Timer {
         }
     }
 
-    /// The Timer event at the end of cycle A: TIMA = TMA. Returns the IF
-    /// bit to request.
-    pub(crate) fn reload(&mut self, now: u64) -> u8 {
+    /// The reload at the end of cycle A, at clock `now`: TIMA = TMA. The
+    /// timer interrupt it requests is the bus's ([`Self::deadline`]).
+    #[inline(never)] // See `sync`.
+    pub(crate) fn reload(&mut self, now: u64) {
         self.tima = self.tma;
         self.tima_from = self.sc(now);
         self.reloaded_at = now;
         self.schedule_overflow();
-        INT_TIMER
     }
 
     /// Pan Docs "Timer overflow behavior": a TIMA write in cycle A cancels
     /// the reload and the interrupt; in cycle B it is ignored (TMA wins).
     pub(crate) fn write_tima(&mut self, now: u64, value: u8) {
+        self.catch_up(now);
         if now == self.reloaded_at && !self.in_cycle_a(now) {
             return;
         }
@@ -296,6 +354,8 @@ impl Timer {
     /// is used; in cycle B the write also reaches TIMA (SameBoy stores TMA
     /// writes into TIMA whenever `tima_reload_state` isn't RUNNING).
     pub(crate) fn write_tma(&mut self, now: u64, value: u8) {
+        // First: the reloads up to `now` loaded the old TMA.
+        self.catch_up(now);
         self.tma = value;
         if now == self.reloaded_at && !self.in_cycle_a(now) {
             self.tima = value;
@@ -313,6 +373,7 @@ impl Timer {
     // of codegen-unit partitioning (it is not on a hot path).
     #[inline(never)]
     pub(crate) fn write_tac(&mut self, now: u64, value: u8) {
+        self.catch_up(now);
         let new_bit = if value & 4 != 0 {
             TAC_BITS[usize::from(value & 3)]
         } else {
@@ -344,6 +405,7 @@ impl Timer {
     /// `GB_set_internal_div_counter`: `triggers = div_counter & ~value`).
     #[inline(never)] // See `write_tac`.
     pub(crate) fn write_div(&mut self, now: u64) -> u64 {
+        self.catch_up(now);
         let old = self.sc(now);
         let cycle_a = self.in_cycle_a(now);
         if !cycle_a {
@@ -373,6 +435,7 @@ impl Timer {
     /// Verified by AGE `spsw-tima-cgbBC` (CGB B/C), ADR 0020.
     #[inline(never)]
     pub(crate) fn stop_edge(&mut self, now: u64) {
+        self.catch_up(now);
         let b = self.tima_bit;
         // The 4 kHz timer (bit 9) and a stopped timer (0) have none.
         if b & 0xA8 == 0 || self.in_cycle_a(now) {
@@ -388,17 +451,25 @@ impl Timer {
     /// which the eager model advanced only in M-cycle ticks) stays frozen
     /// for `pause` base clocks (0 for none), then runs at the other speed.
     ///
-    /// `pause` may be negative: -1 counts one clock the CPU doesn't see
-    /// (the speed-switch halt to single speed is one clock short of whole
-    /// M-cycles, `Ctx::speed_switch`), keeping the timer on the CPU's grid.
-    pub(crate) fn speed_switch(&mut self, now: u64, pause: i64) {
-        let from = now.wrapping_add_signed(pause);
+    /// `short`: the speed-switch halt to single speed, one clock short of
+    /// whole M-cycles, so the CPU's M-cycle grid moves by 3 clocks
+    /// (`Ctx::speed_switch`). The counter then runs from one clock before
+    /// `now + pause`, counting a clock the CPU doesn't see, which keeps
+    /// the timer on the CPU's grid. A cycle A open at such a switch isn't
+    /// held for the pause: it ends at the first boundary of the moved
+    /// grid, `now + 3`. (The reload ran from the deadline set before the
+    /// switch when every reload was an event; kept, and pinned by
+    /// `differential`'s
+    /// `switch_to_single_speed_in_cycle_a_reloads_at_the_moved_grid`.)
+    pub(crate) fn speed_switch(&mut self, now: u64, pause: u64, short: bool) {
+        self.catch_up(now);
+        let from = now + pause - u64::from(short);
         self.base = self.sc(now);
         self.shift ^= 1;
         self.apu_ds_delay ^= self.shift != 0;
         self.base_clock = from;
         if self.in_cycle_a(now) {
-            self.overflow_at = from.max(now);
+            self.overflow_at = if short { now - 1 } else { from.max(now) };
         } else {
             self.schedule_overflow();
         }
@@ -406,4 +477,16 @@ impl Timer {
             self.reloaded_at = from.max(now);
         }
     }
+}
+
+/// `x % p` for `p` in 1..=256, in 32-bit divisions (16 bits of `x` at a
+/// time: a remainder below 2^8 shifted up by 16 still fits), so the MCU
+/// build needs no 64-bit division routine.
+#[inline]
+fn rem(x: u64, p: u32) -> u64 {
+    let mut r = 0;
+    for i in (0..4).rev() {
+        r = ((r << 16) | ((x >> (16 * i)) as u32 & 0xFFFF)) % p;
+    }
+    u64::from(r)
 }

@@ -29,7 +29,7 @@ use crate::ppu::{self, Frame, Ppu, View, edges};
 use crate::rom::Rom;
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
-use crate::timer::Timer;
+use crate::timer::{INT_TIMER, Timer};
 use crate::{Buttons, Emulator, Events, RunResult};
 
 /// IF bits 5-7 don't exist (they read 1). Bit 5: a delayed LYC-write STAT
@@ -472,17 +472,41 @@ impl Ctx<'_, '_> {
         self.reschedule();
     }
 
-    /// Sets the Timer deadline after a timer state change. The caller
-    /// reschedules ([`Self::schedule_timer`]).
-    fn set_timer_deadline(&mut self) {
+    /// Sets the Timer deadline and reschedules: after a change to the
+    /// timer, or to bit 2 of IF or IE.
+    ///
+    /// The Timer event's work for the rest of the machine is to set IF
+    /// bit 2 at a reload. While the bit is set and IE bit 2 is clear, a
+    /// reload has nothing to request and the dispatch can't clear the
+    /// bit, so there is no deadline: the timer is caught up
+    /// ([`Timer::catch_up`]) at its next access, and here, when one of
+    /// the two bits changes (the reloads up to the clock requested the
+    /// interrupt that was pending). With IE bit 2 set the deadline stays
+    /// on, so the dispatch's acknowledge has nothing to do (ADR 0011,
+    /// 2026-11-24 amendment).
+    #[inline(never)]
+    fn schedule_timer(&mut self) {
+        let now = self.clock();
         let s = &mut *self.sys;
-        s.sched.set(EventKind::Timer, s.timer.deadline());
+        s.timer.catch_up(now);
+        let at = if s.iflags & !s.ie & INT_TIMER != 0 {
+            NEVER
+        } else {
+            s.timer.deadline()
+        };
+        s.sched.set(EventKind::Timer, at);
+        self.reschedule();
     }
 
-    /// [`Self::set_timer_deadline`], and reschedules.
-    fn schedule_timer(&mut self) {
-        self.set_timer_deadline();
-        self.reschedule();
+    /// An IE write (FFFF): bit 2 turns the Timer deadline on or off
+    /// while the timer interrupt is requested ([`Self::schedule_timer`]).
+    #[inline(never)]
+    fn write_ie(&mut self, value: u8) {
+        let old = self.sys.ie;
+        self.sys.ie = value;
+        if (old ^ value) & INT_TIMER != 0 {
+            self.schedule_timer();
+        }
     }
 
     /// Writes to SC, DIV, TIMA, TMA and TAC (by the low 7 address bits):
@@ -518,7 +542,7 @@ impl Ctx<'_, '_> {
         let done = self.sys.serial.div_reset(old, new);
         self.serial_done(done);
         self.apu_div_reset(old);
-        self.set_timer_deadline();
+        self.schedule_timer();
         self.schedule_serial();
     }
 
@@ -754,10 +778,18 @@ impl Ctx<'_, '_> {
     fn run_events(&mut self, now: u64) {
         while let Some(kind) = self.sys.sched.take_first_due(now) {
             match kind {
+                // A reload's interrupt request. With IE bit 2 clear, the
+                // reload itself and those that follow while IF bit 2
+                // stays set are computed at the next access
+                // (`schedule_timer`).
                 EventKind::Timer => {
                     let s = &mut *self.sys;
-                    s.iflags |= s.timer.reload(now);
-                    s.sched.set_inline(EventKind::Timer, s.timer.deadline());
+                    s.iflags |= INT_TIMER;
+                    if s.ie & INT_TIMER != 0 {
+                        debug_assert_eq!(s.timer.deadline(), now);
+                        s.timer.reload(now);
+                        s.sched.set_inline(EventKind::Timer, s.timer.deadline());
+                    }
                 }
                 EventKind::Serial => self.serial_event(now),
                 EventKind::Ppu => self.sync_ppu(),
@@ -1099,7 +1131,7 @@ impl Ctx<'_, '_> {
             0xFE00..=0xFEFF => self.write_oam(addr, value),
             0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
             0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
-            0xFFFF => self.sys.ie = value,
+            0xFFFF => self.write_ie(value),
             _ => {}
         }
     }
@@ -1147,7 +1179,7 @@ impl Ctx<'_, '_> {
         match addr {
             0xFF00..=0xFF7F => self.write_io(a & 0x7F, value),
             0xFF80..=0xFFFE => self.mem.hram[a - 0xFF80] = value,
-            _ => self.sys.ie = value,
+            _ => self.write_ie(value),
         }
     }
 
@@ -1198,22 +1230,35 @@ impl Ctx<'_, '_> {
             self.run_ppu_to_call(at);
         }
         let s = &mut *self.sys;
-        s.iflags = value & INT_MASK | s.iflags & !INT_MASK;
+        let old = s.iflags;
+        s.iflags = value & INT_MASK | old & !INT_MASK;
+        if (old ^ value) & INT_TIMER != 0 {
+            self.schedule_timer();
+        }
     }
 
-    /// [`Bus::push_acknowledge`] of a push onto IF itself (SP = FF10): the
+    /// [`Bus::push_acknowledge`] of a push onto IF or IE (and FF1F-FFEF,
+    /// which the dispatch's one test also sends here).
+    ///
+    /// Onto IF itself (SP = FF10): the
     /// vector comes from IF as it was before the write, the write and the
     /// IF read being the same access (SameBoy `cycle_write_if` returns the
     /// old IF; gambatte cgb04c `irq_precedence/if_and_ie_0_vector_4`:
     /// SP = FF11 writes 0x80 to IF and the timer vector still runs). Out
     /// of line: in the inlined dispatch, the old-IF select cost ~1.5% Ir
     /// in every bench ROM (codegen of `Cpu::run`, measured).
+    ///
+    /// Onto IE (SP = 0000): `ie` is the dispatch's earlier sample, so the
+    /// acknowledged bit can be the timer's with IE bit 2 now clear, which
+    /// turns the Timer deadline back on ([`Self::schedule_timer`]; an
+    /// acknowledge anywhere else finds it on).
     #[cold]
     #[inline(never)]
-    fn push_acknowledge_if(&mut self, value: u8, ie: u8) -> u8 {
+    fn push_acknowledge_reg(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         let old = self.sys.iflags;
-        self.write_mapped(0xFF0F, value);
-        let pending = ie & old & INT_MASK;
+        self.write_mapped(addr, value);
+        let iflags = if addr == 0xFF0F { old } else { self.sys.iflags };
+        let pending = ie & iflags & INT_MASK;
         let bit = pending.isolate_lowest_one();
         // The bit is cleared as in `push_acknowledge`.
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
@@ -1226,6 +1271,7 @@ impl Ctx<'_, '_> {
         }
         self.idle();
         self.sys.iflags &= !(bit & !PPU);
+        self.schedule_timer();
         pending
     }
 
@@ -1595,9 +1641,7 @@ impl Ctx<'_, '_> {
         // M-cycle grid.
         let short = i64::from(m == 4 && !pending);
         // T-cycles to clocks at the new speed.
-        self.sys
-            .timer
-            .speed_switch(now, (freeze * m / 4) as i64 - short);
+        self.sys.timer.speed_switch(now, freeze * m / 4, short != 0);
         // The DIV-APU bit changes (12 <-> 13) with the counter speed, and
         // a switch to double speed toggles the frame sequencer's delay
         // (`Timer::apu_ds_delay`).
@@ -1619,7 +1663,7 @@ impl Ctx<'_, '_> {
         // button change rounds down to (ADR 0012); `schedule_serial`
         // reschedules the countdown.
         self.sys.schedule_inputs(m);
-        self.set_timer_deadline();
+        self.schedule_timer();
         self.schedule_serial();
         if !pending {
             // To single speed, Gambatte's PPU gains a clock at the switch
@@ -2038,8 +2082,9 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
-        if addr == 0xFF0F {
-            return self.push_acknowledge_if(value, ie);
+        // IF and IE (and FF1F-FFEF: one test).
+        if addr | 0x00F0 == 0xFFFF {
+            return self.push_acknowledge_reg(addr, value, ie);
         }
         self.write_mapped(addr, value);
         let pending = ie & self.sys.iflags & INT_MASK;
@@ -2053,13 +2098,19 @@ impl Bus for Ctx<'_, '_> {
             self.sys.iflags &= !bit;
         }
         self.idle();
+        // The timer's bit: its deadline is on (IE bit 2 is set, the push
+        // wasn't onto IE; `schedule_timer`).
         self.sys.iflags &= !(bit & !PPU);
         pending
     }
 
     #[inline(always)]
     fn set_interrupt_flags(&mut self, value: u8) {
+        let old = self.sys.iflags;
         self.sys.iflags = value & INT_MASK;
+        if (old ^ value) & INT_TIMER != 0 {
+            self.schedule_timer();
+        }
     }
 
     fn event(&mut self, event: Events) {
@@ -3152,7 +3203,6 @@ mod tests {
     /// elsewhere sees IF as it is after the write.
     #[test]
     fn dispatch_push_onto_if_chooses_from_the_old_if() {
-        use crate::timer::INT_TIMER;
         for (addr, pending) in [(0xFF0F, INT_TIMER), (0xC000, 0)] {
             let emu = load(rom(0x8000, 0, 0, 0x80));
             let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
