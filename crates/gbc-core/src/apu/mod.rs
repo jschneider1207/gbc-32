@@ -199,6 +199,17 @@ impl Apu {
         ch1.env.nrx2 = 0xF3;
     }
 
+    /// Moves the APU `by` clocks later (the `clock-offset` test hook,
+    /// `Emulator::start_clock_at`; `by` is a multiple of 4): the clock it
+    /// is synced to, and the power-on clock's 2 MHz phase (`Fs::phase`).
+    /// The single-speed trigger grid is the clock mod 4
+    /// ([`Self::trigger_delay`]), which a multiple of 4 keeps.
+    #[cfg(feature = "clock-offset")]
+    pub(crate) fn shift_clock(&mut self, by: u64) {
+        self.out.synced += by;
+        self.fs.phase = (self.fs.phase + (by >> 1) as u8) & 3;
+    }
+
     #[inline]
     pub(crate) fn powered(&self) -> bool {
         self.fs.power

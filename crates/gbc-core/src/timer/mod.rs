@@ -179,6 +179,19 @@ impl Timer {
         t
     }
 
+    /// Moves the timer `by` clocks later: the same counter, TIMA and
+    /// reload window at clock `t + by` as it had at `t` (the
+    /// `clock-offset` test hook, `Emulator::start_clock_at`).
+    #[cfg(feature = "clock-offset")]
+    pub(crate) fn shift_clock(&mut self, by: u64) {
+        self.base_clock += by;
+        for t in [&mut self.overflow_at, &mut self.reloaded_at] {
+            if *t != NEVER {
+                *t += by;
+            }
+        }
+    }
+
     /// The system counter at clock `now`.
     #[inline]
     pub(crate) fn sc(&self, now: u64) -> u64 {

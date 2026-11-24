@@ -1542,6 +1542,82 @@ mod tests {
         );
     }
 
+    /// The `clock-offset` test hook (`Emulator::start_clock_at`): a run
+    /// from a moved clock is the run from 0, that much later, in
+    /// everything but the clock itself, also across 2^31, 2^32 and 2^33
+    /// (the whole corpus: `scripts/check-sync-invariance.sh`).
+    #[cfg(feature = "clock-offset")]
+    #[test]
+    fn a_run_from_a_moved_clock_matches_the_run_from_0() {
+        use std::vec::Vec;
+        type Chunk = (u64, u64, u16, Registers, Vec<u8>, Vec<(i16, i16)>, Vec<u16>);
+        let run = |offset: u64| -> Vec<Chunk> {
+            let emu = with_program(
+                &[
+                    0x3E, 0x05, 0xE0, 0x07, // LD A,05; LDH (07),A: TIMA at 262144 Hz
+                    0x3E, 0x28, 0xE0, 0x41, // LD A,28; LDH (41),A: STAT mode 0 and 2
+                    0x3E, 0x07, 0xE0, 0xFF, // LD A,07; LDH (FF),A: IE (IME stays off)
+                    0x3E, 0x01, 0xE0, 0x4D, // LD A,01; LDH (4D),A: arm the speed switch
+                    0x10, 0x00, // STOP: double speed
+                    0x3E, b'Z', 0xE0, 0x01, // LD A,'Z'; LDH (01),A
+                    0x3E, 0x83, 0xE0, 0x02, // LD A,83; LDH (02),A: fast serial
+                    0x76, 0x04, 0x40, // HALT; INC B; LD B,B
+                    0xF0, 0x05, 0xE0, 0x43, // LDH A,(05); LDH (43),A: SCX
+                    0xAF, 0xE0, 0x0F, // XOR A; LDH (0F),A
+                    0x18, 0xF4, // JR -12 (back to HALT)
+                ],
+                0x80,
+            );
+            if offset != 0 {
+                emu.start_clock_at(offset);
+            }
+            assert_eq!(emu.clock(), offset);
+            emu.set_stop_events(Events::LD_B_B | Events::SERIAL_TX);
+            assert!(emu.set_buttons_at(offset + 150_001, Buttons::A));
+            let mut fb = frame();
+            let mut audio = [StereoSample::default(); 5];
+            let mut log = Vec::new();
+            while emu.clock() - offset < 4 * u64::from(FRAME_CLOCKS) {
+                let r = emu.run_until(emu.clock() + 456, &mut fb, &mut audio);
+                log.push((
+                    emu.clock() - offset,
+                    r.clocks,
+                    r.events.bits(),
+                    emu.registers(),
+                    (0xFF00..=0xFF7F).map(|a| emu.peek(a)).collect(),
+                    (audio[..r.audio_samples].iter())
+                        .map(|s| (s.left, s.right))
+                        .collect(),
+                    if r.events.contains(Events::FRAME_READY) {
+                        fb.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                ));
+            }
+            log
+        };
+        let want = run(0);
+        // The program got somewhere: frames, samples, the serial byte.
+        assert!(want.iter().any(|c| !c.6.is_empty()) && want.iter().any(|c| !c.5.is_empty()));
+        assert!(want.iter().any(|c| c.2 & Events::SERIAL_TX.bits() != 0));
+        for offset in [
+            4,
+            (1 << 31) - 100_000,
+            (1 << 32) - 100_000,
+            (1 << 32) - 200_004,
+            (1 << 33) - 100_000,
+            1 << 40,
+            (1 << 52) - 4,
+        ] {
+            let got = run(offset);
+            assert_eq!(got.len(), want.len(), "offset {offset}");
+            for (g, w) in got.iter().zip(&want) {
+                assert!(g == w, "offset {offset}, clock {}: {g:?} != {w:?}", w.0);
+            }
+        }
+    }
+
     #[test]
     fn step_is_one_mcycle_when_idle() {
         let emu = emulator();

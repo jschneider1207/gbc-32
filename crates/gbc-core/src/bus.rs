@@ -853,8 +853,14 @@ impl Ctx<'_, '_> {
         // `mcycle` is 4 or 2: a shift by 2 or 1, not a division (no
         // divide-by-zero panic path on thumbv7em).
         debug_assert!(self.hot.mcycle == 2 || self.hot.mcycle == 4);
-        let m = self.hot.mcycle as u32;
-        (self.hot.budget.max(1) as u32 + m - 1) >> (m >> 1)
+        // Test builds with eager sync: the skips go one M-cycle at a time.
+        #[cfg(feature = "eager-sync")]
+        return 1;
+        #[cfg(not(feature = "eager-sync"))]
+        {
+            let m = self.hot.mcycle as u32;
+            (self.hot.budget.max(1) as u32 + m - 1) >> (m >> 1)
+        }
     }
 
     /// The countdown reached zero: run what is due at the current clock
@@ -1876,6 +1882,8 @@ impl Ctx<'_, '_> {
     pub(crate) fn idle_speed_switch(&mut self) {
         let m = self.hot.mcycle as u32;
         // The halt is 0x20000 clocks at most: the difference fits.
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         let left = self.sys.vdma.switch_end.wrapping_sub(self.clock()) as u32 / m;
         let n = self.mcycles_to_deadline().min(left).max(1);
         self.hot.budget -= (n * m) as i32;
@@ -1900,6 +1908,8 @@ impl Ctx<'_, '_> {
     pub(crate) fn vdma_stall(&mut self, limit: u64) {
         let mut n = u32::from(self.sys.vdma.stall);
         while n != 0 {
+            #[cfg(feature = "eager-sync")]
+            self.eager_sync();
             let k = self.mcycles_to_deadline().min(n);
             self.hot.budget -= (k * self.hot.mcycle as u32) as i32;
             n -= k;
@@ -2196,9 +2206,47 @@ impl Ctx<'_, '_> {
     }
 }
 
+/// The `eager-sync` feature (test only, never in a product build;
+/// docs/perf.md "Sync-placement invariance").
+#[cfg(feature = "eager-sync")]
+impl Ctx<'_, '_> {
+    /// Brings every lazily synced component up to the current clock: the
+    /// PPU (with a running OAM DMA's bytes first, as before every PPU
+    /// sync), the APU, the timer's reloads and the cartridge RTC. Called
+    /// at the start of every M-cycle, before its access, also inside the
+    /// skips (HALT, STOP mode, the speed-switch halt, a VRAM DMA stall),
+    /// which then go one M-cycle at a time ([`Self::mcycles_to_deadline`]).
+    ///
+    /// It sets no deadline and raises nothing the lazy build would not:
+    /// a component's state is meant to be a function of the clock and the
+    /// writes, not of when it was last synced (ADR 0002, 0011, 0014, 0021
+    /// section 3), so a build with this feature must behave identically
+    /// (`scripts/check-sync-invariance.sh`). The PPU deadline is left
+    /// alone on purpose (`run_ppu_to`, not `sync_ppu_to`): where the lazy
+    /// build reschedules is part of what is being compared.
+    #[inline(never)]
+    fn eager_sync(&mut self) {
+        let now = self.clock();
+        // Not backwards: an access earlier in this M-cycle may have run the
+        // PPU past `now` already (the dispatch's acknowledge runs it to
+        // the M-cycle's middle, then idles: `Bus::push_acknowledge`), and
+        // `Ppu::sync` takes its clock as the new sync point.
+        if self.sys.ppu.synced() <= now {
+            self.run_ppu_to_call(now);
+        }
+        self.apu_sync(now);
+        self.sys.timer.catch_up(now);
+        if self.sys.cart.has_rtc() {
+            self.sys.cart.rtc_sync(now);
+        }
+    }
+}
+
 impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn read(&mut self, addr: u16) -> u8 {
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         let v = read::<true>(self.mem, self.sys, &self.hot, addr);
         self.tick();
         v
@@ -2206,12 +2254,16 @@ impl Bus for Ctx<'_, '_> {
 
     #[inline(always)]
     fn write(&mut self, addr: u16, value: u8) {
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         self.write_mapped(addr, value);
         self.tick();
     }
 
     #[inline(always)]
     fn idle(&mut self) {
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         self.tick();
     }
 
@@ -2243,6 +2295,8 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn push_acknowledge(&mut self, addr: u16, value: u8, ie: u8) -> u8 {
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         // IF and IE (and FF1F-FFEF: one test).
         if addr | 0x00F0 == 0xFFFF {
             return self.push_acknowledge_reg(addr, value, ie);
@@ -2353,6 +2407,8 @@ impl Bus for Ctx<'_, '_> {
     /// countdown in one go and handle the deadline, on the same M-cycle
     /// as idling one M-cycle at a time would.
     fn idle_halted(&mut self) {
+        #[cfg(feature = "eager-sync")]
+        self.eager_sync();
         let n = self.mcycles_to_deadline();
         // Up to 2^31 clocks when the countdown is capped: in i64.
         let h = &mut self.hot;
@@ -2708,6 +2764,47 @@ impl Emulator<'_> {
     }
 }
 
+/// The `clock-offset` feature (test only, never in a product build;
+/// docs/perf.md "Clock-offset invariance").
+#[cfg(feature = "clock-offset")]
+impl Emulator<'_> {
+    /// Test hook, not product API: moves the power-on state from clock 0
+    /// to `clock`, so a run starts with [`Emulator::clock`] `== clock` and
+    /// behaves exactly as a run from 0 does, `clock` later. Everything
+    /// that holds a current position moves with it: the clock itself,
+    /// every deadline, the timer's counter origin, the PPU's frame origin
+    /// and sync clock, the APU's sync clock and power-on phase, and the
+    /// RTC's sync clock. State that records a past event that has not
+    /// happened yet (an OAM DMA, a speed switch, an HDMA trigger) stays at
+    /// its power-on value, as on a machine that reached `clock` without
+    /// one: that is what a wrapped compare must get right after 17
+    /// minutes (2^32 clocks).
+    ///
+    /// Call it right after [`Emulator::load`] or [`Emulator::reset`],
+    /// before any run call, `set_buttons_at` or `set_rtc_state`. `clock`
+    /// must be a multiple of 4 (the M-cycle; the APU's 1 MHz trigger grid
+    /// is the clock mod 4). Absolute clocks passed in afterwards
+    /// (`run_until` targets, `set_buttons_at`) are on the moved clock.
+    ///
+    /// # Panics
+    /// If the clock is not 0, or `clock` is not a multiple of 4.
+    pub fn start_clock_at(&mut self, clock: u64) {
+        let sys = &mut self.hw.sys;
+        assert!(
+            sys.hot.clock() == 0 && sys.hot.budget == 0,
+            "not at power on"
+        );
+        assert!(clock.is_multiple_of(4), "not a multiple of 4");
+        sys.hot.deadline = clock;
+        sys.sched.shift_clock(clock);
+        sys.timer.shift_clock(clock);
+        sys.ppu.shift_clock(clock);
+        self.mem.apu.shift_clock(clock);
+        let rtc = sys.cart.rtc_at(0);
+        sys.cart.set_rtc(rtc, clock);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -2859,6 +2956,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "eager-sync", ignore = "the skip is one M-cycle there")]
     fn idle_halted_consumes_the_whole_countdown() {
         let emu = load(rom(0x8000, 0, 0, 0x80));
         write(emu, 0xFF40, 0x11); // LCD off: no event scheduled
@@ -4675,6 +4773,7 @@ mod dma_tests {
     /// The halted skip passes the (cleared) `Dma` deadline: a paused
     /// transfer is no deadline (ADR 0011).
     #[test]
+    #[cfg_attr(feature = "eager-sync", ignore = "the skip is one M-cycle there")]
     fn halted_skip_passes_the_dma_deadline() {
         let emu = setup();
         with_ctx(emu, |ctx| {

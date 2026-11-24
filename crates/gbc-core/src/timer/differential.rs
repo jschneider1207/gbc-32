@@ -561,16 +561,25 @@ mod tests {
             c.stop_in_window,
             c.switch,
             c.serial_done,
-            c.lazy_a,
-            c.lazy_b,
-            c.lazy_multi,
             c.ack,
             c.ack_ie_off,
-            c.ie_on_lazy,
-            c.if_clear_lazy,
             c.if_set,
         ];
         assert!(floors.iter().all(|&n| n >= 20), "{cov:?}");
+        // The lazy catch-up's cases. With the `eager-sync` test feature
+        // the timer is caught up every M-cycle, so none is ever reached
+        // there (the comparison above still ran).
+        let lazy = [
+            c.lazy_a,
+            c.lazy_b,
+            c.lazy_multi,
+            c.ie_on_lazy,
+            c.if_clear_lazy,
+        ];
+        assert!(
+            cfg!(feature = "eager-sync") || lazy.iter().all(|&n| n >= 20),
+            "{cov:?}"
+        );
     }
 
     /// Every field `Timer::catch_up` may touch, and the rest.

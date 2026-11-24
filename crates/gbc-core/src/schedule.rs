@@ -85,6 +85,17 @@ impl Schedule {
         }
     }
 
+    /// Moves every set deadline `by` clocks later (the `clock-offset` test
+    /// hook, `Emulator::start_clock_at`).
+    #[cfg(feature = "clock-offset")]
+    pub(crate) fn shift_clock(&mut self, by: u64) {
+        for t in self.at.iter_mut().chain([&mut self.next, &mut self.slow]) {
+            if *t != NEVER {
+                *t += by;
+            }
+        }
+    }
+
     /// The earliest deadline, or [`NEVER`].
     #[inline]
     pub(crate) const fn next(&self) -> u64 {

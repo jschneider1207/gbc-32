@@ -10,5 +10,16 @@ publish.workspace = true
 # No dependencies: adding one needs human approval (AGENTS.md).
 [dependencies]
 
+# Test-only hooks. No product build (desktop, firmware, romtest, the gate's
+# size and Ir checks) enables them; `scripts/check-sync-invariance.sh` does,
+# through `tools/bench`'s features of the same names (docs/perf.md
+# "Invariance checks").
+[features]
+# Every lazily synced component is brought up to the clock at every
+# M-cycle, before the access (`Ctx::eager_sync`).
+eager-sync = []
+# `Emulator::start_clock_at`: power on with the clock at an arbitrary value.
+clock-offset = []
+
 [lints]
 workspace = true

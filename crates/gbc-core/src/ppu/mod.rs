@@ -683,6 +683,26 @@ impl Ppu {
         self.seek(false);
     }
 
+    /// The clock of the last [`Self::sync`] (the `eager-sync` test hook).
+    #[cfg(feature = "eager-sync")]
+    pub(crate) fn synced(&self) -> u64 {
+        self.synced
+    }
+
+    /// Moves the power-on state `by` clocks later (the `clock-offset` test
+    /// hook, `Emulator::start_clock_at`): the frame origin and the sync
+    /// clock. Right after [`Self::reset`] nothing else holds a clock: no
+    /// line is latched, no OAM scan is in progress, and the OAM DMA
+    /// record describes no transfer (its clocks stay at their power-on
+    /// values, as they would for a machine that reached this clock
+    /// without ever starting one).
+    #[cfg(feature = "clock-offset")]
+    pub(crate) fn shift_clock(&mut self, by: u64) {
+        debug_assert!(self.line.start == NEVER && self.scan.line == NEVER);
+        self.frame_start = self.frame_start.wrapping_add(by);
+        self.synced += by;
+    }
+
     #[inline]
     pub(crate) const fn lcd_enabled(&self) -> bool {
         self.lcdc & 0x80 != 0
