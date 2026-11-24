@@ -228,9 +228,6 @@ impl Wave {
         };
         for (o, &dt) in spans {
             let dt = u32::from(dt);
-            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
-            // would double the function's size (docs/perf.md, APU cost).
-            let dt = core::hint::black_box(dt);
             let cd = u32::from(self.countdown);
             // Up to the first step: the buffer (after a trigger, the old one).
             let now = u32::from(nibble(self.buffer, self.index) >> shift);

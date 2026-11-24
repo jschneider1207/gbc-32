@@ -412,9 +412,6 @@ impl Noise {
             let dt = u32::from(dt);
             // At most one window: at most 16 steps (p >= 8).
             debug_assert!(u64::from(dt) <= super::SAMPLE_PERIOD);
-            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
-            // would double the function's size (docs/perf.md, APU cost).
-            let dt = core::hint::black_box(dt);
             // Clocks with bit 0 = 1: up to the first step at the old bit,
             // then `p` per step after which it is 1, minus the unelapsed
             // rest of the last step's period.

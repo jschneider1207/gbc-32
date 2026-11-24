@@ -163,9 +163,6 @@ impl Square {
         let whole = duty.count_ones();
         for (o, &dt) in spans {
             let dt = u32::from(dt);
-            // Opaque: stops LLVM's Cortex-M runtime unrolling (x4), which
-            // would double the function's size (docs/perf.md, APU cost).
-            let dt = core::hint::black_box(dt);
             let cd = u32::from(self.countdown);
             let bit = u32::from(self.high);
             let high = if dt < cd {
