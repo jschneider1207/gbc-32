@@ -222,8 +222,16 @@ pub(crate) const LYC_DEFER_UNTIL_DS: u32 = 3;
 
 // --- VBlank (lines 144-153) ---
 
-/// Lines 144-152: the comparison is off from the line start to
-/// [`CMP_ON`].
+/// Lines 144-152: the walk's comparison is off from the line start to
+/// [`CMP_WALK`] (`Pt::V0`). The STAT reads and the write views keep the
+/// previous line's comparison to [`CMP_OFF`], as on lines 1-143: gambatte
+/// (behaviour only, `video.cpp` `getStat`, `getLycCmpLy`) sets the LY=LYC
+/// flag while `timeToNextLy > 2` after its 2-cycle lead on every line but
+/// 153, our `t <= 2` (its mode-2 read at line cycle 453 is our
+/// [`CMP_ON`]). CGB04C `lcd_offset/offset{1,2}_lyc8fint_m1stat_1` (LYC =
+/// 143, STAT read at line 144 t = 2 and 1: `C4`, mode 0 with the flag),
+/// `offset3_lyc8fint_m1stat_1` (t = 4: `C0`). The default CPU phase
+/// (reads at `t = 3 mod 4`) can't tell this from an off-start at 0.
 pub(crate) const VCMP_OFF: u32 = 0;
 
 /// Line 144: the mode-2 interrupt quirk, where the mode-2 interrupt of

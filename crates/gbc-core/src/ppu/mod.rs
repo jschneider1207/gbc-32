@@ -774,18 +774,19 @@ impl Ppu {
         ly as u8
     }
 
-    /// The comparison value (`ly_for_comparison`) at `a`: `None` while the
-    /// comparison is off. Also the last value before it, for double speed,
-    /// where the STAT bit holds through it.
+    /// The comparison value (`ly_for_comparison`) at `a` as the STAT reads
+    /// and the STAT/LYC write views see it: `None` while the comparison is
+    /// off. Also the last value before it, for double speed, where the
+    /// STAT bit holds through it. Lines 144-152 keep the previous line's
+    /// value to [`edges::CMP_OFF`] as lines 1-143 do; the walk drops it at
+    /// [`edges::VCMP_OFF`] there.
     fn cmp(a: At, double: bool) -> (Option<u8>, u8) {
         let (l, t) = (a.line, a.t);
         match l {
             0 => (Some(0), 0),
-            1..=143 if t < edges::CMP_OFF => (Some((l - 1) as u8), 0),
-            1..=143 if t < edges::CMP_ON => (None, (l - 1) as u8),
-            1..=143 => (Some(l as u8), 0),
-            144..=152 if t < edges::CMP_ON => (None, (l - 1) as u8),
-            144..=152 => (Some(l as u8), 0),
+            1..=152 if t < edges::CMP_OFF => (Some((l - 1) as u8), 0),
+            1..=152 if t < edges::CMP_ON => (None, (l - 1) as u8),
+            1..=152 => (Some(l as u8), 0),
             _ if t < edges::L153_CMP => (None, 152),
             _ if t < edges::L153_OFF => (Some(153), 0),
             _ if t < edges::L153_ZERO && !double => (None, 153),
@@ -3370,6 +3371,28 @@ mod tests {
         r.ppu.write_lyc(l6, 6, &mut r.iflags, false);
         assert_eq!(r.iflags, 0);
         assert_eq!(r.irqs(l6 + 10), [(l6 + 5, INT_STAT)]);
+    }
+
+    /// Lines 144-152: the STAT bit keeps the previous line's comparison to
+    /// t = 2, as lines 1-143 (`edges::VCMP_OFF`; gambatte `getLycCmpLy`,
+    /// CGB04C `lcd_offset/offset{1,2}_lyc8fint_m1stat_1` read `C4` at line
+    /// 144 t = 1-2).
+    #[test]
+    fn vblank_lines_keep_the_old_coincidence_bit_to_dot_2() {
+        let on = 1000;
+        for lyc in [143u8, 147] {
+            let mut r = Rig::on_at(on, 0, lyc);
+            let next = clock(on, 1, (u32::from(lyc) + 1) * LINE);
+            r.sync(next + 8);
+            let stat = |t: u64| r.stat(next + t) & 7;
+            // Line 144 is mode 0 to t = 4; the others are mode 1.
+            let m = u8::from(lyc != 143);
+            assert_eq!(
+                [stat(0), stat(1), stat(2), stat(3), stat(4)],
+                [4 | m, 4 | m, 4 | m, m, m],
+                "LYC {lyc}"
+            );
+        }
     }
 
     /// Design step 1 (docs/design/lcd-offset-phase.md 3.2): single speed,
