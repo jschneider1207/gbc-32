@@ -1517,7 +1517,14 @@ impl Ctx<'_, '_> {
             if t >= p {
                 p + scale(t - p)
             } else {
-                p - scale(p - t)
+                // Back to single speed within 640 clocks of reset, a
+                // transfer started at double speed can have a rescaled
+                // start before clock 0, which a `u64` can't hold. It
+                // starts at the earliest clock the PPU's view can describe
+                // (`PPU_LEAD`, `OamDma::set_ppu_window`/`ppu_at`) instead,
+                // so what is left runs that many clocks late rather than
+                // (wrapped) never being copied.
+                p.saturating_sub(scale(p - t)).max(dma::PPU_LEAD)
             }
         };
         if d.block_from > p {

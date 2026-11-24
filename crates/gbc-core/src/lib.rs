@@ -1992,6 +1992,43 @@ mod tests {
     }
 
     #[test]
+    fn oam_dma_across_a_switch_to_single_speed_right_after_reset() {
+        // To double speed with an interrupt pending (no halt), a transfer
+        // from C000, then back to single speed (pending again) late in it,
+        // all within 640 clocks of reset: the rest of the transfer, doubled
+        // in length, would have started before clock 0. It must still be
+        // copied, not dropped (and not overflow).
+        let emu = with_program(&[], 0x80);
+        for i in 0..0xA0u16 {
+            write_reg(emu, 0xC000 + i, 0x40 ^ i as u8);
+        }
+        let mut fb = frame();
+        let Emulator { mem, hw } = &mut *emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        assert!(cpu::Bus::speed_switch(&mut ctx, true, true));
+        cpu::Bus::idle(&mut ctx);
+        assert_eq!(ctx.hot.mcycle, 2);
+        cpu::Bus::write(&mut ctx, 0xFF46, 0xC0);
+        let start = ctx.sys.ppu.dma.start;
+        while ctx.clock() <= 2 * start + 8 {
+            cpu::Bus::idle(&mut ctx);
+        }
+        assert!(ctx.clock() < ctx.sys.ppu.dma.end, "still running");
+        assert!(!cpu::Bus::speed_switch(&mut ctx, true, true));
+        assert_eq!(ctx.hot.mcycle, 4);
+        // The PPU's view of it is defined too (past the wake-up M-cycle).
+        let (_, seen) = ctx.sys.ppu.dma.ppu_at(ctx.clock() + 8);
+        assert!(seen <= dma::LEN);
+        for _ in 0..200 {
+            cpu::Bus::idle(&mut ctx);
+        }
+        assert!(ctx.clock() >= ctx.sys.ppu.dma.end, "ended");
+        for (i, &b) in ctx.mem.oam.iter().enumerate() {
+            assert_eq!(b, 0x40 ^ i as u8, "OAM byte {i}");
+        }
+    }
+
+    #[test]
     fn reset_rewinds_clock_and_keeps_cart_ram() {
         let rom = vec![0u8; MIN_ROM_SIZE].leak();
         rom[0x147] = 0x08; // ROM+RAM
