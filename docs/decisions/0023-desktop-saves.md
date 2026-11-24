@@ -99,3 +99,30 @@ a slower drive or a scan would be, so writes moved off the main thread.
   queued.
 - Not covered, as before: a crash or kill of the process mid-play loses
   only what the last completed write did not have.
+
+## Amendment (2026-11-24): HuC3 clock footer
+
+"Not covered: ... HuC3 state" no longer holds for HuC3 (ADR 0032). A HuC3
+cartridge's `.sav` is the cartridge RAM followed by 17 bytes, SameBoy's
+packed `GB_huc3_rtc_time_t` (`Core/gb.h`, written by its
+`GB_save_battery_to_buffer`; its `Core/save_state.c` notes BGB uses the
+same layout): a u64 LE unix time, then u16 LE minute of the day, day,
+alarm minute and alarm day, then one alarm-enabled byte. So HuC3 saves
+are interchangeable with SameBoy and BGB, like the MBC3 ones.
+
+- The timestamp is the time of the clock's last minute tick (the save
+  time minus the seconds into the current minute), which is what
+  SameBoy's `last_rtc_second` means. A synced load advances the stored
+  clock by `now - timestamp`, so the seconds into the minute survive;
+  the part second is lost, as for MBC3. With the sync off (tests,
+  headless) the clock restarts at the top of its minute.
+- Load rules mirror the MBC3 ones: a file of exactly RAM + 17 bytes
+  restores the clock; a plain RAM dump loads quietly without one; any
+  other longer file keeps the RAM and warns. The footer's fields go to
+  the core unmasked: `Huc3RtcState::advance_seconds` and
+  `set_huc3_rtc_state` cut them to their widths.
+- In the code the two clocks travel as one `save::Clock` enum (`Mbc3` or
+  `Huc3`) with `of(emu)`, `of_ejected`, `sync` and `restore`;
+  `save::sync_rtc` became `Clock::sync`.
+- Not covered: the input recording (ADR 0030) has no field for the HuC3
+  clock, so a replay of a HuC3 game starts its clock at zero.

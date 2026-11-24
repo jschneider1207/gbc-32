@@ -1,5 +1,6 @@
 //! Save files: cartridge RAM plus, for MBC3+RTC carts, the 48-byte
-//! BGB/VBA-M/SameBoy RTC footer (ADR 0023).
+//! BGB/VBA-M/SameBoy RTC footer, or for HuC3 carts the 17-byte
+//! SameBoy/BGB HuC3 clock footer (ADR 0023).
 //!
 //! Wall-clock time is read only here and in `main`, never in the core.
 
@@ -7,12 +8,67 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use gbc_core::{CartInfo, RtcState, RtcTime};
+use gbc_core::{CLOCK_HZ, CartInfo, EjectedCart, Emulator, Huc3RtcState, RtcState, RtcTime};
 
 /// Size of the de-facto RTC footer: 10 x u32 LE and a u64 LE unix time.
 pub const FOOTER_LEN: usize = 48;
 /// The older VBA footer, with a u32 timestamp, accepted on load.
 const FOOTER_LEN_32: usize = 44;
+/// Size of the HuC3 clock footer, SameBoy's packed `GB_huc3_rtc_time_t`
+/// (`Core/gb.h`; its `Core/save_state.c` notes that BGB uses the same
+/// layout): a u64 LE unix time, then u16 LE minute of the day, day, alarm
+/// minute and alarm day, then the alarm-enabled byte.
+pub const HUC3_FOOTER_LEN: usize = 17;
+
+/// Which clock a cartridge has, and so which footer its save file ends in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockKind {
+    Mbc3,
+    Huc3,
+}
+
+/// A cartridge clock's state: the core keeps the two kinds apart (ADR
+/// 0032); the save code handles them as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    Mbc3(RtcState),
+    Huc3(Huc3RtcState),
+}
+
+impl Clock {
+    /// The inserted cartridge's clock right now, if it has one.
+    pub fn of(emu: &Emulator<'_>) -> Option<Self> {
+        emu.rtc_state()
+            .map(Self::Mbc3)
+            .or_else(|| emu.huc3_rtc_state().map(Self::Huc3))
+    }
+
+    /// The clock an ejected cartridge came out with.
+    pub fn of_ejected(cart: &EjectedCart<'_>) -> Option<Self> {
+        cart.rtc.map(Self::Mbc3).or(cart.huc3_rtc.map(Self::Huc3))
+    }
+
+    /// Hands the state to the emulator (after `Emulator::load`).
+    pub fn restore(self, emu: &mut Emulator<'_>) {
+        match self {
+            Self::Mbc3(s) => emu.set_rtc_state(s),
+            Self::Huc3(s) => emu.set_huc3_rtc_state(s),
+        }
+    }
+
+    /// The state to restore after loading: the stored clock advanced by
+    /// the wall-clock time since it was saved. `now` is `None` to skip the
+    /// sync (tests, and anything that must not depend on the host clock);
+    /// a stored time in the future counts as no time passed.
+    pub fn sync(self, saved_unix: u64, now: Option<u64>) -> Self {
+        let Some(now) = now else { return self };
+        let elapsed = now.saturating_sub(saved_unix);
+        match self {
+            Self::Mbc3(s) => Self::Mbc3(s.advance_seconds(elapsed)),
+            Self::Huc3(s) => Self::Huc3(s.advance_seconds(elapsed)),
+        }
+    }
+}
 
 /// The save path for a ROM: `<stem>.sav` in the ROM's directory, or
 /// `<file name>.sav` (`game.gbc.sav`) when a sibling ROM with the same stem
@@ -58,18 +114,51 @@ fn get_time(b: &[u8]) -> RtcTime {
     }
 }
 
-/// Encodes a save file: the RAM, then (RTC carts) the footer. The RTC's
-/// sub-second count is not stored (the format has no field for it; loading
-/// restarts the second, an error under one second per save).
-pub fn encode(ram: &[u8], rtc: Option<(&RtcState, u64)>) -> Vec<u8> {
+/// Encodes a save file: the RAM, then (clock carts) the footer, stamped
+/// `unix`.
+///
+/// MBC3: the RTC's sub-second count is not stored (the format has no
+/// field for it; loading restarts the second, an error under one second
+/// per save).
+///
+/// HuC3: the timestamp is the time of the clock's last minute tick
+/// (`unix` minus the seconds into the current minute), which is what
+/// SameBoy's `last_rtc_second` holds, so the seconds into the minute
+/// survive a save and a synced load; the part second is lost.
+pub fn encode(ram: &[u8], clock: Option<(&Clock, u64)>) -> Vec<u8> {
     let mut out = Vec::with_capacity(ram.len() + FOOTER_LEN);
     out.extend_from_slice(ram);
-    if let Some((rtc, unix)) = rtc {
-        put_time(&mut out, &rtc.live);
-        put_time(&mut out, &rtc.latched);
-        out.extend_from_slice(&unix.to_le_bytes());
+    match clock {
+        Some((Clock::Mbc3(rtc), unix)) => {
+            put_time(&mut out, &rtc.live);
+            put_time(&mut out, &rtc.latched);
+            out.extend_from_slice(&unix.to_le_bytes());
+        }
+        Some((Clock::Huc3(c), unix)) => {
+            let into_minute = u64::from(c.subminute_clocks / CLOCK_HZ);
+            out.extend_from_slice(&unix.saturating_sub(into_minute).to_le_bytes());
+            for v in [c.minutes, c.days, c.alarm_minutes, c.alarm_days] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.push(u8::from(c.alarm_enabled));
+        }
+        None => {}
     }
     out
+}
+
+/// The HuC3 footer's clock and its timestamp. The fields go to the core
+/// as stored: `Emulator::set_huc3_rtc_state` and `advance_seconds` mask
+/// them (ADR 0032).
+fn get_huc3(b: &[u8]) -> (Huc3RtcState, u64) {
+    let w = |i: usize| u16::from_le_bytes([b[8 + 2 * i], b[9 + 2 * i]]);
+    let mut c = Huc3RtcState::default();
+    c.minutes = w(0);
+    c.days = w(1);
+    c.alarm_minutes = w(2);
+    c.alarm_days = w(3);
+    c.alarm_enabled = b[16] & 1 != 0;
+    (c, u64::from_le_bytes(b[..8].try_into().unwrap()))
 }
 
 /// What a save file held.
@@ -78,17 +167,29 @@ pub struct Decoded {
     /// Exactly `ram_size` bytes: the file's RAM, zero-padded if short.
     pub ram: Vec<u8>,
     /// The stored clock and the unix time it was stored at.
-    pub rtc: Option<(RtcState, u64)>,
+    pub rtc: Option<(Clock, u64)>,
     pub warnings: Vec<String>,
 }
 
 /// Decodes a save file for a cartridge with `ram_size` bytes of RAM.
 /// Tolerant: a short file fills what it has, a long one is cut (both warn).
-pub fn decode(bytes: &[u8], ram_size: usize, has_rtc: bool) -> Decoded {
+pub fn decode(bytes: &[u8], ram_size: usize, clock: Option<ClockKind>) -> Decoded {
     let mut warnings = Vec::new();
     let mut rtc = None;
     let ram_end = bytes.len().min(ram_size);
-    if has_rtc {
+    let has_rtc = clock.is_some();
+    if clock == Some(ClockKind::Huc3) {
+        if bytes.len() == ram_size + HUC3_FOOTER_LEN {
+            let (state, unix) = get_huc3(&bytes[ram_size..]);
+            rtc = Some((Clock::Huc3(state), unix));
+        } else if bytes.len() > ram_size {
+            warnings.push(format!(
+                "save file is {} bytes, expected {} (RAM) + {HUC3_FOOTER_LEN} (HuC3 clock): clock not restored",
+                bytes.len(),
+                ram_size
+            ));
+        }
+    } else if has_rtc {
         let footer = [FOOTER_LEN, FOOTER_LEN_32]
             .into_iter()
             .find(|f| bytes.len() == ram_size + f);
@@ -104,7 +205,7 @@ pub fn decode(bytes: &[u8], ram_size: usize, has_rtc: bool) -> Decoded {
                 latched: get_time(&b[20..40]),
                 subsecond_clocks: 0,
             };
-            rtc = Some((state, unix));
+            rtc = Some((Clock::Mbc3(state), unix));
         } else if bytes.len() > ram_size {
             warnings.push(format!(
                 "save file is {} bytes, expected {} (RAM) + {FOOTER_LEN} (RTC): clock not restored",
@@ -131,17 +232,6 @@ pub fn decode(bytes: &[u8], ram_size: usize, has_rtc: bool) -> Decoded {
     Decoded { ram, rtc, warnings }
 }
 
-/// Clock state to hand to `Emulator::set_rtc_state` after loading: the
-/// stored clock advanced by the wall-clock time since it was saved. `now`
-/// is `None` to skip the sync (tests, and anything that must not depend on
-/// the host clock); a stored time in the future counts as no time passed.
-pub fn sync_rtc(saved: RtcState, saved_unix: u64, now: Option<u64>) -> RtcState {
-    match now {
-        Some(now) => saved.advance_seconds(now.saturating_sub(saved_unix)),
-        None => saved,
-    }
-}
-
 /// Writes `data` to `path` atomically: a temp file in the same directory,
 /// synced, then renamed over the target.
 pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -164,7 +254,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 pub struct SaveFile {
     pub path: PathBuf,
     pub ram_size: usize,
-    pub has_rtc: bool,
+    pub clock: Option<ClockKind>,
 }
 
 impl SaveFile {
@@ -173,7 +263,13 @@ impl SaveFile {
         info.has_save().then(|| Self {
             path: save_path(rom),
             ram_size: info.ram_size,
-            has_rtc: info.rtc,
+            clock: if info.rtc {
+                Some(ClockKind::Mbc3)
+            } else if info.huc3_rtc {
+                Some(ClockKind::Huc3)
+            } else {
+                None
+            },
         })
     }
 
@@ -189,12 +285,12 @@ impl SaveFile {
 
     /// What the bytes of this cartridge's save file hold.
     pub fn decode(&self, bytes: &[u8]) -> Decoded {
-        decode(bytes, self.ram_size, self.has_rtc)
+        decode(bytes, self.ram_size, self.clock)
     }
 
     /// The file's bytes for this RAM and clock, stamped `now_unix`.
-    pub fn encode(&self, ram: &[u8], rtc: Option<RtcState>, now_unix: u64) -> Vec<u8> {
-        encode(ram, rtc.as_ref().map(|r| (r, now_unix)))
+    pub fn encode(&self, ram: &[u8], clock: Option<Clock>, now_unix: u64) -> Vec<u8> {
+        encode(ram, clock.as_ref().map(|c| (c, now_unix)))
     }
 }
 
@@ -257,6 +353,9 @@ impl SettleTracker {
 mod tests {
     use super::*;
 
+    const MBC3: Option<ClockKind> = Some(ClockKind::Mbc3);
+    const HUC3: Option<ClockKind> = Some(ClockKind::Huc3);
+
     fn sample_rtc() -> RtcState {
         RtcState {
             live: RtcTime {
@@ -282,17 +381,20 @@ mod tests {
     #[test]
     fn round_trip_with_rtc() {
         let ram: Vec<u8> = (0..32).collect();
-        let bytes = encode(&ram, Some((&sample_rtc(), 1_700_000_000)));
+        let bytes = encode(&ram, Some((&Clock::Mbc3(sample_rtc()), 1_700_000_000)));
         assert_eq!(bytes.len(), 32 + FOOTER_LEN);
-        let d = decode(&bytes, 32, true);
+        let d = decode(&bytes, 32, MBC3);
         assert_eq!(d.ram, ram);
-        assert_eq!(d.rtc, Some((sample_rtc(), 1_700_000_000)));
+        assert_eq!(d.rtc, Some((Clock::Mbc3(sample_rtc()), 1_700_000_000)));
         assert!(d.warnings.is_empty());
     }
 
     #[test]
     fn footer_layout_matches_bgb() {
-        let bytes = encode(&[], Some((&sample_rtc(), 0x0102_0304_0506_0708)));
+        let bytes = encode(
+            &[],
+            Some((&Clock::Mbc3(sample_rtc()), 0x0102_0304_0506_0708)),
+        );
         assert_eq!(&bytes[..4], &59u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &0xFFu32.to_le_bytes()); // DL
         assert_eq!(&bytes[16..20], &0x81u32.to_le_bytes()); // DH: carry + day bit 8
@@ -303,38 +405,41 @@ mod tests {
     #[test]
     fn round_trip_without_rtc() {
         let ram = vec![7u8; 8];
-        let d = decode(&encode(&ram, None), 8, false);
+        let d = decode(&encode(&ram, None), 8, None);
         assert_eq!((d.ram, d.rtc, d.warnings.len()), (ram, None, 0));
     }
 
     #[test]
     fn rtc_only_cart() {
-        let bytes = encode(&[], Some((&sample_rtc(), 5)));
-        assert_eq!(decode(&bytes, 0, true).rtc, Some((sample_rtc(), 5)));
+        let bytes = encode(&[], Some((&Clock::Mbc3(sample_rtc()), 5)));
+        assert_eq!(
+            decode(&bytes, 0, MBC3).rtc,
+            Some((Clock::Mbc3(sample_rtc()), 5))
+        );
     }
 
     #[test]
     fn short_file_is_padded_with_a_warning() {
-        let d = decode(&[1, 2, 3], 8, false);
+        let d = decode(&[1, 2, 3], 8, None);
         assert_eq!(d.ram, [1, 2, 3, 0, 0, 0, 0, 0]);
         assert_eq!(d.warnings.len(), 1);
-        let d = decode(&[1, 2, 3], 8, true);
+        let d = decode(&[1, 2, 3], 8, MBC3);
         assert_eq!((d.ram.len(), d.rtc, d.warnings.len()), (8, None, 1));
     }
 
     #[test]
     fn long_file_is_cut_with_a_warning() {
-        let d = decode(&[9; 12], 8, false);
+        let d = decode(&[9; 12], 8, None);
         assert_eq!(d.ram, [9; 8]);
         assert_eq!(d.warnings.len(), 1);
         // An RTC cart with a wrong-sized tail: RAM kept, clock not restored.
-        let d = decode(&[9; 12], 8, true);
+        let d = decode(&[9; 12], 8, MBC3);
         assert_eq!((d.ram, d.rtc, d.warnings.len()), (vec![9; 8], None, 1));
     }
 
     #[test]
     fn rtc_cart_file_without_footer_loads_ram_quietly() {
-        let d = decode(&[4; 8], 8, true);
+        let d = decode(&[4; 8], 8, MBC3);
         assert_eq!(d.ram, [4; 8]);
         assert_eq!(d.rtc, None);
         assert!(
@@ -346,10 +451,10 @@ mod tests {
 
     #[test]
     fn vba_44_byte_footer_loads() {
-        let mut bytes = encode(&[1; 4], Some((&sample_rtc(), 77)));
+        let mut bytes = encode(&[1; 4], Some((&Clock::Mbc3(sample_rtc()), 77)));
         bytes.truncate(4 + 44); // drop the high half of the timestamp
-        let d = decode(&bytes, 4, true);
-        assert_eq!(d.rtc, Some((sample_rtc(), 77)));
+        let d = decode(&bytes, 4, MBC3);
+        assert_eq!(d.rtc, Some((Clock::Mbc3(sample_rtc()), 77)));
     }
 
     #[test]
@@ -361,13 +466,145 @@ mod tests {
             },
             ..RtcState::default()
         };
-        let t = sync_rtc(saved, 1000, Some(1000 + 3600 + 15)).live;
+        let sync = |s: RtcState, at, now| match Clock::Mbc3(s).sync(at, now) {
+            Clock::Mbc3(s) => s,
+            other => panic!("kind changed: {other:?}"),
+        };
+        let t = sync(saved, 1000, Some(1000 + 3600 + 15)).live;
         assert_eq!((t.hours, t.minutes, t.seconds), (1, 1, 5));
-        assert_eq!(sync_rtc(saved, 1000, None), saved, "no sync without now");
-        assert_eq!(sync_rtc(saved, 2000, Some(1000)), saved, "clock went back");
+        assert_eq!(sync(saved, 1000, None), saved, "no sync without now");
+        assert_eq!(sync(saved, 2000, Some(1000)), saved, "clock went back");
         let mut halted = saved;
         halted.live.halted = true;
-        assert_eq!(sync_rtc(halted, 0, Some(999)), halted, "halted stays put");
+        assert_eq!(sync(halted, 0, Some(999)), halted, "halted stays put");
+    }
+
+    fn sample_huc3() -> Huc3RtcState {
+        let mut c = Huc3RtcState::default();
+        c.minutes = 754;
+        c.days = 0x1234;
+        c.alarm_minutes = 0x321;
+        c.alarm_days = 0x2001;
+        c.alarm_enabled = true;
+        c
+    }
+
+    fn huc3(c: Clock) -> Huc3RtcState {
+        match c {
+            Clock::Huc3(s) => s,
+            other => panic!("not a HuC3 clock: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clock_of_finds_either_kind_in_the_emulator() {
+        // The autosave during play reads the clock this way.
+        for (cart_type, want) in [(0xFEu8, HUC3), (0x10, MBC3), (0x03, None)] {
+            let mut rom = vec![0u8; 0x8000];
+            rom[0x147] = cart_type;
+            let mut mem = Box::new(gbc_core::Memory::new());
+            let mut emu = Emulator::new(&mut mem);
+            emu.load(&rom, &mut [], gbc_core::Config::default())
+                .unwrap();
+            let kind = Clock::of(&emu).map(|c| match c {
+                Clock::Mbc3(_) => ClockKind::Mbc3,
+                Clock::Huc3(_) => ClockKind::Huc3,
+            });
+            assert_eq!(kind, want, "type {cart_type:02X}");
+            let ejected = emu.eject().unwrap();
+            assert_eq!(Clock::of_ejected(&ejected).is_some(), want.is_some());
+        }
+    }
+
+    #[test]
+    fn round_trip_with_huc3_clock() {
+        let ram: Vec<u8> = (0..32).collect();
+        let bytes = encode(&ram, Some((&Clock::Huc3(sample_huc3()), 1_700_000_000)));
+        assert_eq!(bytes.len(), 32 + HUC3_FOOTER_LEN);
+        let d = decode(&bytes, 32, HUC3);
+        assert_eq!(d.ram, ram);
+        assert_eq!(d.rtc, Some((Clock::Huc3(sample_huc3()), 1_700_000_000)));
+        assert!(d.warnings.is_empty());
+        // Clock only, no RAM.
+        let bytes = encode(&[], Some((&Clock::Huc3(sample_huc3()), 5)));
+        assert_eq!(
+            decode(&bytes, 0, HUC3).rtc,
+            Some((Clock::Huc3(sample_huc3()), 5))
+        );
+    }
+
+    #[test]
+    fn huc3_footer_layout_matches_sameboy() {
+        // GB_huc3_rtc_time_t, packed: u64 time, u16 minutes, days,
+        // alarm_minutes, alarm_days, u8 alarm_enabled.
+        let bytes = encode(
+            &[0xEE; 2],
+            Some((&Clock::Huc3(sample_huc3()), 0x0102_0304_0506_0708)),
+        );
+        assert_eq!(&bytes[2..10], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&bytes[10..12], &754u16.to_le_bytes());
+        assert_eq!(&bytes[12..14], &[0x34, 0x12]);
+        assert_eq!(&bytes[14..16], &[0x21, 0x03]);
+        assert_eq!(&bytes[16..18], &[0x01, 0x20]);
+        assert_eq!(bytes[18], 1);
+        assert_eq!(bytes.len(), 19);
+    }
+
+    #[test]
+    fn huc3_seconds_into_the_minute_survive_through_the_timestamp() {
+        // Saved 25.5 s into a minute, loaded 40 s of wall clock later: the
+        // minute has ticked once and is 5 s old (the half second is lost).
+        let mut c = sample_huc3();
+        c.subminute_clocks = 25 * CLOCK_HZ + CLOCK_HZ / 2;
+        let bytes = encode(&[], Some((&Clock::Huc3(c), 10_000)));
+        assert_eq!(&bytes[..8], &(10_000u64 - 25).to_le_bytes());
+        let (stored, at) = decode(&bytes, 0, HUC3).rtc.unwrap();
+        assert_eq!((huc3(stored).subminute_clocks, at), (0, 9_975));
+        let s = huc3(stored.sync(at, Some(10_040)));
+        assert_eq!((s.days, s.minutes), (0x1234, 755));
+        assert_eq!(s.subminute_clocks, 5 * CLOCK_HZ);
+        // Days pass too; the alarm is carried as stored.
+        let s = huc3(stored.sync(at, Some(9_975 + 3 * 86_400 + 700 * 60)));
+        assert_eq!((s.days, s.minutes), (0x1238, 14));
+        assert_eq!((s.alarm_minutes, s.alarm_days), (0x321, 0x2001));
+        assert!(s.alarm_enabled);
+        // No sync, or a timestamp in the future: as stored.
+        assert_eq!(stored.sync(at, None), stored);
+        assert_eq!(stored.sync(at, Some(5)), stored);
+    }
+
+    #[test]
+    fn huc3_file_with_the_wrong_tail_keeps_the_ram() {
+        // A plain RAM dump: no clock, no warning.
+        let d = decode(&[4; 8], 8, HUC3);
+        assert_eq!((d.ram, d.rtc, d.warnings.len()), (vec![4; 8], None, 0));
+        // A tail that is not the 17-byte footer (here an MBC3 one): the
+        // RAM is kept, the clock is not restored, with a warning.
+        let bytes = encode(&[9; 8], Some((&Clock::Mbc3(sample_rtc()), 1)));
+        let d = decode(&bytes, 8, HUC3);
+        assert_eq!((d.ram, d.rtc, d.warnings.len()), (vec![9; 8], None, 1));
+        // And a HuC3 footer on an MBC3 cart is not taken for an RTC.
+        let bytes = encode(&[9; 8], Some((&Clock::Huc3(sample_huc3()), 1)));
+        let d = decode(&bytes, 8, MBC3);
+        assert_eq!((d.ram, d.rtc, d.warnings.len()), (vec![9; 8], None, 1));
+        // Short file.
+        let d = decode(&[1, 2, 3], 8, HUC3);
+        assert_eq!((d.ram.len(), d.rtc, d.warnings.len()), (8, None, 1));
+    }
+
+    #[test]
+    fn hostile_huc3_footer_is_safe_to_sync() {
+        let mut bytes = vec![7u8; 4];
+        bytes.extend_from_slice(&[0xFF; HUC3_FOOTER_LEN]);
+        let (stored, at) = decode(&bytes, 4, HUC3).rtc.unwrap();
+        assert_eq!(at, u64::MAX);
+        let raw = huc3(stored);
+        assert_eq!((raw.minutes, raw.days), (0xFFFF, 0xFFFF));
+        // The core masks when it counts (and when the state is set).
+        for (at, now) in [(at, u64::MAX), (0, u64::MAX), (0, 1), (5, 0)] {
+            let s = huc3(stored.sync(at, Some(now)));
+            assert!(s.minutes <= 0xFFF && s.subminute_clocks < 60 * CLOCK_HZ);
+        }
     }
 
     #[test]
