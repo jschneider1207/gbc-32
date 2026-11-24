@@ -2,6 +2,7 @@
 //! window and headless loops both run inside [`run`].
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use gbc_core::{CLOCK_HZ, Config, Emulator, Memory, cart_info};
 
@@ -32,6 +33,15 @@ pub struct Autosave {
     file: Option<SaveFile>,
     tracker: SettleTracker,
     now: fn() -> u64,
+    writes: WriteStats,
+}
+
+/// Save files written since the last [`Autosave::take_write_stats`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WriteStats {
+    pub count: u64,
+    /// The longest single write.
+    pub max: Duration,
 }
 
 impl Autosave {
@@ -45,10 +55,22 @@ impl Autosave {
         if dirty {
             emu.clear_save_dirty();
         }
-        if due && let Err(e) = file.store(emu.cart_ram(), emu.rtc_state(), (self.now)()) {
+        if !due {
+            return;
+        }
+        let t = Instant::now();
+        let r = file.store(emu.cart_ram(), emu.rtc_state(), (self.now)());
+        self.writes.count += 1;
+        self.writes.max = self.writes.max.max(t.elapsed());
+        if let Err(e) = r {
             eprintln!("warning: can't write {}: {e}", file.path.display());
             self.tracker.retry(emu.clock());
         }
+    }
+
+    /// Writes since the last call (for `GBC_FRAME_STATS`).
+    pub fn take_write_stats(&mut self) -> WriteStats {
+        std::mem::take(&mut self.writes)
     }
 }
 
@@ -95,6 +117,7 @@ pub fn run<R>(
         file: save,
         tracker: SettleTracker::new(u64::from(CLOCK_HZ), u64::from(CLOCK_HZ) * MAX_OWED_SECS),
         now: opts.now,
+        writes: WriteStats::default(),
     };
     // A panic in the loop still gets the exit save, then keeps unwinding.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

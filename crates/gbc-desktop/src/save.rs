@@ -428,6 +428,40 @@ mod tests {
         assert_eq!(fs::read(&p).unwrap(), b"two", "old save intact on failure");
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// Not a check: how long `write_atomic` blocks on this machine, for
+    /// attributing frame stalls (`cargo test -- --ignored --nocapture
+    /// write_atomic_latency`; `GBC_SAVE_BENCH_DIR` picks the directory,
+    /// default the temp dir). 32 KiB + footer, like an MBC3 RTC cart.
+    #[test]
+    #[ignore]
+    fn write_atomic_latency() {
+        let base =
+            std::env::var_os("GBC_SAVE_BENCH_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let dir = base.join(format!("gbc-save-bench-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("bench.sav");
+        let data = vec![0x5Au8; 32 * 1024 + FOOTER_LEN];
+        let mut ms: Vec<f64> = (0..50)
+            .map(|i| {
+                let mut d = data.clone();
+                d[0] = i as u8;
+                let t = std::time::Instant::now();
+                write_atomic(&p, &d).unwrap();
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        println!(
+            "write_atomic in {}: min {:.2} p50 {:.2} p90 {:.2} max {:.2} ms",
+            dir.display(),
+            ms[0],
+            ms[25],
+            ms[45],
+            ms[49]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]

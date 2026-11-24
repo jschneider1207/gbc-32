@@ -107,6 +107,7 @@ impl App<'_, '_> {
         if g.surface.resize(w, h).is_err() {
             return;
         }
+        let t = Instant::now();
         if let Ok(mut buf) = g.surface.buffer_mut() {
             video::blit(
                 video::visible(&self.shown, self.blank),
@@ -117,7 +118,9 @@ impl App<'_, '_> {
             if buf.present().is_ok()
                 && let Some(s) = &mut self.stats
             {
-                s.presented(Instant::now());
+                let now = Instant::now();
+                s.presented(now);
+                s.present_took(now - t);
             }
         }
     }
@@ -161,14 +164,20 @@ impl ApplicationHandler for App<'_, '_> {
     }
 
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        if let (
-            Some(s),
+        let Some(s) = &mut self.stats else { return };
+        let now = Instant::now();
+        s.iteration_began(now);
+        match cause {
             StartCause::ResumeTimeReached {
                 requested_resume, ..
-            },
-        ) = (&mut self.stats, cause)
-        {
-            s.woke(requested_resume, Instant::now());
+            } => s.woke(requested_resume, now),
+            // Woken by an event after the deadline had already passed: as
+            // late as a timed wake-up would have been.
+            StartCause::WaitCancelled {
+                requested_resume: Some(r),
+                ..
+            } if now > r => s.woke(r, now),
+            _ => {}
         }
     }
 
@@ -199,8 +208,10 @@ impl ApplicationHandler for App<'_, '_> {
             el.exit();
             return;
         }
+        let t = Instant::now();
         self.poll_pads();
-        self.pacing.begin(Instant::now());
+        let t_pads = Instant::now();
+        self.pacing.begin(t_pads);
         let mut ran = 0;
         while self.pacing.should_run(ran) {
             if self.frames_left == Some(0) {
@@ -214,10 +225,15 @@ impl ApplicationHandler for App<'_, '_> {
             }
         }
         if let Some(s) = &mut self.stats {
+            s.pads_took(t_pads - t);
+            s.step_took(t_pads.elapsed());
             s.ran(ran);
+            let w = self.autosave.take_write_stats();
+            s.saved(w.count, w.max);
             if let Some(line) = s.report(Instant::now()) {
                 eprintln!("{line}");
             }
+            s.iteration_ended(Instant::now());
         }
         if self.frames_left == Some(0) {
             el.exit();
