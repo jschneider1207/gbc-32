@@ -50,11 +50,14 @@ report 122 <gbc_core::bus::Ctx>::write_vram
 report 175 gbc_core::bus::read_oam
 report 192 <gbc_core::bus::Ctx>::write_oam
 report 1252 <gbc_core::ppu::render::Renderer>::render
+report 1144 gbc_core::ppu::render::fill_tiles::<false, true>
+report 2162 gbc_core::ppu::render::fill_tiles::<true, true>
+report 1264 gbc_core::ppu::render::fill_tiles::<false, false>
+report 1852 gbc_core::ppu::render::fill_tiles::<true, false>
 report 1796 <gbc_core::ppu::Ppu>::latch
 report 154 <gbc_core::ppu::Ppu>::draw
 report 355 <gbc_core::ppu::Ppu>::flush
 report 782 <gbc_core::ppu::render::Renderer>::fetch_objects
-report 192 gbc_core::ppu::render::partial_tile::<true>
 report 546 <gbc_core::Emulator>::run
 report 771 <gbc_core::apu::Apu>::sync
 report 1191 <gbc_core::apu::noise::Noise>::integrate

@@ -8,10 +8,11 @@
 //!
 //! Scope: DMG compatibility mode on a CGB (M3); in CGB mode (M5) the BG map
 //! attributes (palette, tile bank, flips, BG-to-OBJ priority) and LCDC.0 as
-//! the master priority. Each tile fetch reads its attribute byte (masked to
-//! 0 in compatibility mode, so that path draws the same pixels as before)
-//! and turns it into a palette and a priority mask for the tile's pixels:
-//! no per-pixel work is added. CGB-mode objects read their attributes the
+//! the master priority. In CGB mode each tile fetch reads its attribute
+//! byte and turns it into a palette and a priority mask for the tile's
+//! pixels: no per-pixel work is added. Compatibility mode has its own copy
+//! of the tile loops with no attribute read (palette 0, bank 0, no flips,
+//! no BG priority). CGB-mode objects read their attributes the
 //! same way at fetch time (OBJ palette 0-7, VRAM bank) and win pixels by
 //! OAM index instead of X (a rank per object-buffer pixel, checked only in
 //! the 8-pixel merge of each object fetch).
@@ -679,14 +680,10 @@ impl Renderer {
     ) {
         let lcdc = held.lcdc;
         let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
-        let attr_mask = if self.cgb {
-            0xFF
-        } else if master == 0 {
+        if !self.cgb && master == 0 {
             // Color 0 whatever the tile data.
             return;
-        } else {
-            0
-        };
+        }
         let win = self.window_active && x0 >= usize::from(self.window_start());
         let (map_bit, y, y_next, col) = if win {
             let col =
@@ -703,15 +700,18 @@ impl Renderer {
         let map = if lcdc & map_bit != 0 { 0x1C00 } else { 0x1800 };
         let fetch = |row_y: u8, tiles: u8| {
             let (base, flip) = tile_data(tiles);
-            Fetch {
+            let f = Fetch {
                 vram: src.vram,
                 map_row: map | (usize::from(y >> 3) << 5),
                 row_offset: usize::from(row_y & 7) << 1,
                 base,
                 flip,
-                attr_mask,
+            };
+            if self.cgb {
+                f.row::<true>(col)
+            } else {
+                f.row::<false>(col)
             }
-            .row(col)
         };
         let (old, attr) = fetch(y, lcdc);
         let (new, _) = fetch(y_next, next.lcdc);
@@ -882,11 +882,9 @@ impl Renderer {
     ) {
         let lcdc = regs.lcdc;
         let colors = src.colors;
-        let mode = if self.cgb {
-            Mode {
-                attr_mask: 0xFF,
-                master: if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 },
-            }
+        if self.cgb {
+            let master = if lcdc & LCDC_BG_ON != 0 { 0xFF } else { 0 };
+            self.bg_parts::<MIX, true>(out, obj, x0, win_from, regs, src, master);
         } else if lcdc & LCDC_BG_ON == 0 {
             if MIX {
                 for (p, &o) in out.iter_mut().zip(obj) {
@@ -895,10 +893,27 @@ impl Renderer {
             } else {
                 out.fill(colors.bg[0][0]);
             }
-            return;
         } else {
-            Mode::DMG
-        };
+            self.bg_parts::<MIX, false>(out, obj, x0, win_from, regs, src, 0xFF);
+        }
+    }
+
+    /// [`Renderer::bg_span`]'s tiles: the BG part up to `win_from`, then the
+    /// window part. `CGB`: CGB mode, the tiles have attributes
+    /// ([`Fetch::row`]); `master`: see [`prio_mask`].
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn bg_parts<const MIX: bool, const CGB: bool>(
+        &self,
+        out: &mut [u16],
+        obj: &[u8],
+        x0: usize,
+        win_from: usize,
+        regs: &Regs,
+        src: &Sources,
+        master: u8,
+    ) {
+        let lcdc = regs.lcdc;
         let split = (win_from - x0).min(out.len());
         let (bg, win) = out.split_at_mut(split);
         let (obj_bg, obj_win) = if MIX {
@@ -914,7 +929,7 @@ impl Renderer {
                 0x1800
             };
             let y = self.ly.wrapping_add(regs.scy);
-            fill_tiles::<MIX>(bg, obj_bg, src, lcdc, mode, map, y, col);
+            fill_tiles::<MIX, CGB>(bg, obj_bg, src, lcdc, master, map, y, col);
         }
         if !win.is_empty() {
             let col = ((win_from - usize::from(self.window_start())) as u8)
@@ -924,7 +939,7 @@ impl Renderer {
             } else {
                 0x1800
             };
-            fill_tiles::<MIX>(win, obj_win, src, lcdc, mode, map, self.window_row, col);
+            fill_tiles::<MIX, CGB>(win, obj_win, src, lcdc, master, map, self.window_row, col);
         }
     }
 
@@ -1121,24 +1136,6 @@ pub(crate) fn object_row(ly: u8, y: u8, tile: u8, flags: u8, lcdc: u8) -> usize 
     (usize::from(tile) << 4) + (usize::from(line) << 1)
 }
 
-/// How tile fetches read the BG map attributes, fixed per span.
-#[derive(Clone, Copy)]
-struct Mode {
-    /// ANDed with each attribute byte: 0xFF in CGB mode, 0 in compatibility
-    /// mode (no attributes: palette 0, bank 0, no flips, no BG priority).
-    attr_mask: u8,
-    /// ANDed with each tile's priority mask ([`mix`]): 0 in CGB mode with
-    /// LCDC.0 clear (objects always on top), else 0xFF.
-    master: u8,
-}
-
-impl Mode {
-    const DMG: Self = Self {
-        attr_mask: 0,
-        master: 0xFF,
-    };
-}
-
 /// One pixel of a span with objects: BG color index `c` (before the
 /// palette) of a tile with BG palette `bg` and priority mask `m`, object
 /// pixel `o`. An opaque object pixel is drawn unless `c` is non-zero and
@@ -1155,8 +1152,8 @@ fn mix(c: u8, o: u8, m: u8, bg: &[u16; 4], colors: &Colors) -> u16 {
     }
 }
 
-/// One BG or window tile row fetch: map row, tile data addressing and how
-/// to read the attributes, fixed for a part of a span.
+/// One BG or window tile row fetch: map row and tile data addressing,
+/// fixed for a part of a span.
 struct Fetch<'a> {
     vram: &'a [u8; 0x4000],
     /// VRAM offset of the map row.
@@ -1166,20 +1163,26 @@ struct Fetch<'a> {
     /// [`tile_data`].
     base: usize,
     flip: u8,
-    attr_mask: u8,
 }
 
 impl Fetch<'_> {
     /// The decoded row of the tile at map column `col` and its attributes:
-    /// in CGB mode the byte at the same map address in VRAM bank 1 (Pan
-    /// Docs: VRAM Tile Maps, "BG Map Attributes"; SameBoy `fetcher_step`
-    /// reads it from `vram[map + 0x2000]` when `cgb_mode`), else 0. Bit 3
-    /// selects the tile data bank, bit 6 flips the row, bit 5 the pixels.
+    /// in CGB mode (`CGB`) the byte at the same map address in VRAM bank 1
+    /// (Pan Docs: VRAM Tile Maps, "BG Map Attributes"; SameBoy
+    /// `fetcher_step` reads it from `vram[map + 0x2000]` when `cgb_mode`),
+    /// else 0. Bit 3 selects the tile data bank, bit 6 flips the row, bit 5
+    /// the pixels.
     #[inline(always)]
-    fn row(&self, col: u8) -> (u16, u8) {
+    fn row<const CGB: bool>(&self, col: u8) -> (u16, u8) {
         let vram = self.vram;
         let i = (self.map_row | usize::from(col >> 3)) & 0x1FFF;
-        let attr = vram[i | 0x2000] & self.attr_mask;
+        if !CGB {
+            // Compatibility mode: no attributes, tile data in bank 0.
+            let addr =
+                ((self.base + (usize::from(vram[i] ^ self.flip) << 4)) | self.row_offset) & 0x1FFF;
+            return (decode(vram[addr], vram[addr | 1]), 0);
+        }
+        let attr = vram[i | 0x2000];
         // Flips and bank from a table: fewer operations per tile than
         // decoding the bits (every CGB-mode tile pays it).
         let e = ATTR_FETCH[usize::from(attr)];
@@ -1220,7 +1223,8 @@ static ATTR_FETCH: [u32; 256] = {
 
 /// The priority mask [`mix`] uses for a tile with attributes `attr`: the
 /// OAM bit (0x80), or any opaque object pixel (0xFF) with the attribute's
-/// BG priority bit; ANDed with `master` ([`Mode`]).
+/// BG priority bit; ANDed with `master`: 0 in CGB mode with LCDC.0 clear
+/// (objects always on top), else 0xFF.
 #[inline(always)]
 fn prio_mask(attr: u8, master: u8) -> u8 {
     (((attr & BG_ATTR_PRIORITY) as i8 >> 7) as u8 | ATTR_BEHIND_BG) & master
@@ -1232,15 +1236,19 @@ fn prio_mask(attr: u8, master: u8) -> u8 {
 /// pixels at the same positions (same length as `out`) and each pixel is
 /// [`mix`]ed; a whole tile with no object pixel (one 8-byte test) is drawn
 /// as without `MIX`. Each tile's palette and priority come from its
-/// attributes ([`Fetch::row`]).
-#[inline(always)]
+/// attributes ([`Fetch::row`]; none without `CGB`).
+///
+/// Left to the compiler, which keeps one out-of-line copy per `MIX`/`CGB`
+/// pair. Forced inline (BG and window call sites: 8 copies) measured
+/// cgb-acid2 -1.49%, cpu_instrs -0.30%, worst-case -0.12%, cgb-raster
+/// +0.09%, two DMG-mode ROMs -0.44% and -0.73% x86 Ir for 4,634 B more.
 #[allow(clippy::too_many_arguments)]
-fn fill_tiles<const MIX: bool>(
+fn fill_tiles<const MIX: bool, const CGB: bool>(
     out: &mut [u16],
     obj: &[u8],
     src: &Sources,
     lcdc: u8,
-    mode: Mode,
+    master: u8,
     map: usize,
     y: u8,
     mut col: u8,
@@ -1253,18 +1261,13 @@ fn fill_tiles<const MIX: bool>(
         row_offset: usize::from(y & 7) << 1,
         base,
         flip,
-        attr_mask: mode.attr_mask,
     };
     // Part of one tile from map column `col`: the span's start up to the
     // next tile boundary, or its end.
-    let part = Part {
-        f,
-        master: mode.master,
-        colors,
-    };
+    let part = Part { f, master, colors };
     let f = &part.f;
     let partial = |out: &mut [u16], obj: &[u8], col: u8| {
-        partial_tile::<MIX>(out, obj, &part, col);
+        partial_tile::<MIX, CGB>(out, obj, &part, col);
     };
 
     let (mut out, mut obj) = (out, obj);
@@ -1289,7 +1292,7 @@ fn fill_tiles<const MIX: bool>(
         (&[][..], &[][..])
     };
     for (i, tile) in tiles.iter_mut().enumerate() {
-        let (w, attr) = f.row(col);
+        let (w, attr) = f.row::<CGB>(col);
         let pal = usize::from(attr & 7);
         let obj8 = if MIX {
             obj_tiles.get(i).filter(|o| u64::from_ne_bytes(**o) != 0)
@@ -1307,7 +1310,7 @@ fn fill_tiles<const MIX: bool>(
                 }
             }
             Some(o8) => {
-                let (bg, m) = (&colors.bg[pal], prio_mask(attr, mode.master));
+                let (bg, m) = (&colors.bg[pal], prio_mask(attr, master));
                 for (i, (p, &o)) in tile.iter_mut().zip(o8).enumerate() {
                     *p = mix((w >> (14 - 2 * i)) as u8 & 3, o, m, bg, colors);
                 }
@@ -1353,7 +1356,7 @@ pub(crate) fn set_pair_color(t: &mut [u32; 16], c: usize, col: u16) {
 /// What [`fill_partial`] needs besides the pixels.
 struct Part<'a> {
     f: Fetch<'a>,
-    /// [`Mode::master`].
+    /// [`prio_mask`]'s `master`.
     master: u8,
     colors: &'a Colors,
 }
@@ -1361,8 +1364,8 @@ struct Part<'a> {
 /// Part of the tile at map column `col` (from pixel `col & 7` on), mixed
 /// with `obj` with `MIX`: the fetch, then [`fill_partial`]. At most two per
 /// part of a span.
-fn partial_tile<const MIX: bool>(out: &mut [u16], obj: &[u8], p: &Part, col: u8) {
-    let (w, attr) = p.f.row(col);
+fn partial_tile<const MIX: bool, const CGB: bool>(out: &mut [u16], obj: &[u8], p: &Part, col: u8) {
+    let (w, attr) = p.f.row::<CGB>(col);
     fill_partial::<MIX>(out, obj, w << (2 * (col & 7)), attr, p.master, p.colors);
 }
 
