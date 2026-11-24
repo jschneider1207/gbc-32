@@ -35,7 +35,7 @@ cd "$(dirname "$0")/.."
 # Adding one is a decision, not a fix: say what state depends on when the
 # sync happens. An entry whose run no longer differs fails the check.
 # None today (the one there was, line 0's single-speed mode-2 pulse posted
-# by deadline only, is a timed request now: `irq::PendingIrq`, ADR 0032).
+# by deadline only, is a timed request now: `irq::PendingIrq`, ADR 0033).
 KNOWN_EAGER=()
 
 ROMS_DIR=${TEST_ROMS:-test-roms}

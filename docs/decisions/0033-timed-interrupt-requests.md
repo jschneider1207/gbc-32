@@ -1,4 +1,4 @@
-# 0032: Interrupt requests with a later IF clock are explicit pending state in the PPU
+# 0033: Interrupt requests with a later IF clock are explicit pending state in the PPU
 
 - Status: Accepted
 - Date: 2026-11-24

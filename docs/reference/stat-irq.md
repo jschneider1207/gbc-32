@@ -261,7 +261,7 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 
 A request whose IF bit is set at a later clock than the walk point or
 write that makes it is explicit state: "IF bits B are set at clock T"
-(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0032). Two rules
+(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0033). Two rules
 use it, both single speed: the LYC-write request (T = landing + 5) and
 line 0's mode-2 pulse (T = point + 1).
 

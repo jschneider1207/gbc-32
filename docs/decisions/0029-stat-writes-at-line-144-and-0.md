@@ -137,7 +137,7 @@ regressions. +898 B `.text` (96,550 of 97,500); cgb-acid2 +0.28% Ir
 
 ## Amendment (2026-11-24): where the delayed requests live
 
-The decisions above stand. Their storage changed (ADR 0032): the
+The decisions above stand. Their storage changed (ADR 0033): the
 LYC-write request no longer waits in IF bits 5-6 but as a timed request
 in the PPU (`irq::PendingIrq`), 5 dots after the write lands, and line
 0's single-speed mode-2 pulse reaches IF through the same mechanism

@@ -995,7 +995,7 @@ today. The one there was,
 `gambatte/lcd_offset/offset3_lyc99int_m2irq_count_1`, came from line 0's
 single-speed mode-2 pulse: its IF request was a dot late only because the
 PPU deadline was one past the walk point, so a sync on the point posted
-it early. The request is now a timed one (`irq::PendingIrq`, ADR 0032),
+it early. The request is now a timed one (`irq::PendingIrq`, ADR 0033),
 posted at the point + 1 whenever the PPU is synced.
 
 Diagnosing a difference: `bench --fingerprint --trace <run>` prints one
