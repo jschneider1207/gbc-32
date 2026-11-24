@@ -710,6 +710,50 @@ left out, the first candidate if `.text` room is left at the end of M10.
 L1 moves only cgb-acid2, by 0.02%, for 4.7 KB (`execute_cb` 6,860 ->
 11,598 B): the shared (HL) body stays.
 
+### Scheduler and attribute pass (M10, review B5 / inventory themes 4, 10, 11)
+
+Each row is one step measured against the row before it (check-bench Ir;
+total gbc-core `.text` on thumbv7em, 113,580 B at the start, baseline
+eb31bf6). "all nine" lists cpu_instrs, cgb_sound, cgb-acid2, event-storm,
+dma-storm, halt-irq, worst-case, cgb-raster, apu-writes in that order.
+
+**One-pass scheduler (B5).** `run_events` tests the three hot kinds in
+place in index order, each handler stores its next deadline with
+`Schedule::rearm`, and the minimum is folded once (`hot_min`, `settle`).
+The pass starts over wherever a handler leaves its own or an earlier
+kind due, so the event order is the old loop's.
+
+| Step | Ir | `.text` (B) | Outcome |
+|---|---|---|---|
+| Hot kinds tested in place, restart after every handler, one fold at the end; handlers still `set` | all nine +0.09, +0.12, +0.26, +0.05, +0.10, +0.12, +0.04, +0.04, +0.11% | | dropped: the fold was not the cost |
+| Single pass, and the Ppu event re-arms in place (no out-of-line `set`, no `reschedule` that `boundary` redoes) | all nine -0.48, -0.68, -1.47, -0.29, -0.12, -1.24, -0.31, -0.22, -0.81% | -324 | kept |
+
+**Timer and scheduler attributes (theme 10).**
+
+| Step | Ir (lines that moved) | `.text` (B) | Outcome |
+|---|---|---|---|
+| A4 `Timer::reload` not forced out of line (inlines into `boundary`) | halt-irq -0.06%, apu-writes -0.02% | +140 | kept |
+| A4 `Timer::catch_up` attribute removed | none | 0 | kept (the compiler keeps it out of line) |
+| A4 `Timer::schedule_overflow` unpinned | event-storm -0.27%, halt-irq -0.26%, cgb-acid2 -0.17%, worst-case -0.14%, apu-writes -0.14%, cgb_sound -0.08%, cpu_instrs -0.06% | +1,270 | dropped (bytes) |
+| A5 `Timer::sync`, `write_tac`, `write_div` unpinned | none | +460 | dropped; comment now cites this |
+| A3 `serial_event` without `#[cold]`, still out of line | none | -34 | kept |
+| A3 `serial_event` inlined into `boundary` | event-storm -0.52%, worst-case -0.15%; cgb-acid2 +0.22%, halt-irq +0.32%, apu-writes +0.15%, cgb_sound +0.10%, cpu_instrs +0.07%, dma-storm +0.06% | -74 | dropped |
+| A6 `Schedule::set` one `#[inline]` function | event-storm -0.80%, worst-case -0.48%, cgb-acid2 -0.05%, dma-storm -0.07%, cgb-raster -0.07% | +3,006 | dropped (bytes) |
+| A6 `set` inlined only in `schedule_timer` and `schedule_serial` | event-storm -0.79%, worst-case -0.32% | +166 | kept: the `set`/`set_inline` pair stays for this |
+| A6 `schedule_serial`, `schedule_timer` unpinned | event-storm +0.22%, worst-case +0.09% | +1,450 | dropped |
+| A7 `read_io_other` unpinned | none (LLVM keeps it out of line) | 0 | attribute kept, see next row |
+| A7 `read_io_other` as arms of `read_io` | dma-storm +4.00%, event-storm +1.97%, cpu_instrs +1.07%, worst-case +1.07%, halt-irq +0.74%, cgb-raster +0.57%, apu-writes +0.37%, cgb_sound +0.04%, cgb-acid2 +0.02% | -78 | dropped |
+| L7 timer lazy whenever IF bit 2 is set | not tried | | |
+
+**OAM DMA read clears (theme 4).** `Memory::dma_read_clears` moved to
+`Sys` (still atomics behind `&`): cgb-acid2 +0.03%, worst-case +0.01%,
+-32 B. The `&mut` CPU read path (to make it a plain `[u32; 5]`) was not
+re-measured; the recorded result (ADR 0028: +2.1% cpu_instrs) stands.
+
+**Attribute sweep (theme 11).** Only T2 was done: `fmt_flags` loops
+plainly instead of through `black_box` (+336 B, `Debug` output only, no
+bench line executes it). A14, A8 and A11 are open.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change

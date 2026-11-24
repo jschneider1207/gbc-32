@@ -2803,8 +2803,8 @@ fn palette_byte(mem: &Memory, reg: usize) -> u8 {
 /// The rare I/O reads (`read_io`'s `_` arm), `reg` the low 7 address bits;
 /// FF unless listed.
 // Out of line, measured (docs/perf.md, "Scheduler and attribute pass"):
-// as arms of `read_io` these cost +3.98% Ir on `synth:dma-storm` and
-// +1.06% on cpu_instrs (`read_high` then needs the PPU position).
+// as arms of `read_io` these cost +4.00% Ir on `synth:dma-storm` and
+// +1.07% on cpu_instrs (`read_high` then needs the PPU position).
 #[inline(never)]
 fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
     let cgb = sys.cgb_mode;
