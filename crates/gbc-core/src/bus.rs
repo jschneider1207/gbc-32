@@ -1965,10 +1965,13 @@ impl Ctx<'_, '_> {
                 v.hblank = false;
                 break;
             }
-            if v.hblank {
+            // One block per HBlank, also for a block whose transfer was
+            // stopped after its trigger (`VramDma::single`).
+            if v.hblank || v.single {
                 break;
             }
         }
+        v.single = false;
         // At most 1 + 128 * 16 M-cycles: fits. One less for the block a
         // HALT's or speed-switch STOP's latched opcode waited for
         // (`VramDma::refetch`).

@@ -69,6 +69,10 @@ pub(crate) struct VramDma {
     /// A transfer step is due at the next instruction fetch
     /// (`hdma_on`): all blocks of a GDMA, or one HDMA block.
     pub(crate) pending: bool,
+    /// The pending step is one block whatever `hblank` says: its HBlank
+    /// trigger came before the FF55 write that stopped the transfer, in
+    /// the same instruction ([`Self::write_hdma5`]).
+    pub(crate) single: bool,
     /// The CPU is in HALT while an HBlank transfer is active: HBlanks
     /// don't start blocks (SameBoy: `!gb->halted` in the HBlank trigger).
     pub(crate) halted: bool,
@@ -112,6 +116,7 @@ impl VramDma {
             blocks: 0,
             hblank: false,
             pending: false,
+            single: false,
             halted: false,
             wake_ok: false,
             refetch: 0,
@@ -146,10 +151,23 @@ impl VramDma {
         self.blocks = (value & 0x7F) + 1;
         let hblank = value & 0x80 != 0;
         if !hblank && self.hblank {
-            // Bit 7 = 0 during an HBlank transfer stops it.
+            // Bit 7 = 0 during an HBlank transfer stops it. A block whose
+            // HBlank trigger came earlier in this instruction still runs,
+            // as that one block of the length just written, not as a
+            // general-purpose transfer of all of it: gambatte (read for
+            // behaviour) leaves the request flagged at a disable, and
+            // `Memory::dma` copies 16 bytes for a flagged HBlank request
+            // whatever FF55 holds (its CGB C captures
+            // `dma/hdma_late_disable_*_2` show that block for a written
+            // length of 0). SameBoy (`GB_IO_HDMA5`, `GB_hdma_run`) differs:
+            // with `hdma_on` set its loop runs every block of the new
+            // length. FF55 follows gambatte here already, so the block
+            // does too.
             self.hblank = false;
+            self.single = self.pending;
             return;
         }
+        self.single = false;
         self.hblank = hblank;
         self.pending = !hblank || mode0;
     }
@@ -186,6 +204,8 @@ mod tests {
         rom[0x7100..0x7102].copy_from_slice(&[0x10, 0x3C]);
         // HALT, INC A, then NOPs; LDH (55),A running into VRAM at 8000.
         rom[0x6000..0x6002].copy_from_slice(&[0x76, 0x3C]);
+        // LDH (55),A, then NOPs.
+        rom[0x6100..0x6102].copy_from_slice(&[0xE0, 0x55]);
         rom[0x7FFE..0x8000].copy_from_slice(&[0xE0, 0x55]);
         let emu = crate::tests::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
@@ -771,5 +791,118 @@ mod tests {
         assert_eq!(emu.mem.vram[..16], block(0));
         assert_eq!(emu.hw.cpu.registers().a, 0x81);
         assert_eq!(emu.hw.cpu.registers().pc, 0x8001);
+    }
+
+    /// 16-byte blocks copied since `setup`.
+    fn copied(emu: &Emulator) -> u16 {
+        (emu.hw.sys.vdma.src - 0xC100) / 16
+    }
+
+    /// Starts an HBlank transfer of 4 blocks in mode 2, then runs `LDH
+    /// (55),A` with A = `a` at the first instruction boundary within
+    /// `lead` clocks of the next line's HBlank trigger (after it if
+    /// negative), and one NOP: whether this line's block ran before the
+    /// instruction, and the length of the NOP's step.
+    fn ldh_hdma5_near_trigger(
+        scx: u8,
+        lead: i64,
+        a: u8,
+    ) -> (&'static mut Emulator<'static>, bool, u64) {
+        let emu = setup(0x91, 0x80);
+        write(emu, 0xFF43, scx);
+        while emu.peek(0xFF41) & 3 != 0
+            || !(1..=140).contains(&emu.peek(0xFF44))
+            || emu.hw.sys.ppu.mode0_start().is_none()
+        {
+            step(emu);
+        }
+        let t = emu.hw.sys.ppu.mode0_start().unwrap() + 456 + HBLANK_DELAY;
+        while emu.peek(0xFF41) & 3 != 2 {
+            step(emu);
+        }
+        write(emu, 0xFF55, 0x83);
+        while emu.clock() as i64 + lead < t as i64 {
+            step(emu);
+        }
+        let mut r = emu.hw.cpu.registers();
+        r.pc = 0x6100;
+        r.a = a;
+        emu.hw.cpu.set_registers(r);
+        // At a trigger in the M-cycle before it, the block runs first.
+        let ran = copied(emu) == 1;
+        let ran = (step(emu) == 4 * (9 + 3)) || ran;
+        let nop = step(emu);
+        (emu, ran, nop)
+    }
+
+    #[test]
+    fn a_cancel_after_the_trigger_copies_only_that_block() {
+        // The HBlank trigger falls inside the `LDH (55),A` that cancels the
+        // transfer, before its write: the block already requested still
+        // runs, as one block and not as a general-purpose transfer of the
+        // written length (gambatte `Memory::dma`: a flagged HBlank request
+        // is always 16 bytes; CGB C captures `dma/hdma_late_disable_*_2`
+        // for a written length of 0). FF55 then reads the written length
+        // less that block, bit 7 set.
+        let (mut before, mut raced, mut after) = (0, 0, 0);
+        for a in [0x7F, 0x00, 0x05] {
+            for scx in 0..4 {
+                for lead in (-8..=20).step_by(4) {
+                    let (emu, ran, nop) = ldh_hdma5_near_trigger(scx, lead, a);
+                    let n = copied(emu);
+                    let at = std::format!("a {a:02X} scx {scx} lead {lead}");
+                    assert!(n <= 1, "{at}: {n} blocks");
+                    let ff55 = emu.peek(0xFF55);
+                    if ran {
+                        // The block ran before the instruction.
+                        assert_eq!((n, nop, ff55), (1, 4, 0x80 | a), "{at}");
+                        after += 1;
+                    } else if n == 0 {
+                        // Cancelled before the trigger: no block.
+                        assert_eq!((nop, ff55), (4, 0x80 | a), "{at}");
+                        before += 1;
+                    } else {
+                        // Triggered, then cancelled, in one instruction.
+                        let left = 0x80 | (a.wrapping_sub(1) & 0x7F);
+                        assert_eq!((nop, ff55), (4 * 10, left), "{at}");
+                        assert_eq!(emu.mem.vram[..16], block(0), "{at}");
+                        raced += 1;
+                    }
+                    assert_eq!(emu.mem.vram[16 * usize::from(n)], 0, "{at}");
+                    // Stopped: no block on the next lines.
+                    for _ in 0..500 {
+                        assert_eq!(step(emu), 4, "{at}");
+                    }
+                    assert_eq!((copied(emu), emu.peek(0xFF55)), (n, ff55), "{at}");
+                }
+            }
+        }
+        assert!(
+            before > 0 && raced > 0 && after > 0,
+            "{before} {raced} {after}"
+        );
+    }
+
+    #[test]
+    fn a_cancel_with_the_lcd_off_stops_it_and_a_gdma_can_follow() {
+        let emu = setup(0x11, 0x80); // LCD off
+        write(emu, 0xFF55, 0x83); // 4 blocks: one at once, no HBlanks after
+        assert_eq!(step(emu), 4 * 10);
+        assert_eq!(emu.peek(0xFF55), 0x02);
+        write(emu, 0xFF55, 0x05);
+        assert_eq!(emu.peek(0xFF55), 0x85);
+        for _ in 0..500 {
+            assert_eq!(step(emu), 4);
+        }
+        assert_eq!(copied(emu), 1);
+        // Bit 7 = 0 with no HBlank transfer active: a general-purpose
+        // transfer, from where the counters stopped.
+        write(emu, 0xFF55, 0x01);
+        assert_eq!(emu.peek(0xFF55), 0x01);
+        assert_eq!(step(emu), 4 * 18);
+        assert_eq!(emu.mem.vram[16..32], block(1));
+        assert_eq!(emu.mem.vram[32..48], block(2));
+        assert_eq!(emu.mem.vram[48], 0);
+        assert_eq!(emu.peek(0xFF55), 0xFF);
     }
 }
