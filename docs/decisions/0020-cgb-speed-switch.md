@@ -249,3 +249,135 @@ decided 8 dots later with the double-speed lead and the window was drawn on
 the WY line. Now the PPU is synced to the switch clock before the speed
 changes. Test: `speed_switch_syncs_the_ppu_with_the_old_speed_first` (the
 frame equals the one with two NOPs in place of the STOP).
+
+## Amendment (2026-11-24): STOP mode
+
+Supersedes "then stops until a button press (a stub until the
+STOP-accuracy task)" under "Decision". Plain STOP (no button held on a
+selected line, KEY1 not armed, or DMG compatibility mode) now enters a
+real STOP mode. M10 review A1-01; the plan's "STOP accuracy", "Screen
+blank while in STOP mode" and M5 HDMA/OAM DMA items. No ROM in the
+manifest enters STOP mode and Pan Docs says no licensed game does, so
+unit tests are the only arbiters.
+
+References: Pan Docs "Using the STOP Instruction" (and its chart, already
+encoded by "STOP length" above); SameBoy (MIT) `Core/sm83_cpu.c`
+`enter_stop_mode`, `leave_stop_mode`, the `stopped` branch of
+`GB_cpu_run`; `Core/timing.c` `timers_run`, `GB_advance_cycles`;
+`Core/display.c` `GB_display_run`, `render_pixel_if_possible`;
+`Core/memory.c` `GB_dma_run`. The model is a CGB in both CGB mode and DMG
+compatibility mode (ADR 0003); where SameBoy separates DMG from CGB, the
+CGB side is taken.
+
+**Entry** (`Bus::stop_begin` -> `Ctx::stop_freeze`, at the end of STOP's
+fetch; then `Bus::stop_enter` after the second byte, if read). Which STOP
+enters it, its length and the DIV reset are unchanged (the chart). It is
+entered with an interrupt pending too (one byte).
+
+**What stops:**
+- The system counter, from the DIV reset on: DIV reads 00, TIMA holds, no
+  timer interrupt (`Timer::freeze`; SameBoy `timers_run` returns while
+  `stopped`). Everything clocked from the counter stops with it: the
+  serial bit clock (a transfer in flight waits) and the APU frame
+  sequencer (lengths, envelopes and the sweep don't step).
+- A TIMA reload in flight at the reset (cycle A) is held: TIMA reads 00
+  and the reload and its interrupt come one M-cycle after the wake-up. A
+  choice, the same as across the speed-switch pause; no reference covers
+  it.
+- OAM DMA pauses and HBlanks start no VRAM DMA block, with HALT's
+  machinery (`dma_pause`, `VramDma::halted`; SameBoy `GB_dma_run` returns
+  while `stopped`, `GB_display_run` starts HDMA only with
+  `!gb->stopped`). A block already requested waits for the wake-up.
+
+**What keeps running** (a CGB; SameBoy `GB_display_run`: "The PPU does not
+advance while in STOP mode on the DMG"; `timers_run` still advances
+`apu_cycles` on a CGB while `stopped`):
+- The PPU. LY, STAT and its interrupt requests go on (IF bits 0 and 1 get
+  set; they end nothing), and `FRAME_READY` keeps its rate.
+- The APU's channels: a channel that is playing keeps its tone.
+- The emulated clock and the cartridge RTC.
+So `run_until` needs no special case: frames and samples keep their
+rates and a call ends at its target, also when nothing can end the STOP.
+
+**The screen.** Pan Docs: "On CGB, leaving the LCD enabled when invoking
+STOP will result in a black screen. Except if the LCD is in Mode 3, where
+it will keep drawing the current screen." SameBoy: the PPU loses OAM, VRAM
+and palette RAM unless the CPU's access to each was blocked at the STOP
+(`cgb_palettes_ppu_blocked = !cgb_palettes_blocked`), and draws black
+without palette RAM, in either CGB mode. Here: if palette RAM is open to
+the CPU at the end of STOP's fetch (`Ppu::palette_blocked`, LCD on),
+every frame completed in STOP mode is black (all pixels 0000), filled when
+it completes (`Ctx::stop_frame`: one test after the stopped idle, nothing
+in the renderer); otherwise frames are drawn as usual. `screen_blank`
+(white, LCD off) is not involved.
+
+**Wake-up** (`Bus::stop_halt` -> `Ctx::stop_wake`). Only a selected P1
+line being low ends STOP mode (Pan Docs: "STOP is terminated by one of the
+P10 to P13 lines going low"; SameBoy: `JOYP & 0xF != 0xF`, sampled every
+M-cycle). The lines are all high at entry (otherwise STOP is the
+button-held case) and P1 can't be written in STOP mode, so this is a
+button pressed in a selected group since: the joypad interrupt's
+condition, whatever IE says. With no group selected nothing ends it
+(hardware: until reset). Interrupts don't end it. The stopped step skips
+to the next deadline like HALT; a scheduled button change is one, so
+`set_buttons_at` ends it on its M-cycle.
+
+**Resume.** SameBoy: `leave_stop_mode`, then 8 T-cycles, then the next
+`GB_cpu_run`. Here: at the boundary where the line is low the counter
+starts again from the value it held (0000), OAM DMA resumes as after
+HALT, and in HDMA's HBlank period after a STOP outside it a block is
+requested (`allow_hdma_on_wake`); then two idle M-cycles (at either
+speed); then the CPU runs: a dispatch if one is due (the press requested
+the joypad interrupt), else the instruction after STOP.
+
+**Not modelled:**
+- The oscillator's start-up time. Neither Pan Docs nor GBCTR gives one
+  for STOP mode; SameBoy has only the 8 T-cycles above.
+- SameBoy's held DIV reset with IME off at `enter_stop_mode`
+  (`div_cycles = -4`, "I don't trust this if"): the counter restarts
+  exactly at the wake-up boundary in every case. (The speed switch keeps
+  its verified hold.)
+- Black per pixel: the frame STOP mode begins in is black from its top,
+  the one it ends in is drawn from its top; and the PPU still reads real
+  OAM and VRAM, so mode-3 lengths in STOP mode are those of the picture,
+  not of an empty line.
+- SameBoy's separate OAM and VRAM conditions (STOP in mode 2 keeps OAM):
+  one condition, palette RAM, decides.
+- An HDMA block requested in STOP's own M-cycles running the second byte
+  as an opcode (the speed-switch STOP's `prefetched` case): it just runs
+  at the wake-up.
+- DMG and SGB behavior (white screen, PPU and APU stopped): not this
+  model.
+
+**Bus trait.** `stop_wakeup` is replaced by `stop_enter` and `stop_halt`
+(defaults: nothing; one idle M-cycle and never woken). The trait is
+public only for `tools/sm83-tests`, which uses neither; the `Emulator`
+API is unchanged. `run_until`'s docs describe what a front end sees.
+
+**Tests** (core unit tests; each failed on the old code or fails under
+the named mutation of the new code):
+`stop_mode_freezes_div_tima_and_the_serial_clock`,
+`stop_mode_is_not_ended_by_interrupts` (mutation: IE & IF also wakes),
+`stop_mode_ends_only_on_a_selected_p1_line`,
+`run_until_in_stop_mode_returns_on_time_with_black_frames_and_audio`,
+`stop_in_mode_3_keeps_the_picture`,
+`stop_mode_resumes_two_mcycles_after_the_line_goes_low`,
+`scheduled_input_wakes_stop_on_its_mcycle` (now d + 12),
+`stop_mode_holds_the_frame_sequencer_but_not_the_channels`,
+`the_wake_up_restarts_the_serial_clock_and_the_frame_sequencer`,
+`stop_mode_holds_a_tima_reload_in_flight`,
+`stop_mode_pauses_the_transfer` (OAM DMA),
+`stop_mode_skips_hblanks_and_waking_in_mode_0_starts_a_block`. The timer
+differential test ends its plain STOP on the same clock, which checks
+that a freeze and thaw with no time between change nothing.
+
+**Measured** (d316018 against its parent 2cc605c): full stage1 manifest,
+no result changes. `diff-fingerprint.sh`, also with `--audio-buffer 7
+--hash-samples`: one ROM of the corpus differs, in both of its runs,
+`blargg/dmg_sound/dmg_sound.gb` (DMG-only, not in the manifest), which
+executes STOP 00 at 1.07 s with P1 = FF and is in STOP mode from there.
+
+**Open for the human:** whether the APU should go silent instead. The
+review finding and the task brief assumed it stops; SameBoy's CGB path
+keeps the channels running, which is what is implemented. No hardware
+test decides it.
