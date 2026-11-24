@@ -89,7 +89,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 
 | ID | Sev | Finding | Outcome |
 |---|---|---|---|
-| B1 | high | Unserviced TIMA overflows each run a scheduler event: 23.7% of worst-case (measured) | wave 1, branch `m10-timer-lazy` |
+| B1 | high | Unserviced TIMA overflows each run a scheduler event: 23.7% of worst-case (measured) | fixed 69247dd: worst-case -23.7%, event-storm -28.0%; lazy only while IF.2 is set and IE.2 clear (re-arming from the acknowledge path cost 720 B in `Cpu::run`) |
 | B2 | high | Serial: one event per bit (~11%, estimate) | wave 4 |
 | B3 | high | 4.02 M x86-Ir line is not a stand-in for 50% of the M7 | human: line stays until an M7 measurement; relative +3% guard is the gate. Better proxies (QEMU thumb counts, i686 valgrind) need an install: Needs human |
 | B4 | high (M7) | u64 time arithmetic on every event/IO path | stage 2 (u32 epoch-relative stamps; needs the clock-offset net, E6) |
@@ -107,10 +107,10 @@ been seen failing on the old code; until then it is a reviewer claim.
 
 | ID | Sev | Finding | Outcome |
 |---|---|---|---|
-| C1 | med | ITCM list stale, no callee-closure check | wave 1 |
-| C2 | med | Gate measures 16 codegen units; firmware will use 1 | wave 1 (human: pin to 1) |
-| C3 | med | Total `.text` cap is not an MCU constraint | wave 1 (human: demoted to a report) |
-| C4 | low | 17 budgets with large slack; `LineObjects::scan` line measures a dead copy | wave 1 |
+| C1 | med | ITCM list stale, no callee-closure check | fixed 0a424bc (closure check added; margin 2,324 B) |
+| C2 | med | Gate measures 16 codegen units; firmware will use 1 | fixed 4db1d02 (+0.6..2.4% Ir, .text 98,204 -> 94,960 B) |
+| C3 | med | Total `.text` cap is not an MCU constraint | fixed be036b7 |
+| C4 | low | 17 budgets with large slack; `LineObjects::scan` line measures a dead copy | fixed be036b7 (hot caps = measured +5%) |
 | C5 | med | Frame buffer kept out of DTCM for a reason that does not hold | stage 2 (placement plan in docs/perf.md corrected in wave 5) |
 | C6 | med | 40 instructions from loop top to dispatch (= B6) | wave 4 |
 | C7 | low | Register pairs stored big-endian (-214 B, 47 fewer `rev`) | wave 4 |
@@ -145,7 +145,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | ID | Sev | Finding | Outcome |
 |---|---|---|---|
 | E1 | high | Mid-line PPU is a closed-form image of a FIFO machine; per-write cost unbounded | wave 6: test-only dot-stepped mode-3 oracle; promotion into the core is stage 2 (needs M7 numbers) |
-| E2 | high | Budgets decide design | human: reformed (wave 1) |
+| E2 | high | Budgets decide design | fixed be036b7 (gates), state moves in wave 5 |
 | E3 | med | Line timeline encoded 3-4 times | wave 5 |
 | E4 | med | Sub-M-cycle timing per-site; line-0 pulse reconciled at three observers | wave 5 (`Irq` event, landing table) |
 | E5 | med | CPU fetch-overlap modes port gambatte's `prefetched_` | stage 2 (touches `Cpu::run`; wants the real-game net) |
