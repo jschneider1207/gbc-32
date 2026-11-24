@@ -65,11 +65,11 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A3-6 | low | Stale sweep overflow check survives a CH1 retrigger | wave 2 |
 | A3-7 | low | Desktop DC blocker starts from zero (click) | plan (desktop is throwaway) |
 | A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | fixed 35ff843 (ADR 0031; independent API review: no high/medium). HuC1 + HuC3 (human): wave 2, open |
-| A4-2 | med | HDMA cancel with a block pending copies `value + 1` blocks | wave 2 |
+| A4-2 | med | HDMA cancel with a block pending copies `value + 1` blocks | fixed (branch m10-hdma-cancel): the triggered block runs as one block (gambatte; SameBoy does value+1 as we did). Non-zero cancel values are single-source: Needs human FYI |
 | A4-3 | med | Fuzz pass built without overflow checks / debug asserts (= D5) | fixed fc92df4 |
 | A4-4 | low | `dma_retime` underflow on a switch to single speed right after reset | fixed df7a7a9 (confirmed: test failed before) |
 | A4-5 | low | `RtcState::advance_seconds` underflow on an unmasked state | fixed f29659a (confirmed) |
-| A4-6 | low | Re-arming an active HDMA inside HBlank starts a second block (references disagree) | plan |
+| A4-6 | low | Re-arming an active HDMA inside HBlank starts a second block (references disagree) | pinned + commented (we follow SameBoy); no behaviour change |
 | A4-7 | low | RP (FF56) unimplemented (= A1-03) | wave 2 |
 | A4-8 | low | MBC1M detection accepts two blank logo areas | fixed 2de0ffb (confirmed) |
 | A4-9 | low | MBC3 latch edge rule unverified | plan (already a task) |
@@ -77,7 +77,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A4-11 | low | Test gaps (list in report) | wave 3 where cheap |
 | A1-01 | med | Plain STOP mode is a stub (machine keeps running; any button wakes) | wave 2 |
 | A1-02 | low | Speed switch runs `boundary()` with stale deadlines; serial bit can shift twice | wave 2 (with E8) |
-| A1-04 | low | `VramDma::switch_end` 32-bit, two meanings; stale `RAN` after 8.5-17 min | wave 5 (own field after reform) |
+| A1-04 | low | `VramDma::switch_end` 32-bit, two meanings; stale `RAN` after 8.5-17 min | fixed: `switch_end` is a u64 (confirmed: block dropped 2^31 clocks later) |
 | A1-05 | low | State in unused bits/padding because of the `Hw` cap | wave 5 |
 | A1-06 | med | Speed switch/STOP timing is a composite of three emulators | wave 5: branch experiment (DIV reset after STOP's 2nd byte) |
 | A1-07 | low | Sub-M-cycle access offsets decided per site (= E4) | wave 5 |
