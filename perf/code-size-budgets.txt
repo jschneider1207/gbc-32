@@ -1,11 +1,12 @@
-# Code-size budgets for hot gbc-core functions (thumbv7em-none-eabihf, release,
-# -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh; see
+# Code-size budgets for hot gbc-core functions (thumbv7em-none-eabihf, release
+# with `codegen-units = 1` as pinned in Cargo.toml, -C target-cpu=cortex-m7). Checked by scripts/check-code-size.sh; see
 # docs/perf.md "Code-size budgets".
 #
 # Format: <budget bytes> <exact demangled symbol name, as printed by nm -C>
 # Lines starting with '#' and blank lines are ignored.
 # Rules:
-#  - A symbol's size is the sum over all copies (CGU-local duplicates) of it.
+#  - A symbol's size is the sum over all copies of it (one, with the pinned
+#    single codegen unit).
 #  - A listed symbol that is not found is a failure (renamed or inlined away):
 #    update this file, do not delete the line to make the check pass.
 #  - Raising a budget is committed with the change that needs it, with the
@@ -40,15 +41,18 @@
 # Line 0, 144 and 153 update points, split out of point_irq (m9-perf;
 # measured 214 bytes, + 10%).
 236 <gbc_core::ppu::Ppu>::point_irq_rare
-1290 <gbc_core::bus::Ctx>::write_ppu
+# codegen-units = 1 (2026-11-24): LLVM inlines more of the register
+# decode here, 1,262 -> 1,488 B (+5%).
+1565 <gbc_core::bus::Ctx>::write_ppu
 # CPU VRAM/OAM access blocking by PPU mode (measured 218, 216, 196, 280,
 # 304, 240 bytes): VRAM accesses leave the inlined bus path for these.
+# codegen-units = 1: `Ppu::vram_blocked` and `Ppu::oam_blocked` (58 and 68 B
+# thunks around `cpu_blocked`) are inlined into these four, so their two
+# lines are gone.
 230 gbc_core::bus::read_vram
 230 <gbc_core::bus::Ctx>::write_vram
-210 <gbc_core::ppu::Ppu>::vram_blocked
 300 gbc_core::bus::read_oam
 320 <gbc_core::bus::Ctx>::write_oam
-260 <gbc_core::ppu::Ppu>::oam_blocked
 # Scanline renderer (M3; measured 2668, 2208, 482, 122, 290 bytes): the
 # pixel loop, the per-line setup (object priority sort, buffer clear), the
 # OAM scan, and the PPU's draw/flush wrappers. write_ppu above grew from
@@ -63,10 +67,12 @@
 # render 2216 + fill_mixed 792 -> 1680 + 1000 + 1104 + 548 (+1,324 B) for
 # -14% cgb-acid2, -2% worst-case Ir (docs/perf.md "Pixel-pair lookups").
 1160 gbc_core::ppu::render::fill_plain
-125 gbc_core::ppu::render::fill_partial::<false>
+# codegen-units = 1: fill_partial::<false> 118 -> 218 B (+5%).
+230 gbc_core::ppu::render::fill_partial::<false>
 455 gbc_core::ppu::render::fill_partial::<true>
 4590 <gbc_core::ppu::Ppu>::latch
-510 <gbc_core::ppu::objects::LineObjects>::scan
+# codegen-units = 1: `LineObjects::scan` has no out-of-line copy (it was
+# an uncalled 482 B duplicate with several units; every use is inlined).
 # OAM DMA as the PPU sees it (measured 138, 338): draw passes the
 # per-slot object attributes of a line OAM DMA touches, flush fixes
 # them first; the rest of that path is out of line (cold).
@@ -83,7 +89,8 @@
 375 <gbc_core::bus::Ctx>::write_palette_data
 745 <gbc_core::bus::Ctx>::vram_dma
 221 <gbc_core::bus::Ctx>::vdma_arm
-481 <gbc_core::Emulator>::run
+# codegen-units = 1: Emulator::run 418 -> 520 B (+5%).
+546 <gbc_core::Emulator>::run
 # M6 APU (ADR 0021; measured 1456, 152, 398, 462, 276, 50, 42, 258 bytes
 # after the M6 code-size pass; +10%): the output sync and frame-sequencer
 # step, the channel register decode (`Square::write` is inlined into
@@ -117,7 +124,7 @@
 # 95,608 -> 95,002): Sys::new and Cart::into_ejected shared by reset/load/
 # eject, and the RTC advance no longer inlined per caller.
 380 <gbc_core::bus::Sys>::new
-640 <gbc_core::bus::Sys>::reset
+# codegen-units = 1: `Sys::reset` (628 B) is inlined into its callers.
 890 <gbc_core::Emulator>::load
 185 <gbc_core::cart::Cart>::into_ejected
 510 <gbc_core::cart::RtcTime>::add_seconds

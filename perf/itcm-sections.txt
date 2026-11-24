@@ -6,6 +6,9 @@
 # The globs match the length-prefixed path segments of rustc's v0-mangled
 # section names, never the crate hash (it changes with the compiler/build).
 # `*` has the same meaning in the shell's `[[ == ]]` as in GNU ld / lld.
+# Measured on the release build with `codegen-units = 1` (Cargo.toml), where
+# `Ppu::vram_blocked`, `Ppu::oam_blocked` and `render::frame_row` are inlined
+# into their callers and so have no section.
 #
 # ITCM_BUDGET_BYTES: the budget for the summed size of every section matched
 # below. Assumption (docs/perf.md): H753 ITCM 64 KiB minus an 8 KiB front-end
@@ -26,8 +29,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3bus*3Ctx9write_oam*                         # Ctx::write_oam
 .text._R*8gbc_core3bus*3Ctx8sync_ppu*                          # Ctx::sync_ppu
 .text._R*8gbc_core3bus*3Ctx8boundary*                          # Ctx::boundary
-.text._R*8gbc_core3ppu*3Ppu12vram_blocked*                     # Ppu::vram_blocked
-.text._R*8gbc_core3ppu*3Ppu11oam_blocked*                      # Ppu::oam_blocked
 .text._R*8gbc_core3bus*3Bus10halt_begin*                       # Bus::halt_begin
 .text._R*8gbc_core3bus*3Bus8halt_end*                          # Bus::halt_end
 .text._R*8gbc_core3bus*3Bus11idle_halted*                      # Bus::idle_halted
@@ -65,7 +66,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3ppu*3Ppu11check_wy_at*                      # Ppu::check_wy_at
 .text.unlikely._R*8gbc_core3ppu*3Ppu9scan_line*    # Ppu::scan_line (rustc puts it in .text.unlikely)
 .text._R*8gbc_core3bus*3Ctx9write_ppu*                         # Ctx::write_ppu
-.text._R*8gbc_core3ppu6render9frame_row*                       # render::frame_row
 .text._R*8gbc_core3ppu6render9cgb_color*                       # render::cgb_color
 # Tier B, plain tile path (plan: first to drop if the firmware build is over budget)
 .text._R*8gbc_core3ppu6render*8Renderer6render*                # Renderer::render

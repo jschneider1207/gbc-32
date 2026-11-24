@@ -19,6 +19,11 @@ undocumented_unsafe_blocks = "deny"
 # Never set `panic = "abort"` in these profiles.
 [profile.release]
 debug = "line-tables-only"
+# One codegen unit, as the firmware build will use (human, 2026-11-24):
+# with several, which functions are inlined, and so every size and Ir
+# number in perf/, depends on how rustc splits the crate into units.
+# The `checked` profile inherits it.
+codegen-units = 1
 
 # The SM83 test data (161 MB) is hashed on every `cargo test`; unoptimized
 # SHA-256 would add seconds to the dev loop.
