@@ -25,7 +25,7 @@ Waves (details in the triage file):
    (65f00bd), A4-1 unsupported mappers refused (35ff843, ADR 0031), A4-8
    (2de0ffb), A4-2 HDMA cancel (6094acb), A1-04 (0d64707), A4-4/A4-5,
    speed-switch order A1-02/E8/A1-08 (e8d960e..7cc2345), APU analytic
-   tests + A3-3/A3-6, STOP mode + RP (FF56). **In flight:** HuC1 + HuC3
+   tests + A3-3/A3-6, STOP mode + RP (FF56). HuC1 + HuC3 (ADR 0032). **Wave 2 is complete.** Formerly in flight: HuC1 + HuC3
    (branch `m10-huc`). Old in-flight note:
    STOP mode + RP register (branch `m10-stop-mode`), APU analytic sample
    tests + A3-3/A3-6 (branch `m10-apu`). **Open:** HuC1 + HuC3 mappers

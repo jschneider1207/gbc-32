@@ -396,6 +396,7 @@ are recorded in `docs/reviews/stage1-m10.md`.
      they touch the most code.
 - [ ] Turn the lows into one-line tasks in the Stage 2 plan (or here, if
   they're Stage 1 only).
+- [ ] M10 lows (HuC3, from the diff review): the clock protocol follows Pan Docs where SameBoy differs (command runs on the semaphore write; locations 00-06 are a buffer, not the live counters): check against a real Robopon / Pocket Family trace or switch to SameBoy's model; a `.sav` moved between SameBoy and us can be a minute off; a replay of a HuC3 game starts its clock at zero without a warning (`docs/reference/hudson-mappers.md`)
 - [ ] Budget changes: tightening one is an agent decision (record it);
   raising one needs the human, with numbers.
 

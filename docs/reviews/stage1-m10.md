@@ -64,7 +64,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | A3-5 | low | Output headroom (±2x full scale after high-pass) not in the API contract | fixed: bound is exactly +-61,440 (2x full scale, 17 bits) in the API docs and ADR 0021 |
 | A3-6 | low | Stale sweep overflow check survives a CH1 retrigger | fixed (confirmed against SameBoy apu.c) |
 | A3-7 | low | Desktop DC blocker starts from zero (click) | plan (desktop is throwaway) |
-| A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | fixed 35ff843 (ADR 0031; independent API review: no high/medium). HuC1 + HuC3 (human): wave 2, open |
+| A4-1 | med | Unsupported mappers run as ROM-only with battery-flagged RAM (= D12) | fixed 35ff843 (ADR 0031; independent API review: no high/medium). HuC1 + HuC3: done (ADR 0032; independent review: no high/medium; unverified-on-hardware list in `docs/reference/hudson-mappers.md`) |
 | A4-2 | med | HDMA cancel with a block pending copies `value + 1` blocks | fixed (branch m10-hdma-cancel): the triggered block runs as one block (gambatte; SameBoy does value+1 as we did). Non-zero cancel values are single-source: Needs human FYI |
 | A4-3 | med | Fuzz pass built without overflow checks / debug asserts (= D5) | fixed fc92df4 |
 | A4-4 | low | `dma_retime` underflow on a switch to single speed right after reset | fixed df7a7a9 (confirmed: test failed before) |
