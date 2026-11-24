@@ -61,13 +61,19 @@ impl RtcState {
     /// wrap as in [`RtcTime`]), and the day counter overflowing past 511
     /// sets the sticky `day_carry`. A halted clock does not advance.
     /// `latched` and `subsecond_clocks` are untouched. Correct for any
-    /// `seconds` (not a per-second loop).
+    /// `seconds` (not a per-second loop). The fields are public, so `self`
+    /// may come straight from a save file: the live registers are cut to
+    /// their hardware widths first ([`RtcTime::masked`], as
+    /// [`Emulator::set_rtc_state`](crate::Emulator::set_rtc_state) does).
     ///
     /// For syncing on load: `emu.load(..)`, then
     /// `emu.set_rtc_state(saved.advance_seconds(elapsed))`.
     #[must_use]
     pub fn advance_seconds(mut self, seconds: u64) -> Self {
         if !self.live.halted {
+            // `add_seconds` relies on the widths (a register at or above
+            // its modulus counts up to the top of its width).
+            self.live = self.live.masked();
             self.live.add_seconds(seconds);
         }
         self
@@ -231,6 +237,30 @@ mod tests {
         assert_eq!(u128::from(a.hours), n / 3600 % 24);
         assert_eq!(u128::from(a.days), n / 86_400 % 512);
         assert!(a.day_carry);
+    }
+
+    #[test]
+    fn advance_seconds_masks_unvalidated_registers_first() {
+        // A front end may hand over a state read from a file without
+        // masking it: every field past its width.
+        let raw = RtcState {
+            live: RtcTime {
+                seconds: 0xC8,
+                minutes: 0xFF,
+                hours: 0xFF,
+                days: 0xFFFF,
+                halted: false,
+                day_carry: false,
+            },
+            ..RtcState::default()
+        };
+        let masked = RtcState {
+            live: raw.live.masked(),
+            ..raw
+        };
+        for n in [0, 1, 59, 86_400 * 600, u64::MAX] {
+            assert_eq!(raw.advance_seconds(n).live, masked.advance_seconds(n).live);
+        }
     }
 
     #[test]
