@@ -50,6 +50,12 @@ per-write 905.6 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size
 lever (needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment
 `nop` padding (`docs/perf.md` code size).
 
+**Present-phase fix landed (session 14 end):** LADX slide route
+irregularities beyond the beat 54.1 -> 1.1/min (slides 115 -> 0), Wario
+Land 3 no-input 51 -> 1.6/min; costs ~6% of a core (spin waits) and ~1 ms
+mean present delay; `GBC_PRESENT_PHASE=0 GBC_PRECISE_WAIT=0` restores the
+old behaviour (ADR 0024 amendment). Desktop smoothness is done.
+
 **Human (session 14): the desktop client is a throwaway used to validate
 the core; spend minimal time on it.** Fix only what blocks core validation
 (crashes, lost saves, wrong output). No more smoothness/pacing polish after

@@ -47,6 +47,11 @@
 - A shared `flock` (shared for builds, exclusive for bench/fingerprint/
   gate) kept heavy steps alone across parallel agents.
 
+- Later in the session: STAT singles 6 (e5739b8, baseline 9ea63c4, stretch
+  3,410); replay/frame-log tooling (ADR 0030); present-phase + precise
+  wait (display irregularities ~54 -> ~1/min beyond the beat). Human:
+  desktop client is throwaway; SameBoy differential harness queued.
+
 ## Review
 - None run this session (no milestone close; no runner pass/fail change;
   no core public API change). M10 notes in STATUS: `obj_size_fetch`
@@ -54,4 +59,5 @@
 
 ## Left open
 - 33 M9 fix targets (STATUS Next up).
-- Desktop smoothness vs SameBoy: present-path jitter or display sync.
+- Desktop smoothness: done (present-phase fix). Desktop is a throwaway
+  validation client (human); no further polish.
