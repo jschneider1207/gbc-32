@@ -4,90 +4,66 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
-  review on Fable, started by the human). M8 is `stage1-m8` (ad56c23).
-  M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, session 15 (log
-  `logs/2026-11-23-15-m9-apu-mealybug-lcdoffset.md`). Baseline 1205e48
-  (must 86/86, should 40/40, stretch 3,437/3,461; every fail signed off).
+- **Milestone:** M10 (in-depth review), in progress. M9 is `stage1-m9`
+  (49c0756, tagged on the human's instruction); M1-M8 tagged likewise.
+- **Last updated:** 2026-11-24, session 16 (M10 review; log to be written
+  at session end: `logs/2026-11-24-16-m10-review.md`).
 
-## Next up: M9 close
+## Next up: M10 (in-depth review)
 
-**M9 ROM work is done:** every manifest ROM passes or is in a group the
-human signed off (24 fails, all signed off; 1205e48). Session 15 closed
-the last three Mealybug ROMs: TILE_SEL latch carried across lines
-(4c16263..cdf447c) and the window zero pixel at a WX match on a window
-tile's first pixel (a98d26d..4f32363; SameBoy does it on DMG only, the
-CGB C capture shows it too). M9's remaining tasks: M8 review lows
-(plan M9 bullets) and the real-game checklist (human). Then M9 milestone
-review and tag `stage1-m9`, then M10 (in-depth review, human starts it on
-Fable). Items for M10: `obj_size_fetch` temporarily swaps one VRAM byte
-for one object fetch (unobservable, but unusual); boot-tile setup
-(`bus.rs` `boot_logo`); delayed LYC request kept in IF bits 5-6
-(`LYC_IRQ_PENDING`, reads OR 0xE0, interrupt checks mask with
-`INT_MASK`); line-0 pulse scheduler deadline one dot after its walk
-point (`Ppu::next_event`); the window zero pixel follows a CGB C capture
-where SameBoy limits it to DMG (`Ppu::window_zero`); bbad441's 1 MHz phase shift under the ds APU
-delay is inferred from one ROM pair; the TILE_SEL set-glitch latch lives
-in `Memory` (`Hw` was at its size limit). Also open: single-speed
-line-153/0 walk points a dot early vs gambatte ("Open" in
-`docs/reference/stat-irq.md`).
+**Read `docs/reviews/stage1-m10.md` first**: the triage table (every
+finding, its outcome, the wave plan). Raw reviewer reports are in
+`docs/reviews/stage1-m10/`. The human gave this milestone more latitude
+than the usual milestone rules ("improve it instead of just copying");
+decisions are under "Decided in session 16" below.
 
-**Budgets (main 1205e48):** `.text` 98,124 of 99,000 B (human raised it
-from 97,500 in session 15 for the last 3 ROMs; per-function budgets
-unchanged). `next_event` 586 of 590 B. Worst-case ~4.005 M Ir/frame,
-99.6% of the 4.02 M line: the hot render path has no room left.
-cgb-acid2 +1.33% vs bench baseline (guard +3%). APU per-write 916.4 of 950
-Ir. `Hw` at its 864 B limit. Biggest remaining size lever (needs the
-human, Stage 2 measurement): ~5.8 KB of M7 alignment `nop` padding
-(`docs/perf.md` code size).
+Waves (details in the triage file):
+1. Nets + measuring stick: **done** (checked profile fc92df4;
+   `codegen-units = 1` 4db1d02; ITCM closure check 0a424bc; budget reform
+   be036b7; lazy timer 69247dd, worst-case -23.7%).
+2. Correctness fixes: done so far: A2-01 palette/LCD-off (86c2f98), A2-05
+   (65f00bd), A4-1 unsupported mappers refused (35ff843, ADR 0031), A4-8
+   (2de0ffb), A4-2 HDMA cancel (6094acb), A1-04 (0d64707), A4-4/A4-5,
+   speed-switch order A1-02/E8/A1-08 (e8d960e..7cc2345). **In flight:**
+   STOP mode + RP register (branch `m10-stop-mode`), APU analytic sample
+   tests + A3-3/A3-6 (branch `m10-apu`). **Open:** HuC1 + HuC3 mappers
+   (human asked for them; `MapperKind` already has the variants).
+3. More nets before big refactors (E6): golden fingerprint with samples in
+   the gate, eager-sync equality for the PPU, clock-offset/long-run runs.
+4. Performance (fingerprint-identical): B2 serial one event per byte, B5
+   scheduler one-pass, B6/C6 one attention check per instruction, B7, B8,
+   C7; then `synth:worst-case` gains a serviced timer IRQ (human) and the
+   baseline is re-recorded.
+5. Structure: state back to its owners (the `Hw` cap is gone), typed `Irq`
+   event instead of IF bits 5-6, one line-timeline table, `bus.rs` split,
+   `Speed` enum, architecture.md and comment sweep.
+6. Test-only dot-stepped mode-3 oracle (E1); audio alias measurement (A3-1,
+   any Ir cost goes to the human).
 
-**Present-phase fix landed (session 14 end):** LADX slide route
-irregularities beyond the beat 54.1 -> 1.1/min (slides 115 -> 0), Wario
-Land 3 no-input 51 -> 1.6/min; costs ~6% of a core (spin waits) and ~1 ms
-mean present delay; `GBC_PRESENT_PHASE=0 GBC_PRECISE_WAIT=0` restores the
-old behaviour (ADR 0024 amendment). Desktop smoothness is done.
+**How work is run:** one fix agent per theme in a scratch worktree under
+the session scratchpad (`git worktree add <scratch>/wt-x -b m10-x main`),
+at most 2 building agents, every cargo/valgrind command under
+`flock -x <scratch>/build.lock`. The orchestrator rebases the branch on
+`main`, re-runs tests + `check-code-size.sh` + `check-itcm-set.sh` +
+romtest full manifest (+ `check-bench.sh` when the hot path moved), then
+`git merge --ff-only` and removes the worktree. Every correctness fix has a
+test seen failing first. Core public API changes get one independent
+reviewer on the diff.
+
+**Gates now (be036b7):** ITCM set fit + glob match + callee closure
+(`check-itcm-set.sh`; 55,0xx of 57,344 B, margin ~2.3 KB; a new function
+called from ITCM code needs a glob or a `FLASH_OK <glob>  # reason` line in
+`perf/itcm-sections.txt`); per-function caps for ITCM functions only
+(measured +5%); +3% Ir guard vs `perf/bench-baseline.txt` (worst-case
+372.8 M Ir = 3.12 M/frame). Total `.text` (95,950 B) and flash-function
+lines are report-only. No `Hw` size cap. Release profile is
+`codegen-units = 1`.
 
 **Human (session 14): the desktop client is a throwaway used to validate
 the core; spend minimal time on it.** Fix only what blocks core validation
 (crashes, lost saves, wrong output). No more smoothness/pacing polish after
 the in-flight present-phase fix. The SameBoy differential harness stays
 worthwhile (it validates the core), at lower priority than M9 ROM fixes.
-
-**Desktop front end (session 14):** audio-driven pacing now reads a
-smoothed fill (WASAPI's 10 ms chunks made frames land 10/20 ms apart;
-ADR 0024 amendments). `GBC_FRAME_STATS=1` prints per-4 s frame stats and
-a `hitch:` line per gap (blank frames = game turned the LCD off; busy/step
-= our code blocked; wake late = OS; high fill + few frames = pacer).
-Saves are written on a `SaveWriter` thread (ADR 0023 amendment). Human
-still finds Wario Land 3 slightly less smooth than SameBoy (vsync off in
-SameBoy too). A long Shantae run (town + levels, build e2c908e, before the
-hitch line) was clean: frame interval p1 ~16.0 / p99 ~17.5 ms, no gaps
-after startup. Wario Land 3 gaps (67-469 ms) confirmed on bc07793: every `hitch:` line
-is LCD-off blank frames (e.g. 28 frames, 27 blank), busy/wake late <2 ms.
-Present step ~2 ms adds +-1 ms jitter (present p1 15.0 / p99 18.5 vs
-frame p1 16.1 / p99 17.4); occasional `step max` 5-9 ms (one frame's
-emulation; normal ~0.3 ms) is unexplained but within budget. Human: hitches don't match the stutter
-felt. Link's Awakening DX (84858f7): hitches = 2-3 LCD-off frames; a
-~40 s stretch with `wake late` mean 1.0 / max 4.1 ms (elsewhere 0.35 / ~1)
-spread frame intervals to 13-20.5 ms: queued fix = sleep to ~2 ms before
-due, then precise wait (after the replay tooling, `desktop-replay`, same
-files). Stutter work: automatic detection from a per-frame log + DWM refresh
-counts on agent-run native replays (human: noticing stutters and pressing
-a mark key is not a good strategy; marks optional).
-Tooling landed (ADR 0030, `docs/desktop-diagnostics.md`): record/replay,
-`GBC_FRAME_LOG`, `scripts/analyze-frame-log.exs`, `scripts/synth-input.exs`
-(LADX slide route). Human recording of a Wario Land 3 level:
-`/mnt/x/gbc-32/wario-land-{session.txt,frames.csv}` (+ `.sav`); display
-irregularities 70/min (beat 15), all 0-1 ms after vblank.
-**Queued for a future session (human):** SameBoy differential harness:
-SameBoy v1.0.5 core (MIT) built from source in scratch, boot ROMs from a
-copy of `X:\sameboy_winsdl_v1.0.5` (no RGBDS needed), CGB C model, replay
-our recordings, compare frames from the game's start (SameBoy runs its
-boot ROM, we don't). Settles game-side questions (e.g. Wario Land 3 camera
-steps) objectively. Next
-candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
-(human: "decide after the stall fix").
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
@@ -117,12 +93,38 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None (session 15 worktrees removed; merged branches `m9-*` remain,
-  see Needs human: branches to delete).
+- Branch `m10-stop-mode` (worktree `<session scratchpad>/wt-stop`): real
+  STOP mode + RP (FF56). Branch `m10-apu` (`wt-apu`): analytic sample
+  tests, A3-3, A3-6, headroom doc. If the session died, check
+  `git worktree list` and `git log main..<branch>`; re-verify before merging.
 
 ## Needs human
 
-Open:
+Open (M10, session 16):
+- **A better M7 cycle proxy without hardware** (review B3): x86 Ir tracks
+  M7 cycles poorly (thumb/x86 instruction ratio 0.9-3.35 per function; all
+  clock math is u64). Options that need a system install: `qemu-system-arm`
+  with an instruction-count plugin, or an i686 valgrind. Or a one-day
+  NUCLEO-H753ZI spike measuring two bench workloads. Until then the 4.02 M
+  line is a belief, and u32 clocks (B4) / dot-stepped mode 3 in the core
+  (E1) / the CPU fetch rework (E5) wait for Stage 2.
+- **HDMA cancel with a non-zero value while a block is already triggered**
+  (A4-2, 6094acb): we now copy that one block (gambatte); SameBoy master
+  copies value+1 blocks (what we did before). The CGB captures only cancel
+  with 00. Single-source; a hardware capture would settle it.
+- **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
+  0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
+  land it will load as them). SameBoy and real no-MBC boards ignore 0147.
+- **Audio aliasing** (A3-1): fix candidates roughly double the channel and
+  mixing cost; will come back with a measurement before changing anything.
+- **Hardware repo** (C11): `docs/firmware-interface.md` says "~200 KiB
+  emulator state"; measured 51.8 KiB (`Memory` 50,960 + `Emulator` 832).
+  Also C5: the frame buffer can live in DTCM (it is never a DMA source).
+- **Branches to delete** (agent `git branch -D` is denied), merged by
+  fast-forward in session 16: `m10-timer-lazy`, `m10-ppu-lcdoff`,
+  `m10-cart-unsupported`, `m10-hdma-cancel`, `m10-speed-switch`.
+
+Open (earlier sessions):
 - **Stage 3 ROM memory (hardware repo, human-owned):** independent review
   `docs/reference/stage3-rom-memory-options.md` (session 12) recommends
   3.0 V HyperRAM on OCTOSPI (as on the STM32H735G-DK) over the ADR 0001 FMC
