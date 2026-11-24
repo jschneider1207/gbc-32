@@ -41,9 +41,11 @@ impl Output {
 
 /// The spans integrated per batch: the channels are called once per batch,
 /// with their per-span setup (period, duty, wave RAM words) done once.
-/// 16 spans: 128 B of level sums on the stack, cleared per batch. `i16`:
-/// a lane is one channel's level times clocks over one span, at most
-/// 15 x `SAMPLE_PERIOD` = 1,920 in magnitude.
+/// 16 spans: 128 B of level sums on `Apu::flush`'s stack, cleared per
+/// batch (9 x86 instructions; with the lanes in `Apu` instead the clear
+/// would go, for under 0.1% of any bench). `i16`: a lane is one channel's
+/// level times clocks over one span, at most 15 x `SAMPLE_PERIOD` = 1,920
+/// in magnitude.
 pub(crate) const BATCH: usize = 16;
 const _: () = assert!(15 * SAMPLE_PERIOD <= i16::MAX as u64);
 // `Spans::ends` and `Spans::set` have a bit per span.
@@ -139,7 +141,7 @@ pub(crate) fn weights(nr50: u8, nr51: u8) -> [[i32; 4]; 2] {
 }
 
 /// The mixed sums of one span from the channel integrals. An explicit sum:
-/// `w.map(..)` left out-of-line `try_map`/`Drain` copies (136 B, code size).
+/// `w.map(..)` compiled to out-of-line `try_map`/`Drain` calls.
 #[inline]
 pub(crate) fn mix(levels: [i32; 4], w: &[[i32; 4]; 2]) -> [i32; 2] {
     let [a, b, c, d] = levels;
