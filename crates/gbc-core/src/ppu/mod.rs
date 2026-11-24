@@ -1252,13 +1252,49 @@ impl Ppu {
         self.cursor = self.seek_point(double);
     }
 
-    /// The update point after `c` (which is at or before the next frame's
-    /// first point; `start` is the clock of `c`'s frame position 0): what
-    /// [`Self::next_point`] (or [`Self::next_work_point`] if `quiet`)
-    /// returns for `c.pos`, without dividing. A visible line's `End` is at
-    /// its latched end, or at the earliest possible end if not latched yet.
-    #[inline]
-    fn step(&self, c: Cursor, quiet: bool, start: u64, double: bool) -> Cursor {
+    /// A visible line's `End` after its `Latch` at frame position `latch`
+    /// (`line_start` is the clock of the line's position 0): its latched
+    /// end, or the earliest possible end if not latched yet (167 dots
+    /// after the pipeline start).
+    #[inline(always)]
+    fn end_after(&self, latch: u32, base: u32, line_start: u64) -> u32 {
+        match self.latched_end(line_start) {
+            Some(e) => base + e,
+            None => latch + edges::MIN_MODE3,
+        }
+    }
+
+    /// [`Self::step`] while no STAT interrupt source is selected
+    /// ([`Self::quiet`]): the walk of the points that do work regardless
+    /// (`Latch`, `End`, `VBlank`); what [`Self::next_work_point`] returns
+    /// for `c.pos`, without dividing.
+    #[inline(always)]
+    fn step_work(&self, c: Cursor, start: u64) -> Cursor {
+        let l = u32::from(c.line);
+        let base = l * LINE;
+        let (pos, line, pt) = match c.pt {
+            Pt::Latch => {
+                let line_start = start.wrapping_add(u64::from(base));
+                (self.end_after(c.pos, base, line_start), l, Pt::End)
+            }
+            Pt::End if l < LINES - 1 => (base + LINE + edges::PIPE, l + 1, Pt::Latch),
+            Pt::End => (VBLANK_POS, LINES, Pt::VBlank),
+            // `VBlank` (the other points are not on this walk).
+            _ => (FRAME + edges::PIPE, 0, Pt::Latch),
+        };
+        Cursor {
+            pos,
+            line: line as u8,
+            pt,
+        }
+    }
+
+    /// The update point after `c` with a STAT interrupt source selected
+    /// (`c` is at or before the next frame's first point; `start` is the
+    /// clock of `c`'s frame position 0): what [`Self::next_point`] returns
+    /// for `c.pos`, without dividing.
+    #[inline(always)]
+    fn step(&self, c: Cursor, start: u64, double: bool) -> Cursor {
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
@@ -1278,22 +1314,11 @@ impl Ppu {
             ),
             Pt::Ly4 => (base + edges::PIPE, l, Pt::Latch),
             Pt::Latch => {
-                let end = match self.latched_end(start.wrapping_add(u64::from(base))) {
-                    Some(e) => base + e,
-                    // The earliest end: 167 dots after the pipeline start.
-                    None => c.pos + edges::MIN_MODE3,
-                };
-                (end, l, Pt::End)
+                let line_start = start.wrapping_add(u64::from(base));
+                (self.end_after(c.pos, base, line_start), l, Pt::End)
             }
-            Pt::End if !quiet => (c.pos + edges::HBLANK_AFTER_END, l, Pt::HBlank),
-            Pt::End | Pt::HBlank if l < LINES - 1 => {
-                if quiet {
-                    (base + LINE + edges::PIPE, l + 1, Pt::Latch)
-                } else {
-                    (base + LINE + edges::PT_LY, l + 1, Pt::Ly3)
-                }
-            }
-            Pt::End => (VBLANK_POS, LINES, Pt::VBlank),
+            Pt::End => (c.pos + edges::HBLANK_AFTER_END, l, Pt::HBlank),
+            Pt::HBlank if l < LINES - 1 => (base + LINE + edges::PT_LY, l + 1, Pt::Ly3),
             Pt::HBlank => (base + LINE + edges::VCMP_OFF, LINES, Pt::V0),
             Pt::V0 => match l {
                 144 => (c.pos + (edges::QUIRK2 - edges::VCMP_OFF), l, Pt::Quirk2),
@@ -1303,7 +1328,6 @@ impl Ppu {
             Pt::Quirk2 => (base + edges::CMP_WALK, l, Pt::V4),
             Pt::V4 if l == LINES => (VBLANK_POS, l, Pt::VBlank),
             Pt::V4 => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
-            Pt::VBlank if quiet => (FRAME + edges::PIPE, 0, Pt::Latch),
             Pt::VBlank => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
             Pt::L153Cmp => (c.pos + (edges::L153_OFF - edges::L153_CMP), l, Pt::L153Off),
             Pt::L153Off => (
@@ -1434,12 +1458,23 @@ impl Ppu {
     #[inline(always)]
     fn next_walk_event(&self, double: bool) -> u64 {
         if !self.lcd_enabled() {
-            return NEVER;
+            NEVER
+        } else if self.quiet() {
+            self.look_ahead::<true>(double)
+        } else {
+            self.look_ahead::<false>(double)
         }
+    }
+
+    /// The clock of the first update point from the cursor on that
+    /// requests an interrupt, completes the frame or ends a visible line's
+    /// mode 3, on a copy of the STAT line. `QUIET`: [`Self::quiet`] (the
+    /// walk of [`Self::step_work`], or that of [`Self::step`]).
+    #[inline(always)]
+    fn look_ahead<const QUIET: bool>(&self, double: bool) -> u64 {
         let mut line = self.line_irq;
         let mut start = self.frame_start;
         let mut c = self.cursor;
-        let quiet = self.quiet();
         loop {
             if c.pos >= FRAME {
                 c.pos -= FRAME;
@@ -1449,12 +1484,16 @@ impl Ppu {
             let fires = match c.pt {
                 Pt::End | Pt::VBlank => true,
                 Pt::Latch => false,
-                pt => !quiet && self.point_irq_ahead(&mut line, pt, u32::from(c.line), double),
+                pt => !QUIET && self.point_irq_ahead(&mut line, pt, u32::from(c.line), double),
             };
             if fires {
                 return start.wrapping_add(u64::from(c.pos));
             }
-            c = self.step(c, quiet, start, double);
+            c = if QUIET {
+                self.step_work(c, start)
+            } else {
+                self.step(c, start, double)
+            };
         }
     }
 
@@ -1488,7 +1527,11 @@ impl Ppu {
         iflags: &mut u8,
         double: bool,
     ) -> Events {
-        let events = self.run_points(now, mem, frame, iflags, double);
+        let events = if self.quiet() {
+            self.run_points::<true>(now, mem, frame, iflags, double)
+        } else {
+            self.run_points::<false>(now, mem, frame, iflags, double)
+        };
         self.post_irqs(now, iflags);
         events
     }
@@ -1512,16 +1555,19 @@ impl Ppu {
         if self.lcd_enabled() && p < u64::from(self.cursor.pos.min(FRAME)) {
             self.synced = now;
             Events::EMPTY
+        } else if self.quiet() {
+            self.run_points::<true>(now, mem, frame, iflags, double)
         } else {
-            self.run_points(now, mem, frame, iflags, double)
+            self.run_points::<false>(now, mem, frame, iflags, double)
         }
     }
 
     /// [`Self::walk_to`] with update points to run (or the LCD off, or
     /// `now` in the next frame). Out of line: the callers inline only the
-    /// test above.
+    /// test above. `QUIET`: [`Self::quiet`], which no update point changes
+    /// (the walk of [`Self::step_work`], or that of [`Self::step`]).
     #[inline(never)]
-    fn run_points(
+    fn run_points<const QUIET: bool>(
         &mut self,
         now: u64,
         mem: &mut Memory,
@@ -1534,7 +1580,6 @@ impl Ppu {
             self.synced = now;
             return events;
         }
-        let quiet = self.quiet();
         while self.frame_start.wrapping_add(u64::from(self.cursor.pos)) <= now {
             if self.cursor.pos >= FRAME {
                 self.next_frame();
@@ -1543,7 +1588,7 @@ impl Ppu {
             self.synced = self.frame_start.wrapping_add(u64::from(c.pos));
             let l = u32::from(c.line);
             // `Latch` and `End` don't change the STAT line.
-            if !quiet && !matches!(c.pt, Pt::Latch | Pt::End) {
+            if !QUIET && !matches!(c.pt, Pt::Latch | Pt::End) {
                 let mut line = self.line_irq;
                 if self.point_irq(&mut line, c.pt, l, double) {
                     // (By position: in single speed only line 0's mode-2
@@ -1580,8 +1625,11 @@ impl Ppu {
                 _ => {}
             }
             // After the point's work: `Latch` fixes where `End` is.
-            let n = self.step(c, quiet, self.frame_start, double);
-            self.cursor = n;
+            self.cursor = if QUIET {
+                self.step_work(c, self.frame_start)
+            } else {
+                self.step(c, self.frame_start, double)
+            };
         }
         self.synced = now;
         if now.wrapping_sub(self.frame_start) >= u64::from(FRAME) {

@@ -41,7 +41,7 @@ report 866 gbc_core::bus::read_high
 report 204 <gbc_core::bus::Ctx>::sync_ppu
 report 347 <gbc_core::bus::Ctx>::write_mapped
 report 1183 <gbc_core::bus::Ctx>::boundary
-report 960 <gbc_core::ppu::Ppu>::run_points
+report 960 <gbc_core::ppu::Ppu>::run_points::<false>
 report 590 <gbc_core::ppu::Ppu>::next_event
 report 1054 <gbc_core::ppu::Ppu>::point_irq_ahead
 report 1563 <gbc_core::bus::Ctx>::write_ppu
