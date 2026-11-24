@@ -2028,6 +2028,8 @@ impl Ppu {
 
     /// Clock (line position) at which the window's stall begins, under the
     /// current stalls (`None`: no window stall).
+    #[cold]
+    #[inline(never)]
     fn window_stall_at(&self) -> Option<i32> {
         let lt = &self.line;
         let (mut clock, mut x) = (i32::from(lt.first_pixel), 0);
