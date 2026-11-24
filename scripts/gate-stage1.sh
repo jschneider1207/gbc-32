@@ -61,6 +61,9 @@ step "Instruction-count benchmark (valgrind)"
 step "Fuzz pass over untrusted inputs (fixed seed + corpus)"
 ./scripts/check-fuzz.sh || fail "fuzz pass (docs/fuzzing.md; failing input in target/fuzz-failures/)"
 
+step "Invariance checks: sync placement, clock offset, 30-minute run"
+./scripts/check-sync-invariance.sh --long || fail "invariance checks (docs/perf.md \"Invariance checks\")"
+
 step "Desktop front end: release build + headless run (M7)"
 # Run the binary cargo just built, wherever CARGO_TARGET_DIR or a cargo
 # config put it: a hard-coded target/release path may be stale.

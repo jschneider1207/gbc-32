@@ -149,7 +149,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | E3 | med | Line timeline encoded 3-4 times | wave 5 |
 | E4 | med | Sub-M-cycle timing per-site; line-0 pulse reconciled at three observers | wave 5 (`Irq` event, landing table) |
 | E5 | med | CPU fetch-overlap modes port gambatte's `prefetched_` | stage 2 (touches `Cpu::run`; wants the real-game net) |
-| E6 | med | Net gaps: audio samples, long runs, sync placement, real-game frames | wave 3 |
+| E6 | med | Net gaps: audio samples, long runs, sync placement, real-game frames | fixed: `check-sync-invariance.sh` (eager-sync and clock-offset features, 30-minute checked run), in the gate. Corpus identical except one known ROM (line-0 mode-2 pulse depends on its deadline placement; goes with E4). Real-game frames: still open |
 | E7 | med | Unpinned / single-ROM behaviours | wave 5 (tag in code + list in docs/reference) |
 | E9 | low | Five hand-written stall-list loops | wave 5 |
 | E10 | low | = A2-06 | wave 5 |
