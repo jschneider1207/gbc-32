@@ -49,6 +49,12 @@ per-write 905.6 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size
 lever (needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment
 `nop` padding (`docs/perf.md` code size).
 
+**Human (session 14): the desktop client is a throwaway used to validate
+the core; spend minimal time on it.** Fix only what blocks core validation
+(crashes, lost saves, wrong output). No more smoothness/pacing polish after
+the in-flight present-phase fix. The SameBoy differential harness stays
+worthwhile (it validates the core), at lower priority than M9 ROM fixes.
+
 **Desktop front end (session 14):** audio-driven pacing now reads a
 smoothed fill (WASAPI's 10 ms chunks made frames land 10/20 ms apart;
 ADR 0024 amendments). `GBC_FRAME_STATS=1` prints per-4 s frame stats and
