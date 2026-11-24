@@ -17,6 +17,27 @@ finding, its outcome, the wave plan). Raw reviewer reports are in
 than the usual milestone rules ("improve it instead of just copying");
 decisions are under "Decided in session 16" below.
 
+**Progress snapshot (5307f7e, late session 16):** waves 1-3 done. Landed
+since: invariance nets in the gate (`check-sync-invariance.sh --long`,
+allowlist empty), HuC1/HuC3 (ADR 0032), H735-sized size gate, renderer
+tile-loop specialisation (DMG-mode games -6.6%), APU loops + mixer spans,
+serial one event per transfer, timed interrupt requests (ADR 0033; IF
+bits 5-6 hack gone). Bench baseline re-recorded: worst-case 313.5 M Ir
+(2.62 M/frame; was 488.4 M this morning after the cgu=1 pin). `.text`
+108,656 of 122,880 B. **In flight:** `m10-cpu-loop` (one attention check
+per instruction, tick, little-endian register pairs), `m10-ppu-state`
+(fetch state out of `Memory`, `Stalls` type, `Memory::clear`).
+**Queued, in order:** bus access fast paths (B8, inventory A1
+`write_mapped`, L1 CB merge); scheduler one-pass (B5); inventory themes
+1, 4, 8, 10, 11 (small state moves, OAM DMA read clears, PPU walk/access
+checks, timer/scheduler attributes, attribute sweep); worst-case bench
+gains a serviced timer IRQ + a DMG-mode bench line (human approved the
+first; the second is a stricter addition); line-153 rule (L5, behaviour
+change, needs a test); timeline table (E3), `bus.rs` split (D2), `Speed`
+enum (D4), docs/comment sweep (D7/D8, inventory section 6 list); mode-3
+oracle (E1); audio alias measurement (A3-1). Then the M10 gate run, baseline,
+tag `stage1-m10`.
+
 Waves (details in the triage file):
 1. Nets + measuring stick: **done** (checked profile fc92df4;
    `codegen-units = 1` 4db1d02; ITCM closure check 0a424bc; budget reform
@@ -100,7 +121,8 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Branch `m10-stop-mode` (worktree `<session scratchpad>/wt-stop`): real
+- See "Progress snapshot" above for the live branches. Older note:
+- Branch `m10-stop-mode` (merged): real
   STOP mode + RP (FF56). Branch `m10-apu` (`wt-apu`): analytic sample
   tests, A3-3, A3-6, headroom doc. If the session died, check
   `git worktree list` and `git log main..<branch>`; re-verify before merging.
