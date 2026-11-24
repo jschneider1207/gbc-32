@@ -353,11 +353,15 @@ impl Rng {
 }
 
 /// Header values that exercise the interesting branches: every cartridge
-/// type, ROM/RAM size codes, and a few wild values.
-const TYPES: [u8; 20] = [
-    0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0B, 0x0F, 0x10, 0x11, 0x13, 0x19, 0x1B, 0x1E,
-    0x20, 0x22, 0xFC, 0xFF,
+/// type the core loads, ROM/RAM size codes, and a few wild values.
+const TYPES: [u8; 19] = [
+    0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x19, 0x1A, 0x1B,
+    0x1C, 0x1D, 0x1E,
 ];
+/// Types the core refuses (`LoadErrorKind::UnsupportedMapper`, ADR 0031):
+/// one per unsupported mapper and two unassigned codes. Kept a minority
+/// of the generated inputs, since a refused cartridge never runs.
+const REFUSED_TYPES: [u8; 9] = [0x0B, 0x0D, 0x20, 0x22, 0xFC, 0xFD, 0xFE, 0xFF, 0x16];
 
 /// One structure-aware input for the gate pass: control bytes biased
 /// towards interesting header values, then a body of random bytes mixed
@@ -374,8 +378,14 @@ pub fn generate(rng: &mut Rng) -> Vec<u8> {
         (rng.byte() & !3) | u8::from(rng.below(2) == 0)
     };
     // 5..9: type, rom size, ram size, cgb flag.
-    if rng.below(4) != 0 {
-        v[5] = TYPES[rng.below(TYPES.len() as u64) as usize];
+    // 1 in 16 keeps the random byte (most values are unassigned codes), 1
+    // in 8 of the rest names an unsupported mapper.
+    if rng.below(16) != 0 {
+        v[5] = if rng.below(8) == 0 {
+            REFUSED_TYPES[rng.below(REFUSED_TYPES.len() as u64) as usize]
+        } else {
+            TYPES[rng.below(TYPES.len() as u64) as usize]
+        };
     }
     if rng.below(2) == 0 {
         v[6] = rng.below(12) as u8;

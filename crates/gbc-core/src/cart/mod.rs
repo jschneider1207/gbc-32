@@ -1,5 +1,6 @@
-//! Cartridge: ROM, external RAM, mappers and RTC. No MBC and MBC1 since
-//! M1; the other mappers arrive in M4.
+//! Cartridge: ROM, external RAM, mappers and RTC. No MBC, MBC1 (and
+//! MBC1M), MBC2, MBC3/MBC30 and MBC5 are emulated; a header that names
+//! any other mapper ([`MapperKind`]) is a load error (ADR 0031).
 //!
 //! The ROM and cartridge RAM are borrowed from the caller for the
 //! emulator's lifetime `'a` (ADR 0006) and handed back by
@@ -87,6 +88,12 @@ pub enum LoadErrorKind {
     /// The caller's cartridge RAM buffer is smaller than the header needs
     /// (see [`cart_ram_size`]).
     CartRamTooSmall { needed: usize, len: usize },
+    /// The header's cartridge type (0147, `cart_type`) names a mapper the
+    /// core does not emulate, or no known mapper at all
+    /// ([`MapperKind::Unknown`]). Such a cartridge is refused rather than
+    /// run without banking: the game would execute the wrong bank and
+    /// could scribble over its save (ADR 0031).
+    UnsupportedMapper { mapper: MapperKind, cart_type: u8 },
 }
 
 impl core::fmt::Display for LoadErrorKind {
@@ -98,6 +105,10 @@ impl core::fmt::Display for LoadErrorKind {
             Self::CartRamTooSmall { needed, len } => {
                 write!(f, "cartridge RAM buffer is {len} bytes; {needed} needed")
             }
+            Self::UnsupportedMapper { mapper, cart_type } => write!(
+                f,
+                "unsupported cartridge: {mapper} (header cartridge type {cart_type:02X})"
+            ),
         }
     }
 }
@@ -145,6 +156,103 @@ impl core::error::Error for LoadError<'_> {
     }
 }
 
+/// The mapper family the header's cartridge type (0147) names (Pan Docs:
+/// The Cartridge Header, "0147 - Cartridge type"), including the ones the
+/// core does not emulate ([`MapperKind::is_supported`]). Only the header
+/// byte decides it: an MBC1 multicart is [`MapperKind::Mbc1`], and the
+/// RAM, battery, RTC and rumble variants of a mapper share its kind (see
+/// [`CartInfo`] for those).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MapperKind {
+    /// No mapper: 00 (ROM only), 08 (ROM+RAM), 09 (ROM+RAM+BATTERY).
+    RomOnly,
+    /// MBC1: 01-03.
+    Mbc1,
+    /// MBC2: 05-06.
+    Mbc2,
+    /// MBC3 and MBC30: 0F-13.
+    Mbc3,
+    /// MBC5: 19-1E.
+    Mbc5,
+    /// MMM01: 0B-0D. Not emulated.
+    Mmm01,
+    /// MBC6: 20. Not emulated.
+    Mbc6,
+    /// MBC7 (accelerometer, EEPROM): 22. Not emulated.
+    Mbc7,
+    /// Pocket Camera: FC. Not emulated.
+    PocketCamera,
+    /// Bandai TAMA5: FD. Not emulated.
+    Tama5,
+    /// Hudson HuC3: FE. Not emulated.
+    HuC3,
+    /// Hudson HuC1: FF. Not emulated.
+    HuC1,
+    /// A code Pan Docs does not assign (04, 07, 0A, 0E, 14-18, 1F, 21,
+    /// 23-FB).
+    Unknown,
+}
+
+impl MapperKind {
+    /// The kind a cartridge type byte (header 0147) names.
+    pub const fn from_cart_type(cart_type: u8) -> Self {
+        match cart_type {
+            0x00 | 0x08 | 0x09 => Self::RomOnly,
+            0x01..=0x03 => Self::Mbc1,
+            0x05 | 0x06 => Self::Mbc2,
+            0x0B..=0x0D => Self::Mmm01,
+            0x0F..=0x13 => Self::Mbc3,
+            0x19..=0x1E => Self::Mbc5,
+            0x20 => Self::Mbc6,
+            0x22 => Self::Mbc7,
+            0xFC => Self::PocketCamera,
+            0xFD => Self::Tama5,
+            0xFE => Self::HuC3,
+            0xFF => Self::HuC1,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the core emulates this mapper.
+    /// [`Emulator::load`](crate::Emulator::load), [`cart_ram_size`] and
+    /// [`cart_info`] fail with [`LoadErrorKind::UnsupportedMapper`] for
+    /// the others.
+    pub const fn is_supported(self) -> bool {
+        // Keep in step with `Mapper::from_header` (the test
+        // `supported_kinds_are_the_ones_that_load` checks every code).
+        matches!(
+            self,
+            Self::RomOnly | Self::Mbc1 | Self::Mbc2 | Self::Mbc3 | Self::Mbc5
+        )
+    }
+
+    /// The mapper's usual name, for messages.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RomOnly => "no mapper",
+            Self::Mbc1 => "MBC1",
+            Self::Mbc2 => "MBC2",
+            Self::Mbc3 => "MBC3",
+            Self::Mbc5 => "MBC5",
+            Self::Mmm01 => "MMM01",
+            Self::Mbc6 => "MBC6",
+            Self::Mbc7 => "MBC7",
+            Self::PocketCamera => "Pocket Camera",
+            Self::Tama5 => "TAMA5",
+            Self::HuC3 => "HuC3",
+            Self::HuC1 => "HuC1",
+            Self::Unknown => "unknown mapper",
+        }
+    }
+}
+
+impl core::fmt::Display for MapperKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Header byte `at` of `rom` (0 past the end: callers check the length
 /// first).
 ///
@@ -168,26 +276,40 @@ fn rom_byte(rom: Rom<'_>, i: usize) -> u8 {
 /// [`Emulator::cart_ram`](crate::Emulator::cart_ram)). MBC2's built-in
 /// 512x4-bit RAM counts as 512 bytes. The caller owns this buffer and
 /// persists it (battery saves).
+///
+/// Fails as [`Emulator::load`](crate::Emulator::load) would for a ROM too
+/// short to hold the header or one whose mapper is not emulated
+/// ([`LoadErrorKind::UnsupportedMapper`]).
 pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
     if rom.len() < MIN_ROM_SIZE {
         return Err(LoadErrorKind::RomTooSmall { len: rom.len() });
     }
     // Pan Docs: The Cartridge Header, 0147 and 0149.
+    // A mapper the core does not emulate has no RAM to size: the
+    // cartridge does not load (ADR 0031). Checked here too, not only in
+    // `Mapper::from_header`, so a front end that sizes its buffer or asks
+    // `cart_info` before `load` learns it before it touches a save file.
+    let cart_type = header(rom, HEADER_CART_TYPE);
+    let mapper = MapperKind::from_cart_type(cart_type);
+    if !mapper.is_supported() {
+        return Err(LoadErrorKind::UnsupportedMapper { mapper, cart_type });
+    }
     // ROM ONLY (00) has no RAM whatever 0149 says. SameBoy (Core/mbc.c,
     // GB_configure_cart) zeroes the RAM size for a no-MBC type whose
     // table entry has no RAM, but for MBC types without RAM and a nonzero
     // 0149 it assumes the RAM exists ("Assuming cartridge has RAM"), which
     // is what the table below does anyway (ADR 0016).
-    if header(rom, HEADER_CART_TYPE) == 0x00 {
+    if cart_type == 0x00 {
         return Ok(0);
     }
-    if matches!(header(rom, HEADER_CART_TYPE), 0x05 | 0x06) {
+    if matches!(mapper, MapperKind::Mbc2) {
         return Ok(512);
     }
-    // Unknown codes mean no RAM rather than a load failure, as in SameBoy
-    // (Core/mbc.c, GB_configure_cart: a 256-entry `ram_sizes` table where
-    // only 0x00-0x05 are non-zero). Bad headers are common in homebrew and
-    // test ROMs, which may still run fine without cartridge RAM.
+    // Unknown RAM size codes mean no RAM rather than a load failure, as in
+    // SameBoy (Core/mbc.c, GB_configure_cart: a 256-entry `ram_sizes`
+    // table where only 0x00-0x05 are non-zero). Bad headers are common in
+    // homebrew and test ROMs, which may still run fine without cartridge
+    // RAM.
     Ok(match header(rom, HEADER_RAM_SIZE) {
         // "Unused" in Pan Docs; some homebrew uses it for 2 KiB (SameBoy
         // agrees).
@@ -206,6 +328,9 @@ pub fn cart_ram_size(rom: &[u8]) -> Result<usize, LoadErrorKind> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CartInfo {
+    /// The mapper the cartridge type (0147) names; always a supported one
+    /// ([`cart_info`] fails for the others).
+    pub mapper: MapperKind,
     /// [`cart_ram_size`]: bytes of cartridge RAM (the save file length).
     pub ram_size: usize,
     /// The cartridge type (0147) is battery-backed: its RAM (and RTC)
@@ -228,10 +353,12 @@ impl CartInfo {
 
 /// [`CartInfo`] from the header, usable before
 /// [`Emulator::load`](crate::Emulator::load) (e.g. to decide whether to
-/// read a save file). Fails like [`cart_ram_size`].
+/// read a save file). Fails like [`cart_ram_size`]: in particular for a
+/// cartridge whose mapper is not emulated, which has no `CartInfo`.
 pub fn cart_info(rom: &[u8]) -> Result<CartInfo, LoadErrorKind> {
     let ram_size = cart_ram_size(rom)?;
     Ok(CartInfo {
+        mapper: MapperKind::from_cart_type(header(rom, HEADER_CART_TYPE)),
         ram_size,
         battery: has_battery(rom),
         rtc: has_rtc(rom),
@@ -281,8 +408,9 @@ fn has_rtc(rom: &[u8]) -> bool {
 /// Header", 0147): every type named "+BATTERY" (03 MBC1, 06 MBC2, 09 ROM,
 /// 0D MMM01, 0F/10/13 MBC3, 1B/1E MBC5, 22 MBC7, FF HuC1). SameBoy
 /// (`Core/mbc.c`, `GB_cart_defs`) also marks the Pocket Camera (FC),
-/// TAMA5 (FD) and HuC3 (FE) as battery-backed. (Mappers not emulated yet
-/// run as if they had no MBC, but their saves are still saves.)
+/// TAMA5 (FD) and HuC3 (FE) as battery-backed. The table is the header's;
+/// the types of mappers the core does not emulate never reach a caller,
+/// since those cartridges do not load (ADR 0031).
 fn has_battery(rom: &[u8]) -> bool {
     matches!(
         header(rom, HEADER_CART_TYPE),
@@ -385,8 +513,8 @@ impl RtcState {
 /// The memory bank controller, from the header's cartridge type (0147).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mapper {
-    /// No MBC: 32 KiB of ROM, optional RAM that is always enabled (Pan
-    /// Docs: No MBC).
+    /// No MBC (types 00, 08, 09): 32 KiB of ROM, optional RAM that is
+    /// always enabled (Pan Docs: No MBC). Also the empty slot.
     None,
     /// MBC1 (types 01-03), standard wiring: BANK2 is ROM bank bits 5-6.
     Mbc1,
@@ -408,19 +536,40 @@ enum Mapper {
 }
 
 impl Mapper {
-    fn from_header(rom: &[u8]) -> Self {
-        match header(rom, HEADER_CART_TYPE) {
-            0x01..=0x03 if is_mbc1m(rom) => Self::Mbc1M,
-            0x01..=0x03 => Self::Mbc1,
-            0x05 | 0x06 => Self::Mbc2,
-            0x0F | 0x10 => Self::Mbc3Rtc,
-            0x11..=0x13 => Self::Mbc3,
-            0x19..=0x1B => Self::Mbc5 { rumble: false },
-            0x1C..=0x1E => Self::Mbc5 { rumble: true },
-            // TODO(M4): the rest; until then they
-            // run as if they had no MBC.
-            _ => Self::None,
-        }
+    /// The mapper to emulate, resolved once at load: the header's
+    /// [`MapperKind`] plus what the rest of the type byte and the ROM
+    /// contents add (RTC, rumble, multicart wiring). Fails for a kind the
+    /// core does not emulate (ADR 0031).
+    ///
+    /// To add a mapper: a variant here, its arm below, and its kind in
+    /// [`MapperKind::is_supported`]; the match is exhaustive, and the test
+    /// `supported_kinds_are_the_ones_that_load` holds the two together.
+    fn from_header(rom: &[u8]) -> Result<Self, LoadErrorKind> {
+        use MapperKind as K;
+        let cart_type = header(rom, HEADER_CART_TYPE);
+        let mapper = MapperKind::from_cart_type(cart_type);
+        Ok(match mapper {
+            K::RomOnly => Self::None,
+            K::Mbc1 if is_mbc1m(rom) => Self::Mbc1M,
+            K::Mbc1 => Self::Mbc1,
+            K::Mbc2 => Self::Mbc2,
+            K::Mbc3 if has_rtc(rom) => Self::Mbc3Rtc,
+            K::Mbc3 => Self::Mbc3,
+            // Pan Docs 0147: 1C-1E are the "+RUMBLE" types.
+            K::Mbc5 => Self::Mbc5 {
+                rumble: cart_type >= 0x1C,
+            },
+            K::Mmm01
+            | K::Mbc6
+            | K::Mbc7
+            | K::PocketCamera
+            | K::Tama5
+            | K::HuC3
+            | K::HuC1
+            | K::Unknown => {
+                return Err(LoadErrorKind::UnsupportedMapper { mapper, cart_type });
+            }
+        })
     }
 }
 
@@ -517,9 +666,9 @@ impl<'a> Cart<'a> {
     /// On error, the buffers come back in the [`LoadError`]. The mapper is
     /// in its power-on state.
     pub(crate) fn new(rom: &'a [u8], ram: &'a mut [u8]) -> Result<Self, LoadError<'a>> {
-        let kind = match cart_ram_size(rom) {
-            Ok(needed) if ram.len() >= needed => {
-                let mapper = Mapper::from_header(rom);
+        let resolved = cart_ram_size(rom).and_then(|n| Ok((n, Mapper::from_header(rom)?)));
+        let kind = match resolved {
+            Ok((needed, mapper)) if ram.len() >= needed => {
                 let padded = rom.len().next_multiple_of(ROM_BANK).max(2 * ROM_BANK);
                 let mut cart = Self {
                     rom: Rom::new(rom),
@@ -538,7 +687,7 @@ impl<'a> Cart<'a> {
                 cart.reset();
                 return Ok(cart);
             }
-            Ok(needed) => LoadErrorKind::CartRamTooSmall {
+            Ok((needed, _)) => LoadErrorKind::CartRamTooSmall {
                 needed,
                 len: ram.len(),
             },
@@ -1191,7 +1340,12 @@ mod tests {
             0x03, 0x06, 0x09, 0x0D, 0x0F, 0x10, 0x13, 0x1B, 0x1E, 0x22, 0xFC, 0xFD, 0xFE, 0xFF,
         ];
         for t in 0..=0xFFu8 {
-            let info = cart_info(&rom_with(t, 0x02)).unwrap();
+            // The table is the header's (`has_battery`), whatever the
+            // mapper; only supported types have a `CartInfo`.
+            assert_eq!(has_battery(&rom_with(t, 0x02)), battery.contains(&t));
+            let Ok(info) = cart_info(&rom_with(t, 0x02)) else {
+                continue;
+            };
             assert_eq!(info.battery, battery.contains(&t), "type {t:02X}");
             assert_eq!(info.rtc, matches!(t, 0x0F | 0x10), "type {t:02X}");
         }
@@ -1199,6 +1353,7 @@ mod tests {
         assert_eq!(
             info(0x03, 0x03),
             CartInfo {
+                mapper: MapperKind::Mbc1,
                 ram_size: 0x8000,
                 battery: true,
                 rtc: false
@@ -1212,6 +1367,99 @@ mod tests {
         assert_eq!(
             cart_info(&[0; 0x100]),
             Err(LoadErrorKind::RomTooSmall { len: 0x100 })
+        );
+    }
+
+    /// The codes that load: every type Pan Docs assigns to no mapper,
+    /// MBC1, MBC2, MBC3 or MBC5.
+    const SUPPORTED: [u8; 19] = [
+        0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x19, 0x1A,
+        0x1B, 0x1C, 0x1D, 0x1E,
+    ];
+
+    /// A4-1/D12: a mapper the core does not emulate is refused with a
+    /// typed error that names it, and gets no RAM, battery flag or run.
+    #[test]
+    fn unsupported_mappers_are_refused_by_name() {
+        use MapperKind as K;
+        let named = [
+            (0x0B, K::Mmm01),
+            (0x0C, K::Mmm01),
+            (0x0D, K::Mmm01),
+            (0x20, K::Mbc6),
+            (0x22, K::Mbc7),
+            (0xFC, K::PocketCamera),
+            (0xFD, K::Tama5),
+            (0xFE, K::HuC3),
+            (0xFF, K::HuC1),
+            // Unassigned codes, the old "MBC4" range (15-17) among them.
+            (0x04, K::Unknown),
+            (0x07, K::Unknown),
+            (0x0A, K::Unknown),
+            (0x0E, K::Unknown),
+            (0x15, K::Unknown),
+            (0x16, K::Unknown),
+            (0x17, K::Unknown),
+            (0x1F, K::Unknown),
+            (0x21, K::Unknown),
+            (0x23, K::Unknown),
+            (0x80, K::Unknown),
+            (0xFB, K::Unknown),
+        ];
+        for (cart_type, mapper) in named {
+            assert_eq!(MapperKind::from_cart_type(cart_type), mapper);
+            assert!(!mapper.is_supported());
+            // 0149 = 03: 32 KiB of RAM, were the type trusted.
+            let rom = rom_with(cart_type, 0x03);
+            let kind = LoadErrorKind::UnsupportedMapper { mapper, cart_type };
+            assert_eq!(cart_ram_size(&rom), Err(kind), "type {cart_type:02X}");
+            assert_eq!(cart_info(&rom), Err(kind), "type {cart_type:02X}");
+            // Refused whatever the RAM buffer; the buffers come back.
+            for len in [0usize, 0x8000] {
+                let mut ram = std::vec![0x5Au8; len];
+                let err = Cart::new(&rom, &mut ram).err().expect("refused");
+                assert_eq!(err.kind, kind, "type {cart_type:02X}");
+                let (r, ram) = err.into_buffers();
+                assert_eq!((r.len(), ram.len()), (MIN_ROM_SIZE, len));
+                assert!(ram.iter().all(|&b| b == 0x5A));
+            }
+        }
+        // A too-short ROM is still reported as that.
+        assert_eq!(
+            cart_ram_size(&[0xFF; 0x100]),
+            Err(LoadErrorKind::RomTooSmall { len: 0x100 })
+        );
+    }
+
+    #[test]
+    fn supported_kinds_are_the_ones_that_load() {
+        let mut ram = std::vec![0u8; 0x8000];
+        for t in 0..=0xFFu8 {
+            let rom = rom_with(t, 0x03);
+            let kind = MapperKind::from_cart_type(t);
+            let listed = SUPPORTED.contains(&t);
+            assert_eq!(kind.is_supported(), listed, "type {t:02X}");
+            assert_eq!(Mapper::from_header(&rom).is_ok(), listed, "type {t:02X}");
+            assert_eq!(cart_ram_size(&rom).is_ok(), listed, "type {t:02X}");
+            assert_eq!(Cart::new(&rom, &mut ram).is_ok(), listed, "type {t:02X}");
+            if listed {
+                assert_eq!(cart_info(&rom).unwrap().mapper, kind);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_mapper_message_names_it() {
+        use std::string::ToString;
+        let e = cart_info(&rom_with(0xFE, 0x03)).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "unsupported cartridge: HuC3 (header cartridge type FE)"
+        );
+        let e = cart_info(&rom_with(0x16, 0x03)).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "unsupported cartridge: unknown mapper (header cartridge type 16)"
         );
     }
 
@@ -1670,12 +1918,12 @@ mod mbc1m_tests {
         assert!(is_mbc1m(&rom(0x01, true)[..0x4_4000]));
         assert!(!is_mbc1m(&rom(0x01, true)[..0x4_3FFF]));
         // Only MBC1 types are multicart candidates.
-        assert_eq!(Mapper::from_header(&rom(0x01, true)), Mapper::Mbc1M);
-        assert_eq!(Mapper::from_header(&rom(0x03, true)), Mapper::Mbc1M);
-        assert_eq!(Mapper::from_header(&rom(0x01, false)), Mapper::Mbc1);
+        assert_eq!(Mapper::from_header(&rom(0x01, true)), Ok(Mapper::Mbc1M));
+        assert_eq!(Mapper::from_header(&rom(0x03, true)), Ok(Mapper::Mbc1M));
+        assert_eq!(Mapper::from_header(&rom(0x01, false)), Ok(Mapper::Mbc1));
         assert_eq!(
             Mapper::from_header(&rom(0x19, true)),
-            Mapper::Mbc5 { rumble: false }
+            Ok(Mapper::Mbc5 { rumble: false })
         );
     }
 

@@ -1076,6 +1076,23 @@ mod tests {
         ));
     }
 
+    /// A mapper the core does not emulate is a load error like any other
+    /// (it used to run as "no MBC" and complete).
+    #[test]
+    fn real_core_reports_an_unsupported_mapper_as_a_load_error() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x147] = 0xFF; // HuC1
+        rom[0x149] = 0x03;
+        let mut st = RunState::default();
+        assert_eq!(
+            run_core(&rom, &plan(Exit::RunFrames { frames: 1 }), &mut st),
+            Err(CoreFailure::Load(
+                "unsupported cartridge: HuC1 (header cartridge type FF)".into()
+            ))
+        );
+        assert_eq!(st.end, None);
+    }
+
     fn audio_plan(frames: u64) -> RunPlan {
         RunPlan {
             audio_last_frame: true,

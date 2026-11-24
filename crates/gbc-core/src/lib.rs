@@ -42,7 +42,10 @@
 //! The caller owns persistence (ADR 0015). [`cart_info`]`(rom)` says,
 //! before loading, whether there is anything to save
 //! ([`CartInfo::has_save`]: a battery-backed cartridge with RAM or an
-//! RTC); cartridges without a battery get no save file. The save is
+//! RTC); cartridges without a battery get no save file. It fails, as
+//! [`Emulator::load`] would, for a cartridge whose mapper the core does
+//! not emulate ([`LoadErrorKind::UnsupportedMapper`], which names the
+//! [`MapperKind`]): report that and leave any save file alone. The save is
 //! [`Emulator::cart_ram`] plus, for MBC3+RTC carts,
 //! [`Emulator::rtc_state`] (stored with the wall-clock time).
 //! [`Emulator::save_dirty`] says when the game changed it, so a front end
@@ -188,8 +191,8 @@ mod timer;
 
 pub use apu::StereoSample;
 pub use cart::{
-    CartBuffers, CartInfo, EjectedCart, LoadError, LoadErrorKind, MIN_ROM_SIZE, RtcState, RtcTime,
-    cart_info, cart_ram_size,
+    CartBuffers, CartInfo, EjectedCart, LoadError, LoadErrorKind, MIN_ROM_SIZE, MapperKind,
+    RtcState, RtcTime, cart_info, cart_ram_size,
 };
 pub use config::{Config, DmgPalettes, rgb555, rgb555_to_888, rgb888_to_555};
 pub use cpu::Registers;
@@ -324,6 +327,13 @@ impl<'a> Emulator<'a> {
     /// with [`Emulator::save_dirty`] clear. On error the emulator is
     /// unchanged (the previous cartridge stays inserted) and the error
     /// hands back `rom` and `cart_ram`.
+    ///
+    /// A cartridge whose header names a mapper the core does not emulate
+    /// (HuC1, HuC3, MBC6, MBC7, MMM01, TAMA5, the Pocket Camera, or an
+    /// unassigned type code; see [`MapperKind`]) is refused with
+    /// [`LoadErrorKind::UnsupportedMapper`] rather than run without
+    /// banking. [`cart_info`] and [`cart_ram_size`] fail the same way, so
+    /// a front end can tell the user before it reads or creates a save.
     #[must_use = "the returned cartridge holds the previous RTC state, dirty flag and RAM buffer"]
     pub fn load(
         &mut self,
@@ -937,6 +947,46 @@ mod tests {
         );
         assert_eq!(err.cart_ram.len(), 3);
         assert_eq!(emu.peek(0x0100), 0xAB);
+    }
+
+    /// A4-1: an unsupported mapper is a load error like the others: the
+    /// buffers come back untouched and the emulator (here with a
+    /// cartridge inserted) is unchanged.
+    #[test]
+    fn load_refuses_an_unsupported_mapper_and_returns_the_buffers() {
+        let emu = emulator();
+        let before = (emu.clock(), emu.registers(), emu.cart_info());
+        for (cart_type, mapper) in [
+            (0xFF, MapperKind::HuC1),
+            (0xFE, MapperKind::HuC3),
+            (0x22, MapperKind::Mbc7),
+            (0x0D, MapperKind::Mmm01),
+            (0x20, MapperKind::Mbc6),
+            (0xFD, MapperKind::Tama5),
+            (0xFC, MapperKind::PocketCamera),
+            (0x16, MapperKind::Unknown),
+        ] {
+            let rom = vec![0u8; 0x8000].leak();
+            rom[0x147] = cart_type;
+            rom[0x149] = 0x03; // 32 KiB of battery RAM, were it trusted
+            let ram = vec![0xA5u8; 0x8000].leak();
+            let err = emu.load(rom, ram, Config::default()).unwrap_err();
+            assert_eq!(
+                err.kind,
+                LoadErrorKind::UnsupportedMapper { mapper, cart_type }
+            );
+            let (rom, ram) = err.into_buffers();
+            assert_eq!((rom.len(), ram.len()), (0x8000, 0x8000));
+            assert!(ram.iter().all(|&b| b == 0xA5));
+            assert_eq!(cart_info(rom), Err(err_kind(mapper, cart_type)));
+            // The previous cartridge is still inserted and untouched.
+            assert_eq!(emu.peek(0x0100), 0xAB);
+            assert_eq!((emu.clock(), emu.registers(), emu.cart_info()), before);
+        }
+    }
+
+    fn err_kind(mapper: MapperKind, cart_type: u8) -> LoadErrorKind {
+        LoadErrorKind::UnsupportedMapper { mapper, cart_type }
     }
 
     #[test]

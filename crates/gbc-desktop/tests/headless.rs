@@ -163,6 +163,49 @@ fn unreadable_and_invalid_roms_exit_1() {
     assert_eq!(headless(&tiny, "1").status.code(), Some(1));
 }
 
+/// A cartridge whose mapper the core does not emulate (review A4-1) is
+/// refused with a message that names the mapper, and its `.sav` is
+/// neither read into a run nor written: it used to run as "no MBC" with
+/// always-enabled battery RAM and overwrite the save at exit.
+#[test]
+fn unsupported_mapper_exits_1_and_leaves_the_save_alone() {
+    // HuC1, HuC3, MBC7 (all "+BATTERY" types) and an unassigned code.
+    for (cart_type, name) in [
+        (0xFFu8, "HuC1"),
+        (0xFE, "HuC3"),
+        (0x22, "MBC7"),
+        (0x16, "unknown mapper"),
+    ] {
+        let dir = Dir::new(&format!("unsupported-{cart_type:02x}"));
+        let rom_path = dir.path("game.gbc");
+        // No enable register on a mapper-less cartridge: the write to
+        // A000 would land in the save.
+        fs::write(&rom_path, rom(cart_type, WRITER)).unwrap();
+        let sav: Vec<u8> = (0..0x2000u32).map(|i| (i * 7) as u8).collect();
+        fs::write(dir.path("game.sav"), &sav).unwrap();
+        let out = headless(&rom_path, "5");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{cart_type:02X}: {stderr}");
+        assert!(
+            stderr.contains("game.gbc") && stderr.contains("unsupported cartridge"),
+            "{stderr}"
+        );
+        assert!(stderr.contains(name), "{stderr}");
+        assert!(stderr.contains(&format!("{cart_type:02X}")), "{stderr}");
+        assert_eq!(fs::read(dir.path("game.sav")).unwrap(), sav);
+        let mut files: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(files, ["game.gbc", "game.sav"]);
+        // Without a save none is created either.
+        fs::remove_file(dir.path("game.sav")).unwrap();
+        assert_eq!(headless(&rom_path, "5").status.code(), Some(1));
+        assert!(!dir.path("game.sav").exists());
+    }
+}
+
 #[test]
 fn locked_cpu_still_exits_0_with_a_warning() {
     let dir = Dir::new("lock");
