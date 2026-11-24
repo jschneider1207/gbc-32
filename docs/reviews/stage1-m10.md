@@ -100,7 +100,7 @@ been seen failing on the old code; until then it is a reviewer claim.
 | B9 | med (M7) | `Cpu::run` register pressure, single dispatch branch | stage 2 |
 | B10 | med (M7) | ITCM/DTCM placement still Proposed | stage 2 (ADR 0026 at link time) |
 | B11 | low | PPU sync fixed cost ~300-380 Ir, 3.6x per line | wave 5 (timeline table, E3) |
-| B12 | low | Full four-channel APU sync per register write | plan |
+| B12 | low | Full four-channel APU sync per register write | fixed (m10-undo-apu): NR50/NR51 writes append a mixer span instead of syncing four channels; 917 -> 749 Ir per write. Per-channel sync for channel registers: not done (needs a bench that shows it) |
 | B13 | low | Bounds-check panics in per-line PPU/OAM code | plan |
 
 ## C. Code size and MCU fit
