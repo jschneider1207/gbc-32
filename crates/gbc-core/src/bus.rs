@@ -562,10 +562,13 @@ impl Ctx<'_, '_> {
     /// Sets the Serial deadline ([`Self::serial_deadline`]) and
     /// reschedules: after a change to the transfer, the counter or its
     /// rate.
+    // Out of line, measured (docs/perf.md, "Scheduler and attribute
+    // pass"): inlined into the register-write paths it is +1,450 B and
+    // slower. `Schedule::set` is inlined here, also measured.
     #[inline(never)]
     fn schedule_serial(&mut self) {
         let at = self.serial_deadline();
-        self.sys.sched.set(EventKind::Serial, at);
+        self.sys.sched.set_inline(EventKind::Serial, at);
         self.reschedule();
     }
 
@@ -581,7 +584,7 @@ impl Ctx<'_, '_> {
     /// interrupt that was pending). With IE bit 2 set the deadline stays
     /// on, so the dispatch's acknowledge has nothing to do (ADR 0011,
     /// 2026-11-24 amendment).
-    #[inline(never)]
+    #[inline(never)] // See `schedule_serial`.
     fn schedule_timer(&mut self) {
         let now = self.clock();
         let s = &mut *self.sys;
@@ -591,7 +594,7 @@ impl Ctx<'_, '_> {
         } else {
             s.timer.deadline()
         };
-        s.sched.set(EventKind::Timer, at);
+        s.sched.set_inline(EventKind::Timer, at);
         self.reschedule();
     }
 
@@ -1053,9 +1056,11 @@ impl Ctx<'_, '_> {
 
     /// A serial transfer completes at `now` (`EventKind::Serial`): the
     /// catch-up applies the shifts since the last access, the eighth
-    /// among them. Out of line, off `boundary`: once a transfer.
-    /// `boundary` reschedules after the event loop.
-    #[cold]
+    /// among them. Once a transfer; `boundary` reschedules after the
+    /// event loop.
+    // Out of line, measured (docs/perf.md, "Scheduler and attribute
+    // pass"): inlined into `boundary` it slows the PPU event's path.
+    // Not `#[cold]`: a running transfer has one every eight bits.
     #[inline(never)]
     fn serial_event(&mut self, now: u64) {
         self.serial_catch_up(now);
@@ -2792,7 +2797,10 @@ fn palette_byte(mem: &Memory, reg: usize) -> u8 {
 }
 
 /// The rare I/O reads (`read_io`'s `_` arm), `reg` the low 7 address bits;
-/// FF unless listed. Out of line, for `read_high`'s code-size budget.
+/// FF unless listed.
+// Out of line, measured (docs/perf.md, "Scheduler and attribute pass"):
+// as arms of `read_io` these cost +3.98% Ir on `synth:dma-storm` and
+// +1.06% on cpu_instrs (`read_high` then needs the PPU position).
 #[inline(never)]
 fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
     let cgb = sys.cgb_mode;

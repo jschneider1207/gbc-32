@@ -53,8 +53,7 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core4cart*4Cart8read_ram*                        # Cart::read_ram (every cartridge RAM read)
 .text._R*8gbc_core4cart*4Cart8read_rtc*                        # Cart::read_rtc (A000-BFFF read with RAM off or RTC mapped)
 .text._R*8gbc_core3bus*3Ctx15run_ppu_to_call*                  # Ctx::run_ppu_to_call (sync_ppu, write_ppu, Cpu::run)
-.text._R*8gbc_core5timer*5Timer17schedule_overflow*            # Timer::schedule_overflow (every TIMA reload, from boundary)
-.text._R*8gbc_core5timer*5Timer6reload*                       # Timer::reload (a serviced TIMA overflow, from boundary)
+.text._R*8gbc_core5timer*5Timer17schedule_overflow*            # Timer::schedule_overflow (every TIMA reload: `Timer::reload` is inlined in boundary)
 # Tier D: frame driver
 .text._R*8gbc_core*8Emulator3run*                               # Emulator::run
 .text._R*8gbc_core*8Emulator9run_frame*                         # Emulator::run_frame
@@ -109,6 +108,7 @@ ITCM_BUDGET_BYTES=57344
 FLASH_OK .text._R*8gbc_core3bus13read_io_other*                # reads of the less common FFxx registers
 FLASH_OK .text._R*8gbc_core5timer*5Timer4read*                 # DIV/TIMA/TMA/TAC reads
 FLASH_OK .text._R*8gbc_core3bus7read_sb*                       # SB reads (a running transfer's lazy shifts)
+FLASH_OK .text._R*8gbc_core3bus*3Ctx12serial_event*              # the end of a serial transfer (once per byte sent)
 FLASH_OK .text._R*8gbc_core3apu8read_apu*                      # APU register reads (FF10-FF3F)
 FLASH_OK .text._R*8gbc_core3bus*3Ctx14write_timer_io*          # timer and serial register writes
 FLASH_OK .text._R*8gbc_core3bus*3Ctx8write_ie*                 # IE writes (re-arm the lazy timer)

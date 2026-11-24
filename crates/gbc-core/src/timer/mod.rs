@@ -290,9 +290,6 @@ impl Timer {
     /// are `256 - TMA` falls of the selected bit apart, a whole number of
     /// clocks, so only the second and the last need running. The last is
     /// the second plus the whole periods that fit before `now`.
-    // Out of line (code size): one copy for the register accesses, STOP,
-    // the speed switch and the IF paths.
-    #[inline(never)]
     pub(crate) fn catch_up(&mut self, now: u64) {
         let first = self.deadline();
         if first > now {
@@ -315,8 +312,9 @@ impl Timer {
 
     /// Makes `tima` exact at `now` (not in cycle A, except for a read on
     /// a copy).
-    // Out of line (code size): shared by the register writes and STOP,
-    // none of them on a hot path.
+    // Out of line, measured (docs/perf.md, "Scheduler and attribute pass"):
+    // `sync`, `write_tac` and `write_div` inlined into their callers are
+    // +460 B for no Ir (register writes and STOP only).
     #[inline(never)]
     fn sync(&mut self, now: u64) {
         self.tima = self.tima(now);
@@ -324,7 +322,10 @@ impl Timer {
     }
 
     /// Sets `overflow_at` from the synced `tima`/`tima_from`.
-    #[inline(never)] // See `sync`.
+    // Out of line, measured (docs/perf.md, "Scheduler and attribute pass"):
+    // inlined into its six callers it is +1,270 B for 0.15-0.3% Ir on five
+    // bench lines.
+    #[inline(never)]
     fn schedule_overflow(&mut self) {
         self.overflow_at = if self.tima_bit == 0 {
             NEVER
@@ -347,7 +348,6 @@ impl Timer {
 
     /// The reload at the end of cycle A, at clock `now`: TIMA = TMA. The
     /// timer interrupt it requests is the bus's ([`Self::deadline`]).
-    #[inline(never)] // See `sync`.
     pub(crate) fn reload(&mut self, now: u64) {
         self.tima = self.tma;
         self.tima_from = self.sc(now);
@@ -386,9 +386,7 @@ impl Timer {
     /// `GB_emulate_timer_glitch`). That includes disabling the timer:
     /// SameBoy ticks there; Pan Docs says CGBs don't (ADR 0011 open
     /// question, kept until a test decides).
-    // Out of line: keeps the code-size budgets of its callers independent
-    // of codegen-unit partitioning (it is not on a hot path).
-    #[inline(never)]
+    #[inline(never)] // See `sync`.
     pub(crate) fn write_tac(&mut self, now: u64, value: u8) {
         self.catch_up(now);
         let new_bit = if value & 4 != 0 {
@@ -420,7 +418,7 @@ impl Timer {
     /// Returns the counter before the write: its set bits all fall, which
     /// the caller applies to the serial bit clock (SameBoy
     /// `GB_set_internal_div_counter`: `triggers = div_counter & ~value`).
-    #[inline(never)] // See `write_tac`.
+    #[inline(never)] // See `sync`.
     pub(crate) fn write_div(&mut self, now: u64) -> u64 {
         self.catch_up(now);
         let old = self.sc(now);

@@ -75,7 +75,6 @@ report 1088 <gbc_core::cpu::Cpu>::checked_fetch::<gbc_core::bus::Ctx>
 report 517 <gbc_core::ppu::Ppu>::stat
 report 244 <gbc_core::schedule::Schedule>::set
 report 225 <gbc_core::timer::Timer>::schedule_overflow
-report 126 <gbc_core::timer::Timer>::reload
 report 225 <gbc_core::bus::Ctx>::start_audio
 report 198 <gbc_core::apu::noise::Noise>::advance
 report 196 <gbc_core::ppu::Ppu>::cpu_blocked

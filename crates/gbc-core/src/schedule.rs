@@ -121,7 +121,8 @@ impl Schedule {
         self.set_inline(kind, at);
     }
 
-    /// [`Self::set`], inlined: for the event handlers in `Ctx::boundary`.
+    /// [`Self::set`], inlined: for `Ctx::schedule_timer` and
+    /// `Ctx::schedule_serial`.
     #[inline(always)]
     pub(crate) fn set_inline(&mut self, kind: EventKind, at: u64) {
         let i = kind as usize;
