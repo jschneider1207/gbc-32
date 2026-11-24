@@ -122,24 +122,11 @@ Open (M10, session 16):
 - **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
   0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
-- **`acceptance/README.md` item 5** still says every symbol in
-  `perf/code-size-budgets.txt` must fit its budget and a missing symbol
-  fails; since the budget reform and the H735 retarget (9b501c3) only the
-  total `.text` line gates. Contract text is human-owned: please update.
-- **Hardware repo follow-ups** from the H735 gate work: ADR 0001 and
-  `firmware-interface.md` still say FMC SDRAM and byte-wise ROM reads;
-  `TCM_AXI_SHARED` should be 01 (128 KiB ITCM, 256 KiB AXI: two frames +
-  audio + 128 KiB cart RAM need 231,424 B; at 192 KiB ITCM, AXI is 34,816 B
-  short). A full-panel 153,600 B LTDC frame buffer does not fit in AXI
-  SRAM next to 128 KiB of cart RAM.
 - **Retire ADR 0027 (byte-wide ROM reads)?** ES0491 2.7.3 is an FMC
   erratum; 2.8.4 Table 5 allows memory-mapped HyperBus reads at any address
   and length. With HyperRAM the gate has no hardware reason left.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
-- **Hardware repo** (C11): `docs/firmware-interface.md` says "~200 KiB
-  emulator state"; measured 51.8 KiB (`Memory` 50,960 + `Emulator` 832).
-  Also C5: the frame buffer can live in DTCM (it is never a DMA source).
 - **Branches to delete** (agent `git branch -D` is denied), merged by
   fast-forward in session 16: `m10-timer-lazy`, `m10-ppu-lcdoff`,
   `m10-cart-unsupported`, `m10-hdma-cancel`, `m10-speed-switch`.
@@ -207,6 +194,11 @@ Decided in session 16 (2026-11-24, M10 review), human:
 - Stage 3 ROM memory is HyperRAM on OCTOSPI, not FMC SDRAM (the human
   referred to it as decided; hardware ADR 0001 not yet updated). ADR 0027
   (byte-wide ROM reads, for the FMC erratum) stays until retired.
+- Permission given to edit `acceptance/README.md` item 5 (now: only total
+  `.text` gates) and the hardware repo docs for HyperRAM/H735 facts. Done:
+  hardware ADR 0003 (HyperRAM on OCTOSPI, supersedes 0001), ADR 0001 status
+  line, `firmware-interface.md`, `requirements.md`: left UNCOMMITTED in
+  `../gbc-32-hardware` for the human to review and commit.
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.

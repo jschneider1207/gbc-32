@@ -256,10 +256,12 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
    `crates/gbc-core/tests/hard_rules.rs` must exist and pass: `std` only
    inside `#[cfg(test)]` modules, no `#[path]` or `include!`, `#![no_std]`
    present, and no dependencies of any kind in the core's `Cargo.toml`.
-5. `scripts/check-code-size.sh` passes: every symbol in
-   `perf/code-size-budgets.txt` is found in the `thumbv7em-none-eabihf`
-   release build (`-C target-cpu=cortex-m7`) and fits its budget. A missing
-   symbol fails.
+5. `scripts/check-code-size.sh` passes: the total `.text` of `gbc-core` in
+   the `thumbv7em-none-eabihf` release build (`-C target-cpu=cortex-m7`)
+   fits the `(total .text)` figure in `perf/code-size-budgets.txt` (sized
+   for the STM32H735's ITCM, `docs/perf.md` "Code-size budgets"). The
+   per-function lines in that file are reported, not gated (human,
+   2026-11-24).
 6. `scripts/check-bench.sh` passes: the benchmark ROMs are present with the
    hashes in `acceptance/test-roms.sha256`, and no ROM's instruction count
    under valgrind exceeds `perf/bench-baseline.txt` by more than 3%.
