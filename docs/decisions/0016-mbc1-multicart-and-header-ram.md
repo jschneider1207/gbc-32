@@ -89,3 +89,22 @@ has a bank 0x10 (offset 0x40000) and is detected when its second game's
 logo is there. The size test only rules out ROMs of 0x40000 bytes or less
 (2 Mbit), which have no room for a second game at bank 0x10. The decision
 itself is unchanged.
+
+## Amendment (2026-11-24): the logo areas must be the logo
+Stage 1 M10 review, finding A4-8: the test above also accepts two equal
+areas that are not a logo at all, in particular filler (00 or FF) in a
+logo-less homebrew ROM with an empty start of bank 0x10. Such a ROM got
+4-bit BANK1 wiring and broke on its first far call. The note above that
+"test fixtures must not do that" admitted the hole for fixtures only.
+
+`is_mbc1m` now also requires both areas to be the Nintendo logo itself
+(Pan Docs, The Cartridge Header, 0104-0133; Pan Docs MBC1 "MBC1M"
+suggests looking for the logo). This is stricter than SameBoy, whose test
+has the same blind spot. It is still content inspection, not test-ROM
+detection: every licensed cartridge carries these 48 bytes or the boot
+ROM refuses it, and each game of a multicart is a stand-alone image with
+its own. The change can only turn MBC1M into MBC1, and only for ROMs
+without the logo; mooneye `emulator-only/mbc1/multicart_rom_8Mb` has the
+real logo in both places and still passes. Test:
+`blank_logo_areas_are_not_a_multicart` (failed before the change). The
+decision itself is unchanged.

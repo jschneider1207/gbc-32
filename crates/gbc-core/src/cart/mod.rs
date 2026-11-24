@@ -242,19 +242,34 @@ mod rtc;
 
 use crate::rom::Rom;
 
+/// The Nintendo logo every licensed cartridge carries at 0104-0133 (Pan
+/// Docs: The Cartridge Header, "0104-0133 - Nintendo logo"); the boot ROM
+/// refuses to start a cartridge without it.
+const NINTENDO_LOGO: [u8; 0x30] = [
+    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+    0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+    0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+];
+
 /// Whether an MBC1 ROM is a multicart (MBC1M), by its contents (ADR 0016).
 /// Each game of a multicart has its own header, so the Nintendo logo
 /// (0104-0133, 0x30 bytes) is repeated at the start of the game in bank
-/// 0x10 (offset 0x40104). Same test as SameBoy (`Core/mbc.c`,
-/// GB_configure_cart: ROM of at least 0x44000 bytes and the two logo
-/// copies equal).
+/// 0x10 (offset 0x40104). SameBoy's test (`Core/mbc.c`,
+/// GB_configure_cart) is a ROM of at least 0x44000 bytes whose two logo
+/// areas are equal; here both must also be the logo itself (Pan Docs:
+/// MBC1, "MBC1M": look for the logo), so that two equal areas of filler
+/// (a logo-less homebrew ROM with an empty bank 0x10) are not taken for a
+/// second game.
 fn is_mbc1m(rom: &[u8]) -> bool {
     if rom.len() < 0x4_4000 {
         return false;
     }
     // Byte by byte through `Rom::get` (`header`), not a slice compare (a
     // `memcmp` may read words; ADR 0027). Both copies are inside the ROM.
-    (0x104..0x134).all(|i| header(rom, i) == header(rom, 0x4_0000 + i))
+    NINTENDO_LOGO
+        .iter()
+        .zip(0x104..)
+        .all(|(&b, i)| header(rom, i) == b && header(rom, 0x4_0000 + i) == b)
 }
 
 /// Whether the cartridge type has an MBC3 real-time clock.
@@ -1620,7 +1635,7 @@ mod mbc1m_tests {
     extern crate std;
     use std::vec::Vec;
 
-    const LOGO: [u8; 0x30] = [0xCE; 0x30];
+    const LOGO: [u8; 0x30] = NINTENDO_LOGO;
 
     /// 1 MiB MBC1 ROM, 64 banks; each bank's first byte is its number.
     /// `logo_at_10`: copy the logo to bank 0x10 (multicart layout).
@@ -1664,6 +1679,34 @@ mod mbc1m_tests {
         );
     }
 
+    /// A4-8: two equal *blank* logo areas (a logo-less homebrew ROM with
+    /// filler at the start of bank 0x10) are not a second game's header.
+    #[test]
+    fn blank_logo_areas_are_not_a_multicart() {
+        for fill in [0x00u8, 0xFF] {
+            let mut r = std::vec![fill; 64 * ROM_BANK];
+            r[HEADER_CART_TYPE] = 0x01;
+            r[HEADER_RAM_SIZE] = 0x00;
+            // Standard wiring: BANK2 = 1, BANK1 = 1 is bank 0x21, where
+            // the multicart wiring would map bank 0x11.
+            for b in [0x11usize, 0x21] {
+                r[b * ROM_BANK] = b as u8;
+            }
+            assert!(!is_mbc1m(&r), "fill {fill:#04x}");
+            let mut ram = [];
+            let mut c = Cart::new(&r, &mut ram).unwrap();
+            assert_eq!(c.mapper, Mapper::Mbc1, "fill {fill:#04x}");
+            c.write_rom(0x4000, 1, 0);
+            c.write_rom(0x2000, 1, 0);
+            assert_eq!(bank_at(&c, 0x4000), 0x21, "fill {fill:#04x}");
+        }
+        // Equal non-blank bytes that are not the logo aren't one either.
+        let mut r = std::vec![0u8; 64 * ROM_BANK];
+        r[HEADER_CART_TYPE] = 0x01;
+        r[0x104..0x134].fill(0xCE);
+        r[0x4_0104..0x4_0134].fill(0xCE);
+        assert!(!is_mbc1m(&r));
+    }
     #[test]
     fn multicart_wires_bank2_at_bit_4() {
         let r = rom(0x01, true);
