@@ -5,87 +5,87 @@
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
 - **Milestone:** M10 (in-depth review), in progress. M9 is `stage1-m9`
-  (49c0756, tagged on the human's instruction); M1-M8 tagged likewise.
-- **Last updated:** 2026-11-24, session 16 (M10 review; log to be written
-  at session end: `logs/2026-11-24-16-m10-review.md`).
+  (49c0756); M1-M8 tagged likewise.
+- **Last updated:** 2026-11-24, session 16 (log
+  `logs/2026-11-24-16-m10-review.md`).
 
-## Next up: M10 (in-depth review)
+## Next up: M10 (in-depth review), second half
 
-**Read `docs/reviews/stage1-m10.md` first**: the triage table (every
-finding, its outcome, the wave plan). Raw reviewer reports are in
+**Read `docs/reviews/stage1-m10.md` first** (triage: every finding and its
+outcome). Raw reports and the inventory of budget-driven code shapes
+(`F-budget-distortions.md`: 55 items, 12 themes, 22 keep-as-is) are in
 `docs/reviews/stage1-m10/`. The human gave this milestone more latitude
-than the usual milestone rules ("improve it instead of just copying");
-decisions are under "Decided in session 16" below.
+than the usual rules ("improve it instead of just copying"; "ensure the
+core is written in the most logical and high performant way"); their
+decisions are under "Decided in session 16".
 
-**Progress snapshot (5307f7e, late session 16):** waves 1-3 done. Landed
-since: invariance nets in the gate (`check-sync-invariance.sh --long`,
-allowlist empty), HuC1/HuC3 (ADR 0032), H735-sized size gate, renderer
-tile-loop specialisation (DMG-mode games -6.6%), APU loops + mixer spans,
-serial one event per transfer, timed interrupt requests (ADR 0033; IF
-bits 5-6 hack gone). Bench baseline re-recorded: worst-case 313.5 M Ir
-(2.62 M/frame; was 488.4 M this morning after the cgu=1 pin). `.text`
-108,656 of 122,880 B. **In flight:** `m10-cpu-loop` (one attention check
-per instruction, tick, little-endian register pairs), `m10-ppu-state`
-(fetch state out of `Memory`, `Stalls` type, `Memory::clear`).
-**Queued, in order:** bus access fast paths (B8, inventory A1
-`write_mapped`, L1 CB merge); scheduler one-pass (B5); inventory themes
-1, 4, 8, 10, 11 (small state moves, OAM DMA read clears, PPU walk/access
-checks, timer/scheduler attributes, attribute sweep); worst-case bench
-gains a serviced timer IRQ + a DMG-mode bench line (human approved the
-first; the second is a stricter addition); line-153 rule (L5, behaviour
-change, needs a test); timeline table (E3), `bus.rs` split (D2), `Speed`
-enum (D4), docs/comment sweep (D7/D8, inventory section 6 list); mode-3
-oracle (E1); audio alias measurement (A3-1). Then the M10 gate run, baseline,
-tag `stage1-m10`.
+**Done (all on `main`):** the eight reviews and triage; nets (checked
+profile in the fuzz gate; `check-sync-invariance.sh --long` in the gate:
+eager-sync equality with an empty allowlist, clock offsets past 2^32,
+30-minute run; `tests/apu_output.rs`); every confirmed correctness finding
+(palette/LCD-off, WY latch, HDMA cancel + stale flag, speed-switch order,
+STOP mode + RP, two APU fixes, DMA retime, RTC mask, unsupported mappers
+refused (ADR 0031), HuC1 + HuC3 (ADR 0032)); `codegen-units = 1`; size
+gate sized for the STM32H735 (only total `.text` <= 122,880 B gates);
+perf: lazy timer, serial one event per transfer, timed interrupt requests
+(ADR 0033), renderer tile-loop specialisation, APU loops + mixer spans,
+PPU fetch state out of `Memory` + `Stalls` type, interpreter loop
+(attention flag, offset-0 tick, little-endian register pairs).
+Numbers at 3607e6b: worst-case 288.0 M Ir (2.41 M/frame; 488.4 M this
+morning after the cgu=1 pin), cpu_instrs 1,486 M (1,703 M), `.text`
+112,110 B.
 
-Waves (details in the triage file):
-1. Nets + measuring stick: **done** (checked profile fc92df4;
-   `codegen-units = 1` 4db1d02; ITCM closure check 0a424bc; budget reform
-   be036b7; lazy timer 69247dd, worst-case -23.7%).
-2. Correctness fixes: done so far: A2-01 palette/LCD-off (86c2f98), A2-05
-   (65f00bd), A4-1 unsupported mappers refused (35ff843, ADR 0031), A4-8
-   (2de0ffb), A4-2 HDMA cancel (6094acb), A1-04 (0d64707), A4-4/A4-5,
-   speed-switch order A1-02/E8/A1-08 (e8d960e..7cc2345), APU analytic
-   tests + A3-3/A3-6, STOP mode + RP (FF56). HuC1 + HuC3 (ADR 0032). **Wave 2 is complete.** Formerly in flight: HuC1 + HuC3
-   (branch `m10-huc`). Old in-flight note:
-   STOP mode + RP register (branch `m10-stop-mode`), APU analytic sample
-   tests + A3-3/A3-6 (branch `m10-apu`). **Open:** HuC1 + HuC3 mappers
-   (human asked for them; `MapperKind` already has the variants).
-3. More nets before big refactors (E6): golden fingerprint with samples in
-   the gate, eager-sync equality for the PPU, clock-offset/long-run runs.
-4. Performance (fingerprint-identical): B2 serial one event per byte, B5
-   scheduler one-pass, B6/C6 one attention check per instruction, B7, B8,
-   C7; then `synth:worst-case` gains a serviced timer IRQ (human) and the
-   baseline is re-recorded.
-5. Structure: state back to its owners (the `Hw` cap is gone), typed `Irq`
-   event instead of IF bits 5-6, one line-timeline table, `bus.rs` split,
-   `Speed` enum, architecture.md and comment sweep.
-6. Test-only dot-stepped mode-3 oracle (E1); audio alias measurement (A3-1,
-   any Ir cost goes to the human).
+**Remaining, in order** (one agent per item, see "How work is run"):
+1. Bus access fast paths: review B8 + inventory A1 (`write_mapped`
+   out of line), then L1 (CB (HL) merge) if bytes allow. Biggest byte
+   spend left (est. 8-10 KB of the ~10.8 KB margin): measure Ir per byte.
+2. Retire ADR 0027 (human: "Yes retire that ADR"): dated amendment marking
+   it retired (ROM is in HyperRAM on OCTOSPI; ES0491 2.7.3 is FMC-only,
+   2.8.4 Table 5 allows any-address HyperBus reads); undo inventory items
+   R1-R4 and L19 where a wide ROM read is the natural/faster form (e.g.
+   `Cart::dma_block` word copies), each measured; remove
+   `check-rom-loads.sh` from the gate (gate edit prompts the human) and
+   from `acceptance/README.md` if listed (human-owned: ask, or the human
+   already allowed contract edits that follow their decisions: confirm).
+3. Scheduler one-pass (B5); inventory themes 1 (small scalar state), 4
+   (OAM DMA read clears), 10 (timer/scheduler attributes), 11 (attribute
+   sweep per file family).
+4. `synth:worst-case` gains a serviced timer IRQ (human approved) and a
+   DMG-mode bench line is added (no bench line runs a DMG-mode ROM; the
+   renderer's -6.6% there is unguarded); re-record the baseline.
+5. Structure: line timeline as one table (E3), `bus.rs` split along
+   D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
+   experiment (A1-06).
+6. Docs/comment sweep: `docs/architecture.md` (D7), stale and budget-era
+   comments (D8, inventory section 6), stale names (`Memory::obj_rank` in
+   ADR 0019 and plan line ~117, `Emulator` size in lib.rs), perf.md tables.
+7. Test-only dot-stepped mode-3 oracle (E1); audio alias measurement
+   (A3-1; any Ir cost goes to the human).
+8. Triage lows into plan tasks; M8 review lows still open in the plan;
+   full `./scripts/gate-stage1.sh`; `romtest --update-baseline`; session
+   log; tag `stage1-m10`. Declaring Stage 1 complete is the human's.
 
-**How work is run:** one fix agent per theme in a scratch worktree under
-the session scratchpad (`git worktree add <scratch>/wt-x -b m10-x main`),
-at most 2 building agents, every cargo/valgrind command under
-`flock -x <scratch>/build.lock`. The orchestrator rebases the branch on
-`main`, re-runs tests + `check-code-size.sh` + `check-itcm-set.sh` +
-romtest full manifest (+ `check-bench.sh` when the hot path moved), then
-`git merge --ff-only` and removes the worktree. Every correctness fix has a
-test seen failing first. Core public API changes get one independent
-reviewer on the diff.
+**How work is run:** one agent per theme in a scratch worktree under the
+session scratchpad (`git worktree add <scratch>/wt-x -b m10-x main`), every
+cargo/valgrind command under `flock -x <scratch>/build.lock` (absolute
+path). The orchestrator rebases the branch on `main`, re-runs clippy,
+tests, `check-code-size.sh`, `check-itcm-set.sh`, `diff-fingerprint.sh main
+--audio-buffer 7 --hash-samples`, `check-sync-invariance.sh`, romtest full
+manifest and `check-bench.sh`, then `git merge --ff-only`, removes the
+worktree, and re-records `perf/bench-baseline.txt` after perf merges.
+Correctness fixes need a test seen failing first; refactors must be
+fingerprint-identical. Briefs that worked are in the session transcript
+only; the pattern is: goal, files, constraints, what to measure, exact
+report format, commit trailer.
 
-**Gates now (9b501c3, sized for the final MCU, STM32H735 with 128 KiB ITCM):**
-total gbc-core `.text` <= 122,880 B (97,136 now) in `check-code-size.sh`;
-+3% Ir guard; `check-rom-loads.sh`. Per-function lines and the H753 ITCM
-hot set (fit, closure) are report-only. Budget-driven code shapes are
-being undone: inventory `docs/reviews/stage1-m10/F-budget-distortions.md`
-(55 items, 12 behaviour-preserving themes, 22 keep-as-is). Old text:
-(`check-itcm-set.sh`; 55,0xx of 57,344 B, margin ~2.3 KB; a new function
-called from ITCM code needs a glob or a `FLASH_OK <glob>  # reason` line in
-`perf/itcm-sections.txt`); per-function caps for ITCM functions only
-(measured +5%); +3% Ir guard vs `perf/bench-baseline.txt` (worst-case
-372.8 M Ir = 3.12 M/frame). Total `.text` (95,950 B) and flash-function
-lines are report-only. No `Hw` size cap. Release profile is
-`codegen-units = 1`.
+**Gates now:** total gbc-core `.text` <= 122,880 B (128 KiB ITCM on the
+H735 minus 8 KiB reserve; provisional until a firmware ELF exists); +3% Ir
+vs `perf/bench-baseline.txt`; fuzz under the `checked` profile; invariance
+checks; `check-rom-loads.sh` (until ADR 0027's retirement lands).
+Per-function size lines and the H753 ITCM hot set are report-only (the
+dev-board set is over its figure: expected, WARN only). Release profile:
+`codegen-units = 1` plus, once the in-flight commit lands,
+`-C llvm-args=-cgp-max-address-users-to-scan=100000` (human approved).
 
 **Human (session 14): the desktop client is a throwaway used to validate
 the core; spend minimal time on it.** Fix only what blocks core validation
@@ -121,11 +121,20 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- See "Progress snapshot" above for the live branches. Older note:
-- Branch `m10-stop-mode` (merged): real
-  STOP mode + RP (FF56). Branch `m10-apu` (`wt-apu`): analytic sample
-  tests, A3-3, A3-6, headroom doc. If the session died, check
-  `git worktree list` and `git log main..<branch>`; re-verify before merging.
+At the time of writing two agents were running; a fresh session cannot
+receive their reports, so check their state before anything else:
+- **LLVM flag** (working directly on `main`): look for commits
+  `infra: ...` after 3607e6b touching `.cargo/config.toml` and the three
+  `scripts/check-*.sh`, plus a new `perf/bench-baseline.txt`. If absent or
+  half-done (`git status`), redo: flag in `.cargo/config.toml` and the
+  scripts that set RUSTFLAGS, fingerprint identical, `check-bench.sh
+  --update-baseline`, docs.
+- **PPU walk theme**, branch `m10-ppu-walk` (worktree
+  `<session scratchpad>/wt-walk`, may be gone after a reboot; the branch
+  stays): inventory L3, L4, L8, L13, L14 (behaviour-preserving) and L5
+  (line-153 rule, a behaviour change). `git log main..m10-ppu-walk`; if it
+  has commits, rebase, re-verify as in "How work is run" and merge; L5 must
+  come with a failing-first test and an explanation of every differing ROM.
 
 ## Needs human
 
@@ -144,9 +153,6 @@ Open (M10, session 16):
 - **Filler-header homebrew** (ADR 0031): a ROM-only image whose header byte
   0147 is FF/FE (padding) is now refused as HuC1/HuC3 (after those mappers
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
-- **Retire ADR 0027 (byte-wide ROM reads)?** ES0491 2.7.3 is an FMC
-  erratum; 2.8.4 Table 5 allows memory-mapped HyperBus reads at any address
-  and length. With HyperRAM the gate has no hardware reason left.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
 - **Branches to delete** (agent `git branch -D` is denied), merged by
@@ -227,6 +233,8 @@ Decided in session 16 (2026-11-24, M10 review), human:
   (measured on the cpu-loop branch: cpu_instrs -18.2% vs -12.3% without,
   thumb `.text` smaller). Tied to the pinned toolchain: re-check on any
   toolchain bump.
+- Retire ADR 0027 (byte-wide ROM reads): "Yes retire that ADR". Work
+  item 2 under "Remaining".
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.
