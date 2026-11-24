@@ -932,7 +932,8 @@ impl Renderer {
     /// consecutive from pixel 0, so the objects of a span are the next ones
     /// in `order` from `ObjRank::next`: each object is looked at once per line,
     /// not once per span. Out of line: once per span with objects, and
-    /// inlined it would grow `render` past its size budget.
+    /// forced into `render` it measured slower (cpu_instrs +0.06%,
+    /// worst-case +0.04%, cgb-acid2 -0.01% x86 Ir) for 568 B more.
     #[inline(never)]
     fn fetch_objects(
         &mut self,
