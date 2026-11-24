@@ -2742,7 +2742,7 @@ impl Ppu {
     pub(crate) fn obj_size_fetch(&mut self, at: u64, value: u8, mem: &mut Memory) {
         // In mode 3 (as `mode3_pixel`).
         let a = self.at(at);
-        let (t, ly) = (a.t, a.line as u8);
+        let t = a.t;
         let lt = &self.line;
         if !self.lcd_enabled()
             || lt.start != at.wrapping_sub(u64::from(t))
@@ -2776,16 +2776,7 @@ impl Ppu {
                 self.lcdc
             };
             // Fetched with the old height; after a write between the two
-            // reads, the high plane's byte of the new height's row stands
-            // in for the old row's during the fetch (VRAM is the PPU's
-            // alone in mode 3).
-            let attrs = self.attr_on.then_some(&self.obj_attr);
-            let old_hi = self
-                .renderer
-                .obj_high_addr(&mem.oam, attrs, slot, ly, self.lcdc);
-            let new_hi = self.renderer.obj_high_addr(&mem.oam, attrs, slot, ly, hi);
-            let keep = mem.vram[old_hi];
-            mem.vram[old_hi] = mem.vram[new_hi];
+            // reads, the high plane with the new one.
             let src = Sources {
                 vram: &mem.vram,
                 oam: &mem.oam,
@@ -2794,8 +2785,7 @@ impl Ppu {
                 pairs: &mem.bg_pairs,
             };
             self.renderer
-                .fetch_next_object(&mut mem.obj_buf, &src, self.lcdc);
-            mem.vram[old_hi] = keep;
+                .fetch_next_object(&mut mem.obj_buf, &src, self.lcdc, hi);
         }
     }
 

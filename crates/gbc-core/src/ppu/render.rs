@@ -1234,28 +1234,45 @@ impl Renderer {
                 break;
             }
             if x != 0 {
-                self.fetch_object(obj, src, lcdc, slot, index, y, x);
+                self.fetch_object(obj, src, lcdc, lcdc, slot, index, y, x);
             }
             k += 1;
         }
         self.next_obj = k as u8;
     }
 
-    /// Fetches the line's next object in fetch order (`next_obj`)
-    /// now, with LCDC `lcdc`: an LCDC.2 write lands after its fetch read
-    /// the tile row (`Ppu::obj_size_fetch`). Cold: only on such writes.
+    /// Fetches the line's next object in fetch order (`next_obj`) now,
+    /// its low bit plane with the object height of LCDC `lcdc_low` and its
+    /// high one with that of `lcdc_high`: an LCDC.2 write lands after its
+    /// fetch read the tile row, or between its two reads
+    /// (`Ppu::obj_size_fetch`). Cold: only on such writes.
     #[cold]
     #[inline(never)]
-    pub(crate) fn fetch_next_object(&mut self, obj: &mut ObjBuf, src: &Sources, lcdc: u8) {
+    pub(crate) fn fetch_next_object(
+        &mut self,
+        obj: &mut ObjBuf,
+        src: &Sources,
+        lcdc_low: u8,
+        lcdc_high: u8,
+    ) {
         if self.slow & OBJ_DIRTY != 0 {
             obj.pix = [0; OBJ_BUF_LEN];
             self.slow &= !OBJ_DIRTY;
         }
-        // `fetch_objects` up to that object only.
-        let all = self.objects;
-        self.objects = all.with_len(self.next_obj.wrapping_add(1));
-        self.fetch_objects(obj, src, lcdc, usize::MAX);
-        self.objects = all;
+        // As one step of `fetch_objects`, whatever the span.
+        let k = usize::from(self.next_obj);
+        if k >= self.objects.len() {
+            return;
+        }
+        let slot = usize::from(self.order[k % MAX_PER_LINE]);
+        let (index, y, x) = self.objects.get(slot);
+        if x >= 168 {
+            return;
+        }
+        if x != 0 {
+            self.fetch_object(obj, src, lcdc_low, lcdc_high, slot, index, y, x);
+        }
+        self.next_obj = k as u8 + 1;
     }
 
     /// The fetch-order position and the slot of the line's next object to
@@ -1295,14 +1312,19 @@ impl Renderer {
         ((object_row(ly, y, tile, flags, lcdc) | bank) + 1) & 0x3FFF
     }
 
-    /// Decodes one object's row into the object buffer.
+    /// Decodes one object's row into the object buffer. The fetch reads
+    /// LCDC.2 (the object height) for each bit plane's address (SameBoy
+    /// display.c `get_object_line_address` before each `vram_read`):
+    /// `lcdc_low` and `lcdc_high` are LCDC as of those two reads, the same
+    /// value unless a write landed between them (`Ppu::obj_size_fetch`).
     #[inline(always)]
     #[allow(clippy::too_many_arguments)] // Object fields plus the buffer.
     fn fetch_object(
         &mut self,
         obj: &mut ObjBuf,
         src: &Sources,
-        lcdc: u8,
+        lcdc_low: u8,
+        lcdc_high: u8,
         slot: usize,
         index: u8,
         y: u8,
@@ -1340,8 +1362,9 @@ impl Renderer {
         } else {
             (u8::from(flags & ATTR_DMG_OBP1 != 0) << 2, 0, 0)
         };
-        let addr = object_row(self.ly, y, tile, flags, lcdc) | bank;
-        let (mut lo, mut hi) = (src.vram[addr & 0x3FFF], src.vram[(addr + 1) & 0x3FFF]);
+        let low = object_row(self.ly, y, tile, flags, lcdc_low) | bank;
+        let high = (object_row(self.ly, y, tile, flags, lcdc_high) | bank) + 1;
+        let (mut lo, mut hi) = (src.vram[low & 0x3FFF], src.vram[high & 0x3FFF]);
         if flags & ATTR_X_FLIP != 0 {
             lo = lo.reverse_bits();
             hi = hi.reverse_bits();
