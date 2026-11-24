@@ -991,8 +991,10 @@ impl Ppu {
     /// The CPU access windows ([`Self::vram_blocked`],
     /// [`Self::palette_blocked`], [`Self::oam_blocked`]): on a visible line
     /// with the LCD on, from `from[0]` (`from[1]` on the first line after
-    /// LCD enable) to `end_extra` dots after the mode-3 end. Out of line:
-    /// one copy for the three (code size).
+    /// LCD enable) to `end_extra` dots after the mode-3 end. Out of line,
+    /// one copy for the three: inlined into each it is +470 B for -0.06%
+    /// on cgb-acid2 (the others within 0.01%), and `palette_blocked`'s
+    /// fast path then pays for the larger frame (cgb-raster +2.45%).
     #[inline(never)]
     fn cpu_blocked(&self, now: u64, double: bool, from: [u32; 2], end_extra: u32) -> bool {
         if !self.lcd_enabled() {
