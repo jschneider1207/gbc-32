@@ -62,7 +62,12 @@ after startup. Wario Land 3 gaps (67-469 ms) confirmed on bc07793: every `hitch:
 is LCD-off blank frames (e.g. 28 frames, 27 blank), busy/wake late <2 ms.
 Present step ~2 ms adds +-1 ms jitter (present p1 15.0 / p99 18.5 vs
 frame p1 16.1 / p99 17.4); occasional `step max` 5-9 ms (one frame's
-emulation; normal ~0.3 ms) is unexplained but within budget. Next
+emulation; normal ~0.3 ms) is unexplained but within budget. Human: hitches don't match the stutter
+felt. Link's Awakening DX (84858f7): hitches = 2-3 LCD-off frames; a
+~40 s stretch with `wake late` mean 1.0 / max 4.1 ms (elsewhere 0.35 / ~1)
+spread frame intervals to 13-20.5 ms: queued fix = sleep to ~2 ms before
+due, then precise wait (after the replay tooling, `desktop-replay`, same
+files). Stutter work now waits on a recorded session with M marks. Next
 candidates: present path jitter (softbuffer, +-1-2 ms) or display sync
 (human: "decide after the stall fix").
 
