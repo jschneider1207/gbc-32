@@ -45,8 +45,8 @@ pub(crate) const BATCH: usize = 16;
 const _: () = assert!(15 * SAMPLE_PERIOD <= i16::MAX as u64);
 
 /// Adds `level` times each span's clocks to `out`: a channel whose DAC is
-/// on while the channel is off (Pan Docs DAC: digital 0 -> +1). One copy
-/// for all channels (code size).
+/// on while the channel is off (Pan Docs DAC: digital 0 -> +1). Out of
+/// line: one copy for all channels, off their playing paths.
 #[inline(never)]
 pub(crate) fn constant(segs: &[u8], out: &mut [i16], level: i32) {
     for (o, &dt) in out.iter_mut().zip(segs) {

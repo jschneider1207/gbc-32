@@ -94,8 +94,8 @@ impl Square {
     }
 
     /// The digital output `dt` clocks after the state (PCM12), from a
-    /// copy: the state is unchanged. Out of line: one copy for both
-    /// squares (code size).
+    /// copy: the state is unchanged. Out of line: a rare read, one copy
+    /// for both squares.
     #[inline(never)]
     pub(crate) fn digital_at(&self, dt: u64) -> u8 {
         let mut sq = *self;
@@ -113,7 +113,7 @@ impl Square {
 
     /// Advances by `dt` clocks without integrating (ADR 0021 section 9),
     /// in closed form: positions only matter mod 8. Out of line: one copy
-    /// for both squares (code size).
+    /// for both squares and the PCM12 read.
     #[inline(never)]
     pub(crate) fn advance(&mut self, dt: u64) {
         if !self.on {
@@ -146,7 +146,7 @@ impl Square {
     /// popcount), then the final position's bit for the rest. Exact: the
     /// same state and integral as stepping
     /// (`integrate_matches_a_clock_by_clock_reference`). Out of line: one
-    /// copy for both squares (code size).
+    /// copy for both squares.
     #[inline(never)]
     pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i16]) {
         if !self.env.dac() {
@@ -225,9 +225,7 @@ impl Square {
     /// countdown (`docs/reference/apu.md`). `max(1)`: a 4-clock period 4
     /// clocks on steps 1 clock late (no ROM). A trigger's countdown counts
     /// as reloaded one period before its first step (`delay` clocks on; no
-    /// ROM). Then the length (`Length::write_nrx4`) and the trigger. Out
-    /// of line: one copy for both squares, off `Apu::write` (code size).
-    #[inline(never)]
+    /// ROM). Then the length (`Length::write_nrx4`) and the trigger.
     fn write_nrx4(&mut self, value: u8, fs: u8, delay: u8) {
         let since = self.since_step();
         self.freq = self.freq & 0xFF | u16::from(value & 7) << 8;
@@ -265,9 +263,7 @@ impl Square {
     }
 
     /// Frame-sequencer step `step` (after the increment): length on odd
-    /// steps (256 Hz), the envelope on step 0 (64 Hz). Out of line: one
-    /// copy for both squares (code size).
-    #[inline(never)]
+    /// steps (256 Hz), the envelope on step 0 (64 Hz).
     pub(crate) fn frame_step(&mut self, step: u8) {
         if step & 1 == 1 {
             self.clock_length();
