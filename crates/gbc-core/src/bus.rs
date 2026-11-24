@@ -1359,12 +1359,12 @@ impl Ctx<'_, '_> {
         {
             return;
         }
-        let a = usize::from(addr);
-        if addr < 0xFEA0 {
-            self.mem.oam[a & 0xFF] = value;
+        let i = oam_offset(addr);
+        if let Some(b) = self.mem.oam.get_mut(i) {
+            *b = value;
             self.sys.ppu.oam_written();
         } else {
-            self.mem.extra_oam[extra_oam_index(a)] = value;
+            self.mem.extra_oam[extra_oam_index(i)] = value;
         }
     }
 
@@ -2714,12 +2714,22 @@ fn wram_mut<'m>(mem: &'m mut Memory, sys: &Sys, a: usize) -> &'m mut u8 {
     }
 }
 
-/// FEA0-FEFF on CGB revision C: RAM with address bits 3-4 ignored (SameBoy
-/// `GB_read_oam`/`write_oam`: `addr &= ~0x18`). TODO(M3): reads 0xFF while
-/// the PPU blocks OAM (Pan Docs: "FEA0-FEFF range").
+/// The offset of `addr` in FE00-FEFF (the caller's address is in it):
+/// below 0xA0 an index into OAM, from there on FEA0-FEFF
+/// ([`extra_oam_index`]).
 #[inline]
-fn extra_oam_index(a: usize) -> usize {
-    ((a & 0xFF) & !0x18) - 0xA0
+fn oam_offset(addr: u16) -> usize {
+    debug_assert!(addr >> 8 == 0xFE);
+    usize::from(addr & 0xFF)
+}
+
+/// FEA0-FEFF on CGB revision C, by the offset `i` in FE00-FEFF
+/// ([`oam_offset`], 0xA0 or more): RAM with address bits 3-4 ignored
+/// (SameBoy `GB_read_oam`/`write_oam`: `addr &= ~0x18`). TODO(M3): reads
+/// 0xFF while the PPU blocks OAM (Pan Docs: "FEA0-FEFF range").
+#[inline]
+fn extra_oam_index(i: usize) -> usize {
+    (i - 0xA0) & !0x18
 }
 
 /// The palette RAM byte BCPD (`reg` 0x69) or OCPD (0x6B) reads, at the
@@ -2787,11 +2797,10 @@ fn read_oam(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
 /// FE00-FEFF as stored.
 #[inline]
 fn raw_oam(mem: &Memory, addr: u16) -> u8 {
-    let a = usize::from(addr);
-    if addr < 0xFEA0 {
-        mem.oam[a & 0xFF]
-    } else {
-        mem.extra_oam[extra_oam_index(a)]
+    let i = oam_offset(addr);
+    match mem.oam.get(i) {
+        Some(&b) => b,
+        None => mem.extra_oam[extra_oam_index(i)],
     }
 }
 

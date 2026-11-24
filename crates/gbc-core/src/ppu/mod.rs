@@ -3194,7 +3194,10 @@ impl ObjectLines {
         if !self.valid || self.tall != tall {
             self.build(oam, tall);
         }
-        self.bits[(ly >> 5) as usize] & (1 << (ly & 31)) != 0
+        // (No line past the screen has a bit.)
+        self.bits
+            .get((ly >> 5) as usize)
+            .is_some_and(|w| w & (1 << (ly & 31)) != 0)
     }
 
     fn build(&mut self, oam: &[u8; 0xA0], tall: bool) {
