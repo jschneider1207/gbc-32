@@ -7,48 +7,45 @@
 - **Milestone:** M9 (test-ROM completion), in progress; then M10 (in-depth
   review on Fable, started by the human). M8 is `stage1-m8` (ad56c23).
   M1-M7 tagged likewise.
-- **Last updated:** 2026-11-23, session 14 (log
-  `logs/2026-11-23-14-m9-stat-dma-mealybug-pacing.md`). Baseline 186d4bc
-  (must 86/86, should 40/40, stretch 3,404/3,461).
+- **Last updated:** 2026-11-23, session 15 (log
+  `logs/2026-11-23-15-m9-apu-mealybug-lcdoffset.md`). Baseline 0be5600
+  (must 86/86, should 40/40, stretch 3,422/3,461).
 
-## Next up (session 15): M9
+## Next up (session 15, in progress): M9
 
-27 open fix targets (51 stretch fails minus 24 signed off; the 5
-no-reference Mealybug ROMs are signed off too). Baseline 9ea63c4
-(stretch 3,410). By area:
-1. **Mealybug 7** (`docs/design/mid-line-ppu.md`, last section, groups
-   C-F): C `m3_lcdc_tile_sel_change`, `m3_scy_change` and D
-   `m3_lcdc_win_map_change`, `m3_lcdc_tile_sel_win_change` likely need one
-   model (SameBoy keeps the BG fetcher running during an object fetch, so
-   the next tile's reads land at fixed dots inside the stall); E step G
+15 open fix targets (39 stretch fails minus 24 signed off). Session 15
+landed: SameSuite group 15 (sweep overflow delay, CH4 trigger phase: 3
+fixed + 4 cgbE ROMs now pass; the other 4 signed off by the human),
+Mealybug C/D (`m3_scy_change`, `m3_lcdc_win_map_change` pass;
+`m3_lcdc_tile_sel_change`, `m3_lcdc_tile_sel_win_change` at 8 px, one
+unexplained line each, `docs/design/mid-line-ppu.md` "Mealybug C and D"),
+lcd_offset 3 (all pass). Open, by area:
+1. **Mealybug 5:** the two 8-px ROMs above; E step G
    (`*_tile_sel_change2`, `*_tile_sel_win_change2`); F `cgb_wx_glitch`
-   (`m3_wx_4_change_sprites`). E/F need per-dot fetcher detail.
-2. **SameSuite APU 7** (group 15 "unclear"): ch1 `sweep`, `sweep_restart`;
-   ch1/2 `volume`; ch4 `align`, `delay`, `equivalent_frequencies`. May turn
-   out E-only (then evidence + sign-off request).
-3. STAT singles: done (e5739b8, 6 ROMs). Left: single-speed line-153/0
-   walk points are a dot early vs gambatte (IF/STAT writes work around it
-   where ROMs hit it); "Open" in `docs/reference/stat-irq.md`.
-4. **lcd_offset 3:** `offset{1,2}_lyc8fint_m1stat_1` (line-144 STAT mode
-   read edge, design steps 6-9), `offset3_lyc99int_m2irq_count_1` (single
-   speed version of the ds fix regresses 4 `m2enable/*ly0*`).
-5. `scx_during_m3` 4 (all the `scx_0367c0` PNG), `cgbpal_m3` 2 (ds
-   lcdoffset1 m3start), `oam_access/prewrite_lcdoffset1_1`,
-   `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_2`, `cgb-acid-hell`,
-   AGE `m3-bg-lcdc`.
-6. M8 review lows still open (plan M9 bullets).
+   (`m3_wx_4_change_sprites`).
+2. **gambatte `scx_during_m3/scx_0367c0` 4** (in flight, branch
+   `m9-scx-0367c0`).
+3. **lcdoffset1 CPU access 3:** `cgbpal_m3` ds `m3start_ds_lcdoffset1_2`
+   read/write, `oam_access/prewrite_lcdoffset1_1` (in flight, branch
+   `m9-m3start-access`).
+4. `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_2`, `cgb-acid-hell`
+   (2 px), AGE `m3-bg-lcdc` (256 px).
+5. M8 review lows still open (plan M9 bullets). Single-speed line-153/0
+   walk points a dot early vs gambatte ("Open" in
+   `docs/reference/stat-irq.md`).
 After M9: M10, in-depth review (human starts it on Fable). Items for it:
 `obj_size_fetch` temporarily swaps one VRAM byte for one object fetch
 (unobservable, but unusual); boot-tile setup (`bus.rs` `boot_logo`);
 delayed LYC request kept in IF bits 5-6 (`LYC_IRQ_PENDING`, reads OR 0xE0,
-interrupt checks mask with `INT_MASK`; unusual).
+interrupt checks mask with `INT_MASK`; unusual); line-0 pulse scheduler
+deadline one dot after its walk point (`Ppu::next_event`).
 
-**Budgets (main 9ea63c4):** `.text` 96,550 of 97,500 B (950 free; tight
-again). Worst-case 476.78 M Ir (~3.99 M Ir/frame, 99.2%
-of the 4.02 M line). cgb-acid2 686.27 M (baseline 682.33, guard +3%). APU
-per-write 905.6 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size
-lever (needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment
-`nop` padding (`docs/perf.md` code size).
+**Budgets (main 0be5600):** `.text` 96,904 of 97,500 B (596 free).
+`next_event` 586 of 590 B. Worst-case ~3.98 M Ir/frame (of the 4.02 M
+line). cgb-acid2 +0.85% vs bench baseline (guard +3%). APU per-write
+915.4 of 950 Ir. `Hw` at its 864 B limit. Biggest remaining size lever
+(needs the human, Stage 2 measurement): ~5.8 KB of M7 alignment `nop`
+padding (`docs/perf.md` code size).
 
 **Present-phase fix landed (session 14 end):** LADX slide route
 irregularities beyond the beat 54.1 -> 1.1/min (slides 115 -> 0), Wario
@@ -125,7 +122,11 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None (no worktrees or unmerged agent branches at session 14 end).
+- Worktrees in the session-15 scratchpad
+  (`/tmp/claude-1000/-home-jess-gbc-32/bf774c1c-.../scratchpad/`):
+  `wt-scx` (branch `m9-scx-0367c0`), `wt-m3start` (`m9-m3start-access`),
+  agents running. Merged and removable: `wt-apu` (`m9-apu-15`),
+  `wt-mealy` (`m9-mealy-cd`), `wt-lcdoff` (`m9-lcd-offset`).
 
 ## Needs human
 Open:
@@ -161,7 +162,18 @@ Open:
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
+Decided in session 15 (2026-11-23), human:
+- SameSuite `channel_{1,2}_volume`, `channel_4_align`,
+  `channel_1_sweep_restart`: "Sign off all 4" as CGB E results (each
+  failing cell is SameBoy's CGB C value). Moved into
+  `same-suite-apu-cgbE` (0be5600). FYI: 4 earlier-signed-off cgbE ROMs
+  (`channel_4_lfsr_7_15`, `_lfsr_restart{,_fast}`,
+  `_frequency_alignment`) now pass on our CGB C model; they stay in that
+  group (moving them back would be a manifest change: stricter, the
+  human's call).
+
 Decided in session 14 (2026-11-23), human:
+
 - SameSuite `channel_1_freq_change_timing-cgb0BC`: sign off ("Sign off
   target"): it needs the CGB C PCM12 read glitch; a model fitted to it broke
   14 passing SameSuite ROMs that expect CGB E reads. Own stretch group
@@ -336,12 +348,12 @@ None.
 
 ## Acceptance snapshot
 
-Baseline 9ea63c4 (`acceptance/results/stage1.json`, session 14; session 13
-ended at 3,376; M8 tag `stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at
-bc07793 (session 14 end). (.text 95,652 B, worst-case ~3.99 M Ir/frame.)
+Baseline 0be5600 (`acceptance/results/stage1.json`, session 15; session 14
+ended at 3,410; M8 tag `stage1-m8` was stretch 3,126). `scripts/gate-stage1.sh` passed at
+bc07793 (session 14 end); not yet re-run in session 15.
 
 | Tier | Pass | Total | Notes |
 |---|---|---|---|
 | must | 86 | 86 | |
 | should | 40 | 40 | |
-| stretch | 3,410 | 3,461 | 51 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 in `same-suite-apu-cgbE`, 1 in `same-suite-apu-pcm-glitch`, 3 in `gambatte-uninit-palram`, 5 no-reference in `mealybug-no-cgb-reference`. 27 open fix targets |
+| stretch | 3,422 | 3,461 | 39 fail, 5 no-reference. Signed off (still run, counted as fail where failing): 7 other-revision SameSuite, 13 failing of 17 in `same-suite-apu-cgbE`, 1 in `same-suite-apu-pcm-glitch`, 3 in `gambatte-uninit-palram`, 5 no-reference in `mealybug-no-cgb-reference`. 15 open fix targets |
