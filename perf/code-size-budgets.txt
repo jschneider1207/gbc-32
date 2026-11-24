@@ -43,7 +43,7 @@ report 347 <gbc_core::bus::Ctx>::write_mapped
 report 1183 <gbc_core::bus::Ctx>::boundary
 report 960 <gbc_core::ppu::Ppu>::walk_to
 report 590 <gbc_core::ppu::Ppu>::next_event
-report 444 <gbc_core::ppu::Ppu>::point_irq
+report 1054 <gbc_core::ppu::Ppu>::point_irq_ahead
 report 1563 <gbc_core::bus::Ctx>::write_ppu
 report 124 gbc_core::bus::read_vram
 report 122 <gbc_core::bus::Ctx>::write_vram
@@ -95,7 +95,6 @@ report 860 <gbc_core::bus::Ctx>::write_during_dma
 report 540 <gbc_core::bus::Ctx>::div_reset
 report 720 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
 report 605 <gbc_core::ppu::Ppu>::seek
-report 236 <gbc_core::ppu::Ppu>::point_irq_rare
 report 97 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop_begin
 report 248 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch_halt
 report 375 <gbc_core::bus::Ctx>::write_palette_data

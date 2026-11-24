@@ -1361,18 +1361,27 @@ impl Ppu {
     }
 
     /// Applies the STAT-line part of update point `pt` on line `l` to
-    /// `line`. Returns whether it requests the STAT interrupt.
+    /// `line`. Returns whether it requests the STAT interrupt. Each point
+    /// has `eval` specialized to its mode source and comparison (perf: one
+    /// shared `eval` for all cost ~7 Ir per point, 1% on cgb-acid2), and
+    /// the walk inlines it (as a call: cgb-acid2 +1.2%).
+    #[inline(always)]
     fn point_irq(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
         let (sel, lyc) = (self.stat_select, self.lyc);
         let ly = l as u8;
-        // The points of lines 1-143 and 145-153 inline `eval`, specialized
-        // to their mode source and comparison; the rest (line 0's `Ly3`,
-        // line 144's, line 153's) go to `point_irq_rare` as a tail call
-        // (perf: one shared `eval` for all cost ~7 Ir per point, 1% on
-        // cgb-acid2; all of them inlined grow this past its thumbv7em
-        // budget).
         match pt {
-            Pt::Ly3 if l != 0 => line.eval_inline(sel, lyc, 2, None),
+            // Line 0, double speed: the mode-1 source ends here, a dot
+            // before the mode-2 pulse (`Ly4`), unless mode 2 is selected:
+            // then it lasts to the pulse, which a selected mode 1 so
+            // blocks, as in single speed ([`edges::ly0_pt`]).
+            Pt::Ly3 if l == 0 => {
+                if double && sel & SEL_MODE2 == 0 {
+                    line.eval_inline(sel, lyc, NO_MODE, Some(0))
+                } else {
+                    line.eval_inline(sel, lyc, 1, Some(0))
+                }
+            }
+            Pt::Ly3 => line.eval_inline(sel, lyc, 2, None),
             // The mode-2 source ends (line 0: a pulse). Lines 1-143 had it
             // from `Ly3`, and a write since kept the line up for it
             // ([`Self::update_at`]), so only line 0 can rise for it here.
@@ -1380,39 +1389,31 @@ impl Ppu {
                 let a = line.eval_inline(sel, lyc, 2, Some(ly));
                 a | line.eval_inline(sel, lyc, NO_MODE, Some(ly))
             }
-            Pt::HBlank => line.eval_inline(sel, lyc, 0, Some(ly)),
-            Pt::V0 if l != 144 => line.eval_inline(sel, lyc, 1, None),
-            Pt::V4 if l != 144 => line.eval_inline(sel, lyc, 1, Some(ly)),
             Pt::Latch | Pt::End => false,
-            _ => self.point_irq_rare(line, pt, l, double),
+            Pt::HBlank => line.eval_inline(sel, lyc, 0, Some(ly)),
+            Pt::V0 if l == 144 => line.eval_inline(sel, lyc, 0, None),
+            Pt::V0 => line.eval_inline(sel, lyc, 1, None),
+            Pt::Quirk2 => line.eval_inline(sel, lyc, MODE_0_2, None),
+            // Line 144: the mode part holds from `Quirk2` (the selects as
+            // of there block the mode-1 interrupt, `edges::QUIRK2`).
+            Pt::V4 if l == 144 => line.eval_inline(sel, lyc, MODE_HOLD, Some(144)),
+            Pt::V4 => line.eval_inline(sel, lyc, 1, Some(ly)),
+            Pt::VBlank => line.eval_inline(sel, lyc, 1, Some(144)),
+            Pt::L153Cmp => line.eval_inline(sel, lyc, 1, Some(153)),
+            Pt::L153Off if double => line.eval_inline(sel, lyc, 1, Some(153)),
+            Pt::L153Off => line.eval_inline(sel, lyc, 1, None),
+            Pt::L153Zero => line.eval_inline(sel, lyc, 1, Some(0)),
         }
     }
 
-    /// [`Self::point_irq`] for line 0's `Ly3`, line 144's points and
-    /// line 153's.
+    /// [`Self::point_irq`] as a call, for the look-ahead
+    /// ([`Self::next_event`]). (Perf: inlined into that loop, the tests of
+    /// the selects and LYC of every arm are hoisted out of it, about 70
+    /// instructions per look-ahead whatever points it visits, also with
+    /// no source selected: halt-irq +0.7%, cpu_instrs +0.2%.)
     #[inline(never)]
-    fn point_irq_rare(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
-        let (mode, cmp) = match pt {
-            Pt::V0 => (0, None),
-            Pt::Quirk2 => (MODE_0_2, None),
-            // Line 144: the mode part holds from `Quirk2` (the selects as
-            // of there block the mode-1 interrupt, `edges::QUIRK2`).
-            Pt::V4 => (MODE_HOLD, Some(l as u8)),
-            Pt::VBlank => (1, Some(144)),
-            Pt::L153Cmp => (1, Some(153)),
-            Pt::L153Off => (1, if double { Some(153) } else { None }),
-            Pt::L153Zero => (1, Some(0)),
-            // `Ly3` on line 0 (`point_irq` handles the others). Double
-            // speed: the mode-1 source ends here, a dot before the mode-2
-            // pulse (`Ly4`), unless mode 2 is selected: then it lasts to
-            // the pulse, which a selected mode 1 so blocks, as in single
-            // speed ([`edges::ly0_pt`]).
-            _ => {
-                let ends = double && self.stat_select & SEL_MODE2 == 0;
-                (if ends { NO_MODE } else { 1 }, Some(0))
-            }
-        };
-        line.eval(self.stat_select, self.lyc, mode, cmp)
+    fn point_irq_ahead(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
+        self.point_irq(line, pt, l, double)
     }
 
     /// When [`Ppu::sync`] must next run: the first update point after the
@@ -1444,11 +1445,12 @@ impl Ppu {
                 c.pos -= FRAME;
                 start = start.wrapping_add(u64::from(FRAME));
             }
-            // (`point_irq` is false at `Latch`; skipping the call there
-            // saves ~0.25% Ir on cgb-acid2 but takes this past its
-            // thumbv7em code-size budget.)
-            let fires = matches!(c.pt, Pt::End | Pt::VBlank)
-                || (!quiet && self.point_irq(&mut line, c.pt, u32::from(c.line), double));
+            // `Latch` changes neither the STAT line nor IF.
+            let fires = match c.pt {
+                Pt::End | Pt::VBlank => true,
+                Pt::Latch => false,
+                pt => !quiet && self.point_irq_ahead(&mut line, pt, u32::from(c.line), double),
+            };
             if fires {
                 return start.wrapping_add(u64::from(c.pos));
             }

@@ -83,7 +83,7 @@ ITCM_BUDGET_BYTES=57344
 # Tier B (cheap, per-event PPU functions)
 .text._R*8gbc_core3ppu*3Ppu7walk_to*                           # Ppu::walk_to (Ppu::sync without the timed-request post, which its callers inline)
 .text._R*8gbc_core3ppu*3Ppu10next_event*                       # Ppu::next_event
-.text._R*8gbc_core3ppu*3Ppu9point_irq*                         # Ppu::point_irq
+.text._R*8gbc_core3ppu*3Ppu15point_irq_ahead*                  # Ppu::point_irq_ahead (next_event; the walk inlines point_irq)
 .text._R*8gbc_core3ppu*3Ppu4draw*                              # Ppu::draw
 .text._R*8gbc_core3ppu*3Ppu5flush*                             # Ppu::flush
 .text._R*8gbc_core3ppu*3Ppu4stat*                              # Ppu::stat
@@ -132,5 +132,4 @@ FLASH_OK .text._R*8gbc_core3bus*3Ctx9dma_pause*                # HALT/STOP enter
 FLASH_OK .text._R*8gbc_core3bus*3Ctx10dma_resume*              # HALT/STOP left during an OAM DMA
 FLASH_OK .text._R*8gbc_core9vdma_turn*                         # Emulator::run, only while a VRAM DMA is pending or stalls the CPU
 # Rare events
-FLASH_OK .text._R*8gbc_core3ppu*3Ppu14point_irq_rare*          # update points of lines 0, 144 and 153 (a few per frame)
 FLASH_OK .text._R*8gbc_core3bus*3Bus17speed_switch_halt*       # the halt after a CGB speed switch
