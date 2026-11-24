@@ -7,6 +7,7 @@ cgb-acid2/cgb-acid2.gbc 20 665225971
 synth:event-storm 2 177553521
 synth:dma-storm 3 384572153
 synth:halt-irq 10 269252415
-synth:worst-case 2 276111793
+synth:worst-case 2 289297010
 synth:cgb-raster 2 270975126
 synth:apu-writes 2 79404943
+synth:dmg-raster 2 185451213
