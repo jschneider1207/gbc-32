@@ -1,7 +1,6 @@
 //! Large internal RAM arrays.
 
 use crate::apu::Apu;
-use crate::dma::ReadClears;
 use crate::ppu::ObjBuf;
 
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
@@ -59,11 +58,6 @@ pub struct Memory {
     pub(crate) bg_pal: [u8; 64],
     /// CGB OBJ palette RAM (OCPD, FF6B), same layout.
     pub(crate) obj_pal: [u8; 64],
-    /// OAM bytes cleared by conflicting CPU reads during an OAM DMA from
-    /// VRAM, not yet applied to `oam` ([`ReadClears`]). Placed here, not in
-    /// `Sys`, while `Hw` had a size cap (dropped 2026-11-24). Empty outside a transfer and between run
-    /// calls.
-    pub(crate) dma_read_clears: ReadClears,
     /// The APU's internal state (ADR 0021 section 2): here, not in `Hw`, as
     /// it is only touched on cold paths. All zero is powered off.
     pub(crate) apu: Apu,
@@ -89,7 +83,6 @@ impl Memory {
             obj_pal: [0; 64],
             bg_pairs: [[0; 16]; 8],
             apu: Apu::new(),
-            dma_read_clears: ReadClears::new(),
         }
     }
 
@@ -110,7 +103,6 @@ impl Memory {
         self.obj_pal.fill(0);
         self.bg_pairs = [[0; 16]; 8];
         self.apu = Apu::new();
-        self.dma_read_clears = ReadClears::new();
     }
 }
 
@@ -141,9 +133,7 @@ mod tests {
             obj_pal,
             bg_pairs,
             apu,
-            dma_read_clears,
         } = &NEW;
-        assert!(dma_read_clears.is_empty());
         let fields: [&[u8]; 11] = [
             wram,
             vram,
@@ -164,8 +154,7 @@ mod tests {
         // the tail to the 8-byte alignment of `apu` (HRAM is 127 bytes).
         let total: usize = fields.iter().map(|f| f.len()).sum::<usize>()
             + size_of_val(bg_pairs)
-            + size_of::<Apu>()
-            + size_of_val(dma_read_clears);
+            + size_of::<Apu>();
         assert_eq!(
             size_of::<Memory>(),
             total.next_multiple_of(align_of::<Memory>())
@@ -191,7 +180,6 @@ mod tests {
                 obj_buf,
                 bg_pal,
                 obj_pal,
-                dma_read_clears,
                 apu,
             } = &mut *m;
             bg_pairs.as_flattened_mut().fill(0x1234_5678);
@@ -207,7 +195,6 @@ mod tests {
             rank.fill(9);
             bg_pal.fill(21);
             obj_pal.fill(22);
-            dma_read_clears.record(23);
             apu.post_boot();
         }
         m.clear();
@@ -224,7 +211,6 @@ mod tests {
             obj_buf,
             bg_pal,
             obj_pal,
-            dma_read_clears,
             apu,
         } = &*m;
         let same = [
@@ -240,7 +226,6 @@ mod tests {
             ("obj_buf.rank", obj_buf.rank == NEW.obj_buf.rank),
             ("bg_pal", *bg_pal == NEW.bg_pal),
             ("obj_pal", *obj_pal == NEW.obj_pal),
-            ("dma_read_clears", *dma_read_clears == NEW.dma_read_clears),
             ("apu", *apu == NEW.apu),
         ];
         let dirty: std::vec::Vec<_> = same.iter().filter(|f| !f.1).map(|f| f.0).collect();

@@ -70,10 +70,12 @@ pub(crate) struct OamDma {
 /// The OAM bytes cleared by conflicting CPU reads during a transfer from
 /// VRAM and not yet applied to OAM: bit `i % 32` of word `i / 32` for byte
 /// `i` (`bus::dma_read_clear` records, `Ctx::dma_sync` applies; ADR 0028
-/// amendment). Interior mutability, because the CPU read path takes shared
-/// references and stays that way; atomics (relaxed loads and stores, plain
-/// `ldr`/`str` on the MCU) rather than `Cell`, so `Memory`, where this
-/// lives, stays `Sync` and can be a `static`. All zero when idle.
+/// amendment). Lives in `Sys`, with the rest of the bus state. Interior
+/// mutability, because the CPU read path takes shared references and
+/// stays that way (docs/perf.md, "Scheduler and attribute pass"); atomics
+/// (relaxed loads and stores, plain `ldr`/`str` on the MCU) rather than
+/// `Cell`, so the owner stays `Sync` and can be a `static`. All zero when
+/// idle.
 pub(crate) struct ReadClears([AtomicU32; 5]);
 
 impl ReadClears {

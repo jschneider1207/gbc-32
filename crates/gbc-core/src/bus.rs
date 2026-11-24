@@ -21,7 +21,7 @@ use crate::apu::{self, StereoSample};
 use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK, StopKind};
-use crate::dma::{self, Conflict, OamDma};
+use crate::dma::{self, Conflict, OamDma, ReadClears};
 use crate::hdma::{self, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
@@ -77,6 +77,10 @@ pub(crate) struct Sys<'a> {
     pub(crate) inputs: InputQueue,
     /// CGB VRAM DMA (FF51-FF55, ADR 0017).
     pub(crate) vdma: VramDma,
+    /// OAM bytes cleared by conflicting CPU reads during an OAM DMA from
+    /// VRAM, not yet applied to OAM ([`ReadClears`]). Empty outside a
+    /// transfer and between run calls.
+    pub(crate) dma_read_clears: ReadClears,
     /// STOP mode with the screen black: frames completed in it are black
     /// ([`Ctx::stop_frame`]). Cold, so last.
     pub(crate) stop_black: bool,
@@ -90,6 +94,7 @@ impl Sys<'_> {
             sched: Schedule::new(),
             inputs: InputQueue::new(),
             vdma: VramDma::new(),
+            dma_read_clears: ReadClears::new(),
             stop_black: false,
             ppu: Ppu::new(),
             timer: Timer::new(),
@@ -1685,8 +1690,7 @@ impl Ctx<'_, '_> {
     #[cold]
     #[inline(never)]
     fn dma_apply_read_clears(&mut self) {
-        let mem = &mut *self.mem;
-        if mem.dma_read_clears.apply(&mut mem.oam) {
+        if self.sys.dma_read_clears.apply(&mut self.mem.oam) {
             self.sys.ppu.oam_written();
         }
     }
@@ -2697,7 +2701,7 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
         (Conflict::Open, _) => return 0xFF,
         (Conflict::Wram(a), _) => a,
         (Conflict::DmaVram, i) => {
-            dma_read_clear(mem, i);
+            dma_read_clear(sys, i);
             sys.ppu.dma.base + u16::from(i)
         }
         (Conflict::Dma, i) => sys.ppu.dma.base + u16::from(i),
@@ -2715,8 +2719,8 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
 /// Inline: a call here would cost every read during a transfer saved
 /// registers (measured on `synth:dma-storm`).
 #[inline(always)]
-fn dma_read_clear(mem: &Memory, i: u8) {
-    mem.dma_read_clears.record(i);
+fn dma_read_clear(sys: &Sys, i: u8) {
+    sys.dma_read_clears.record(i);
 }
 
 /// One VRAM DMA block's 16 source bytes from `src` (16-aligned, so the
@@ -5132,7 +5136,7 @@ mod dma_tests {
                 let want = if cleared(i) { 0 } else { byte(i) };
                 assert_eq!(b, want, "source {src:02X}, byte {i}");
             }
-            assert!(emu.mem.dma_read_clears.is_empty());
+            assert!(emu.hw.sys.dma_read_clears.is_empty());
         }
     }
 
