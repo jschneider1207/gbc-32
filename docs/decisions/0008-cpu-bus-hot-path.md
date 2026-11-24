@@ -164,3 +164,131 @@ target-cpu=cortex-m7"`; `nm --size-sort -S` on the rlib's objects):
 
 Inlining `execute_cb` into `run` as well was measured and gave no host
 speedup, so it stays out of line.
+
+### 2026-11-24: one test between two instructions; the countdown in M-cycles
+
+Stage 1 M10 review, findings B6, B7, B9 (`docs/reviews/stage1-m10/B-perf.md`)
+and C6 (`C-size-mcu.md`). Behaviour is unchanged: the SM83 single-step
+suite, the romtest manifest and the fingerprint of every corpus run are
+identical.
+
+**The loop.** Before every instruction `Cpu::run` tested four things, each
+a load and a branch: the run's end (`Ctx::done`), the mode, `ime && IE &
+IF != 0`, and EI's delay. Now:
+
+```
+loop {
+    let Some(mut op) = self.checked_fetch(bus) else { return };  // out of line
+    loop {
+        self.execute(op, bus);              // the one inlined 256-arm dispatch
+        if bus.attention() { break }        // the one test
+        op = bus.read(pc); pc += 1;
+    }
+    if bus.run_done() { return }
+}
+```
+
+- `Bus::attention()` is one flag (`Ctx::attention`). It is true whenever
+  the next step may be anything but a plain fetch: the run is done, the
+  CPU is not in `Mode::Running`, EI's delay is pending, or `ime && IE &
+  IF != 0`. True more often than that is allowed and only slower.
+- `Cpu::checked_fetch` is the old per-step sequence, unchanged and in the
+  same order (the mode's step, the interrupt check and dispatch, EI's
+  delay), then the opcode fetch. It loops over steps that are no
+  instruction (a halted idle, a dispatch), testing `run_done` after each
+  as `run` did, and returns the opcode of the first that is. On the way to
+  that fetch it calls `Bus::settle(ime)`, which lowers the flag to `done
+  || (ime && IE & IF != 0)`. The first step of every `run` call goes
+  through it, so CPU state set from outside between calls
+  (`Emulator::run` setting `done` for a single step, `latch_fetch`, the
+  setters) needs no flag. `Cpu::step` is one checked step.
+- **Who raises it, and when.** The CPU, in the instruction that changes
+  its own state: EI (`Bus::attend`), RETI (`Bus::attend_ime`: only with
+  `IE & IF != 0`, IME being on from here), HALT, STOP and an invalid
+  opcode. The bus (`Ctx::irq_attention`: if `IE & IF != 0`, whatever IME
+  is, since the CPU tests IME itself), right after anything that can set
+  an IF bit or change IE while instructions run: the events of a
+  `boundary` (timer, serial, PPU sync with its timed requests of ADR
+  0033, scheduled joypad input), a serial byte completed by a DIV write,
+  and a write to IF, IE, P1 or a PPU register (LCDC, STAT, LYC). And
+  `Ctx::end_run` (a stop event, the target, a VRAM DMA request) with
+  `done`.
+- **Why the timing is the same.** The interrupt check itself didn't move:
+  it reads IME, IE and IF in `checked_fetch` at the same point between
+  two instructions as before. The flag only decides whether that check is
+  made, and it is raised inside the M-cycle whose access or tick changed
+  the inputs, always before the instruction ends. With IME off and a
+  request waiting, `settle` lowers the flag; nothing can be dispatched
+  until IME changes (EI, RETI: the CPU raises it) or IE or IF do (the bus
+  raises it again). A PPU sync to the current clock sets no IF bit (a
+  point that requests an interrupt has the PPU deadline at or before it,
+  so a boundary walked it); only the syncs ahead of the clock do, in the
+  IF/STAT/LYC writes, which raise the flag after it.
+- **Tests.** `run_calls_match_single_steps_for_every_interrupt_request`
+  (run calls against single steps, each of which is a checked step, with
+  the dispatch clocks compared) and
+  `run_on_a_bus_with_low_attention_matches_single_steps` (the CPU's side,
+  M-cycle by M-cycle, on a test bus). Removing any one raise fails one of
+  them (15 mutations, each seen failing). In builds with debug
+  assertions the loop also asserts, on the path that skips the check,
+  that the check would have found nothing; the `checked`-profile runs of
+  `scripts/check-sync-invariance.sh` exercise that over the whole corpus.
+
+Rejected: forcing the countdown to zero instead of a flag (review C6), so
+that the per-instruction test would be the fetch M-cycle's own tick. It
+saves the flag test (2 x86 instructions) but every raise then costs a
+`boundary` call per M-cycle until the instruction ends, about 100 Ir,
+which `synth:halt-irq` (three raises per interrupt) would pay.
+
+**The countdown.** `Hot::budget` (clocks left, minus `mcycle` per tick,
+test `<= 0`) is now `Hot::t_minus`: minus the M-cycles until `deadline`,
+plus one per tick, test `>= 0`. `deadline` is the first M-cycle boundary
+at or after the earliest due clock, so the boundary runs on the same
+M-cycle as before, and the clock is `deadline + t_minus * mcycle`, exact
+at every point. Counting up makes the test the sign of the sum, which the
+increment's own flags give (a `<= 0` test of a wrapping subtraction needs
+a second instruction). `Hot` and `Ctx` are `repr(C)` with the count
+first: the tick is `inc [ctx]; js` on x86 (was 7 instructions) and
+`ldr; adds; str; bmi` on thumb (was 7, 3 of them loads). A change of the
+M-cycle length keeps the clock (`Hot::set_mcycle`); the speed switch's 3
+odd clocks are `Ctx::skip_clocks`.
+
+**Why field addresses mattered.** With one address used by more than 100
+memory accesses in a function (the ~140 inlined ticks, the ~90 inlined
+reads), LLVM's CodeGenPrepare stops folding it into the accesses
+(`-cgp-max-address-users-to-scan`, default 100) and keeps `&ctx.field`
+as a value: rematerialized before each use on x86 (`lea; mov`), spilled
+and reloaded on thumb (612 stack-slot references in `Cpu::run`, review
+B9/C6). Offset 0 needs no address, which is why the count is first. The
+other hot fields (`hot.dma`, the `sys` and `mem` pointers) still pay one
+instruction per access; raising the limit (`-C
+llvm-args=-cgp-max-address-users-to-scan=100000`) on the unchanged main
+gave -3.3% Ir on cpu_instrs and -1% to -3.6% elsewhere, but it is a
+hidden LLVM option and a build-configuration decision (not taken here).
+
+Measurements (x86 Ir, `scripts/check-bench.sh`, against the baseline of
+the same day; thumbv7em sizes from `scripts/check-code-size.sh`):
+
+| | baseline | countdown | + attention |
+|---|---|---|---|
+| cpu_instrs | 1,694,717,771 | -6.03% | -11.94% |
+| cgb_sound | 1,130,295,021 | -5.90% | -9.92% |
+| cgb-acid2 | 689,083,500 | +0.21% | -0.25% |
+| event-storm | 208,386,107 | -6.83% | -10.32% |
+| dma-storm | 428,664,099 | -0.63% | -2.66% |
+| halt-irq | 286,184,478 | -1.87% | -2.41% |
+| worst-case | 313,479,719 | -4.15% | -7.98% |
+| cgb-raster | 324,867,705 | -4.31% | -7.94% |
+| apu-writes | 82,421,047 | -1.04% | -1.57% |
+| total `.text` (B) | 108,656 | 108,242 | 112,368 |
+| `Cpu::run` (B) | 24,512 | 23,784 | 27,400 (+ `checked_fetch` 1,088) |
+
+Thumb, from the end of one instruction's handler to the `tbh` of the
+next, opcode in ROM: 28 instructions, 8 loads, 2 stores, 4 conditional
+branches (was 40, 14, 2, 11). The size went up with the second step
+although the per-instruction code went down: with the test at the end of
+each handler LLVM places the code differently and copies the 4-instruction
+tick into each exit of an inlined read (~410 copies, were ~160) and the
+3-instruction test into 113 handler ends. `Cart::read_ram` is
+`#[inline(never)]` now: the inliner had made it a call at 88 of the 89
+reads before and a copy at all 89 after (4.6 KB).

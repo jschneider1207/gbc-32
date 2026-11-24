@@ -34,7 +34,7 @@ ITCM_BUDGET_BYTES=57344
 # Tier A: per instruction / bus access
 .text._R*8gbc_core3cpu*3Cpu3run*                               # Cpu::run
 .text._R*8gbc_core3cpu*3Cpu10execute_cb*                       # Cpu::execute_cb
-.text._R*8gbc_core3cpu*3Cpu16step_not_running*                 # Cpu::step_not_running
+.text._R*8gbc_core3cpu*3Cpu13checked_fetch*                    # Cpu::checked_fetch (halted steps, interrupt dispatch, the checks after EI/HALT/an IF change)
 .text._R*8gbc_core3bus9read_high*                              # bus::read_high
 .text._R*8gbc_core3bus9read_vram*                              # bus::read_vram
 .text._R*8gbc_core3bus8read_oam*                               # bus::read_oam

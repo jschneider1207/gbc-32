@@ -418,7 +418,23 @@ pub(crate) struct Ctx<'r, 'a> {
     /// target, or already reached).
     target: u64,
     /// The run call ends after the current instruction ([`Bus::run_done`]).
+    /// Set through [`Ctx::end_run`] while the CPU runs, so that it looks.
     pub(crate) done: bool,
+    /// [`Bus::attention`]: the CPU checks before its next instruction
+    /// (the end of the run, an interrupt, its own state). Raised by
+    /// [`Ctx::end_run`], by whatever may have left `IE & IF` nonzero
+    /// ([`Ctx::irq_attention`]: after the events of a boundary, a
+    /// completed serial byte, and a write to IF, IE, P1 or a PPU
+    /// register) and by the CPU ([`Bus::attend`]); lowered only by the
+    /// CPU's check ([`Bus::settle`]). ADR 0008, 2026-11-24 amendment.
+    ///
+    /// Those are all the places IF bits are set while the CPU runs
+    /// instructions. A PPU sync to the current clock sets none: a point
+    /// that requests an interrupt has the PPU deadline at or before it
+    /// (ADR 0033), so a boundary walked it. Only a sync ahead of the
+    /// clock can (the IF, STAT and LYC writes, which raise this after
+    /// it; the dispatch's acknowledge, a checked step).
+    attention: bool,
 }
 
 impl Drop for Ctx<'_, '_> {
@@ -453,6 +469,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             stop_on,
             target,
             done: false,
+            attention: true,
         };
         ctx.start_audio();
         ctx.reschedule();
@@ -465,6 +482,23 @@ impl Ctx<'_, '_> {
     #[inline]
     pub(crate) fn clock(&self) -> u64 {
         self.hot.clock()
+    }
+
+    /// The run call ends after the current instruction.
+    #[inline]
+    pub(crate) fn end_run(&mut self) {
+        self.done = true;
+        self.attention = true;
+    }
+
+    /// IE or IF may have changed: with an enabled interrupt requested,
+    /// the CPU checks before its next instruction ([`Ctx::attention`]).
+    /// It tests IME itself, so this is also raised with IME off.
+    #[inline(always)]
+    fn irq_attention(&mut self) {
+        if self.sys.ie & self.sys.iflags != 0 {
+            self.attention = true;
+        }
     }
 
     /// Advances everything but the CPU by one M-cycle: only the clock
@@ -489,6 +523,7 @@ impl Ctx<'_, '_> {
     fn serial_done(&mut self, done: bool) {
         if done {
             self.sys.iflags |= INT_SERIAL;
+            self.irq_attention();
             self.raise(Events::SERIAL_TX);
         }
     }
@@ -563,6 +598,7 @@ impl Ctx<'_, '_> {
         if (old ^ value) & INT_TIMER != 0 {
             self.schedule_timer();
         }
+        self.irq_attention();
     }
 
     /// Writes to SB, SC, DIV, TIMA, TMA and TAC (by the low 7 address
@@ -889,7 +925,7 @@ impl Ctx<'_, '_> {
     pub(crate) fn raise(&mut self, events: Events) {
         self.events |= events;
         if events.intersects(self.stop_on) {
-            self.done = true;
+            self.end_run();
         }
     }
 
@@ -931,8 +967,10 @@ impl Ctx<'_, '_> {
         }
         if now >= self.target {
             self.target = u64::MAX;
-            self.done = true;
+            self.end_run();
         }
+        // An event may have requested an interrupt.
+        self.irq_attention();
         // No handler moves the clock.
         self.reschedule_at(now);
     }
@@ -1095,7 +1133,7 @@ impl Ctx<'_, '_> {
                 // transfer block (SameBoy `GB_lcd_off`).
                 if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
                     s.vdma.pending = true;
-                    self.done = true;
+                    self.end_run();
                 }
                 let s = &mut *self.sys;
                 if (value ^ s.ppu.lcdc) & 0x04 != 0 {
@@ -1230,6 +1268,9 @@ impl Ctx<'_, '_> {
         }
         // The selects, LYC or LCDC may move the next deadline.
         self.schedule_ppu();
+        // An LCDC, STAT or LYC write may have requested the STAT
+        // interrupt.
+        self.irq_attention();
     }
 
     /// A CPU write at the current clock (no M-cycle; the caller ticks).
@@ -1381,6 +1422,7 @@ impl Ctx<'_, '_> {
         if (old ^ value) & INT_TIMER != 0 {
             self.schedule_timer();
         }
+        self.irq_attention();
     }
 
     /// [`Bus::push_acknowledge`] of a push onto IF or IE (and FF1F-FFEF,
@@ -1426,7 +1468,12 @@ impl Ctx<'_, '_> {
         let s = &mut *self.sys;
         let cgb = s.cgb_mode;
         match reg {
-            0x00 => s.set_joypad(s.buttons, value),
+            0x00 => {
+                // Selecting a group with a button held requests the
+                // joypad interrupt.
+                s.set_joypad(s.buttons, value);
+                self.irq_attention();
+            }
             0x01 | 0x02 | 0x04..=0x07 => self.write_timer_io(reg, value),
             0x0F => self.write_if(value),
             0x10..=0x3F => self.write_apu(reg, value),
@@ -1977,7 +2024,7 @@ impl Ctx<'_, '_> {
     /// the run loop can run it ([`Emulator::run`]).
     fn vdma_request(&mut self) {
         self.sys.vdma.pending = true;
-        self.done = true;
+        self.end_run();
     }
 
     /// FF55 write. An HBlank transfer that starts in HDMA's period as it
@@ -1998,7 +2045,7 @@ impl Ctx<'_, '_> {
         self.sys.vdma.write_hdma5(value, mode0);
         self.vdma_sync_reg();
         if self.sys.vdma.pending {
-            self.done = true;
+            self.end_run();
         }
         if self.sys.vdma.hblank {
             self.vdma_arm(now, false);
@@ -2370,6 +2417,30 @@ impl Bus for Ctx<'_, '_> {
     #[inline(always)]
     fn run_done(&self) -> bool {
         self.done
+    }
+
+    #[inline(always)]
+    fn attention(&self) -> bool {
+        self.attention
+    }
+
+    #[inline(always)]
+    fn attend(&mut self) {
+        self.attention = true;
+    }
+
+    #[inline(always)]
+    fn attend_ime(&mut self) {
+        self.irq_attention();
+    }
+
+    /// The CPU's check found nothing but, with `ime`, a pending
+    /// interrupt it dispatches after one more instruction (EI's delay
+    /// just ended) or, on the first step of a call, the run's end
+    /// ([`Emulator::run`] sets `done` for a single step).
+    #[inline(always)]
+    fn settle(&mut self, ime: bool) {
+        self.attention = self.done || (ime && self.sys.ie & self.sys.iflags != 0);
     }
 
     /// The wake-up's HDMA block: SameBoy `GB_cpu_run` checks STAT for it

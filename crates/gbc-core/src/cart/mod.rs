@@ -832,7 +832,12 @@ impl<'a> Cart<'a> {
     /// The index is below `ram_len <= ram_buf.len()`, but the compiler
     /// can't see that, so `get` replaces the bounds check: the fallback
     /// is never taken and there is no panic path in the CPU's hot code.
-    #[inline]
+    ///
+    /// Out of line: one call at each of the CPU's ~90 inlined reads. Left
+    /// to the inliner (`#[inline]`) it is a call at most of them in one
+    /// build and a copy at all of them, 4.6 KB on thumbv7em, in the next
+    /// (measured, 2026-11-24).
+    #[inline(never)]
     pub(crate) fn read_ram(&self, addr: u16) -> u8 {
         if !self.ram_enabled {
             return 0xFF;

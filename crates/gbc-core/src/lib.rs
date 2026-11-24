@@ -1475,36 +1475,64 @@ mod tests {
     /// countdown (ADR 0008, amendments) must be invisible.
     fn run_calls_match_single_steps(program: &[u8], until: u64, expect: Events) {
         let stops = Events::SERIAL_TX | Events::LD_B_B;
-        let a = with_program(program, 0x80);
-        let b = with_program(program, 0x80);
+        let make = || with_program(program, 0x80);
+        run_calls_match_single_steps_of(&make, stops, until, expect);
+    }
+
+    /// [`run_calls_match_single_steps`] for the emulator `make` returns,
+    /// with the stop events `stops`.
+    fn run_calls_match_single_steps_of(
+        make: &dyn Fn() -> &'static mut Emulator<'static>,
+        stops: Events,
+        until: u64,
+        expect: Events,
+    ) {
+        let a = make();
+        let b = make();
         a.set_stop_events(stops);
         b.set_stop_events(stops);
+        // The events that end a run call, each at its clock; one that
+        // doesn't is reported by whichever call it happens in, so only
+        // whether it was seen is compared.
+        let stopping = stops | Events::ALWAYS_STOP;
         let mut fb = frame();
         let mut steps = std::vec::Vec::new();
+        let mut seen = Events::EMPTY;
         while a.clock() < until {
             let start = a.clock();
             let r = a.step(&mut fb, &mut []);
             assert_eq!(r.clocks, a.clock() - start);
-            if !r.events.is_empty() {
-                steps.push((a.clock(), r.events));
+            seen |= r.events;
+            if r.events.intersects(stopping) {
+                steps.push((a.clock(), r.events.intersection(stopping)));
             }
         }
         let mut runs = std::vec::Vec::new();
+        let mut seen_runs = Events::EMPTY;
         let mut target = 1;
         while b.clock() < until {
             target = (target + 997).min(until);
             let start = b.clock();
             let r = b.run_until(target, &mut fb, &mut []);
             assert_eq!(r.clocks, b.clock() - start);
-            if r.events.is_empty() {
-                assert!(b.clock() >= target);
+            seen_runs |= r.events;
+            if r.events.intersects(stopping) {
+                runs.push((b.clock(), r.events.intersection(stopping)));
             } else {
-                runs.push((b.clock(), r.events));
+                assert!(b.clock() >= target);
             }
         }
-        let seen = steps.iter().fold(Events::EMPTY, |acc, &(_, e)| acc | e);
         assert!(seen.contains(expect), "{seen:?}");
-        assert_eq!(steps, runs);
+        assert_eq!(seen, seen_runs);
+        // (Not `assert_eq!`: the lists are long.)
+        let first = steps.iter().zip(&runs).position(|(s, r)| s != r);
+        let first = first.unwrap_or(steps.len().min(runs.len()));
+        assert!(
+            steps == runs,
+            "first difference at event {first}: steps {:?}, runs {:?}",
+            steps.get(first.saturating_sub(1)..(first + 2).min(steps.len())),
+            runs.get(first.saturating_sub(1)..(first + 2).min(runs.len())),
+        );
         assert_eq!(a.clock(), b.clock());
         assert_eq!(a.registers(), b.registers());
         for reg in [0xFF02, 0xFF04, 0xFF05, 0xFF0F, 0xFF41, 0xFF44, 0xFF4D] {
@@ -1565,6 +1593,79 @@ mod tests {
             ],
             5 * u64::from(FRAME_CLOCKS) + 777,
             Events::FRAME_READY | Events::LD_B_B,
+        );
+    }
+
+    /// Every way an interrupt becomes deliverable while `Cpu::run` loops
+    /// over instructions, against single steps (each a run call of its
+    /// own, whose one step is always a checked one): the CPU's loop looks
+    /// for an interrupt only when the bus has raised its attention (ADR
+    /// 0008, 2026-11-24 amendment), so each of these must raise it, at
+    /// its M-cycle. The handlers are `LD B,B; RETI`: the breakpoint event
+    /// gives each dispatch its clock.
+    #[test]
+    fn run_calls_match_single_steps_for_every_interrupt_request() {
+        let mut main = std::vec![
+            0xF3, 0xAF, 0xE0, 0x0F, 0xE0, 0xFF, // DI; XOR A; LDH (0F),A; LDH (FF),A
+            0x3E, 0x30, 0xE0, 0x00, // LD A,30; LDH (00),A: no P1 group selected
+            0xFB, 0x00, // EI; NOP
+            // An IF write requests an enabled interrupt.
+            0x3E, 0x1F, 0xE0, 0xFF, // LD A,1F; LDH (FF),A: IE = all
+            0x3E, 0x04, 0xE0, 0x0F, 0x00, // LD A,04; LDH (0F),A; NOP
+            // An IE write enables a requested one.
+            0xAF, 0xE0, 0xFF, // XOR A; LDH (FF),A
+            0x3E, 0x04, 0xE0, 0x0F, 0x00, // LD A,04; LDH (0F),A; NOP
+            0x3E, 0x1F, 0xE0, 0xFF, 0x00, // LD A,1F; LDH (FF),A; NOP
+            // EI with one waiting: dispatched after the next instruction.
+            0xF3, 0x3E, 0x04, 0xE0, 0x0F, // DI; LD A,04; LDH (0F),A
+            0x00, 0x00, 0xFB, 0x00, 0x00, // NOP; NOP; EI; NOP; NOP
+            // RETI with one waiting: the serial handler requests the
+            // timer's.
+            0x3E, 0x08, 0xE0, 0x0F, 0x00, // LD A,08; LDH (0F),A; NOP
+            // A P1 write selects the group of a held button.
+            0x3E, 0x10, 0xE0, 0x00, 0x00, // LD A,10; LDH (00),A; NOP
+            0x3E, 0x30, 0xE0, 0x00, // LD A,30; LDH (00),A
+            // A STAT write enables the mode-1 source in VBlank.
+            0xF0, 0x44, 0xFE, 0x90, 0x20, 0xFA, // LDH A,(44); CP 90; JR NZ,-6
+            0x3E, 0x10, 0xE0, 0x41, 0x00, // LD A,10; LDH (41),A; NOP
+            0xAF, 0xE0, 0x41, // XOR A; LDH (41),A
+            // A serial byte completes in a DIV write: each one, 192 clocks
+            // after the last, is a falling edge of counter bit 7, and
+            // every other one of those shifts a bit.
+            0x3E, 0x81, 0xE0, 0x02, // LD A,81; LDH (02),A
+            0x16, 0x14, // LD D,14
+            0x0E, 0x0A, 0x0D, 0x20, 0xFD, // LD C,0A; DEC C; JR NZ,-3
+            0xE0, 0x04, 0x15, 0x20, 0xF6, // LDH (04),A; DEC D; JR NZ,-10
+            // The timer: out of HALT, and at a boundary in a loop.
+            0x3E, 0xF0, 0xE0, 0x06, // LD A,F0; LDH (06),A
+            0x3E, 0x05, 0xE0, 0x07, // LD A,05; LDH (07),A: every 256 clocks
+            0x76, 0x00, // HALT; NOP
+            0x0E, 0x40, 0x0D, 0x20, 0xFD, // LD C,40; DEC C; JR NZ,-3
+            0x18, 0xF7, // JR -9 (back to HALT)
+        ];
+        main.resize(0x200, 0);
+        let make = || {
+            let rom = std::vec![0u8; 0x8000].leak();
+            rom[0x100..0x103].copy_from_slice(&[0xC3, 0x50, 0x01]); // JP 0150
+            rom[0x150..0x350].copy_from_slice(&main);
+            rom[0x143] = 0x80;
+            for vector in [0x40, 0x48, 0x50, 0x60] {
+                rom[vector..vector + 2].copy_from_slice(&[0x40, 0xD9]); // LD B,B; RETI
+            }
+            // Serial: LD A,04; LDH (0F),A; RETI.
+            rom[0x58..0x5D].copy_from_slice(&[0x3E, 0x04, 0xE0, 0x0F, 0xD9]);
+            let emu = fresh();
+            emu.load(rom, &mut [], Config::default()).unwrap();
+            emu.set_buttons(Buttons::A);
+            emu
+        };
+        // The serial byte is no stop event here: a stop would have the
+        // next run call look for its interrupt anyway.
+        run_calls_match_single_steps_of(
+            &make,
+            Events::LD_B_B,
+            3 * u64::from(FRAME_CLOCKS) + 99,
+            Events::FRAME_READY | Events::LD_B_B | Events::SERIAL_TX,
         );
     }
 

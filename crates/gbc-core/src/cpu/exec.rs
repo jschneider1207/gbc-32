@@ -427,6 +427,7 @@ impl Cpu {
                 bus.idle();
                 if OP == 0xD9 {
                     self.ime = true;
+                    bus.attend_ime();
                 }
             }
             // POP rr.
@@ -513,6 +514,7 @@ impl Cpu {
             0xFB => {
                 // EI: IME turns on after the next instruction.
                 self.ei_pending = true;
+                bus.attend();
             }
             // D3 DB DD E3 E4 EB EC ED F4 FC FD.
             _ => self.lock(bus),
@@ -712,6 +714,126 @@ mod tests {
             {
                 self.iflags |= bits;
             }
+        }
+    }
+
+    /// A [`TestBus`] whose [`Bus::attention`] is as low as the contract
+    /// allows: lowered by `settle`, raised by `attend`, by an M-cycle
+    /// that leaves `IE & IF` nonzero and by the end of the run, `limit`
+    /// M-cycles.
+    struct LazyBus {
+        bus: TestBus,
+        limit: usize,
+        attention: bool,
+    }
+
+    impl LazyBus {
+        fn after_mcycle(&mut self) {
+            if self.run_done() || self.bus.ie & self.bus.iflags != 0 {
+                self.attention = true;
+            }
+        }
+    }
+
+    impl Bus for LazyBus {
+        fn read(&mut self, addr: u16) -> u8 {
+            let v = self.bus.read(addr);
+            self.after_mcycle();
+            v
+        }
+        fn write(&mut self, addr: u16, value: u8) {
+            self.bus.write(addr, value);
+            self.after_mcycle();
+        }
+        fn idle(&mut self) {
+            self.bus.idle();
+            self.after_mcycle();
+        }
+        fn interrupt_enable(&self) -> u8 {
+            self.bus.ie
+        }
+        fn interrupt_flags(&self) -> u8 {
+            self.bus.iflags
+        }
+        fn set_interrupt_flags(&mut self, value: u8) {
+            self.bus.iflags = value;
+        }
+        fn event(&mut self, event: Events) {
+            self.bus.event(event);
+        }
+        fn run_done(&self) -> bool {
+            self.bus.log.len() >= self.limit
+        }
+        fn attention(&self) -> bool {
+            self.attention
+        }
+        fn attend(&mut self) {
+            self.attention = true;
+        }
+        fn settle(&mut self, ime: bool) {
+            self.attention = self.run_done() || (ime && self.bus.ie & self.bus.iflags != 0);
+        }
+    }
+
+    /// `Cpu::run` looks at the mode, IME and EI's delay only when the bus
+    /// says so ([`Bus::attention`]). Against single steps on a bus that
+    /// always says so, M-cycle by M-cycle: whatever the CPU itself does
+    /// that needs a checked step next (EI, RETI, HALT, the HALT bug, an
+    /// invalid opcode) must raise it ([`Bus::attend`]).
+    #[test]
+    fn run_on_a_bus_with_low_attention_matches_single_steps() {
+        // (program at 0100, IF at the start, (M-cycles, IF bits) set
+        // later). IE is the timer; its handler is RETI, or INC B; RETI.
+        type Case = (&'static [u8], u8, Option<(usize, u8)>);
+        let cases: [Case; 6] = [
+            // EI; NOP; HALT, woken into a dispatch; NOP; invalid opcode.
+            (&[0xFB, 0x00, 0x76, 0x00, 0xD3], 0x00, Some((6, 0x04))),
+            // EI with a request waiting: one more instruction, dispatch.
+            (&[0xFB, 0x3C, 0x3C, 0x3C, 0xD3], 0x04, None),
+            // The HALT bug (IME off, a request waiting), then EI.
+            (&[0x76, 0x3C, 0xFB, 0x3C, 0x3C, 0xD3], 0x04, None),
+            // RETI with a request made in the handler (after INC B).
+            (&[0xFB, 0x3C, 0x3C, 0x3C, 0x3C, 0xD3], 0x04, Some((9, 0x04))),
+            // EI; DI: no dispatch. Then HALT without IME: woken, no
+            // dispatch.
+            (&[0xFB, 0xF3, 0x3C, 0x76, 0x3C, 0xD3], 0x00, Some((7, 0x04))),
+            // EI; HALT with a request waiting: dispatch, HALT again.
+            (&[0xFB, 0x76, 0x3C, 0xD3], 0x04, None),
+        ];
+        for (i, (program, iflags, later)) in cases.into_iter().enumerate() {
+            const LIMIT: usize = 40;
+            let bus = || {
+                let mut bus = TestBus::new(program, 0x100);
+                bus.mem[0x50..0x52].copy_from_slice(&[0x04, 0xD9]); // INC B; RETI
+                bus.ie = 0x04;
+                bus.iflags = iflags;
+                bus.irq_at_log = later;
+                bus
+            };
+            let mut steps = bus();
+            let mut cpu = cpu_at(0x100);
+            while steps.log.len() < LIMIT {
+                cpu.step(&mut steps);
+            }
+            let mut lazy = LazyBus {
+                bus: bus(),
+                limit: LIMIT,
+                attention: false,
+            };
+            let mut cpu_run = cpu_at(0x100);
+            cpu_run.run(&mut lazy);
+            assert_eq!(lazy.bus.log, steps.log, "case {i}");
+            assert_eq!(cpu_run.regs, cpu.regs, "case {i}");
+            assert_eq!(
+                (cpu_run.ime, cpu_run.mode, lazy.bus.events),
+                (cpu.ime, cpu.mode, steps.events),
+                "case {i}"
+            );
+            // The cases got where they should: locked up (the last one
+            // halted), the handler run (but with IME off).
+            assert_eq!(cpu.locked(), i != 5, "case {i}");
+            assert_eq!(cpu.halted(), i == 5, "case {i}");
+            assert_eq!(cpu.regs.b != 0, i != 4, "case {i}");
         }
     }
 

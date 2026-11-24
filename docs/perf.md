@@ -691,7 +691,7 @@ time of the table), by tier:
 
 | Tier | Contents | Size (B) |
 |---|---|---|
-| A: per instruction/access | `Cpu::run`, `execute_cb`, `step_not_running`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`, `run_ppu_to_call`; `Ppu::cpu_blocked`; `Cart::{read_ram, read_rtc}`; `halt_begin/end`, `idle_halted`; `Schedule::set`, `Timer::schedule_overflow` | 36,834 |
+| A: per instruction/access | `Cpu::run`, `execute_cb`, `checked_fetch`; `read_high`, `read_vram`, `read_oam`, `write_mapped`, `write_high`, `write_io`, `write_vram`, `write_oam`, `sync_ppu`, `boundary`, `run_ppu_to_call`; `Ppu::cpu_blocked`; `Cart::{read_ram, read_rtc}`; `halt_begin/end`, `idle_halted`; `Schedule::set`, `Timer::schedule_overflow` | 36,834 |
 | B: PPU, per event | `Ppu::{sync, next_event, point_irq, draw, flush, stat, ly, check_wy_at}`, `Ctx::write_ppu`, `cgb_color` | 4,722 |
 | B: PPU, plain tile path | `Renderer::render`, `fill_plain`, `fill_partial::<false>`, `partial_tile::<false>` | 2,348 |
 | B: PPU, per line with objects | `Ppu::{latch, set_stalls}`, `LineTiming::finish`, `Renderer::fetch_objects`, `fill_mixed`, `fill_partial::<true>`, `partial_tile::<true>` | 4,720 |

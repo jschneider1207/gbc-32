@@ -117,22 +117,6 @@ pub trait Bus {
     fn write(&mut self, addr: u16, value: u8);
     /// One M-cycle without a memory access (an internal CPU cycle).
     fn idle(&mut self);
-    /// The opcode fetch M-cycle: reads `addr`, or with `latched` (an
-    /// opcode fetched earlier, [`Cpu::latch_fetch`]) only idles and
-    /// returns it. One call site with the M-cycle shared by both cases,
-    /// so the opcode dispatch has one entry (perf: a second entry for the
-    /// latched opcode cost `synth:worst-case` 1%: LLVM duplicated the
-    /// dispatch jump and lost addressing modes all through `Cpu::run`).
-    #[inline(always)]
-    fn fetch(&mut self, addr: u16, latched: Option<u8>) -> u8 {
-        match latched {
-            Some(op) => {
-                self.idle();
-                op
-            }
-            None => self.read(addr),
-        }
-    }
     /// Idles a halted, stopped, locked-up or powered-off CPU: at least one
     /// M-cycle, and at most up to the first M-cycle boundary at which
     /// [`Bus::interrupt_flags`], [`Bus::interrupt_enable`], the result of
@@ -239,6 +223,39 @@ pub trait Bus {
     /// default (true) makes `run` a single step.
     fn run_done(&self) -> bool {
         true
+    }
+    /// Whether the next step of [`Cpu::run`] needs its checks: the one
+    /// test the loop makes between two instructions (ADR 0008, 2026-11-24
+    /// amendment). It must be true whenever [`Bus::run_done`] is, and
+    /// whenever IE or IF changed since the last [`Bus::settle`] so that
+    /// `IE & IF` may be nonzero; the CPU adds its own reasons with
+    /// [`Bus::attend`]. True more often than needed is only slower. Free.
+    /// The default (always) makes every step a checked one.
+    #[inline(always)]
+    fn attention(&self) -> bool {
+        true
+    }
+    /// The CPU needs its next step checked: IME or EI's delay was set, or
+    /// it left the running state. [`Bus::attention`] is true from here to
+    /// the next [`Bus::settle`]. Free.
+    #[inline(always)]
+    fn attend(&mut self) {}
+    /// IME was just set, with no EI delay (RETI): as [`Bus::attend`], but
+    /// only needed if `IE & IF` is nonzero now (the default doesn't
+    /// look). Free.
+    #[inline(always)]
+    fn attend_ime(&mut self) {
+        self.attend();
+    }
+    /// A checked step found the CPU running with no EI delay, `ime` being
+    /// IME, and goes on to fetch. From here [`Bus::attention`] may be
+    /// false while [`Bus::run_done`] is false and, with `ime`, `IE & IF`
+    /// is zero. Without `ime`, IE and IF as they are now need no
+    /// attention, only a change to them does (the check after it settles
+    /// again). Free.
+    #[inline(always)]
+    fn settle(&mut self, ime: bool) {
+        let _ = ime;
     }
 }
 
@@ -400,57 +417,124 @@ impl Cpu {
     /// loop and the opcode dispatch are one function: registers are saved
     /// and restored once per call, not once per instruction (ADR 0008,
     /// amendments). Not `#[inline]`: one instance per bus type.
+    ///
+    /// Between two instructions the loop makes one test,
+    /// [`Bus::attention`]. Only a step that finds it set looks at the
+    /// rest, in [`Cpu::checked_fetch`]: the end of the run, the mode, a
+    /// pending interrupt, EI's delay (ADR 0008, 2026-11-24 amendment).
+    /// The first step of a call is checked whatever the bus says: the
+    /// CPU's state may have been set from outside since the last call.
     pub fn run<B: Bus>(&mut self, bus: &mut B) {
         loop {
-            self.step_inline(bus);
+            // Checked steps, up to an instruction's opcode fetch. The
+            // first step of a call is one whatever the bus says: the
+            // CPU's state may have been set from outside since the last.
+            let Some(mut op) = self.checked_fetch(bus) else {
+                return;
+            };
+            // Instructions, with one test between two of them.
+            loop {
+                // The only call site in `run`, so the 256-arm dispatch
+                // is inlined once.
+                self.execute(op, bus);
+                if bus.attention() {
+                    break;
+                }
+                // What a checked step would have found: nothing.
+                debug_assert!(
+                    self.mode == Mode::Running
+                        && !self.ei_pending
+                        && !(self.ime && bus.interrupt_enable() & bus.interrupt_flags() != 0)
+                        && !bus.run_done()
+                );
+                let pc = self.regs.pc;
+                op = bus.read(pc);
+                self.regs.pc = pc.wrapping_add(1);
+            }
+            // `run_done` implies `attention`.
             if bus.run_done() {
-                break;
+                return;
             }
         }
     }
 
     /// Executes one instruction, or dispatches one interrupt, or idles
     /// ([`Bus::idle_halted`]) while halted, stopped, locked up or powered
-    /// off.
+    /// off. Every step is a checked one ([`Cpu::attend`]).
     #[inline]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
-        self.step_inline(bus);
+        if let Some(step) = self.attend(bus) {
+            let op = self.fetch(bus, step);
+            self.execute(op, bus);
+        }
     }
 
+    /// The opcode fetch of a checked step, `step` being
+    /// [`Cpu::attend`]'s: the read, PC advancing by `step`, or with
+    /// [`LATCHED`] the M-cycle alone, for [`Cpu::latched`].
     #[inline(always)]
-    fn step_inline<B: Bus>(&mut self, bus: &mut B) {
-        let mut pc_step = 1;
-        let mut latched = None;
-        if self.mode != Mode::Running {
-            match self.step_not_running(bus) {
-                // A latched opcode: its M-cycle without a read, PC already
-                // past it; `step_not_running` did the interrupt check.
-                Some(LATCHED) => {
-                    latched = Some(self.latched);
-                    pc_step = 0;
-                }
-                Some(step) => pc_step = step,
-                None => return,
-            }
-        }
-        if latched.is_none() {
-            if self.ime && bus.interrupt_enable() & bus.interrupt_flags() != 0 {
-                self.dispatch(bus);
-                return;
-            }
-            // EI takes effect after the instruction that follows it. The
-            // check above used the old IME, so that instruction always
-            // runs.
-            if self.ei_pending {
-                self.ei_pending = false;
-                self.ime = true;
-            }
+    fn fetch<B: Bus>(&mut self, bus: &mut B, step: u16) -> u8 {
+        if step == LATCHED {
+            bus.idle();
+            return self.latched;
         }
         let pc = self.regs.pc;
-        let op = bus.fetch(pc, latched);
-        self.regs.pc = pc.wrapping_add(pc_step);
-        // The only call site, so the 256-arm dispatch is inlined once.
-        self.execute(op, bus);
+        let op = bus.read(pc);
+        self.regs.pc = pc.wrapping_add(step);
+        op
+    }
+
+    /// [`Cpu::run`]'s checked steps: runs those that are no instruction
+    /// (an idle, an interrupt dispatch) until one is, and returns its
+    /// opcode, fetched; `None` when the run is done after one
+    /// ([`Bus::run_done`]). Out of line: off the instruction loop, which
+    /// comes here only with [`Bus::attention`] set.
+    #[inline(never)]
+    fn checked_fetch<B: Bus>(&mut self, bus: &mut B) -> Option<u8> {
+        loop {
+            if let Some(step) = self.attend(bus) {
+                return Some(self.fetch(bus, step));
+            }
+            if bus.run_done() {
+                return None;
+            }
+        }
+    }
+
+    /// The checks before a step: the mode, a pending interrupt, EI's
+    /// delay. Returns `None` if that was the step (an idle, or an
+    /// interrupt dispatch), `Some(LATCHED)` to run [`Cpu::latched`] in an
+    /// M-cycle without a read, or `Some(pc_step)` for an opcode fetch
+    /// that advances PC by `pc_step`.
+    ///
+    /// On the way to a fetch it tells the bus what it found
+    /// ([`Bus::settle`]), which lets the following steps skip this. Not
+    /// before a latched opcode ([`Mode::Prefetched`] runs it ahead of the
+    /// interrupt check): the step after it is checked again.
+    #[inline(always)]
+    fn attend<B: Bus>(&mut self, bus: &mut B) -> Option<u16> {
+        let mut pc_step = 1;
+        if self.mode != Mode::Running {
+            // `step_not_running` did the interrupt check of a latched
+            // opcode.
+            pc_step = self.step_not_running(bus)?;
+            if pc_step == LATCHED {
+                return Some(LATCHED);
+            }
+        }
+        if self.ime && bus.interrupt_enable() & bus.interrupt_flags() != 0 {
+            self.dispatch(bus);
+            return None;
+        }
+        // EI takes effect after the instruction that follows it. The
+        // check above used the old IME, so that instruction always
+        // runs.
+        if self.ei_pending {
+            self.ei_pending = false;
+            self.ime = true;
+        }
+        bus.settle(self.ime);
+        Some(pc_step)
     }
 
     /// A VRAM DMA block is about to run where the CPU would fetch its next
@@ -459,7 +543,9 @@ impl Cpu {
     /// overwrites it, or a PPU mode that starts blocking VRAM during the
     /// stall, doesn't change it (gambatte CGB C `dma/hdma_pc_7ffe`,
     /// `late_gdma_pc_7ffe_{1,2}`). Only from a plain running state; the
-    /// fetch's M-cycle stays after the stall (ADR 0017).
+    /// fetch's M-cycle stays after the stall (ADR 0017). Between two
+    /// [`Cpu::run`] calls: the first step of a call is a checked one, so
+    /// this doesn't have to raise the bus's attention.
     #[cold]
     pub(crate) fn latch_fetch<B: Bus>(&mut self, bus: &mut B) {
         if self.mode == Mode::Running {
@@ -474,7 +560,7 @@ impl Cpu {
     /// step is done (an idle, [`Bus::idle_halted`]), or `Some(pc_step)` if the CPU is
     /// running again and the caller should go on with a normal step whose
     /// opcode fetch advances PC by `pc_step`.
-    #[inline(never)]
+    #[inline(always)]
     fn step_not_running<B: Bus>(&mut self, bus: &mut B) -> Option<u16> {
         match self.mode {
             Mode::Running => Some(1),
@@ -560,7 +646,7 @@ impl Cpu {
                     self.ei_pending = false;
                     self.ime = true;
                 }
-                // The M-cycle: `Bus::fetch` with the latched opcode.
+                // The M-cycle: `Cpu::fetch` with the latched opcode.
                 Some(LATCHED)
             }
             Mode::Prefetched => {
@@ -634,6 +720,8 @@ impl Cpu {
             // SameSuite `ei_delay_halt`).
             self.regs.pc = self.regs.pc.wrapping_sub(1);
         }
+        // Halted, the HALT bug or a dispatch: the next step is a checked one.
+        bus.attend();
     }
 
     /// The wake-up from HALT or the speed-switch halt, after its M-cycle:
@@ -669,6 +757,8 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     fn stop<B: Bus>(&mut self, bus: &mut B) {
+        // Whatever STOP turns out to do, the next step is a checked one.
+        bus.attend();
         let pending = bus.interrupt_enable() & bus.interrupt_flags() != 0;
         let kind = bus.stop_begin();
         if !pending {
@@ -706,6 +796,7 @@ impl Cpu {
     /// for good (Pan Docs: CPU Instruction Set; GBCTR).
     fn lock<B: Bus>(&mut self, bus: &mut B) {
         self.mode = Mode::Locked;
+        bus.attend();
         bus.event(Events::CPU_LOCKED);
     }
 }

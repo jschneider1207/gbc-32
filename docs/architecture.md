@@ -272,7 +272,12 @@ Each run call builds one `Ctx` (`Ctx::new`: the memory, `sys`, the frame
 and audio buffers, the stop events and the target) and calls
 `cpu.run(&mut ctx)`, which loops over instructions until the context
 reports the call done (target reached or a stop event raised); the opcode
-dispatch is inlined into that loop. The CPU is generic over the `Bus`
+dispatch is inlined into that loop. Between two instructions the loop
+tests one flag, `Bus::attention` (`Ctx::attention`), which the context
+raises when the call is done or `IE & IF` may have become nonzero and the
+CPU raises for its own state (EI, RETI, HALT, STOP); only then does it
+look at the mode, IME and the interrupts (`Cpu::checked_fetch`; ADR 0008,
+2026-11-24 amendment). The CPU is generic over the `Bus`
 trait; every `read`/`write`/`idle` is one M-cycle: the access at the
 current clock, then a tick: only an `i32` count of the M-cycles to the
 next deadline (the first M-cycle boundary at or after the earlier of the
