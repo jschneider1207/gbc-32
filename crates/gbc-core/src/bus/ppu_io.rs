@@ -1226,4 +1226,43 @@ mod tests {
             assert_eq!(ctx.sys.iflags & STAT, 0);
         });
     }
+
+    /// Single speed, lines 1-152: a LYC write landing a dot before the
+    /// walk's LY=LYC comparison (the access at t = 3, the comparison at
+    /// t = 5) is too late for it, and the comparison's interrupt, with the
+    /// old LYC, reaches IF at its own dot: an IF read at the end of the
+    /// write's M-cycle (t = 7) sees it, as with no write. gambatte
+    /// (behaviour only, `lyc_irq.cpp` `regChange`, `doEvent`): the LYC
+    /// event keeps its time and the old LYC for a write at most 2 cycles
+    /// before it, and a write of the same value does nothing; only the
+    /// interrupt a LYC write itself requests comes 5 cycles after it
+    /// (`LCD::lycRegChange`). (Until the M10 review this interrupt took
+    /// the write's delay too, and came one M-cycle late.)
+    #[test]
+    fn lyc_write_a_dot_before_the_comparison_leaves_its_interrupt_on_time() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        for line in [1u8, 2, 100, 143, 144, 150, 152] {
+            // No write (SCY instead), another LYC, the same LYC.
+            for (reg, value) in [
+                (0xFF42, 0),
+                (0xFF45, 0xFF),
+                (0xFF45, line + 1),
+                (0xFF45, line),
+            ] {
+                let emu = setup();
+                with_ctx(emu, |ctx| {
+                    let e = ctx.clock();
+                    ctx.write(0xFF45, line);
+                    ctx.write(0xFF40, 0x91);
+                    ctx.write(0xFF41, 0x40);
+                    // Frame position = clock - E + 3.
+                    idle_to(ctx, e, u64::from(line) * 114);
+                    ctx.sys.iflags = 0;
+                    ctx.write(reg, value);
+                    let seen = ctx.read(0xFF0F) & STAT;
+                    assert_eq!(seen, STAT, "line {line}, {reg:04X} = {value:02X}");
+                });
+            }
+        }
+    }
 }

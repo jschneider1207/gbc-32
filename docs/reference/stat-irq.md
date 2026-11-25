@@ -288,6 +288,24 @@ still takes; line 144's windows already assume the whole-dot phase 2.
   in the M-cycle after the LYC write (not reachable by an instruction)
   lands 4 dots after it, before the request, as in gambatte, where the
   write at `cc + 4` precedes the event.
+- The delay is for the interrupt the write itself requests, not for the
+  walk's own LY=LYC interrupt. A LYC write landing on t = 4 of lines
+  1-152 (the access at t = 3, the default grid) lands a dot before the
+  walk's comparison (t = 5), which the write views already see: the
+  comparison is evaluated first, with the old LYC (`Ppu::early_cmp`), and
+  its request reaches IF at t = 5, the comparison's own dot (a timed
+  request), so the interrupt check at the end of the write's M-cycle
+  (t = 7) takes it, as with no write. gambatte (behaviour only,
+  `lyc_irq.cpp` `regChange`, `doEvent`): the LYC event keeps its time and,
+  for a write of another value at most 2 cycles before it, the old LYC; a
+  write of the same value does nothing (`LCD::lycRegChange` returns).
+  Until 2026-11-24 (M10 review) this request took the write's 5 dots too
+  (t = 9), one M-cycle late, also for a write of the same value.
+  Line 153's comparison with 153 (t = 5) has no such rule: the write views
+  see it at 5, not 4, so a LYC write landing on 153:4 comes before it. One
+  that changes LYC loses the interrupt (gambatte keeps it), and one that
+  writes 153 again requests it as its own, at t = 9 (gambatte: at 5). No
+  ROM (`unpinned.md`, `l153-lyc-write-before-cmp`).
 - Single speed, a STAT write accessed at line 0 t = 3 lands its phase 2
   a dot before line 0's pulse (t = 4), where the write views see the
   pulse done and the mode-1 source over ("a write a dot before either
@@ -311,11 +329,13 @@ still takes; line 144's windows already assume the whole-dot phase 2.
 
 A request whose IF bit is set at a later clock than the walk point or
 write that makes it is explicit state: "IF bits B are set at clock T"
-(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0033). Two rules
-use it, both single speed: the LYC-write request (T = landing + 5), and
+(`irq::PendingIrq`, owned by the PPU as `Ppu::irq`; ADR 0033). Three
+rules use it, all single speed: the LYC-write request (T = landing + 5);
 line 0's mode-2 pulse or line 153's comparison against 0 when a STAT or
 LYC write lands a dot before it (T = the point's dot; without such a
-write the walk's point requests at once).
+write the walk's point requests at once); and the LY=LYC comparison of
+lines 1-152 when a LYC write lands a dot before it (T = the comparison's
+dot, t = 5).
 
 - Posting: `Ppu::next_event` is the earlier of the walk's next event and
   T, so the `EventKind::Ppu` deadline covers it, and every `Ppu::sync`
@@ -336,7 +356,9 @@ write the walk's point requests at once).
   LYC or other PPU write only reschedules the PPU.
 - At most two wait at once (a LYC write's with the pulse's, or with line
   153's: LYC writes are at least two M-cycles apart, and the two walk
-  points 448 dots).
+  points 448 dots). A LYC write landing a dot before the comparison of
+  lines 1-152 adds at most one: the comparison's request needs the old
+  LYC to match, the write's own the new one and the line low.
 
 ## Open
 

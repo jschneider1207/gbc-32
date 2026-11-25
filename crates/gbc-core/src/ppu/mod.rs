@@ -3165,7 +3165,22 @@ impl Ppu {
             return;
         }
         match c.pt {
-            Pt::Ly4 | Pt::V4 if c.line != 0 => self.update_at(now, iflags, speed, view),
+            Pt::Ly4 | Pt::V4 if c.line != 0 => {
+                // Single speed, a LYC write: the bus delays what the write
+                // itself requests (`edges::LYC_WRITE_IRQ`), but this
+                // request is the walk's comparison, with the old LYC, and
+                // reaches IF at the walk's dot (a timed request). gambatte
+                // (behaviour only, `lyc_irq.cpp` `regChange`, `doEvent`):
+                // the LYC event keeps its time, and for a write at most 2
+                // cycles before it the old LYC.
+                let timed = view == View::LycWrite && !speed.is_double();
+                let mut walk = 0;
+                let to = if timed { &mut walk } else { &mut *iflags };
+                self.update_at(now, to, speed, view);
+                if walk != 0 {
+                    self.irq.request(now.wrapping_add(ahead), walk, iflags);
+                }
+            }
             Pt::Ly4 | Pt::L153Zero if !speed.is_double() => {
                 self.point_before_write(c, now.wrapping_add(ahead), iflags, speed);
             }
@@ -4135,13 +4150,15 @@ mod tests {
         assert_eq!(r.irqs(l5 + 10), []);
         // A LYC write at t = 4 comes after the comparison with the old LYC:
         // LYC = 5 on line 5 still interrupts (gambatte `lycEnable/
-        // ff45_disable_2`, default phase).
+        // ff45_disable_2`, default phase). The request is the walk's, at
+        // its dot (t = 5), not the write's own (`iflags` here, which the
+        // bus delays by `edges::LYC_WRITE_IRQ`).
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 4);
         r.iflags = 0;
         r.ppu.write_lyc(l5 + 4, 0xFF, &mut r.iflags, Speed::Normal);
-        assert_eq!(r.iflags, INT_STAT);
-        assert_eq!(r.irqs(l5 + 10), []);
+        assert_eq!(r.iflags, 0);
+        assert_eq!(r.irqs(l5 + 10), [(l5 + 5, INT_STAT)]);
         // So does a STAT phase-2 write there that clears the LYC select.
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 4);
@@ -4156,7 +4173,8 @@ mod tests {
         r.iflags = 0;
         r.ppu
             .write_lyc(l150 + 4, 0xFF, &mut r.iflags, Speed::Normal);
-        assert_eq!(r.iflags, INT_STAT);
+        assert_eq!(r.iflags, 0);
+        assert_eq!(r.irqs(l150 + 10), [(l150 + 5, INT_STAT)]);
     }
 
     /// Design step 3: in double speed too the walk compares at `t = 5`,
