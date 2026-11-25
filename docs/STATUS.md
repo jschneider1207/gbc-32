@@ -204,6 +204,16 @@ Working rules that matter here:
 ## Needs human
 
 Open (M10, session 18):
+- **Speed switch on one model (A1-06): approve or reject an ADR 0020
+  change.** Experiment done, code parked on branch `m10-spsw-div-code`
+  (1437f18, based on a863b4b; not merged). It follows AGE for two-byte
+  STOPs: DIV resets after STOP's last byte (speed switch and STOP mode),
+  `Timer::stop_edge` and the IME-off 4 T hold go away. Full manifest: 0
+  status changes; 4 of 4,031 fingerprints differ (all speed-switch
+  ROMs); `.text` +58 B; Ir unchanged. It replaces four sentences of ADR
+  0020 (listed in `docs/reference/speed-switch.md`). Single-source
+  point: with IME on and nothing pending the timer ends 4 T behind
+  today's (AGE vs SameBoy); no ROM decides it.
 - **Audio aliasing fix: a budget decision** (A3-1 measured, 6753609;
   `docs/reference/audio-aliasing.md`, ratchet test
   `tests/apu_aliasing.rs`). The 128-clock box filter leaves aliases
