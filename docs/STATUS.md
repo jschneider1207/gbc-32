@@ -6,134 +6,64 @@
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
 - **Milestone:** M10 (in-depth review), in progress. M9 is `stage1-m9`
   (49c0756); M1-M8 tagged likewise.
-- **Last updated:** 2026-11-24, session 17 (log
-  `logs/2026-11-24-17-m10-perf-bench.md`; session 16:
-  `logs/2026-11-24-16-m10-review.md`).
+- **Last updated:** 2026-11-24, session 18 (log
+  `logs/2026-11-24-18-m10-structure-close-review.md`; session 17:
+  `logs/2026-11-24-17-m10-perf-bench.md`).
 - **Model (human, 2026-11-24): the main session for the rest of M10 must
   be Fable (`claude-fable-5-2`), as session 16 was.** If the main session
   is running on another model, stop and tell the human before doing any
   work. Subagents run on whatever model the main (Fable) session judges
   best for each task.
 
-## Next up: M10 (in-depth review), second half
+## Next up: M10 (in-depth review), closing
 
-**Read `docs/reviews/stage1-m10.md` first** (triage: every finding and its
-outcome). Raw reports and the inventory of budget-driven code shapes
-(`F-budget-distortions.md`: 55 items, 12 themes, 22 keep-as-is) are in
-`docs/reviews/stage1-m10/`. The human gave this milestone more latitude
-than the usual rules ("improve it instead of just copying"; "ensure the
-core is written in the most logical and high performant way"); their
-decisions are under "Decided in session 16".
+**Read `docs/reviews/stage1-m10.md` first**: the triage of the eight M10
+reviews and, at the end, the "Milestone-close review (session 18)" table
+(four fresh reviewers over `stage1-m9..2821437`; no high; three mediums).
 
-**Done (all on `main`):** the eight reviews and triage; nets (checked
-profile in the fuzz gate; `check-sync-invariance.sh --long` in the gate:
-eager-sync equality with an empty allowlist, clock offsets past 2^32,
-30-minute run; `tests/apu_output.rs`); every confirmed correctness finding
-(palette/LCD-off, WY latch, HDMA cancel + stale flag, speed-switch order,
-STOP mode + RP, two APU fixes, DMA retime, RTC mask, unsupported mappers
-refused (ADR 0031), HuC1 + HuC3 (ADR 0032)); `codegen-units = 1`; size
-gate sized for the STM32H735 (only total `.text` <= 122,880 B gates);
-perf: lazy timer, serial one event per transfer, timed interrupt requests
-(ADR 0033), renderer tile-loop specialisation, APU loops + mixer spans,
-PPU fetch state out of `Memory` + `Stalls` type, interpreter loop
-(attention flag, offset-0 tick, little-endian register pairs).
-Also landed: the LLVM address-folding option in every build (f4e16f5,
-human approved; guards in `check-code-size.sh` and `check-bench.sh`), and
-the PPU walk theme incl. the line-153 LYC=0 timed request (L5, c08c22a).
-Numbers at the last merge: worst-case 278.1 M Ir (2.33 M/frame; 488.4 M this
-morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
-113,154 B (margin 9,726 B).
+**State of `main`** (session 18; every item below is merged):
+- Structure: `Speed` enum (5e116e5), line timeline as one table
+  (`ppu/timeline.rs`, 2529ce6), `bus.rs` split into `bus/` (eight
+  modules, 0 B / 0 Ir), test layout (`testkit`, 77b64be), docs and comment
+  sweep (`docs/architecture.md` rewritten, a1a499d), `UNPINNED:` tags +
+  `docs/reference/unpinned.md` + `tests/unpinned.rs` (d900f7b).
+- Behaviour changes, each with a test seen failing: line 0 double-speed
+  write view (ab37d1f); single-speed walk points at 0:5 / 153:13
+  (c598882); speed switch and STOP on AGE's model (2821437, ADR 0020
+  amendment, human approved); output filter box 64 + 8-tap FIR (ADR 0035,
+  human approved); VBlank mode-0 latch and late-LYC-write interrupt dot
+  (d614c28, 4619272, close-review C-V1/C-V2).
+- Perf: object-line summary (86d01ef, C-P1; new gated line
+  `synth:oam-lines`); L7 measured and dropped. Baseline 9030669:
+  worst-case 314.2 M Ir (2.618 M/frame, 65.1% of the 4.02 M line),
+  cpu_instrs 1,327.5 M, `.text` 116,150 B (margin 6,730 B).
+- Gate, stricter only: env overrides unset, eager-sync feature proof,
+  `cargo doc -D warnings` step, `worst-case@0` in the invariance corpus;
+  `--long` frame check rewritten (d017dd5, human approved): frames counted
+  from the first one, each within 23 clocks of its due clock.
 
-**Remaining, in order** (one agent per item, see "How work is run"):
-1. DONE (session 17, c2f19a0): bus dispatch reorder (cpu_instrs -7.52%,
-   cgb_sound -5.22%, dma-storm -5.24%, +754 B); A1 inline forms and L1
-   measured and dropped (docs/perf.md "CPU write path"/"CPU read path";
-   the push-only inline write, +1,664 B for ~0.75%, is the best leftover).
-2. DONE (session 17): ADR 0027 retired, ROM is a plain slice, VRAM DMA
-   copies ROM blocks as 16-byte chunks (-328 B); `check-rom-loads.sh`
-   removed from the gate and deleted (6d8434f). Baseline eb31bf6:
-   worst-case 276.1 M Ir, cpu_instrs 1,275.7 M, `.text` 113,580 B
-   (margin 9,300 B).
-3. PARTLY DONE (session 17, m10-sched merged): one-pass scheduler (B5),
-   theme 10 attributes by measurement, theme 4 move (read clears in
-   `Sys`), T2. Numbers in docs/perf.md "Scheduler and attribute pass".
-   Session 18 check: theme 1, theme 11 (A8/A11/A14) and the S4 move had
-   already landed (docs/perf.md "Small-state and attribute pass",
-   a990e6f); S4 `&mut` read path and the `schedule_overflow` inline were
-   measured and dropped there. Left: L7 only (timer lazy whenever IF bit
-   2 is set, not tried).
-4. DONE (session 17): `synth:worst-case` services a 16,384 Hz timer IRQ
-   playing PCM through NR50 (2.422 M Ir/frame at merge, 60.2% of the
-   4.02 M line); new `synth:dmg-raster` line. Baseline 782d01e:
-   worst-case 287.7 M Ir, cpu_instrs 1,269.5 M, `.text` 113,832 B
-   (margin 9,048 B).
-   The new program found a core bug (`check-sync-invariance.sh` failed):
-   a mode-3 write that moves mode 0 (SCX in the discard, window
-   start/cut) left the HBlank HDMA trigger at the old time; fixed cab6e24
-   (`write_ppu` re-arms it; test seen failing; +120 B; only the five
-   `synth:worst-case` audio fingerprints changed). Baseline not
-   re-recorded after it (max +0.16%).
-   Small leftovers: add `synth:worst-case@0` (no APU) to the invariance
-   corpus (stricter: agent decision); `synth.rs` comment says the SCX
-   write lands 18-42 M-cycles into mode 3 but some land in the discard.
-   Item 7's oracle is DONE (0e674bc, session 17): `ppu/mode3_oracle.rs`
-   (test-only, SameBoy-derived dot-stepped mode 3; doc
-   `docs/reference/mode3-oracle.md`); 28,949 static and 28,040 SCX-write
-   lines agree with the core. Two disagreement classes are on its
-   enumerated exclusion list and need a verdict (one small agent each,
-   references first; no core change without one):
-   (a) WX=0 with a fine scroll and an object: DECIDED (human, 2026-11-24,
-   "go with your judgement for now and ensure it is documented"): the
-   stalls follow the renderer's 7+f window grid (ADR 0034, f21ea36 line;
-   test seen failing). References split 7 / 7+f / 8+f; the oracle
-   exclusion stays for 7+f vs SameBoy's 8+f (892 of 1,348 lines).
-   (b) SCX write with an object at X=0: FIXED (session 17, 2244e84 +
-   705757c): X=0 objects are fetched before the fine-scroll discard
-   (SameBoy, GateBoy netlist, Pan Docs; no ROM reaches it), plus a
-   junk-tile sharing correction when the write wraps the discard;
-   exclusion removed, 40,400 fast / 536,400 exhaustive lines agree.
-   (c) WX=0 with a mid-line SCX write: FIXED (695a55b line, session 17):
-   the fine-scroll discard runs after a window that starts at WX=0
-   (SameBoy, GateBoy, Pan Docs; no ROM reaches it); 14,000 WX=0 lines
-   added to the sweep; on-screen-object lines stay under the ADR 0034
-   exclusion. Open edges (plan tasks, no capture pins any of them):
-   (d) a later window write on a line whose discard wrapped rebuilds the
-   stalls without the junk-tile correction or the kept WX=0 dot;
-   (e) pixels when the discard wraps (n >= 8) at WX=0: the renderer cuts
-   7 + n%8, not 7 + n. Decisive capture for (c): CGB, WX=0, SCX 1, SCX=0
-   written at 89..=97, mode 0 at 263 / 271 (at 96) / 264.
-   Not covered by the oracle: double speed, first line after LCD on,
-   WX/WY/LCDC mid-line writes, OAM DMA lines, pixels. Audio alias
-   measurement (A3-1) is still open under item 7.
-   `.text` 116,358 B (margin 6,522 B); baseline 0270845 (latest core is
-   up to +0.72% on dmg-raster over it: re-record at the next perf merge).
-   **Real M7 numbers** (session 17; `tools/h7-bench`, outside the
-   workspace and the gate; results in docs/perf.md "Measured on a
-   Cortex-M7 (NUCLEO-H755ZI-Q)" and the crate README; all hashes match
-   the host). Worst case, cycles/frame mean/max: flash + caches
-   4.27 M / 4.32 M (HSI 64 MHz), 4.44 M / 4.50 M (PLL 392 MHz); hot set
-   in ITCM + DTCM 3.09 M / 3.13 M and 3.10 M / 3.14 M. ITCM is 1.38-1.41x
-   faster on the worst case, 1.11-1.18x on the rest. Worst case in ITCM =
-   47.8% of a frame at 392 MHz (measured; this board's limit with direct
-   SMPS), 39.0% at 480 MHz and 34.1% at 550 MHz (extrapolated). Cycles
-   per x86 Ir: 1.12-1.33 in ITCM, 1.24-1.81 from flash. The ITCM hot set
-   is 68.8 KB linked vs this chip's 64 KiB (plain tile path left in
-   flash; no room for ISRs); the H735 (128 KiB+) takes the whole core.
-   Board notes: flash with `tools/h7-bench/flash.sh` (native Windows
-   copy; never while COM3 is open); the first serial lines after a flash
-   can be the old image's. Unverified: supply write across a USB power
-   cycle (needs the human to replug), the M4 stub.
-5. Structure: line timeline as one table (E3), `bus.rs` split along
-   D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
-   experiment (A1-06).
-6. Docs/comment sweep: `docs/architecture.md` (D7), stale and budget-era
-   comments (D8, inventory section 6), stale names (`Memory::obj_rank` in
-   ADR 0019 and plan line ~117, `Emulator` size in lib.rs), perf.md tables.
-7. Test-only dot-stepped mode-3 oracle (E1); audio alias measurement
-   (A3-1; any Ir cost goes to the human).
-8. Triage lows into plan tasks; M8 review lows still open in the plan;
-   full `./scripts/gate-stage1.sh`; `romtest --update-baseline`; session
-   log; tag `stage1-m10`. Declaring Stage 1 complete is the human's.
+**Remaining, in order:**
+1. Merge `m10-storm` if not yet on `main` (close-review C-P2: adversarial
+   `synth:storm-*` programs measured, `docs/perf.md` "Outside the bound"
+   rewritten; no core change). If the agent's report was lost, re-run the
+   brief: measure dense APU writes, KEY1+STOP loops, DIV/TAC loops,
+   back-to-back GDMA and dense mid-mode-3 PPU writes in Ir/frame against
+   `synth:worst-case`, document, no mitigation. Mitigations are a budget
+   question for the human, with the numbers.
+2. Tick "Fix the confirmed high and medium findings" in the plan once
+   C-P2 is merged; update its row in `docs/reviews/stage1-m10.md`.
+3. Full `./scripts/gate-stage1.sh`, alone (not run since M10 started; it
+   now includes `--long`, which no per-merge check ran: that is how the
+   dmg-raster failure went unseen for a session).
+4. `romtest --update-baseline` (expect `spsw-interrupts-cgbBC` to end 18
+   clocks later, still passing), commit, tag `stage1-m10`. The human said
+   partly fixed mediums (A2-02 latch model, E4 `LAND`, D4/D6 rests) do not
+   block the tag: they are plan tasks.
+5. Declaring Stage 1 complete is the human's; the real-game checklist is
+   theirs too. Start a fresh session after the tag.
+
+Agent-run check results were spot-checked by diff (comment-only filters,
+file lists), not re-run; the full gate in step 3 is the independent run.
 
 **How work is run:** one agent per theme in a scratch worktree under the
 session scratchpad (`git worktree add <scratch>/wt-x -b m10-x main`), every
@@ -191,37 +121,33 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- None at cab6e24 (session 17 clean point; log
-  `logs/2026-11-24-17-m10-perf-bench.md`): `m10-bus-fast`, `m10-rom-wide`,
-  `m10-bench-irq`, `m10-sched`, `m10-sync-apu` merged by fast-forward,
-  worktrees removed (branches left for the human to delete).
-- Before session 17: Session 16 ended at a clean point: every `m10-*` branch is merged
-  by fast-forward and its worktree removed; `main` builds, passes tests and
-  the checks listed under "How work is run" as of the last merge
-  (c08c22a + baseline). The full `gate-stage1.sh` has NOT been run since
-  the M10 work started: run it before tagging (remaining item 8).
+- `m10-storm` (worktree `<session 18 scratchpad>/wt-storm`, may be gone
+  with the scratchpad): the C-P2 measurement agent. Everything else from
+  session 18 is merged by fast-forward and its worktree removed.
 
 ## Needs human
 
 Open (M10, session 18):
-- **Speed switch on one model (A1-06): approve or reject an ADR 0020
-  change.** Experiment done, code parked on branch `m10-spsw-div-code`
-  (1437f18, based on a863b4b; not merged). It follows AGE for two-byte
-  STOPs: DIV resets after STOP's last byte (speed switch and STOP mode),
-  `Timer::stop_edge` and the IME-off 4 T hold go away. Full manifest: 0
-  status changes; 4 of 4,031 fingerprints differ (all speed-switch
-  ROMs); `.text` +58 B; Ir unchanged. It replaces four sentences of ADR
-  0020 (listed in `docs/reference/speed-switch.md`). Single-source
-  point: with IME on and nothing pending the timer ends 4 T behind
-  today's (AGE vs SameBoy); no ROM decides it.
-- **Audio aliasing fix: a budget decision** (A3-1 measured, 6753609;
-  `docs/reference/audio-aliasing.md`, ratchet test
-  `tests/apu_aliasing.rs`). The 128-clock box filter leaves aliases
-  worse than -40 dBc in 1-8 kHz from ~1 kHz up (C7 50%: -36 dBc; 12.5%
-  duty: -25 dBc; worst over notes up to 4.4 kHz: -22 dBc). Options, worst-case
-  Ir/frame: box 64 + 8-tap FIR, -41 dBc, about +10% (recommended if
-  anything is done); box 32 + 16-tap FIR, -52 dBc, about +28%; or leave
-  it and record a known limitation. No listening test was done.
+- **New figure for the APU budget:** `docs/perf.md`'s 230k Ir/frame
+  "channels and mixing" budget no longer holds with the output filter
+  (ADR 0035: about +229k Ir/frame on the worst case, +64k on silent
+  programs). Report-only today.
+- **Costs of the filter beyond the worst case** (told to the human, no
+  answer needed unless they object): apu-writes +33.6%, halt-irq +14.6%,
+  cgb-acid2 +10.6%. The filter saturates to i16 (unity gain kept; only a
+  four-channel swing above 81% of full scale reaches it).
+- **Mitigations for the outside-the-bound loops** (C-P2), once measured.
+- **Hardware captures that would settle things:** see
+  `docs/reference/unpinned.md` (48+ rows). Most likely wrong: STAT during
+  OAM DMA, the speed-switch IME-on timer offset (now AGE, 4 T behind
+  SameBoy), WX=0 window grid (ADR 0034), HDMA re-arm in HBlank, the APU
+  double-speed trigger delay phase.
+- **Branches to delete** (merged, session 18): `m10-alias`, `m10-speed`,
+  `m10-l7`, `m10-timeline`, `m10-spsw-div`, `m10-spsw-div-code`
+  (superseded by `m10-spsw-land`), `m10-spsw-land`, `m10-line0-ds`,
+  `m10-bus-split`, `m10-docs`, `m10-stat-walk`, `m10-unpinned`,
+  `m10-tests`, `m10-audio-fir`, `m10-long-bisect` (empty),
+  `m10-gate-strict`, `m10-m0-latch`, `m10-long-check`, `m10-objlines`.
 
 Open (M10, session 17):
 - **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,
@@ -235,9 +161,6 @@ Open (M10, session 17):
   `tools/h7-bench` (merged, session 17). Board left running
   `bench-itcm-dtcm-pll`.
   `qemu-system-arm` 8.2.2 is installed (mps2-an500).
-- Item 3 leftovers as plan tasks: inventory L7; `Ctx::write_high` and
-  `Apu::write_rest` unpin never measured; romtest worker `eprintln!`
-  deadlocks (main.rs holds the stderr lock).
 - **M7 instruction counts without hardware:** the human offered to install
   `qemu-system-arm` in WSL (`sudo apt install qemu-system-arm`) when they
   get a chance; then build a bare-metal Cortex-M7 harness (e.g. machine
@@ -323,6 +246,10 @@ for each", to the three questions put to them):
   table, D4 and D6 rests): carried over as plan tasks; they do not block
   `stage1-m10`. (The agent's recommendation, which the question left
   open; say if these should be finished first.)
+- `--long` frame check ("Do the first one"): count expected frames from
+  the first completed frame and drop the +-1 tolerance (d017dd5; the
+  reported clock overshoots a boundary by up to 23 clocks, so each frame
+  is checked within 23 clocks of its due clock, with no drift).
 
 Decided in session 16 (2026-11-24, M10 review), human:
 - `stage1-m9` tagged at 49c0756 on the human's instruction ("Tag m9"); the
