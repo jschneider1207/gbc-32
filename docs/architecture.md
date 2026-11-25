@@ -245,11 +245,18 @@ memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, st
 bitset.rs   * bitset! macro behind Buttons and Events
 events.rs   * Events
 schedule.rs * event table (ADR 0011): EventKind (dispatch order), Schedule (one u64 deadline per kind + their minimum)
-joypad.rs   * Buttons, P1 line logic, the joypad interrupt edge, InputQueue (scheduled changes, ADR 0012; P1/JOYP register access is in bus.rs)
+joypad.rs   * Buttons, P1 line logic, the joypad interrupt edge, InputQueue (scheduled changes, ADR 0012; P1/JOYP register access is in bus/mod.rs)
 config.rs   * Config, DmgPalettes, RGB555 helpers
 cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP, STOP mode)
   exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
-bus.rs      * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), memory map, I/O, peek
+bus/        * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), the tick and event dispatch, `impl Bus for Ctx`, memory map, I/O decode, interrupt-ack writes, peek. Each file below adds an `impl Ctx` block for one subsystem's glue
+  reset.rs  *   `Sys::new`, `Sys::reset`: the post-boot state (I/O values, boot logo tiles)
+  timer_io.rs * timer and serial: register writes, DIV reset, their deadlines and the Serial event
+  apu_io.rs *   APU: register writes, DIV-APU and audio-buffer events, the lazy sync
+  ppu_io.rs *   PPU: syncs to the clock, its deadline, `write_ppu`, palette data writes
+  oam_dma.rs *  OAM DMA: start, lazy copy, pause/resume/retime, CPU reads and writes during a transfer
+  vram_dma.rs * VRAM DMA: FF55 writes, arming, the HBlank trigger, the stall and the block copy
+  stop.rs   *   STOP mode (freeze, wake-up) and the CGB speed switch
 timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clock, TIMA reload as the Timer event, serial edge clocks
   reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
 ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
