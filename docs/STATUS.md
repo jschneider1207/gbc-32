@@ -57,9 +57,11 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
 3. PARTLY DONE (session 17, m10-sched merged): one-pass scheduler (B5),
    theme 10 attributes by measurement, theme 4 move (read clears in
    `Sys`), T2. Numbers in docs/perf.md "Scheduler and attribute pass".
-   Left: theme 1 (S2/S3/S9/S10), theme 11 (A14/A8/A11, L7), S4 `&mut`
-   read path; re-measure the dropped `schedule_overflow` inline
-   (+1,270 B) on the new serviced-timer worst-case.
+   Session 18 check: theme 1, theme 11 (A8/A11/A14) and the S4 move had
+   already landed (docs/perf.md "Small-state and attribute pass",
+   a990e6f); S4 `&mut` read path and the `schedule_overflow` inline were
+   measured and dropped there. Left: L7 only (timer lazy whenever IF bit
+   2 is set, not tried).
 4. DONE (session 17): `synth:worst-case` services a 16,384 Hz timer IRQ
    playing PCM through NR50 (2.422 M Ir/frame at merge, 60.2% of the
    4.02 M line); new `synth:dmg-raster` line. Baseline 782d01e:
@@ -200,6 +202,16 @@ Working rules that matter here:
   the M10 work started: run it before tagging (remaining item 8).
 
 ## Needs human
+
+Open (M10, session 18):
+- **Audio aliasing fix: a budget decision** (A3-1 measured, 6753609;
+  `docs/reference/audio-aliasing.md`, ratchet test
+  `tests/apu_aliasing.rs`). The 128-clock box filter leaves aliases
+  worse than -40 dBc in 1-8 kHz from ~1 kHz up (C7 50%: -36 dBc; 12.5%
+  duty: -25 dBc; worst over notes up to 4.4 kHz: -22 dBc). Options, worst-case
+  Ir/frame: box 64 + 8-tap FIR, -41 dBc, about +10% (recommended if
+  anything is done); box 32 + 16-tap FIR, -52 dBc, about +28%; or leave
+  it and record a known limitation. No listening test was done.
 
 Open (M10, session 17):
 - **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,
