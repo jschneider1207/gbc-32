@@ -1,5 +1,9 @@
 # Stage 1: portable core + desktop front end
 
+> **Status: COMPLETE** (declared by the human, 2026-11-25). Last full gate
+> pass: `stage1-m10` (b6b59e7). Checklist rows left unplayed (Pokémon
+> Crystal, Alone in the Dark) were not required for the sign-off.
+
 **Stage goal:** `gbc-core` passes every `must` ROM in `acceptance/stage1.toml`
 and plays real games correctly on the desktop.
 

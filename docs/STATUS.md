@@ -3,13 +3,19 @@
 > Read this first every session. Rewrite it (don't append) at the end of
 > each session so a fresh session can pick up from here.
 
-- **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M10 (in-depth review) is closed: `stage1-m10` (b6b59e7),
-  gate exit 0 on that commit. M1-M9 tagged likewise. All Stage 1
-  milestones are tagged; declaring the stage complete is the human's.
-- **Last updated:** 2026-11-25, session 19 (log
-  `logs/2026-11-25-19-stage1-lows.md`; session 18:
-  `logs/2026-11-24-18-m10-structure-close-review.md`).
+- **Stage:** 1 is **COMPLETE** (declared by the human, 2026-11-25). Last
+  full gate pass: `stage1-m10` (b6b59e7). Stage 2 (STM32H7 platform
+  layer, `README.md` §2) is next and has **no plan yet**: the first task is
+  drafting `docs/plan/stage-2.md` for the human's approval.
+- **Dev-board clock (human, 2026-11-25):** Stage 2 targets the
+  NUCLEO-H753ZI at **480 MHz** (VOS0 + SYSCFG ODEN; LDO supply and rev V
+  silicon allow it), not the 392 MHz used so far. Not yet measured: the
+  480 MHz figures in `tools/h7-bench/README.md` are scaled from 392 MHz
+  cycles, and flash wait states rise at 240 MHz AXI, so cycles/frame may
+  grow for flash-resident code. Measuring it is an early Stage 2 task.
+- **Last updated:** 2026-11-25, session 20 (log
+  `logs/2026-11-25-20-stage1-complete.md`; session 19:
+  `logs/2026-11-25-19-stage1-lows.md`).
 - **Model (human, 2026-11-25): Opus is fine for the remaining Stage 1
   work**; the Fable-only rule below applied to M10, which is closed.
 - **Model (human, 2026-11-24): the main session for the rest of M10 must
@@ -18,7 +24,21 @@
   work. Subagents run on whatever model the main (Fable) session judges
   best for each task.
 
-## Next up: M10 (in-depth review), closing
+## Next up: Stage 2 plan
+
+1. Draft `docs/plan/stage-2.md` (milestones, gates, in the shape of
+   `stage-1.md`) from `README.md` §2, `docs/architecture.md` "Targets",
+   `docs/perf.md` (dev-board ITCM placement), `tools/h7-bench/README.md`,
+   and the Stage-2-deferred items (stage-1 plan: E5/D11 CPU fetch rework;
+   B4 u32 clocks; E1 dot-stepped mode 3). Scope is the human's: present the
+   draft for approval before starting work.
+2. Early in Stage 2: bring h7-bench up at 480 MHz (VOS0) and measure the
+   worst case against the 50% bar.
+3. Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
+   unplayed checklist rows (Pokémon Crystal, Alone in the Dark) were not
+   required for the sign-off.
+
+## Stage 1 close (history, M10)
 
 **Read `docs/reviews/stage1-m10.md` first**: the triage of the eight M10
 reviews and, at the end, the "Milestone-close review (session 18)" table
@@ -144,7 +164,8 @@ Open (session 19, 2026-11-25):
   50.1% / 50.6% of a 392 MHz frame (measured at 392 MHz) (H755 measured 47.2% at bcd881e; the
   rise is most likely core changes since, not separated). At 480 MHz
   (VOS0, allowed on this rev V part, not run) it would be ~41%. The final
-  target (H735, 550 MHz) is unaffected; a Stage 2 decision.
+  target (H735, 550 MHz) is unaffected. DECIDED (human, 2026-11-25):
+  target 480 MHz on the dev board (see top). Remove at the next rewrite.
 - **`tools/h7-bench/expected-hashes.txt`** regenerated (human approved,
   2026-11-25): only worst-case and cpu_instrs changed, to the values the
   board prints; `host/` test passes. Remove at the next STATUS rewrite.
