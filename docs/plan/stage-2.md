@@ -1,7 +1,7 @@
 # Stage 2: STM32H7 platform layer (NUCLEO-H753ZI + X-NUCLEO-GFX02Z1)
 
 > **Status: DRAFT, revised 2026-11-25 with the human's decisions** (see
-> "Decisions" below: D1-D7, D9 and D10 are accepted or decided; D8 is a
+> "Decisions" below: D1-D7 and D9-D11 are accepted or decided; D8 is a
 > note). Scope is the human's. Nothing here has started.
 
 **Stage goal** (`README.md` §2): the unchanged `gbc-core` runs on the
@@ -11,12 +11,18 @@ and there is input, audio out and frame pacing. Memory layout and caches are
 tuned until games run at full speed. The 50% performance target
 (`README.md`) belongs to the final MCU (STM32H735 at 550 MHz). The H753 is
 lower spec, so on this board `synth:worst-case` (the realistic worst case,
-`docs/perf.md`) is **measured and reported against 50% of 480 MHz
-(4,018,249 CPU cycles per frame = 480 MHz / 59.7275 Hz / 2), not gated**
+`docs/perf.md`) is **measured and reported against 50% of 472 MHz
+(3,951,279 CPU cycles per frame = 472 MHz / 59.7275 Hz / 2), not gated**
 (human, 2026-11-25). What is gated is "games run at full speed": every
 sign-off workload finishes each frame inside real time (frame time
-< 1/59.7275 s, i.e. under 8,036,499 cycles at 480 MHz, whole loop
+< 1/59.7275 s, i.e. under 7,902,557 cycles at 472 MHz, whole loop
 included), plus the on-board cycle baseline's +3% regression ratchet.
+The figures are 472,000,000 / 59.7275 = 7,902,557.4 (rounded down), and
+the 50% line 3,951,278.7 (rounded to nearest, as the human approved it).
+The budget uses the nominal clock. This board's HSI measured +0.36%, so the
+nominal figure is slightly conservative here; a board whose HSI runs slow
+(DS12117 lower bound, 63.7 MHz at 30 °C) would have up to that much less
+real time, which the real-time check does not see.
 
 **Stage gate:** `./scripts/gate-stage2.sh` exits 0, with the board attached
 for its on-board steps (proposed below; decision D1). M7 (the in-depth
@@ -45,9 +51,10 @@ that checks it.
 | Item | Fact | Source |
 |---|---|---|
 | MCU | STM32H753ZIT6 rev V (`idcode=0x20036450`), **single core**, so there is no Cortex-M4 to use | h7-bench README; DS12117 |
-| 480 MHz | VOS0 needs the LDO (this board has it) and TJ ≤ 105 °C. Rev V only (ES0392 §2.2.21). VOS0 is entered from VOS1 by setting SYSCFG ODEN | DS12117 Table 112 and notes 4-5 |
-| Flash at 240 MHz AXI | 4 wait states, WRHIGHFREQ = 10. A miss costs 5 AXI clocks = 10 CPU cycles, against 6 at 392 MHz | RM0433 Table 17 |
-| HSE | 8 MHz from the ST-LINK MCO by default (SB45 ON). Enough for an exact 480 MHz (8/2 x 240 / 2). HSI tolerance at 480 MHz is unverified, so the plan uses HSE | UM2407 §7.5.1 |
+| 480 MHz (VOS0 limit) | VOS0 needs the LDO (this board has it) and TJ ≤ 105 °C. Rev V only (ES0392 §2.2.21). VOS0 is entered from VOS1 by setting SYSCFG ODEN | DS12117 Table 112 and notes 4-5 |
+| Flash at 236 MHz AXI | 4 wait states, WRHIGHFREQ = 10. A miss costs 5 AXI clocks = 10 CPU cycles, against 6 at 392 MHz (4 WS is valid at any lower AXI clock too) | RM0433 Table 17 (VOS0 band ]225; 240] MHz) |
+| HSE | 8 MHz from the ST-LINK MCO by default (SB45 ON). **Not used**: it measured 8.0644 MHz (+8,048 ppm) against the LSE, so 8/2 x 240 / 2 ran the CPU at 483.86 MHz, above the 480 MHz limit, and the MCO has no stated tolerance (settled, D11) | UM2407 §7.5.1; h7-bench README "Clock check" |
+| HSI | 64 MHz, **the Stage 2 clock source** (PLL1 /4 x59 /2 = 472 MHz nominal, AXI/AHB 236, APB 118). 63.7 to 64.3 MHz at VDD = 3.3 V, TJ = 30 °C, plus ±1% over TJ -20 to 105 °C (so at most +1.5%: CPU 479.1 MHz, AXI 239.6 MHz). Measured on this board: 64.228 MHz (+0.36%, CPU 473.68 MHz) against the LSE | DS12117 Rev 10 Table 133 (rev V), f_HSI and ΔTEMP rows; h7-bench README |
 | TCM/SRAM | ITCM 64 KiB, DTCM 128 KiB (neither reachable by DMA1/2; MDMA reaches both), AXI SRAM 512 KiB, D2 SRAM1-3, D3 SRAM4 | RM0433 Table 7; perf.md |
 | LCD | ILI9341V, 240x320 panel (native portrait), 8080-I 8-bit bus: D0-D7 = PD14 PD15 PD0 PD1 PE7 PE8 PE9 PE10, RD = PD4, WR = PD5, CS = PD7 (FMC_NE1), D/CX = PE4, TE = PE13, RESET = PE11. The backlight anode is tied to 3V3 and the cathodes don't go to the MCU, so there is no backlight control | UM2905 Table 2 |
 | LCD address map | Command register at 0x6000_0000. Data at 0x6010_0000 if PE4 is FMC_A20 (8-bit bank: HADDR = A). **Unverified**: the PE4 AF and the bank mapping | derived; check RM0433 FMC and DS12117 AF table |
@@ -119,32 +126,33 @@ gbc-core ◄── gbc-firmware ◄── gbc-nucleo-h753 ──► gbc-link ◄
 
 ---
 
-## M0: 480 MHz measurement (h7-bench only)
+## M0: 480 MHz measurement (h7-bench only; superseded: now 472 MHz HSI, D11)
 
 Answers the question everything else depends on before any new driver
-exists: where does the worst case land against 50% at 480 MHz (reported, not
+exists: where does the worst case land against 50% at 480 MHz (superseded by D11: 472 MHz) (reported, not
 gated)?
 
-- [x] (6dfcfda; banner `d3cr=0x0000e000 syscfg_pwrcr=0x00000081 oden=1 flash_acr=0x24 cpu_hz=480000000`) `pll480` clock in h7-bench: HSE bypass 8 MHz (ST-LINK MCO) → PLL1 480 MHz; VOS1 → ODEN → wait VOSRDY → VOS0 (RM0433 PWR/SYSCFG sequence: cite section in code); flash 4 WS / WRHIGHFREQ=10 before the switch; AXI/AHB 240, APB 120. Banner prints `d3cr`, `SYSCFG_PWRCR`, `flash_acr`, `cpu_hz=480000000`
-- [x] (7d4b026; `cycles=8000008` each line, `tcmprobe` equal, clean UART; bf6f7a5: the PC timed it at 484.3 MHz, 0.9% fast, HSE (ST-LINK MCO) the suspect) `selftest-480` on the board: constant `cycles=`, UART at 115200 (it bounds the clock error), `tcmprobe` equal
-- [x] (bf6f7a5; all 15 hashes equal in all three placements; worst case `itcm-dtcm` 3,291,153 / 3,328,005 cycles = 41.0% / 41.4% of a frame, 82.8% of the 50% bar at most; flash 64.0%; nothing in the bound near a whole frame) All three placements at 480 MHz: hashes equal `expected-hashes.txt`; record mean/max and % of an 8,036,499-cycle frame in the h7-bench README and `docs/perf.md` (replacing the scaled figures)
+- [x] (6dfcfda; banner `d3cr=0x0000e000 syscfg_pwrcr=0x00000081 oden=1 flash_acr=0x24 cpu_hz=480000000`) `pll480` clock in h7-bench: HSE bypass 8 MHz (ST-LINK MCO) → PLL1 480 MHz; VOS1 → ODEN → wait VOSRDY → VOS0 (RM0433 PWR/SYSCFG sequence: cite section in code); flash 4 WS / WRHIGHFREQ=10 before the switch; AXI/AHB 240, APB 120. Banner prints `d3cr`, `SYSCFG_PWRCR`, `flash_acr`, `cpu_hz=480000000` (superseded: 472 MHz HSI, 761049b; the image name `pll480` and the ticked text above are history)
+- [x] (7d4b026; `cycles=8000008` each line, `tcmprobe` equal, clean UART; bf6f7a5: the PC timed it at 484.3 MHz, 0.9% fast, HSE (ST-LINK MCO) the suspect) `selftest-480` on the board: constant `cycles=`, UART at 115200 (it bounds the clock error), `tcmprobe` equal (superseded: the HSE/MCO clock measured 483.86 MHz; 472 MHz HSI, 761049b)
+- [x] (bf6f7a5; all 15 hashes equal in all three placements; worst case `itcm-dtcm` 3,291,153 / 3,328,005 cycles = 41.0% / 41.4% of an 8,036,499-cycle (480 MHz) frame, 82.8% of that 50% bar at most; against the 472 MHz figures 7,902,557 / 3,951,279: 41.6% / 42.1% of a frame, 84.2% of the 50% bar at most; flash 64.0%; nothing in the bound near a whole frame) All three placements at 480 MHz: hashes equal `expected-hashes.txt`; record mean/max and % of an 8,036,499-cycle frame in the h7-bench README and `docs/perf.md` (replacing the scaled figures) (superseded: 472 MHz HSI, 761049b)
 - [x] (60ef23d; first board run bf6f7a5, hashes equal; storms 1.8-3.6 frame times per frame in ITCM, docs/perf.md "Outside the bound") Add the bench workloads the board does not run yet: `dma-storm`, `halt-irq`, `apu-writes`, `oam-lines`, and the five `synth:storm-*` (the Stage 1 M8 task "measure the dense mid-mode-3 programs on the M7"; outside the bound, recorded for context). Regenerate `expected-hashes.txt` for the new lines only (old lines unchanged, say so in the commit)
-- [x] (bf6f7a5; closed: `event-storm` at 480 MHz is 2,014,882 / 2,028,825 cycles in ITCM, 2,143,998 max from flash, at most 50.5% (ITCM) and 53.4% (flash) of the 4,018,249 bar; B4 not opened for it) Re-baseline the event-density question (Stage 1 M8 "worst-case event density on the M7") with the 480 MHz `event-storm` figure; close it or open B4 below
+- [x] (bf6f7a5; closed: `event-storm` at 480 MHz is 2,014,882 / 2,028,825 cycles in ITCM, 2,143,998 max from flash, at most 50.5% (ITCM) and 53.4% (flash) of the 4,018,249 bar (480 MHz; 51.3% and 54.3% of the 472 MHz bar, 3,951,279); B4 not opened for it) Re-baseline the event-density question (Stage 1 M8 "worst-case event density on the M7") with the 480 MHz `event-storm` figure; close it or open B4 below (superseded: 472 MHz HSI, 761049b)
 - [x] (bf6f7a5) Update `docs/perf.md` "Measured on a Cortex-M7" (still titled H755) and `docs/architecture.md` workspace line (h7-bench "on a NUCLEO-H755ZI-Q")
 
 **Acceptance:** `bench-itcm-dtcm-pll480` on the board prints `end pass=1`,
 hashes equal to `expected-hashes.txt` for every workload, and its cycle
 figures are committed. The 50% bar is **measured and reported** here, not
 gated (the H753 is lower spec than the final H735; human, 2026-11-25). If
-`synth:worst-case` max > 4,018,249, say so in STATUS and the log. It does
-not block anything. If it exceeds a full real-time frame (8,036,499),
+`synth:worst-case` max > 3,951,279, say so in STATUS and the log. It does
+not block anything. If it exceeds a full real-time frame (7,902,557),
 the human hears about it at once (STATUS "Needs human") and M6 moves ahead
 of M3.
 
 ## M1: Firmware skeleton, link-time placement, host-side gate
 
 - [ ] ADR: crate layout as above (per-board firmware crates plus `gbc-firmware` and `gbc-link`); PAC-only; one `memory.x` generated by `build.rs` from `perf/itcm-sections.txt` (ADR 0026 mechanism); board module boundary
-- [ ] `gbc-nucleo-h753` boots at 480 MHz (shared bring-up), MPU set up (see M2/M3 for the regions), I/D-cache on (write-back; ES0392 §2.1.1 rules out write-through), fault handler on its own stack with UART report (h7-bench pattern)
+- [ ] `gbc-nucleo-h753` boots at 472 MHz (shared bring-up), MPU set up (see M2/M3 for the regions), I/D-cache on (write-back; ES0392 §2.1.1 rules out write-through), fault handler on its own stack with UART report (h7-bench pattern)
+- [ ] The `gbc-nucleo-h753` banner prints the LSE-measured CPU clock (h7-bench's `clockcheck` method), so a run records its actual clock (D11)
 - [ ] `headless` image: core in the M6-target placement (ITCM set + DTCM data), a ROM from internal flash, a scripted input list, prints one hash per frame plus an audio-stream hash over UART; host counterpart in `tools/` prints the same lines for the same ROM + inputs
 - [ ] `scripts/check-itcm-elf.sh` (the Stage 1 M8 "post-link check", left for Stage 2): every demangled name in `perf/itcm-sections.txt` that the link kept is in `[0, 0x1_0000)`; dropped tiers listed; `.itcm` size vs 64 KiB; veneer count. Mutation-check: a glob moved to flash fails, a renamed function fails
 - [ ] Settle the provisional size gate on the firmware link (Stage 1 C-P5): measure gbc-core's share of the linked ELF (compiler_builtins, panic code, padding) and report against the H735 total; **changing the 122,880 B figure needs the human**
@@ -165,7 +173,7 @@ for byte.
 - [ ] On-board test: unaligned u16/u32 loads at odd addresses from the QSPI window return the right bytes (the core relies on this, `docs/architecture.md` "ROM")
 - [ ] ROM image format in `gbc-firmware`: header (magic, length, SHA-256 or 64-bit hash, title) at a fixed QSPI offset, ROM data 256-byte aligned; the firmware refuses a bad hash
 - [ ] Loader (decision D5): firmware `loader` mode receives a ROM over the VCP, programs it, verifies the hash, reports; host side is `tools/gbc-pc` (native Windows `.exe`, see Crate layout; it replaces the PowerShell-script idea); skip when the stored hash already matches. The frame format lives in `gbc-link` (host-tested, started here together with `tools/gbc-pc`) and has room for an optional save section sent with the ROM (used in M5) and for later PC-to-board and board-to-PC frames (input, save dump). Measure the VCP's highest reliable baud rate (unverified) and record it
-- [ ] Bench placement `itcm-dtcm-qspi`: the bench workloads with their ROMs in QSPI instead of internal flash; record cycles vs `itcm-dtcm` at 480 MHz (the "QSPI as a conservative proxy for HyperRAM" figure Stage 3 needs)
+- [ ] Bench placement `itcm-dtcm-qspi`: the bench workloads with their ROMs in QSPI instead of internal flash; record cycles vs `itcm-dtcm` at 472 MHz (the "QSPI as a conservative proxy for HyperRAM" figure Stage 3 needs)
 
 **Acceptance:** a load → verify round trip passes for a 4 MiB test image
 (hash equal, read back through the memory-mapped window). The `headless`
@@ -192,7 +200,7 @@ over (Stage 3 loads from eMMC).
 
 **Acceptance:** over 600 frames of `cgb-acid2` with the display running,
 the readback self-test reports 0 mismatches. The core's frame hashes still
-equal the host's. Conversion plus DMA setup is ≤ 5% of a 480 MHz frame
+equal the host's. Conversion plus DMA setup is ≤ 5% of a 472 MHz frame
 (about 402k cycles; the target is a proposal). Human check: one look at
 cgb-acid2 and dmg-acid2 on the panel (sign-off item 1).
 
@@ -210,7 +218,7 @@ repo).
 
 **Acceptance:** a 10-minute run of `cgb_sound` plus `synth:worst-case`
 with the display on: 0 underruns. Emulated speed is within ±0.1% of real
-time (emulated clocks / 4,194,304 against DWT cycles / 480 M). The
+time (emulated clocks / 4,194,304 against DWT cycles / 472 M). The
 DAC-feed hash equals the host's. Human check: listen through powered
 speakers or headphones via an amp (sign-off item 2).
 
@@ -257,14 +265,14 @@ requirements are real-time frames and the cycle-baseline ratchet.
 - [ ] Optional: E1 dot-stepped mode 3 in the core, only if the `storm-*` numbers from M0 show the closed-form per-write cost matters for real games (they are outside the bound by human decision)
 - [ ] Optional: B9 dispatch-mispredict measurement. **Note:** the Cortex-M7 DWT has CYCCNT/CPICNT/LSUCNT/FOLDCNT/EXCCNT/SLEEPCNT but, as far as I know, no branch-mispredict counter (unverified), so this needs an indirect method or is dropped
 - [ ] Deferred to Stage 3 unless a measurement here needs it: E5/D11 CPU fetch rework (touches `Cpu::run`; wants the real-game frame-golden net, Stage 1 M10 E6, which needs the human's recordings); C10 recursion split (only for a provable static stack bound; measured stack is 2,952 B)
-- [ ] On-board cycle baseline: `tools/h7-bench/expected-cycles.txt` (per workload, per placement, 480 MHz); the gate fails at > +3% over it (cycle counts repeat exactly, so this is tight but fair). It is a regression ratchet, not an absolute bar. Absorbing a +3% failure needs the human, as for `check-bench.sh`
-- [ ] Report, in `docs/perf.md` and the log: `synth:worst-case` max cycles per frame at 480 MHz with ROMs in QSPI and the shipped placement, as a percentage of the 4,018,249 figure (and the projected margin on the H735 at 550 MHz, labelled as a projection)
+- [ ] On-board cycle baseline: `tools/h7-bench/expected-cycles.txt` (per workload, per placement, 472 MHz); the gate fails at > +3% over it (cycle counts repeat exactly, so this is tight but fair). It is a regression ratchet, not an absolute bar. Absorbing a +3% failure needs the human, as for `check-bench.sh`
+- [ ] Report, in `docs/perf.md` and the log: `synth:worst-case` max cycles per frame at 472 MHz with ROMs in QSPI and the shipped placement, as a percentage of the 3,951,279 figure (and the projected margin on the H735 at 550 MHz, labelled as a projection)
 
-**Acceptance:** on the board at 480 MHz with ROMs in QSPI and the shipped
+**Acceptance:** on the board at 472 MHz with ROMs in QSPI and the shipped
 placement, `synth:worst-case` max cycles per frame is **measured and
-reported** against 4,018,249 (not gated). Full speed is gated: in the
+reported** against 3,951,279 (not gated). Full speed is gated: in the
 `player` image with display, audio and input running, the whole loop
-fits real time (frame time < 1/59.7275 s, under 8,036,499 cycles), with 0
+fits real time (frame time < 1/59.7275 s, under 7,902,557 cycles), with 0
 frames over budget in 10 minutes of `synth:worst-case`. The cycle baseline
 is committed. The performance review (AGENTS.md) is required at this
 milestone's close.
@@ -320,22 +328,22 @@ Host steps (heavy, run alone per AGENTS.md machine rules):
 
 Board steps (serialized under the board lock; each flash is followed by
 reading the serial port and **ignoring the lines before the new banner**):
-- **B1.** `selftest-480`: `cpu_hz=480000000`, VOS0/ODEN read back,
+- **B1.** `selftest-pll480` (image name kept; banner `clock=pll472`): `cpu_hz=472000000`, VOS0/ODEN read back,
   `actvosrdy=1`, the expected `flash_acr`, constant `cycles=`, and an
   equal `tcmprobe`.
-- **B2.** `bench-itcm-dtcm-qspi-480` (and the internal-flash variant):
+- **B2.** `bench-itcm-dtcm-qspi-pll480` (and the internal-flash variant):
   every workload's `calls/frames/clocks/hash` equals
   `expected-hashes.txt`. Every workload ≤ `expected-cycles.txt` + 3%.
   Every sign-off workload (`synth:worst-case` and the replay ROMs) has
-  max cycles per frame < 8,036,499 (real time). `synth:worst-case` max vs
-  4,018,249 is printed as a **report line, not a check** (human,
+  max cycles per frame < 7,902,557 (real time). `synth:worst-case` max vs
+  3,951,279 is printed as a **report line, not a check** (human,
   2026-11-25).
 - **B3.** Load the replay set into QSPI (skipped if the hashes match).
   Then the `player` image in scripted mode: each ROM's frame-hash list
   and DAC-feed hash equal the host's, the display readback has 0
   mismatches, and the run ends with 0 underruns and 0 frames over budget.
 - **B4.** A 10-minute `synth:worst-case` soak in the `player` image: 0
-  frames over budget (budget = one real-time frame, 8,036,499 cycles), 0
+  frames over budget (budget = one real-time frame, 7,902,557 cycles), 0
   underruns, and emulated speed within ±0.1% of real time.
 - **B5.** Save round trip: load a ROM with a test `.sav` (cart RAM plus RTC
   footer) over the serial link, dump it back, and the dump equals the
@@ -351,9 +359,9 @@ input feel right.
 # On-board equality set: each ROM runs on the host and on the board with the
 # same inputs; frame-hash and audio-hash lists must be identical.
 roms_release = "<same as stage1.toml>"
-cpu_mhz = 480
-frame_budget_cycles = 8036499          # real time at 480 MHz; gated
-worst_case_report_cycles = 4018249     # 50% of a 480 MHz frame; REPORTED, not gated
+cpu_mhz = 472
+frame_budget_cycles = 7902557          # real time at 472 MHz; gated
+worst_case_report_cycles = 3951279     # 50% of a 472 MHz frame; REPORTED, not gated
 soak_minutes = 10                      # synth:worst-case, player image
 
 replay = [
@@ -408,10 +416,11 @@ shown. D8 is a note.
 | D4 | Audio output path | (a) **internal DAC1, PA4/PA5**, 12-bit, line level (no purchase; needs powered speakers or headphones through an amp); (b) an I2S DAC breakout (e.g. PCM5102A) on I2S2 (PB12/13/15, PC6) or SAI on non-Zio pins (pin plan unverified): costs money, closer to Stage 3's SAI → DAC; (c) PWM | **Accepted: (a).** It meets the stage goal with no purchase. The ring, DC blocker and pacing carry over whichever is chosen |
 | D5 | Getting ROMs into QSPI | (a) **our own UART loader** over the VCP, scriptable from WSL; (b) STM32CubeProgrammer with an external loader for the shield's flash (the human's tool; availability unverified); (c) a ROM embedded in the firmware image, copied to QSPI at boot (≤ ~1.5 MiB) | **Accepted: (a)**, with (b) as the human's fallback. Agents need (a) for the on-board gate |
 | D6 | Saves on the dev board | (a) none persistent; (b) QSPI save area; (c) internal flash bank 2; (d) over the PC serial link | **Decided (human, 2026-11-25): (d), not QSPI.** `tools/gbc-pc` sends the `.sav` (cart RAM plus the RTC footer, the desktop format, ADR 0023) with the ROM, and the board dumps it back on request or a button combo. Folded into M5; the old M7 is gone. Acceptance: a save round-trips byte-identically, PC → board → PC (B5) |
-| D7 | Full-speed sign-off workloads | `synth:worst-case` (bench, ROM in QSPI, 480 MHz) plus real games for the human: Shantae and Alone in the Dark (heavy HDMA), Wario Land 3, LADX, and Pokémon Crystal (RTC) | **Accepted.** Gated: each finishes its frames inside real time (< 1/59.7275 s). `synth:worst-case` vs 50% and the real-game core cycles from the `player` statistics are reported, not gated. They become gated replays if the human records inputs (Stage 1 M10 E6) |
+| D7 | Full-speed sign-off workloads | `synth:worst-case` (bench, ROM in QSPI, 472 MHz) plus real games for the human: Shantae and Alone in the Dark (heavy HDMA), Wario Land 3, LADX, and Pokémon Crystal (RTC) | **Accepted.** Gated: each finishes its frames inside real time (< 1/59.7275 s). `synth:worst-case` vs 50% and the real-game core cycles from the `player` statistics are reported, not gated. They become gated replays if the human records inputs (Stage 1 M10 E6) |
 | D8 | Cortex-M4 | — | **Note: not applicable**: the H753ZI is single-core (the dual-core H755 is retired), and the Stage 3 H735 is single-core too |
 | D9 | Dependencies for the new crates | AGENTS.md lets agents decide dependencies for `gbc-desktop` and `tools/*` only | **Accepted:** extend that to `gbc-nucleo-h753` (MIT/Apache crates: `cortex-m`, `cortex-m-rt`, `stm32h7`, as h7-bench already uses) and keep `gbc-firmware` (only `gbc-core`) and `gbc-link` (none) dependency-free; `tools/gbc-pc`: `gbc-link` plus a serial-port crate, chosen by the agent under the `tools/*` rule. **Decided (human, 2026-11-25): no `serialport` (MPL-2.0); `gbc-pc` talks to the COM port directly through `windows-sys` (MIT/Apache-2.0).** `gbc-handheld`: decide when it exists |
 | D10 | `acceptance/stage2.toml` | the proposal above | **Accepted:** the human creates it (or edits the proposal). Agents won't create it |
+| D11 | Dev-board clock | (a) 480 MHz from the ST-LINK MCO (measured 483.9 MHz, out of spec); (b) **472 MHz from the HSI**; (c) the HSI trimmed against the LSE at boot to about 478-480 MHz; (d) fit an HSE crystal | **Decided (human, 2026-11-25): (b).** PLL1 = HSI 64 MHz / 4 x 59 / 2 = 472 MHz nominal (measured 473.68 MHz), AXI/AHB 236, APB 118, flash 4 WS, VOS0 via ODEN. At the HSI's worst case (+1.5%) the CPU is at most 479.1 MHz. Figures: real-time frame **7,902,557 cycles**, 50% line **3,951,279** (commits 0a1d52b, 761049b, a5502f4; h7-bench README) |
 
 ## Risks
 
@@ -424,7 +433,7 @@ shown. D8 is a note.
    flash/I-cache, tiers are dropped in the measured order, and the
    post-link check catches what LTO moves. The H753 is allowed to be
    slower, and the 50% figure is reported for it, not gated (human, 2026-11-25); it must still run in real time.
-2. **480 MHz is scaled, not measured.** The 40.9% / 41.3% figure assumes
+2. **480 MHz is scaled, not measured.** (M0 has since measured it, at the 480 MHz MCO clock, then at 472 MHz HSI: D11.) The 40.9% / 41.3% figure assumes
    the cycle count doesn't change with frequency. That held within 0.3%
    for `itcm-dtcm` between 64 and 392 MHz, but flash goes to 4 wait
    states (10 CPU cycles per miss, up from 6), and everything left in
@@ -462,8 +471,8 @@ The shield's QSPI part number, maximum clock, DTR/QPI support and
 quad-enable bit. Whether the 66 ns write cycle is reachable through the
 shield. PE4 as FMC_A20 and the 0x6010_0000 data address. A panel rate
 near 59.7 Hz with DIVA = 01. The panel's native scan direction relative to
-how the shield is mounted. VCP baud rates above 115200. HSI accuracy at 480 MHz
-(avoided by using HSE). An ST app-note citation for the M7 MPU setup of
+how the shield is mounted. VCP baud rates above 115200.
+The HSE/MCO finding is settled (D11). An ST app-note citation for the M7 MPU setup of
 the QSPI and FMC regions. Unaligned loads from the QSPI window (tested in
 M2). Whether the Cortex-M7 DWT has a branch-mispredict counter (believed
 not). A non-Zio pin plan for SAI. Whether the `*-pll` bench images run

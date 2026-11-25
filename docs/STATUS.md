@@ -7,12 +7,7 @@
   full gate pass: `stage1-m10` (b6b59e7). Stage 2 (STM32H7 platform
   layer, `README.md` §2) is next and has **no plan yet**: the first task is
   drafting `docs/plan/stage-2.md` for the human's approval.
-- **Dev-board clock (human, 2026-11-25):** Stage 2 targets the
-  NUCLEO-H753ZI at **480 MHz** (VOS0 + SYSCFG ODEN; LDO supply and rev V
-  silicon allow it), not the 392 MHz used so far. Not yet measured: the
-  480 MHz figures in `tools/h7-bench/README.md` are scaled from 392 MHz
-  cycles, and flash wait states rise at 240 MHz AXI, so cycles/frame may
-  grow for flash-resident code. Measuring it is an early Stage 2 task.
+- **Dev-board clock (human, 2026-11-25, D11):** Stage 2 runs the NUCLEO-H753ZI at **472 MHz from the HSI** (PLL1 64 MHz /4 x59 /2, VOS0 via ODEN, AXI 236 MHz), not 480 MHz from the ST-LINK MCO: the MCO measured 8.0644 MHz, so the CPU ran at 483.9 MHz, out of spec. Figures: real-time frame **7,902,557 cycles**, 50% report line **3,951,279**.
 - **Last updated:** 2026-11-25, session 20 (log
   `logs/2026-11-25-20-stage1-complete.md`; session 19:
   `logs/2026-11-25-19-stage1-lows.md`).

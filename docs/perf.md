@@ -1015,9 +1015,11 @@ there.
 - Against the H755 figures below (core bcd881e) the H753 worst case in
   ITCM is 6% dearer at any clock: the core's code changed between the two
   (not separated, the H755 is gone).
-- The PC timed `selftest-pll480`'s DWT lines at 484.3 MHz, 0.9% fast
-  (h7-bench README, "NUCLEO-H753ZI at 480 MHz"): the % above are against
-  the nominal 480 MHz.
+- Measured with the 480 MHz MCO clock, 483.9 MHz actual (the PC timed
+  `selftest-pll480`'s DWT lines at 484.3 MHz, 0.9% fast; h7-bench README,
+  "NUCLEO-H753ZI at 480 MHz"): the % above are against the nominal 480 MHz.
+  Stage 2 now runs 472 MHz from the HSI (D11): frame 7,902,557 cycles, 50%
+  line 3,951,279; cycle counts are unchanged, the % rise by x 1.0169.
 
 ### NUCLEO-H755ZI-Q (2026-11-24)
 
@@ -1194,7 +1196,7 @@ count.
 count benchmark" and the APU budget above) was derived as 50% of an H753
 frame at 480 MHz: 480 MHz / 59.73 fps / 2 = 4.02 M cycles. On the H735 at
 520 MHz, 50% of a frame is 4.35 M cycles (4.60 M at 550 MHz). The 4.02 M
-line stays as the stricter figure; no Ir gate changes.
+line stays as the stricter figure (the H753 now runs 472 MHz, whose 50% is 3.95 M cycles, D11); no Ir gate changes.
 
 ### Dev board: NUCLEO-H753ZI (Stage 2 only)
 
