@@ -817,8 +817,9 @@ impl<'a> Emulator<'a> {
 /// `limit` (the target, or `u64::MAX` for a `single` step). Returns
 /// whether the call ends: inside the stall, or after it at a stop event
 /// or the target (not for a single step, which runs its instruction).
-/// Out of line, off `Emulator::run` (code-size budgets): only while a
-/// transfer is pending or stalls the CPU.
+/// Out of line: only while a transfer is pending or stalls the CPU, and
+/// inlined it would put `vram_dma` and `vdma_stall` among the callees of
+/// `Emulator::run` (the ITCM set, `perf/itcm-sections.txt`).
 #[inline(never)]
 fn vdma_turn(cpu: &mut Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
     if ctx.sys.vdma.stall == 0 && ctx.sys.vdma.pending && cpu.running() {

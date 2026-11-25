@@ -138,12 +138,10 @@ impl Sys<'_> {
     }
 
     /// Sets the `DivApu` deadline at clock `now`: the next falling edge of
-    /// the system counter's DIV-APU bit while the APU is `powered`, else
+    /// the system counter's DIV-APU bit while the APU is powered, else
     /// [`NEVER`] (ADR 0021 section 4). Called wherever the counter is
     /// rebased or the APU powers on, with the APU's frame-sequencer state
-    /// `fs`. The caller reschedules. Out of line:
-    /// off `speed_switch` and the event handlers (code-size budgets).
-    #[inline(never)]
+    /// `fs`. The caller reschedules.
     pub(crate) fn set_div_apu_deadline(&mut self, fs: apu::Fs, now: u64) {
         let at = if fs.power {
             let k = self.timer.div_apu_bit() + 1;
@@ -666,8 +664,6 @@ impl Ctx<'_, '_> {
 
     /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
     /// the TIMA edge of AGE's later reset ([`Timer::stop_edge`], ADR 0020).
-    /// Out of line: keeps `stop_begin` within its code-size budget.
-    #[inline(never)]
     fn stop_div_reset(&mut self) {
         if self.sys.ie & self.sys.iflags == 0 {
             let now = self.clock();
@@ -821,9 +817,7 @@ impl Ctx<'_, '_> {
 
     /// The end of a run call that started at clock `start`: the samples
     /// completed in it are written, a partial window carries over (ADR 0021
-    /// section 3), and the context is dropped. Out of line: once per call,
-    /// off `Emulator::run`.
-    #[inline(never)]
+    /// section 3), and the context is dropped. Once per call.
     pub(crate) fn finish(mut self, start: u64) -> RunResult {
         self.apu_sync(self.clock());
         RunResult {
@@ -836,8 +830,7 @@ impl Ctx<'_, '_> {
     /// The start of a run call: the APU is brought to the clock (advance
     /// only, if a caller left it behind), and with buffer room the
     /// `AudioBuffer` deadline is where the last slot's window ends. The
-    /// caller reschedules. Out of line: once per call, off `Emulator::run`.
-    #[inline(never)]
+    /// caller reschedules. Once per call.
     fn start_audio(&mut self) {
         let now = self.clock();
         let apu = &mut self.mem.apu;
