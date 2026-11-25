@@ -13,13 +13,11 @@
 //! - the walk's sequence, [`Ppu::step`](super::Ppu::step) and
 //!   [`Ppu::step_work`](super::Ppu::step_work): each arm's distance and
 //!   successor is a `const` lookup ([`next`], [`next_at`], [`first`],
-//!   [`frame_wrap`]), so the code is the same immediates as when they were
-//!   written by hand;
+//!   [`frame_wrap`]), so the code compares against immediates;
 //! - the walk's STAT update per point, `Ppu::point_irq`: each arm
 //!   evaluates its row ([`row`]), specialized at compile time;
 //! - the cursor search, `Ppu::seek_point`: a line's first row
-//!   ([`Class::first`]), then `step` (it was a second, hand-written copy
-//!   of the sequence);
+//!   ([`Class::first`]), then `step`;
 //! - the comparison value as reads and writes see it, `Ppu::cmp`: its
 //!   positions are the rows' [`Row::seen`];
 //! - the STAT/LYC write views (`Ppu::mode_source`, `Ppu::update_at`,

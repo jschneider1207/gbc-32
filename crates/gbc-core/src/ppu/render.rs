@@ -6,7 +6,7 @@
 //! right pixel. Splitting a line into spans gives exactly the same pixels
 //! as one span when no register changes between them (tested below).
 //!
-//! Scope: DMG compatibility mode on a CGB (M3); in CGB mode (M5) the BG map
+//! Scope: DMG compatibility mode on a CGB, and CGB mode with the BG map
 //! attributes (palette, tile bank, flips, BG-to-OBJ priority) and LCDC.0 as
 //! the master priority. In CGB mode each tile fetch reads its attribute
 //! byte and turns it into a palette and a priority mask for the tile's

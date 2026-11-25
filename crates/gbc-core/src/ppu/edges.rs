@@ -10,8 +10,8 @@
 //! second phase of a STAT write, one T-cycle in) are [`Observer`]s; the
 //! bus applies their offset as a whole-dot delay ([`Observer::delay`]).
 //!
-//! Everything here is `const` and compiles to the same immediate
-//! comparisons the code made before the table existed. Where a reference
+//! Everything here is `const`: its users compile to comparisons with
+//! immediates. Where a reference
 //! says the PPU itself differs in double speed (ADR 0014
 //! "Consequences": the mode-0 STAT change one dot later, line 153's LY 0
 //! one dot later), the edge has a per-speed value (`_SS`, `_DS`).

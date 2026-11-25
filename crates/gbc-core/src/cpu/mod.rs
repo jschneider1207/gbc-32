@@ -179,15 +179,15 @@ pub trait Bus {
         let _ = event;
     }
     /// STOP was executed, at the end of its fetch M-cycle. Free: the
-    /// emulator resets DIV here unless the result is [`StopKind::Joypad`].
+    /// emulator resets DIV here unless the result is `StopKind::Joypad`.
     fn stop_begin(&mut self) -> StopKind {
         StopKind::Stop
     }
-    /// The CGB speed switch of a [`StopKind::Switch`], after STOP's second
+    /// The CGB speed switch of a `StopKind::Switch`, after STOP's second
     /// byte (if read). `ime`: IME at the STOP; `pending`: IE & IF was
     /// nonzero at it. Returns true if the CPU waits: without `pending`, it
-    /// halts until [`Bus::speed_switch_over`] or an interrupt; with it,
-    /// it idles one M-cycle. Free.
+    /// halts until the halt has run its length or an interrupt
+    /// ([`Bus::speed_switch_halt`]); with it, it idles one M-cycle. Free.
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
         let _ = (ime, pending);
         false
@@ -197,7 +197,8 @@ pub trait Bus {
     /// place of [`Bus::halt_end`]) and this returns true; otherwise it
     /// idles like [`Bus::idle_halted`], never past the halt's end, and
     /// returns false. The default halt has no length: it ends at once.
-    /// One cold call, so the HALT path of `step_not_running` stays as it was.
+    /// One cold call: the HALT path of `step_not_running` has no
+    /// speed-switch code in it.
     fn speed_switch_halt(&mut self) -> bool {
         self.halt_end();
         true
@@ -205,7 +206,7 @@ pub trait Bus {
     /// After HALT halts ([`Bus::halt_begin`]) or a speed switch that halts
     /// ([`Bus::speed_switch`]): whether the byte after HALT, or STOP's
     /// second byte, latched then, runs as the next opcode after the
-    /// wake-up ([`Mode::Prefetched`]). The emulator: a VRAM DMA block
+    /// wake-up (`Mode::Prefetched`). The emulator: a VRAM DMA block
     /// requested in HALT's M-cycle or STOP's first (gambatte
     /// `Memory::halt`/`stop`, `prefetched`). Free.
     fn hdma_refetch(&mut self) -> bool {
@@ -213,12 +214,12 @@ pub trait Bus {
     }
     /// The byte an opcode fetch at `addr` would read now, without the
     /// M-cycle (the emulator latches an opcode with it before a VRAM DMA
-    /// block, [`Cpu::latch_fetch`]). Free. Default: FF.
+    /// block, `Cpu::latch_fetch`). Free. Default: FF.
     fn fetch_peek(&mut self, addr: u16) -> u8 {
         let _ = addr;
         0xFF
     }
-    /// STOP mode was entered ([`StopKind::Stop`]), after STOP's second
+    /// STOP mode was entered (`StopKind::Stop`), after STOP's second
     /// byte (if read). Free. The emulator pauses OAM DMA and HDMA here;
     /// it stopped the timer in [`Bus::stop_begin`].
     fn stop_enter(&mut self) {}
@@ -434,7 +435,7 @@ impl Cpu {
     ///
     /// Between two instructions the loop makes one test,
     /// [`Bus::attention`]. Only a step that finds it set looks at the
-    /// rest, in [`Cpu::checked_fetch`]: the end of the run, the mode, a
+    /// rest, in `Cpu::checked_fetch`: the end of the run, the mode, a
     /// pending interrupt, EI's delay (ADR 0008, 2026-11-24 amendment).
     /// The first step of a call is checked whatever the bus says: the
     /// CPU's state may have been set from outside since the last call.
@@ -474,7 +475,7 @@ impl Cpu {
 
     /// Executes one instruction, or dispatches one interrupt, or idles
     /// ([`Bus::idle_halted`]) while halted, stopped, locked up or powered
-    /// off. Every step is a checked one ([`Cpu::attend`]).
+    /// off. Every step is a checked one (`Cpu::attend`).
     #[inline]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
         if let Some(step) = self.attend(bus) {
@@ -767,7 +768,8 @@ impl Cpu {
     ///   expects STOP to be one byte even with nothing pending; its
     ///   harness exempts PC and the bus cycles of those cases (ADR 0020).
     ///
-    /// Cold and out of line: it keeps `Cpu::run` small.
+    /// Cold and out of line: STOP is rare, and its code stays out of
+    /// `Cpu::run`.
     #[cold]
     #[inline(never)]
     fn stop<B: Bus>(&mut self, bus: &mut B) {

@@ -7,7 +7,7 @@
 //!
 //! # Construction
 //!
-//! The large RAM arrays (~49 KiB) are a separate type, [`Memory`], which
+//! The large RAM arrays (~50 KiB) are a separate type, [`Memory`], which
 //! the caller provides; [`Emulator`] itself is small (under 1 KiB) and
 //! borrows it, along with the cartridge ROM and RAM:
 //!
@@ -263,7 +263,7 @@ pub struct RunResult {
 pub struct Emulator<'a> {
     /// The large RAM arrays, provided by the caller (ADR 0009). Run calls
     /// copy this pointer into the per-call `Ctx`, so the hot path reaches
-    /// memory through the context exactly as before the split.
+    /// memory through the context, not through the `Emulator`.
     mem: &'a mut Memory,
     hw: Hw<'a>,
 }
@@ -271,9 +271,9 @@ pub struct Emulator<'a> {
 /// Everything except the large RAM arrays, which live in [`Memory`]. It
 /// should stay small: on the MCU the stack is a few KiB and is shared with
 /// interrupt handlers, and the `Emulator` (and so `Hw`) may live on it
-/// (ADR 0006). There is no fixed cap (dropped 2026-11-24, ADR 0006
-/// amendment); `scripts/check-code-size.sh` reports the on-target size of
-/// `Emulator` (824 B on thumbv7em). State belongs with the component that
+/// (ADR 0006). There is no fixed cap (ADR 0006, amendment of 2026-11-24);
+/// `scripts/check-code-size.sh` prints the on-target size of `Emulator`
+/// (952 B on thumbv7em on 2026-11-24). State belongs with the component that
 /// owns it; only something large (a buffer, a table) belongs in `Memory`
 /// instead, as a field whose power-on value is all zeros (non-zero
 /// post-boot values are written by `reset`).
@@ -289,7 +289,7 @@ struct Hw<'a> {
 }
 
 impl Hw<'_> {
-    // Out of line (code size): `Emulator::new` and `eject` share it.
+    // Out of line: cold, and `Emulator::new` and `eject` share the one copy.
     #[inline(never)]
     fn new() -> Self {
         Self {

@@ -35,6 +35,8 @@ const PPU_DUE: u8 = 2;
 impl Ctx<'_, '_> {
     /// The `Ppu` deadline: catches the PPU up to the current clock and
     /// reschedules.
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn sync_ppu(&mut self, now: u64) {
         self.run_ppu::<PPU_DUE>(now);

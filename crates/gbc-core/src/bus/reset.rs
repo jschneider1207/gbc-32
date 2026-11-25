@@ -148,7 +148,7 @@ fn boot_logo(vram: &mut [u8; 0x4000], rom: &[u8]) {
     vram[0x190..0x1A0].copy_from_slice(&TRADEMARK);
 }
 
-/// Post-boot values of the stub I/O registers kept in `Memory::io` (Pan
+/// Post-boot values of the I/O registers kept in `Memory::io` (Pan
 /// Docs: Power Up Sequence, "Hardware registers", CGB column).
 const POST_BOOT_IO: &[(u16, u8)] = &[
     (0xFF10, 0x80),

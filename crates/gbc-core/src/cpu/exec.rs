@@ -58,8 +58,9 @@ impl Cpu {
 
     /// The CB-prefixed instructions, after the CB byte. The register forms
     /// run in their own arm; the 32 (HL) forms (all arms `false`, merged
-    /// into one) share the body after the match: inlining a bus read and
-    /// write into each of them cost about 5 KB on thumbv7em. A (HL) form
+    /// into one) share the body after the match: a bus read and write
+    /// inlined into each of them is 4.7 KB more on thumbv7em for 0.02% Ir
+    /// on one bench line (docs/perf.md, "CPU read path"). A (HL) form
     /// costs ~5 more x86 instructions than inline (the second jump table).
     #[inline(never)]
     fn execute_cb<B: Bus>(&mut self, bus: &mut B) {

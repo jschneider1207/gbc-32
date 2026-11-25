@@ -20,6 +20,8 @@ impl Ctx<'_, '_> {
     /// The PPU is brought up to the write first (its OAM reads so far saw
     /// the old state), and OAM is kept as it is now for the PPU's reads of
     /// bytes not written yet (`Memory::oam_dma_old`).
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn oam_dma(&mut self, value: u8) {
         let now = self.clock();
@@ -291,6 +293,8 @@ fn dma_conflict(d: &OamDma, hot: &Hot, now: u64, addr: u16) -> (Conflict, u8) {
 /// I/O are unaffected, and the rest follows [`dma::conflict`]. Side-effect
 /// free like [`read`], except a conflicting read with a VRAM source
 /// ([`dma_read_clear`]).
+// Out of line: measured with the other bus helpers as one batch, not
+// alone (docs/perf.md, "Small-state and attribute pass", A14).
 #[inline(never)]
 pub(super) fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     let now = hot.clock();

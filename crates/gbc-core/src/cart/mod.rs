@@ -530,8 +530,8 @@ enum Mapper {
     /// MBC3 (types 11-13), no clock. Also MBC30 (see `write_rom`).
     Mbc3,
     /// MBC3 with the RTC (types 0F-10). A variant rather than a `Cart`
-    /// flag, and a unit one (two variants with data would make `Mapper` 2
-    /// bytes), to keep `Cart` at 128 bytes (ADR 0015).
+    /// flag (ADR 0015), and a unit one: two variants with data would make
+    /// `Mapper` 2 bytes.
     Mbc3Rtc,
     /// MBC5 (types 19-1E). `rumble` is set for 1C-1E.
     Mbc5 { rumble: bool },
@@ -1018,6 +1018,9 @@ impl<'a> Cart<'a> {
     /// halting and restarting) leave it alone (rtc3test "Sub-second
     /// writes"; SameBoy `Core/memory.c` `write_mbc_ram` clears
     /// `rtc_cycles` on a seconds write only).
+    // Out of line: a rare path, and inlined it makes `Cart::write_ram` a
+    // flash callee of `write_mapped` in the H753 placement
+    // (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     fn write_rtc(&mut self, v: u8, now: u64) {
         // Nothing mapped (FF) or a Hudson mode.
@@ -1246,6 +1249,8 @@ impl<'a> Cart<'a> {
         }
     }
 
+    // Out of line: a rare path, pinned with the other RTC paths
+    // (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     fn latch_rtc(&mut self, now: u64) {
         self.rtc_sync(now);

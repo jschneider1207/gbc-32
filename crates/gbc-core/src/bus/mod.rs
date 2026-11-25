@@ -404,6 +404,8 @@ impl Ctx<'_, '_> {
 
     /// An IE write (FFFF): bit 2 turns the Timer deadline on or off
     /// while the timer interrupt is requested ([`Self::schedule_timer`]).
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     fn write_ie(&mut self, value: u8) {
         let old = self.sys.ie;
@@ -636,6 +638,8 @@ impl Ctx<'_, '_> {
     /// A CPU write to FE00-FEFF: dropped while the PPU blocks OAM
     /// ([`Ppu::oam_blocked`]), FEA0-FEFF included (Pan Docs: Memory Map,
     /// "FEA0-FEFF range").
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     fn write_oam(&mut self, addr: u16, value: u8) {
         if self
@@ -676,6 +680,8 @@ impl Ctx<'_, '_> {
     /// apart). A request still on its way to IF at that dot
     /// (`Ppu::request_irq`) is not in IF yet, so the write doesn't clear
     /// it.
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     fn write_if(&mut self, value: u8) {
         let at = self.clock() + 1;
@@ -774,8 +780,7 @@ impl Ctx<'_, '_> {
             // value; the read masks are in `read_io`). RP (FF56, the
             // infrared port) too, in either mode (SameBoy: `GB_IO_RP`
             // stores on any CGB); its read is CGB mode only
-            // (`read_io_other`). One arm with them: `write_io` is in the
-            // ITCM set, and a separate arm cost it 40 B.
+            // (`read_io_other`). One arm with them: the same plain store.
             0x56 | 0x72..=0x75 => self.mem.io[reg] = value,
             _ => {}
         }
@@ -1058,8 +1063,9 @@ impl Bus for Ctx<'_, '_> {
 
 /// A read as the CPU sees it at the current clock, through shared
 /// references: the one read side effect (a conflicting read during an OAM
-/// DMA from VRAM) is recorded in a `Cell` ([`dma_read_clear`]), so the CPU
-/// and `peek` keep sharing one `read_high` (ADR 0028 amendment). Shared by
+/// DMA from VRAM) is recorded through `&` in [`Sys::dma_read_clears`]
+/// (`oam_dma::dma_read_clear`), so the CPU and `peek` keep sharing one
+/// `read_high` (ADR 0028 amendment). Shared by
 /// the CPU bus and
 /// [`Emulator::peek`]. `hot` is the live clock: [`Ctx::hot`]
 /// during a run call, [`Sys::hot`] otherwise. While an OAM DMA transfer
@@ -1128,8 +1134,9 @@ fn oam_offset(addr: u16) -> usize {
 
 /// FEA0-FEFF on CGB revision C, by the offset `i` in FE00-FEFF
 /// ([`oam_offset`], 0xA0 or more): RAM with address bits 3-4 ignored
-/// (SameBoy `GB_read_oam`/`write_oam`: `addr &= ~0x18`). TODO(M3): reads
-/// 0xFF while the PPU blocks OAM (Pan Docs: "FEA0-FEFF range").
+/// (SameBoy `GB_read_oam`/`write_oam`: `addr &= ~0x18`). The PPU blocks
+/// it with OAM ([`read_oam`], `Ctx::write_oam`; Pan Docs: "FEA0-FEFF
+/// range").
 #[inline]
 fn extra_oam_index(i: usize) -> usize {
     (i - 0xA0) & !0x18
@@ -1192,6 +1199,8 @@ fn read_vram(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
 
 /// A CPU read of FE00-FEFF: FF while the PPU blocks OAM
 /// ([`Ppu::oam_blocked`]), FEA0-FEFF included.
+// Out of line: measured with the other bus helpers as one batch, not
+// alone (docs/perf.md, "Small-state and attribute pass", A14).
 #[inline(never)]
 fn read_oam(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
     if sys.ppu.oam_blocked(hot.clock(), hot.speed(), false) {

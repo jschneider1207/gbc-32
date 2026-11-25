@@ -13,6 +13,8 @@ impl Ctx<'_, '_> {
     /// frame sequencer steps now (SameBoy `GB_set_internal_div_counter`,
     /// `triggers & apu_bit`); then the deadline moves with the rebased
     /// counter. The caller reschedules.
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn apu_div_reset(&mut self, old: u64) {
         if !self.mem.apu.powered() {
@@ -32,6 +34,8 @@ impl Ctx<'_, '_> {
     /// rebase inside the lag, at most 2 clocks
     /// into it in double speed, moves it by that much), else the next
     /// DIV-APU edge.
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn set_apu_deadline(&mut self, now: u64) {
         let apu = &self.mem.apu;
@@ -70,6 +74,8 @@ impl Ctx<'_, '_> {
     /// A DIV-APU falling edge (`EventKind::DivApu`, due at `now`), or the
     /// pending sweep event `SWEEP_LAG` clocks after the last one
     /// (`Sweep::due`: the step, or a tick of its overflow check).
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn div_apu_event(&mut self, now: u64) {
         self.apu_sync(now);
@@ -84,6 +90,8 @@ impl Ctx<'_, '_> {
 
     /// The last free audio slot's window ended (`EventKind::AudioBuffer`):
     /// write it and end the call. The deadline stays `NEVER`.
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn audio_buffer_event(&mut self, now: u64) {
         self.apu_sync(now);

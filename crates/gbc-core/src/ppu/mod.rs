@@ -178,7 +178,7 @@ const MODE_1_STICKY: u8 = 6;
 ///   window (behaviour only, GPL) and `m2enable/late_enable_lcdoffset3_1`
 ///   (CGB04C) need (double speed: one dot longer, see `mode_source`);
 /// - `StatPhase2` and `LycWrite` (one T-cycle in): the mode-2 source
-///   gone and the comparison done, as before the walk's point moved:
+///   gone and the comparison done:
 ///   gambatte never lets the mode-2 source block a LYC-write trigger
 ///   (`lycRegChangeStatTriggerBlockedByM0OrM1Irq`), and the default-phase
 ///   ROMs `m2_late_m0disable_2`, `lyc1_m2irq_late_lyc255_3` and
@@ -252,12 +252,9 @@ struct Cursor {
 
 /// The STAT interrupt line and the LY=LYC part of it (SameBoy
 /// `stat_interrupt_line`, `lyc_interrupt_line`), and the mode part of the
-/// line: `bits` [`IrqLine::STAT`] and [`IrqLine::MODE`], and `lyc`. Two
-/// bytes, as the two-`bool` struct before the mode part was: three `bool`s
-/// grew `Hw` past the size cap it had then (dropped 2026-11-24), and the
-/// old layout keeps `Ppu` code 62 B smaller than one byte unaligned (thumbv7em). `lyc` in a byte of
-/// its own is a plain store in [`IrqLine::eval`] (perf: one byte for all
-/// three cost ~3 Ir per update point).
+/// line: `bits` [`IrqLine::STAT`] and [`IrqLine::MODE`], and `lyc`. `lyc`
+/// in a byte of its own is a plain store in [`IrqLine::eval`] (measured:
+/// one byte for all three cost ~3 Ir per update point).
 #[derive(Clone, Copy)]
 struct IrqLine {
     bits: u8,
@@ -327,7 +324,7 @@ impl IrqLine {
 ///
 /// Mode 3 lasts 172 dots plus penalties (Pan Docs: Rendering, "Mode 3
 /// length"): `SCX % 8` dots before the first pixel, 6 dots when the
-/// window starts, and 6-11 dots per object ([`object_stalls`]). Pixel
+/// window starts, and 6-11 dots per object ([`sorted_object_stalls`]). Pixel
 /// `x` leaves the pipeline at `first_pixel + x` plus the stalls of the
 /// objects and window at or left of it; mode 3 ends with the last one.
 #[derive(Clone, Copy)]
@@ -628,7 +625,7 @@ pub(crate) struct Ppu {
     bus: [u8; 2],
     bus_live: bool,
     /// The last OAM DMA transfer (FF46). The bus drives it (CPU-side
-    /// timing and conflicts, `bus.rs`); the PPU reads it for its own OAM
+    /// timing and conflicts, `bus/oam_dma.rs`); the PPU reads it for its own OAM
     /// reads ([`OamDma::ppu_at`]).
     pub(crate) dma: OamDma,
     /// Object slots of the current line whose OAM fetch has happened under
@@ -2027,14 +2024,14 @@ impl Ppu {
         // `set_latch` names the last object fetched before tile j + 1's
         // reads, else that there is an object stall in tile j or j + 1,
         // before or after the write (in tile 0: also one among the junk
-        // pixels), else neither. An empty object high plane as the latch is what
-        // the old calibration (a set "on time" next to an object stall)
-        // fitted in Mealybug `m3_lcdc_tile_sel_change` X = 3-7. With the
-        // latch unknown (`Renderer::sel`: BG reads with 8000 addressing
-        // to an earlier line's end), the last two keep that calibration's
-        // plane (old, else new); the lines it was fitted to (Mealybug
+        // pixels), else neither. An empty object high plane as the latch
+        // looks like a set landing on time next to an object stall
+        // (Mealybug `m3_lcdc_tile_sel_change` X = 3-7). With the latch
+        // unknown (`Renderer::sel`: BG reads with 8000 addressing to an
+        // earlier line's end), the last two pick the plane by that rule
+        // (old next to a stall, else new); with it known (Mealybug
         // `m3_lcdc_tile_sel_change` X = 16-17, `_win_change` X = 8-17,
-        // gambatte `bgtiledata_spx*`) now take the latch an earlier line
+        // gambatte `bgtiledata_spx*`) they take the latch an earlier line
         // left (`Ppu::tile_sel_latch`). SameBoy (sm83_cpu.c
         // `GB_CONFLICT_LCDC_CGB`) writes LCDC on time, with a clear
         // glitching the next dot's data read (`tile_sel_glitch`), which the
@@ -3108,8 +3105,8 @@ impl Ppu {
     /// A write landing between the STAT bit's comparison of the new LY
     /// ([`edges::CMP_ON`]) and the walk's ([`edges::CMP_WALK`], lines
     /// 1-152): the write's view has seen the comparison with
-    /// the old LYC and selects (where the walk compared before design step
-    /// 1), so the line takes it before the write changes them.
+    /// the old LYC and selects, so the line takes it before the write
+    /// changes them.
     ///
     /// The bus has synced the PPU to `now`, so that is exactly when the
     /// walk's next point is that comparison (`Ly4` of lines 1-143, `V4`),
@@ -3455,8 +3452,10 @@ pub(crate) fn object_stalls(
     sorted_object_stalls(&sorted[..n], scx, window, out).0
 }
 
-/// [`object_stalls`] of X coordinates already in ascending order (the
-/// line's priority order, [`LineObjects::priority_order`]).
+/// The mode-3 stalls of the objects at X coordinates `xs`, already in
+/// ascending order (the line's priority order,
+/// [`LineObjects::priority_order`]); the rules are on `object_stalls`,
+/// the test-only entry that sorts first.
 ///
 /// Objects at X = 0 are fetched in the junk tile, before the fine-scroll
 /// discard ([`Ppu::hold_fetch`]). The pixels left of the first tile's

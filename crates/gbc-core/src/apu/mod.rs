@@ -11,11 +11,9 @@
 //! FF30-FF3F); [`Apu`] (in `Memory::apu`, not `Hw`) holds only the internal
 //! state. All-zero is a valid `Apu`: powered off.
 //!
-//! Task 1(a) is the framework: power, the frame sequencer and the output
+//! This file is the framework: power, the frame sequencer and the output
 //! pipeline. The channels plug into `Apu::write`, `Apu::integrate`,
-//! `Apu::advance`, [`Apu::step`] and the NR52 active bits. Task 1(b): CH2;
-//! task 3: CH1 with its sweep; task 4: CH3 (`write_wave`, `read_apu`);
-//! task 5: CH4.
+//! `Apu::advance`, [`Apu::step`] and the NR52 active bits.
 
 mod mix;
 mod noise;
@@ -152,7 +150,7 @@ pub(crate) struct Fs {
     pub(crate) skip: u8,
     /// 2 MHz ticks (2 base clocks) of the clock at power on, mod 4: bit 0
     /// is SameBoy's 1 MHz phase (`lf_div`) for the square trigger delay
-    /// (ADR 0021 section 5, task 1(b)); both bits give the noise
+    /// (ADR 0021 section 5); both bits give the noise
     /// alignment (`Noise::trigger_delay`).
     pub(crate) phase: u8,
     /// The frame sequencer runs one double-speed M-cycle (2 clocks) behind
@@ -453,7 +451,8 @@ impl Apu {
 /// FF26 (NR52), wave RAM (FF30-FF3F) and FF76/FF77 (PCM12/PCM34) at clock
 /// `now`, by the low 7 address bits. Pure: a channel whose state a read
 /// depends on is copied and the copy advanced to `now` (ADR 0021 section
-/// 3). Out of line, off `read_high`.
+/// 3). Out of line, off `read_high` (measured: docs/perf.md, "Small-state
+/// and attribute pass", A14).
 #[inline(never)]
 pub(crate) fn read_apu(mem: &Memory, now: u64, reg: usize) -> u8 {
     // The channels are at the start of the spans listed (`mix::Spans`).

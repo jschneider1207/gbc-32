@@ -4,7 +4,7 @@ use crate::apu::Apu;
 use crate::ppu::ObjBuf;
 
 /// The console's large RAM blocks (WRAM, VRAM, OAM, HRAM, the FEA0-FEFF
-/// area and the I/O register backing store), about 49 KiB, provided by the
+/// area and the I/O register backing store), about 50 KiB, provided by the
 /// caller and borrowed by [`Emulator`](crate::Emulator) (ADR 0009).
 ///
 /// [`Memory::new`] is a `const fn` whose value is all zero bytes, so a
@@ -18,9 +18,10 @@ use crate::ppu::ObjBuf;
 /// integers and flags) whose power-on value is zero; non-zero power-on values (e.g. post-boot I/O registers) are
 /// written by `reset`, not by `new`. Checked by the
 /// `memory_new_is_all_zero_bytes` test.
-// `repr(C)`: `apu` (8-byte aligned) last, so the hot arrays keep the
-// offsets they had before it (rustc puts the most aligned field first),
-// which the bus and renderer code size depends on (Thumb-2 immediates).
+// `repr(C)`: the field order is the layout, with `apu` (8-byte aligned)
+// last. Left to rustc, the most aligned field goes first and moves every
+// array; the bus and renderer reach the arrays by offset (Thumb-2
+// immediates).
 #[cfg_attr(test, derive(PartialEq))]
 #[repr(C)]
 pub struct Memory {
@@ -43,10 +44,11 @@ pub struct Memory {
     /// bits 3-4 ignored (Pan Docs: "FEA0-FEFF range"; SameBoy
     /// `GB_read_oam`, `addr &= ~0x18` for CGB_C).
     pub(crate) extra_oam: [u8; 0x60],
-    /// Backing store for I/O registers (FF00-FF7F) that are plain
-    /// read/write storage until their component exists (sound until M6,
-    /// most PPU and CGB palette registers until M3/M5). Indexed by the
-    /// low address byte; registers with behavior live in their component.
+    /// Backing store for the I/O registers (FF00-FF7F) that are plain
+    /// read/write storage: the sound register bytes and wave RAM, SCY,
+    /// SCX, WY, WX, the DMG palettes, FF46, BCPS/OCPS, OPRI, RP and the
+    /// undocumented CGB registers. Indexed by the low address byte;
+    /// registers with behavior live in their component.
     pub(crate) io: [u8; 0x80],
     /// The renderer's object line buffer: the object pixels of the current
     /// line and their drawing-priority ranks ([`ObjBuf`]; ADR 0019). Line

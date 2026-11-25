@@ -68,6 +68,8 @@ impl Ctx<'_, '_> {
     /// 4)`) does its first block now; otherwise it waits for the next
     /// trigger, this line's if still ahead (`dma/hdma_late_enable_*`: an
     /// enable at the HBlank's end starts none).
+    // Out of line: measured with the other bus helpers as one batch, not
+    // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
     pub(super) fn write_hdma5(&mut self, value: u8) {
         let now = self.clock();

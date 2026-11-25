@@ -23,18 +23,14 @@ pub(crate) const NEVER: u64 = u64::MAX;
 /// A kind of scheduled work. The declaration order is the dispatch order
 /// for deadlines on the same clock (ADR 0011), so it is part of the
 /// emulated behavior: don't reorder.
-///
-/// `Timer`, `Serial`, `Ppu` and `Input` (ADR 0012) are scheduled so far.
-/// The others are declared now to pin that order and get their handlers
-/// with the work they stand for: `Dma` in ADR 0011 step 6 (M2), `DivApu`
-/// and `AudioBuffer` in M6.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum EventKind {
     /// TIMA reload + timer interrupt.
     Timer,
-    /// One serial bit shift.
+    /// A serial transfer's completion (its earlier bits shift on access).
     Serial,
-    /// The PPU's next sync (VBlank; mode/STAT events in M3).
+    /// The PPU's next sync: an interrupt request, the frame's end or a
+    /// visible line's mode-3 end (`Ppu::next_event`).
     Ppu,
     /// OAM DMA completion.
     Dma,
