@@ -80,9 +80,11 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    lines agree with the core. Two disagreement classes are on its
    enumerated exclusion list and need a verdict (one small agent each,
    references first; no core change without one):
-   (a) WX=0, SCX&7 != 0, window starting, an object at X 1..=167: core
-   273 vs oracle 277 at SCX 3, X=5 (the core's stalls and its own
-   renderer disagree by SCX&7; SameBoy has a "TODO: verify" there);
+   (a) WX=0 with a fine scroll and an object: DECIDED (human, 2026-11-24,
+   "go with your judgement for now and ensure it is documented"): the
+   stalls follow the renderer's 7+f window grid (ADR 0034, f21ea36 line;
+   test seen failing). References split 7 / 7+f / 8+f; the oracle
+   exclusion stays for 7+f vs SameBoy's 8+f (892 of 1,348 lines).
    (b) SCX write at positions 89..=107 with an object at X=0: core 267 vs
    oracle 268 (SameBoy fetches X=0 objects before the discard). Note
    gambatte `scx_during_m3_spx0` (cgb04c capture) PASSES on the core:
@@ -171,6 +173,19 @@ Working rules that matter here:
 ## Needs human
 
 Open (M10, session 17):
+- **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,
+  WX=0, WY=0, each SCX&7 in 1..=7, window tiles with distinguishable
+  columns: the window pixel at screen x=0 is column 7, 7+f, or 8+f.
+- **NUCLEO-H755ZI-Q spike** (human, 2026-11-24): board on USB (drive E:
+  = /mnt/e label NOD_H755ZIQ, VCP COM3), full chip erase done, option
+  bytes BCM7+BCM4 enabled (not to be changed). Standing permission to
+  flash it and read the serial port without asking; CubeProgrammer is
+  the human's recovery tool (connect under reset). Firmware:
+  `tools/h7-bench` on branch `m10-h7-spike` (agent, build only).
+  `qemu-system-arm` 8.2.2 is installed (mps2-an500).
+- Item 3 leftovers as plan tasks: inventory L7; `Ctx::write_high` and
+  `Apu::write_rest` unpin never measured; romtest worker `eprintln!`
+  deadlocks (main.rs holds the stderr lock).
 - **M7 instruction counts without hardware:** the human offered to install
   `qemu-system-arm` in WSL (`sudo apt install qemu-system-arm`) when they
   get a chance; then build a bare-metal Cortex-M7 harness (e.g. machine
