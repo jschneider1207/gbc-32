@@ -43,15 +43,14 @@ reviews and, at the end, the "Milestone-close review (session 18)" table
   from the first one, each within 23 clocks of its due clock.
 
 **Remaining, in order:**
-1. Merge `m10-storm` if not yet on `main` (close-review C-P2: adversarial
-   `synth:storm-*` programs measured, `docs/perf.md` "Outside the bound"
-   rewritten; no core change). If the agent's report was lost, re-run the
-   brief: measure dense APU writes, KEY1+STOP loops, DIV/TAC loops,
-   back-to-back GDMA and dense mid-mode-3 PPU writes in Ir/frame against
-   `synth:worst-case`, document, no mitigation. Mitigations are a budget
-   question for the human, with the numbers.
-2. Tick "Fix the confirmed high and medium findings" in the plan once
-   C-P2 is merged; update its row in `docs/reviews/stage1-m10.md`.
+1. DONE: `m10-storm` merged (f335f4b). Measured Ir/frame against the
+   4.02 M line: storm-ppu 22.0 M, storm-apu 20.0 M, storm-div 9.65 M,
+   storm-spsw 8.52 M; GDMA 2.35 M is inside. Also merged after the first
+   STATUS rewrite: two more reviews (the filter diff; the gate-check
+   diff) and their fixes: filter tests restored (99f7d4f), `--long`
+   first-frame cap + offset spread + gate refuses stray rustc-flag
+   variables (d1759e7).
+2. DONE: plan box ticked, C-P2 row updated.
 3. Full `./scripts/gate-stage1.sh`, alone (not run since M10 started; it
    now includes `--long`, which no per-merge check ran: that is how the
    dmg-raster failure went unseen for a session).
@@ -121,9 +120,8 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- `m10-storm` (worktree `<session 18 scratchpad>/wt-storm`, may be gone
-  with the scratchpad): the C-P2 measurement agent. Everything else from
-  session 18 is merged by fast-forward and its worktree removed.
+- None. Everything from session 18 is merged by fast-forward and its
+  worktree removed.
 
 ## Needs human
 
@@ -136,7 +134,15 @@ Open (M10, session 18):
   answer needed unless they object): apu-writes +33.6%, halt-irq +14.6%,
   cgb-acid2 +10.6%. The filter saturates to i16 (unity gain kept; only a
   four-channel swing above 81% of full scale reaches it).
-- **Mitigations for the outside-the-bound loops** (C-P2), once measured.
+- **Mitigations for the outside-the-bound loops** (C-P2, measured:
+  docs/perf.md "Outside the bound"): dense APU writes cost about 1.05 M
+  Ir per 1,000 writes (real players do 70-414 per frame); demos with
+  tens of mid-mode-3 PPU writes per line are partly reachable (about
+  +2.7 M Ir/frame at 16 per line, estimate). Cheap options are listed in
+  the plan; none is implemented.
+- **`--long` anchor cap:** offsets of 24-31 clocks are legitimate (STOP
+  wake + CALL) but rejected by the kept +-23 cap; no workload reaches
+  them. Relaxing it to 31 needs sign-off.
 - **Hardware captures that would settle things:** see
   `docs/reference/unpinned.md` (48+ rows). Most likely wrong: STAT during
   OAM DMA, the speed-switch IME-on timer offset (now AGE, 4 T behind
@@ -147,7 +153,8 @@ Open (M10, session 18):
   (superseded by `m10-spsw-land`), `m10-spsw-land`, `m10-line0-ds`,
   `m10-bus-split`, `m10-docs`, `m10-stat-walk`, `m10-unpinned`,
   `m10-tests`, `m10-audio-fir`, `m10-long-bisect` (empty),
-  `m10-gate-strict`, `m10-m0-latch`, `m10-long-check`, `m10-objlines`.
+  `m10-gate-strict`, `m10-m0-latch`, `m10-long-check`, `m10-objlines`,
+  `m10-long-check2`, `m10-audio-tests`, `m10-storm`.
 
 Open (M10, session 17):
 - **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,

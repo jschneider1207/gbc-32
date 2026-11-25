@@ -178,7 +178,7 @@ review time).
 | C-T6 | low | `tools/h7-bench` is its own workspace, outside the gate's fmt/clippy/test | plan (M10 task) |
 | C-T7 | low | The gate-step list in `acceptance/README.md` omits the SM83, ITCM-set and invariance steps the script runs | plan (M10 task; stricter) |
 | C-P1 | med | `ObjectLines::build` reran bit by bit on every line after an OAM write; no bench covered it | fixed 86d01ef (word-wide build, one line late; new program `synth:oam-lines` 377b8ec: 2.016 M -> 1.282 M Ir/frame; tests seen failing) |
-| C-P2 | med | docs/perf.md "Outside the bound" names only PPU writes; dense APU writes, KEY1+STOP loops, DIV/TAC loops and back-to-back GDMA also exceed the benched worst case (reviewer estimates); the table is stale | in progress, session 18 (branch `m10-storm`: measure and document; mitigations are a later decision for the human) |
+| C-P2 | med | docs/perf.md "Outside the bound" names only PPU writes; dense APU writes, KEY1+STOP loops, DIV/TAC loops and back-to-back GDMA also exceed the benched worst case (reviewer estimates); the table is stale | fixed f335f4b (measured, documented): seven `synth:storm-*` programs, 2 s callgrind each; storm-ppu 22.0 M, storm-apu 20.0 M, storm-div 9.65 M, storm-spsw 8.52 M Ir/frame against the 4.02 M line; back-to-back GDMA is inside the bound (2.35 M). No mitigation landed: a budget question for the human. Later audit-round fixes for the close review: filter tests (99f7d4f), `--long` cap and spread (d1759e7) |
 | C-P3 | low | Per-function size report stale: `Ctx::div_reset` is gone, 32 of 61 lines are "over", `Apu::flush` and `hold_fetch` have no line | plan (M10 task) |
 | C-P4 | low | Bench baseline behind the tip | done at close (baseline re-recorded, session 18) |
 | C-P5 | low | `.text` grew 95,652 -> ~116 KB in the range, ~5.5% margin; the gate is provisional (it excludes compiler_builtins and core panic code); 5.8 KB of nop padding unmeasured on the M7; fmt code (2,218 B) counts against the gate | plan (carried-over task, Stage 2) |
@@ -223,5 +223,5 @@ per-merge checks, so a full gate run was the first to see it.
   (7d389ce, ADR 0035), both on the human's decision; A2-02's latch, E4's
   `LAND` table and the D4/D6 rests carried over as plan tasks (human).
   Milestone-close review of `stage1-m9..2821437` run and triaged (section
-  above): C-V1, C-P1 fixed, C-P2 in progress; the `--long` invariance
+  above): C-V1, C-P1 fixed, C-P2 measured and documented (f335f4b); the `--long` invariance
   failure fixed (d017dd5); bench baseline re-recorded.

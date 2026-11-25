@@ -384,7 +384,7 @@ are recorded in `docs/reviews/stage1-m10.md`.
   machine-resource limits on builds still apply to any measurement runs.
 - [x] Triage (AGENTS.md "Triage"): verify each finding and give each
   rejected one a one-line reason.
-- [ ] Fix the confirmed high and medium findings, one theme per fix
+- [x] Fix the confirmed high and medium findings, one theme per fix
   agent, in this order:
   1. A, correctness. Each fix is a behavior change: a regression test
      that has been seen failing, and the full manifest with 0
@@ -440,7 +440,10 @@ Open M10 review items (Stage 1). IDs are rows of `docs/reviews/stage1-m10.md`; t
 - [x] (2821437, ADR 0020 amendment; human approved, session 18) M10 A1-06 (medium, human): per the human's ADR 0020 decision, land `m10-spsw-div-code` (then drop the unused `ime` argument of `Bus::speed_switch`) or keep today's fit and record why (`docs/reference/speed-switch.md`)
 - [x] (7d389ce, ADR 0035; the human chose box 64 + 8-tap FIR, session 18) M10 A3-1 (medium, human): apply the aliasing option the human picks (`docs/reference/audio-aliasing.md`; box 64 + 8-tap FIR about +10% worst-case Ir) or record it as a known limitation
 - [ ] M10 A3-1 follow-up (human): docs/perf.md's 230k Ir/frame APU "channels and mixing" budget no longer describes the APU (the FIR adds ~229k on the worst case, ADR 0035); the new figure is the human's to set
-- [ ] M10 close review C-P2 (medium, in progress, session 18, branch `m10-storm`): docs/perf.md "Outside the bound" names only PPU writes; measure dense APU writes, KEY1+STOP loops, DIV/TAC loops and back-to-back GDMA against the benched worst case and update the table; mitigations are a later decision for the human
+- [x] M10 close review C-P2 (medium): docs/perf.md "Outside the bound" measured for five kinds of storm (f335f4b, `synth:storm-*`)
+- [ ] M10 outside-the-bound mitigations (human decides, numbers in docs/perf.md "Outside the bound"): APU early return for powered-off and unused-register writes, APU write coalescing, skipping BGP/OBPx and same-value PPU writes in CGB mode; adversarial-only loops (speed switch, DIV/TAC) have none worth it
+- [ ] M10 filter review low: `fir`'s `>> 10` floors (about -0.5 LSB bias on non-steady signals, `fir(-x) != -fir(x)` by 1); adding 512 before the shift changes the output and the ratchet values
+- [ ] M10 `--long` check: `ANCHOR_TOLERANCE` (23) rejects legitimate offsets of 24-31 (STOP wake + CALL); relaxing it to `OVERSHOOT` needs the human; four workloads (cgb-acid2, cpu_instrs, cgb_sound, rtc3test) get no frame check
 - [ ] M10 close review C-P3 (low): refresh the per-function size report (`Ctx::div_reset` is gone, 32 of 61 lines are over, `Apu::flush` and `hold_fetch` have no line)
 - [ ] M10 close review C-T6 (low): `tools/h7-bench` is its own workspace, outside the gate's fmt/clippy/test: add its fmt and clippy (and a `--target` build) to the gate (stricter)
 - [ ] M10 close review C-T7 (low): `acceptance/README.md` "Gate" list omits the SM83, ITCM-set and invariance steps `gate-stage1.sh` runs: add them (stricter)
