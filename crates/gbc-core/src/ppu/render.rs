@@ -49,7 +49,11 @@
 //! - WX = 0 loses SCX & 7 pixels (Pan Docs). With SCX & 7 != 0 its
 //!   window start also stalls one dot more (`LineTiming`, AGE
 //!   `stat-mode-window`), which places the mid-line register writes of
-//!   `m3_window_timing_wx_0` right: it passes.
+//!   `m3_window_timing_wx_0` right: it passes. That ROM's window is one
+//!   solid tile, so it does not show how many pixels are lost: no
+//!   capture does, the object stalls assume 7 at any SCX (`sorted_object_stalls`)
+//!   and SameBoy loses one more (`docs/reference/mode3-oracle.md`,
+//!   disagreement 1).
 //! - Mid-line SCX writes keep the fine scroll once the discard is over
 //!   (Pan Docs; a write inside it moves it: `Ppu::hold_fetch`), but new
 //!   low bits still carry into the tile column ([`bg_column`]).

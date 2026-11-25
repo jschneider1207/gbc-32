@@ -505,18 +505,47 @@ mod tests {
         let l = &c.line;
         let starts = l.window_on && l.wy_triggered;
         let on_screen = l.xs[..l.n].iter().any(|x| (1..168).contains(x));
-        // 1. The window at WX = 0 with a fine scroll, and an object on
-        //    the line. The totals without objects agree (6 + 1 dots).
-        //    With one, the object's wait depends on where the window's
-        //    tile grid lies, and three answers exist: the core's stalls
-        //    put it at WX - 7 (7 pixels cut off, whatever SCX is); the
-        //    core's renderer cuts 7 + SCX % 8 (Pan Docs, Window: WX = 0
-        //    "stutters" with SCX % 8; Mealybug `m3_window_timing_wx_0`
-        //    passes with it); SameBoy's loop, which the oracle follows,
-        //    cuts 8 + SCX % 8 (14 at SCX % 8 = 7) and marks the case
-        //    "TODO: Verify fetcher access timings". No acceptance ROM has
-        //    an object on such a line. E.g. SCX 3, X = 5: core 273,
-        //    oracle 277.
+        // 1. The window at WX = 0 with a fine scroll (f = SCX % 8 != 0),
+        //    and an object on the line. The totals without objects agree
+        //    (6 + 1 dots). An object's wait depends on where the window's
+        //    tile grid lies (how many window pixels are cut off at the
+        //    left), and no hardware capture here shows that: three
+        //    references give three grids, and the core has two of them.
+        //    - 7 cut, whatever f is: the core's stalls
+        //      (`sorted_object_stalls`: `win_x = WX - 7`), 11 dots at
+        //      X = 1, 9, 17... Gambatte's model does the same (WX = 0
+        //      matches at its xpos 0, after the discard), but none of its
+        //      tests in the manifest has WX = 0, a fine scroll and an
+        //      object.
+        //    - 7 + f cut: the core's renderer (`Renderer::trigger_skip`),
+        //      from Pan Docs, Window: at WX = 0 the window "is switched
+        //      to before the initial fine scroll adjustment, causing it
+        //      to be shifted left by SCX % 8 pixels". 11 dots would be at
+        //      X = 1 - f (mod 8).
+        //    - 8 + f cut for f = 1..=6, 14 at f = 7 (a pixel inserted at
+        //      position -7): SameBoy's loop, which the oracle follows.
+        //      11 dots at X = 8 - f (mod 8); at f = 7 at X = 1 and from
+        //      X = 10 on at X = 2 (mod 8).
+        //    So the core's stalls and its renderer contradict each other
+        //    here (in every reference the object waits for the tile its
+        //    pixel is shown in), and at least one of them is wrong; at
+        //    f = 7 from X = 10 on Pan Docs and SameBoy agree against the
+        //    stalls. Mealybug `m3_window_timing_wx_0` (SCX = LY, no
+        //    objects) cannot tell: its window is one solid tile, and it
+        //    passes with any of the three cuts in the renderer (tried).
+        //    No acceptance ROM has an object on such a line (probed: the
+        //    full manifest never builds stalls for one). E.g. SCX 3,
+        //    X = 5: core 273, oracle 277.
+        //    What settles it, on a CGB: WX = 0, WY = 0, SCX % 8 = f for
+        //    each f in 1..=7, the window's tile map showing a tile whose
+        //    8 columns differ (and a different tile next to it). The
+        //    window pixel shown at screen x = 0 is its pixel 7 (the
+        //    stalls are right, the renderer wrong), 7 + f (the renderer
+        //    is right, the stalls wrong) or 8 + f, 14 at f = 7 (SameBoy
+        //    and the oracle are right, both wrong). An independent check
+        //    of the stalls alone: the length of mode 3 with one object
+        //    at each X in 9..=16 is longest (11 dots) at the X on the
+        //    grid: 9, 17 - f, or 16 - f (10 at f = 7).
         if starts && l.wx == 0 && l.scx & 7 != 0 && on_screen && l.scx_write.is_none() {
             return Some("WX = 0 with SCX % 8 != 0 and an object");
         }

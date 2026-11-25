@@ -69,17 +69,51 @@ Everything asserted agrees. Two classes disagree and are left out by the
 enumerated list in `excluded()`; the test prints their counts and fails
 if a listed class stops disagreeing.
 
-1. **WX = 0, `SCX & 7 != 0`, window starting, an object at X 1..=167.**
-   Without objects both give 6 + 1 dots. With one, its wait depends on
-   where the window's tile grid lies. The core's stalls use WX - 7 (7
-   pixels cut off). The core's renderer cuts `7 + SCX & 7` (Pan Docs,
-   Window: WX = 0 "stutters" with `SCX % 8`; Mealybug
-   `m3_window_timing_wx_0` passes). SameBoy's loop cuts `8 + SCX & 7`
-   (14 at `SCX & 7 = 7`) and carries a "TODO: Verify fetcher access
-   timings in this case". Example: SCX 3, X = 5: core 273, oracle 277.
-   Verdict: unclear which grid is right; the core's stalls disagree with
-   its own renderer, so the core is suspected. No ROM in the manifest has
-   an object on such a line.
+1. **WX = 0, `SCX & 7 != 0` (= f), window starting, an object at X
+   1..=167.** Without objects both give 6 + 1 dots. With one, its wait
+   depends on where the window's tile grid lies, that is, on how many
+   window pixels are cut off at the left. Three references give three
+   answers, and the core holds two of them:
+
+   | cut | who | 11-dot object X (mod 8) |
+   |---|---|---|
+   | 7 | the core's stalls (`sorted_object_stalls`, `win_x = WX - 7`); Gambatte's model | 1 |
+   | 7 + f | the core's renderer (`Renderer::trigger_skip`); Pan Docs, Window: "switched to before the initial fine scroll adjustment, causing it to be shifted left by SCX % 8 pixels" | 1 - f |
+   | 8 + f, 14 at f = 7 | SameBoy's loop (the oracle) | 8 - f; at f = 7: X = 1, then 2 from X = 10 |
+
+   Measured (one object, dots it adds, core/oracle, X = 1..=8, the
+   pattern repeating every 8 except at f = 7): f = 1: 11/9 10/8 9/7 8/6
+   7/6 6/6 6/11 6/10; f = 3: 11/7 10/6 9/6 8/6 7/11 6/10 6/9 6/8; f = 7:
+   equal at X = 1..=8, then 11/6 10/11 9/10 8/9 7/8 6/7 6/6 6/6. Example:
+   SCX 3, X = 5: core 273, oracle 277.
+
+   The core's stalls and renderer contradict each other (every reference
+   makes the object wait for the tile its pixel is shown in), so at least
+   one is wrong; at f = 7 from X = 10 on, Pan Docs and SameBoy agree
+   against the stalls. Nothing available here says which:
+   - No ROM in the manifest reaches the class (probed 2026-11-24: a
+     counter in `set_stalls` over the full manifest). WX = 0 with a fine
+     scroll and no object: AGE `stat-mode-window` (3 ROMs), Mealybug
+     `m3_window_timing_wx_0`, Gambatte
+     `window/arg/late_scx_late_wy_FFto4_ly4_wx00_*`. WX = 0 with objects
+     and no fine scroll: Gambatte `sprites/space/10spritesPrLine_wx0_*`.
+   - Mealybug `m3_window_timing_wx_0` (SCX = LY, objects off) shows the
+     window as one solid tile: the full manifest has no regression with
+     the renderer cutting 7, 7 + f or 8 + f (tried).
+   - Gambatte's model has no special case for WX = 0 with a fine scroll
+     (WX = 0 matches at its xpos 0, after the discard), so nothing shows
+     it was checked there. SameBoy has special cases for exactly this
+     (activation at position -16, a pixel inserted at f = 7) but names no
+     test, and marks the place "TODO: Verify fetcher access timings in
+     this case".
+
+   Verdict: undecided; no behaviour changed. What settles it on a CGB:
+   WX = 0, WY = 0, each f in 1..=7, a window tile map whose first tiles
+   and their columns can be told apart. The window pixel at screen x = 0
+   is 7 (stalls right, renderer wrong), 7 + f (renderer right, stalls
+   wrong) or 8 + f with 14 at f = 7 (SameBoy right, both wrong). The
+   stalls alone: mode 3 with one object at each X in 9..=16 is longest
+   at X = 9, 17 - f, or 16 - f (10 at f = 7).
 2. **An SCX write during the discard on a line with an object at X = 0**
    (positions 89..=107, 6 more per further object at X = 0). SameBoy
    fetches X = 0 objects before the discard, so the compares run 11 dots

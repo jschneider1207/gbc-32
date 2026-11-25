@@ -3244,6 +3244,10 @@ fn sorted_object_stalls(
     let mut total = 0;
     // No window: a start no object reaches (one test per object, no
     // second copy of the loop).
+    // OPEN: at WX = 0 with SCX & 7 != 0 the renderer cuts SCX & 7 more
+    // window pixels (`Renderer::trigger_skip`), which this grid does not
+    // follow; no hardware capture says which is right
+    // (`docs/reference/mode3-oracle.md`, disagreement 1).
     let win_x = window.map_or(i32::MAX, |wx| i32::from(wx) - 7);
     // The tile The Pixel is in, as one number: BG tiles 0..=52 (X + SCX
     // < 423), window tiles 64 + 0..=20 (-1: none yet).
