@@ -198,7 +198,7 @@ const CLOCK_NAME: &str = "pll392";
 /// from the HSE in bypass (8 MHz MCO, UM2407 section 7.5.1) at 8 / 2 x 240
 /// / 2 = 480 MHz; the `clockcheck-pll480` image measured that against the
 /// LSE crystal (2026-11-25) at 483.86 MHz (+0.80%, MCO 8.064 MHz, wandering
-/// by +-0.04% between 2 s windows), over the CPU and AXI maxima. The MCO
+/// by +-0.05% between 2 s windows), over the CPU and AXI maxima. The MCO
 /// has no stated tolerance (UM2407: "fixed at 8 MHz", changeable by an
 /// ST-LINK firmware upgrade) and behaves like an RC oscillator, so no
 /// margin on it is provable. The HSI has one: DS12117 Table 133 (rev V),

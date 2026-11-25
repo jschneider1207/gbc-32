@@ -23,6 +23,15 @@ the board, which had dropped off USB once), and all three placements at
 selftest image is still the one to flash first on a board that has not run
 this before.
 
+**Clock correction, 2026-11-25.** That "480 MHz" was 483.86 MHz: measured
+against the board's 32.768 kHz LSE crystal (`clockcheck`, see "Clock
+check"), the ST-LINK's MCO, the HSE reference, is 8.064 MHz, not 8.000,
+which put the CPU and AXI clocks 0.8% over their maxima. `pll480` now runs
+PLL1 from the HSI at **472 MHz** nominal (473.68 MHz measured; at most
+479.1 MHz at the HSI's datasheet tolerance). The flash wait states did not
+change, so the cycle counts measured at "480 MHz" stand; only the real-time
+budget per frame moves (see "NUCLEO-H753ZI at 480 MHz").
+
 Not part of the root workspace: `cargo build` at the repo root does not see
 it.
 
@@ -33,11 +42,12 @@ it.
 | Image | Features | What it does |
 |---|---|---|
 | `selftest` | `selftest` | Supply, LEDs, UART, caches, cycle counter. No emulator. **Flash this first.** |
+| `clockcheck` | `clockcheck` | The selftest's bring-up, then the CPU clock measured against the LSE crystal ("Clock check"). No emulator. Also `clockcheck-pll` and `clockcheck-pll480`. |
 | `bench-flash-axi` | none | Code in flash behind the I-cache; stack, emulator state and buffers in AXI SRAM behind the D-cache. |
 | `bench-flash-dtcm` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
 | `bench-itcm-dtcm` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
 | `*-pll` | `+pll` | Phase B clock (392 MHz), only with `H7_BENCH_PLL=1`. Flash these last. |
-| `*-pll480` | `+pll480` | Phase C clock (480 MHz, VOS0), `h753` only, only with `H7_BENCH_PLL480=1`. Excludes `pll`. |
+| `*-pll480` | `+pll480` | Phase C clock (VOS0; 472 MHz from the HSI since 2026-11-25, 480 MHz from the HSE before), `h753` only, only with `H7_BENCH_PLL480=1`. Excludes `pll`. |
 | `m4-stub` | (own crate) | `h755` only: optional Cortex-M4 image, see "Dual core". Not needed. |
 
 Every image also has the board feature (`h753` or `h755`); `build.sh`
@@ -95,6 +105,11 @@ code adds about 2.3 KB of `.text` and 20 B of `.bss`; the images without
 | `bench-flash-dtcm-pll480` | 711,632 | - | 130,140 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
 | `bench-itcm-dtcm-pll480` | 712,688 | 64,024 | 67,176 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
 
+With the HSI-based 472 MHz clock (no HSE setup) the `.bin`s are
+11,924 (`selftest-pll480`), 711,040, 711,344 and 712,416 B; `clockcheck`
+is 13,188 B and `clockcheck-pll480` 15,644 B. The images without `pll480`
+did not change.
+
 `.rodata` is mostly the fifteen ROM images (fourteen of 32 KiB and cpu_instrs at 64 KiB: 512 KiB). The `.bin` is 34% of the H753's 2 MiB flash and 68% of the H755's 1 MiB bank 1, so both still fit. The stack starts at the
 top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
 use measured is 2,952 B with the first five workloads and 3,440 B with
@@ -121,7 +136,7 @@ Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 ./build.sh                      # all images for the H753, the host hash test
 H7_BENCH_BOARD=h755 ./build.sh  # the same for the H755, plus the M4 stub
 H7_BENCH_PLL=1 ./build.sh       # also the 392 MHz variants
-H7_BENCH_PLL480=1 ./build.sh    # also the 480 MHz variants (h753 only; refused for h755)
+H7_BENCH_PLL480=1 ./build.sh    # also the VOS0 (472 MHz) variants (h753 only; refused for h755)
 H7_BENCH_QEMU=1 ./build.sh      # also the QEMU smoke run (qemu-system-arm)
 H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
 ```
@@ -190,7 +205,8 @@ h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
 is the rev V reset value 0x46 with SCUEN cleared: the LDO configuration,
 locked.
 
-`selftest-pll480` on the H753 (2026-11-25, verbatim):
+`selftest-pll480` on the H753 with the first, HSE-based clock (2026-11-25,
+verbatim; that clock was in fact 483.86 MHz, see "Clock check"):
 
 ```
 h7bench v1 banner board=NUCLEO-H753ZI image=selftest placement=flash-axi clock=pll480 cpu_hz=480000000 baud=115200
@@ -210,6 +226,10 @@ h7bench v1 selftest n=3 delay=8000000 cycles=8000008 cyccnt=1476839836 stack_use
 - `rcc_cr` 0x0307c025: HSEON, HSERDY, HSEBYP (bits 16-18), PLL1ON and
   PLL1RDY; `cfgr` 0x1b: SW = SWS = PLL1; `d1cfgr` 0x48: D1CPRE /1, HPRE
   /2, D1PPRE /2; `flash_acr` 0x24: 4 wait states, WRHIGHFREQ 0b10.
+  With the HSI clock (`clock=pll472 cpu_hz=472000000`) the banner reads
+  the same except `rcc_cr=0x0304c025`: HSEON and HSERDY clear (HSEBYP,
+  bit 18, still reads 1 after the earlier image set it; the HSE is off),
+  and the `cyccnt=` steps are 472,000,000.
 - VOS0: `d3cr` and `csr1` read the same as at 392 MHz (VOS = ACTVOS =
   0b11, VOSRDY = ACTVOSRDY = 1): neither field has a VOS0 code (RM0433
   sections 6.8.2 and 6.8.6), so `oden=1` is what shows VOS0.
@@ -227,11 +247,68 @@ h7bench v1 selftest n=3 delay=8000000 cycles=8000008 cyccnt=1476839836 stack_use
 - `cycles=` is 8,000,008, and about 11 more on a line after another
   UART line or the probe, as at 64 MHz (8,000,007 and 8,000,018).
   Clean text at 115200 with a BRR computed for a 120 MHz PCLK puts the
-  8 MHz HSE (the ST-LINK's MCO) within a few percent of 8 MHz.
+  8 MHz HSE (the ST-LINK's MCO) within a few percent of 8 MHz (the LSE
+  measurement later put it at +0.8%).
 - A failed wait panics with the step's name, at the right baud rate:
-  checked by building with the HSE wait and, separately, the final switch
-  wait made to fail (`FAULT panic panicked at src/board.rs:...:
-  clock setup failed: hse ready`, `... switch to pll1`).
+  checked by building with the HSE wait (since removed) and, separately,
+  the final switch wait made to fail (`FAULT panic panicked at
+  src/board.rs:...: clock setup failed: hse ready`, `... switch to pll1`).
+
+### Clock check
+
+`clockcheck` (and `clockcheck-pll`, `clockcheck-pll480`: the same with
+that image's clock) measures the CPU clock against the board's 32.768 kHz
+LSE crystal X2 (UM2407 section 7.5.2, default: SB40/SB41 off, R38/R39
+on), a reference that depends neither on the HSI, the HSE nor the PC. It
+enables the LSE (PWR_CR1.DBP, then RCC_BDCR LSEDRV medium-high and LSEON,
+up to 5 s for LSERDY; RM0433 sections 6.8.1 and 8.7.26; the LSE stays on
+across resets, in the backup domain), routes it to TIM16's TI1 (RM0433
+section 41.6.18, `TIM16_TISEL.TI1SEL` = 0b0010 = LSE) and captures every
+rising edge (input capture, section 41.4.6). The CPU polls CC1IF and reads
+DWT_CYCCNT at the first and the last edge of 65,536 LSE periods (2 s);
+the polling latency is the same at both ends, so the error is a few dozen
+cycles in about a billion. TIM16's own latched captures count the same
+window in timer kernel clocks (`tim_hz_measured`, = AHB clock), a check
+with no polling at all. Each line: that window, the running average since
+reset, its deviation from `cpu_hz` in ppm, and the system clock's
+reference oscillator implied by it (the PLL multiplies exactly). If the
+LSE does not start it prints `lse=FAIL` and no figure. The crystal's
+tolerance is not in UM2407; a 32.768 kHz watch crystal is typically
+within +-20 ppm, which is far below everything measured here.
+
+Results on the NUCLEO-H753ZI, 2026-11-25 (LSE started on the first run;
+the start time was not captured, later runs found it running):
+
+| Image | Windows | CPU clock, average | Window min / max | Implied reference |
+|---|---|---|---|---|
+| `clockcheck` (HSI 64 MHz) | 15 (30 s) | 64,229,574 Hz (+3,587 ppm) | 64,221,197 / 64,243,083 | HSI 64.230 MHz |
+| `clockcheck-pll480`, HSE (first version) | 37 (74 s) | 483,863,097 Hz (+8,048 ppm) | 483,646,110 / 484,116,400 | HSE (MCO) 8.0644 MHz |
+| `clockcheck-pll480`, HSI 472 MHz (now) | 34 (68 s) | 473,682,766 Hz (+3,565 ppm) | 473,562,160 / 473,762,450 | HSI 64.228 MHz |
+
+- The HSI, at 64.23 MHz (+0.36%), is inside DS12117 Table 133 (rev V:
+  63.7 to 64.3 MHz at 30 °C), and the two HSI-based images agree on it to
+  30 ppm: the measurement is consistent.
+- The HSE-based "480 MHz" ran at 483.86 MHz, the MCO at 8.064 MHz,
+  0.8% fast; the PC's 484.31 MHz was the right order. The MCO also moved:
+  +/-0.05% from window to window and about +50 ppm in the average in 20 s,
+  about three times the HSI's window spread. It behaves like an RC
+  oscillator, not a crystal (UM2407 section 7.5.1 only says "fixed at
+  8 MHz", changeable by an ST-LINK firmware upgrade; no tolerance).
+- `tim_ppm` equals `cpu_ppm` in every line: TIM16's clock is the AHB
+  clock, CPU / 2 (HSI: CPU / 1).
+
+`clockcheck-pll480` now, verbatim:
+
+```
+h7bench v1 banner board=NUCLEO-H753ZI image=clockcheck placement=flash-axi clock=pll472 cpu_hz=472000000 baud=115200
+h7bench v1 power cr3=0x00000042 csr1=0x0000e000 d3cr=0x0000e000 actvosrdy=1 supply=ldo
+h7bench v1 clock rcc_cr=0x0304c025 cfgr=0x0000001b d1cfgr=0x00000048 flash_acr=0x24 rsr=0x00fe0000
+h7bench v1 vos0 syscfg_pwrcr=0x00000081 oden=1 pwrcr_before=0x00000000 polls_to_drop=2 polls_low=6
+h7bench v1 clockcheck lse=ready waited_cycles=0 (0: already running) window_periods=65536 lse_hz=32768 ref=hsi ref_hz_nominal=64000000 tim_hz_nominal=236000000
+h7bench v1 clockcheck n=46 cycles=947373120 cpu_hz_measured=473686560 avg_s=94 avg_cpu_hz_measured=473682766 cpu_ppm=+3565.1 hsi_hz_implied=64228172 tim_hz_measured=236841384 tim_ppm=+3565.1 overcapture=0 stack_used=624
+```
+
+(The banner's `cpu` and `tcm` lines are left out above.)
 
 On the H755:
 
@@ -263,7 +340,7 @@ h7bench v1 end pass=1
 
 `min`/`mean`/`max` are CPU cycles per `run_until` call of one frame
 (`FRAME_CLOCKS`); 50% of a 59.73 Hz frame is `cpu_hz / 59.73 / 2` cycles
-(4.02 M at 480 MHz, docs/perf.md). `calls`, `frames`, `clocks` and `hash`
+(4.02 M at 480 MHz, docs/perf.md; 3.95 M at 472 MHz, the `pll480` clock now). `calls`, `frames`, `clocks` and `hash`
 must equal the line of the same workload in `expected-hashes.txt`: the hash
 folds every call's clocks, events and audio samples and every completed
 frame, so a match means the board computed exactly what the PC does.
@@ -341,14 +418,26 @@ comments in `src/board.rs` carry the same citations.
   SYSCFG ODEN; not used), and RM0433 Table 17 gives 2 wait states,
   WRHIGHFREQ = 0b10, for a 196 MHz AXI clock at VOS1. VOS in `PWR_D3CR`:
   RM0433 section 6.8.6.
-- **Phase C clock (`pll480`, this board only).** HSE in bypass, 8 MHz
-  from the ST-LINK MCO (UM2407 section 7.5.1, SB45 on), / DIVM1 2 =
-  4 MHz, x 240 = 960 MHz VCO (the wide VCO's top, RM0433 section 8.7.13,
-  DS12117 Table 136), / 2 = 480 MHz. VOS1, then SYSCFG_PWRCR.ODEN, then
-  VOS0 (RM0433 section 6.6.2), allowed by DS12117 Table 111/112 (LDO
-  only, TJ at most 105 °C) and ES0392 section 2.2.21 (rev V). Flash 4 wait
-  states, WRHIGHFREQ = 0b10 (RM0433 Table 17, AXI 240 MHz at VOS0), set
-  before the switch; AXI/AHB 240 MHz, every APB 120 MHz.
+- **Phase C clock (`pll480`, this board only).** Since 2026-11-25: PLL1
+  from the HSI, 64 MHz / DIVM1 4 = 16 MHz, x 59 = 944 MHz VCO (wide VCO,
+  192 to 960 MHz, RM0433 section 8.7.13, DS12117 Table 136), / 2 =
+  **472 MHz** nominal; AXI/AHB 236 MHz, every APB 118 MHz. VOS1, then
+  SYSCFG_PWRCR.ODEN, then VOS0 (RM0433 section 6.6.2), allowed by DS12117
+  Table 111/112 (LDO only, TJ at most 105 °C) and ES0392 section 2.2.21
+  (rev V). Flash 4 wait states, WRHIGHFREQ = 0b10 (RM0433 Table 17, AXI in
+  ]225; 240] MHz at VOS0), set before the switch.
+  Why 472 and why the HSI: the first version took the HSE in bypass, 8 MHz
+  from the ST-LINK MCO (UM2407 section 7.5.1, SB45 on), / 2 x 240 / 2 =
+  480 MHz, and measured 483.86 MHz ("Clock check"): the MCO is 0.8% fast
+  and has no stated tolerance, so no margin on it can be shown, on this
+  board or another NUCLEO's ST-LINK. The HSI has a datasheet bound
+  (DS12117 Table 133, rev V): at most 64.3 MHz at 30 °C, +1% for TJ -20
+  to 105 °C, +0.03% over VDD, so at most 64.96 MHz (+1.5%). 472 MHz
+  nominal is then at most 479.1 MHz (AXI 239.6 MHz), under the 480 / 240
+  MHz limits; the next PLL step, x 60, is 480 MHz nominal, no margin.
+  Measured: 473.68 MHz (HSI +0.36%), 1.3% under the limit. At the HSI's
+  low bound (-2% below -20 °C, 63.7 MHz) the AXI clock stays above
+  225 MHz, and 4 wait states are valid at any lower clock anyway.
 - **Memory** (RM0433 section 2.3.2 Table 7): ITCM 64 KB at 0, DTCM 128 KB
   at 0x2000_0000, AXI SRAM 512 KB at 0x2400_0000, the same as the H755;
   flash 2 x 1 MB from 0x0800_0000, and with one core the image may use
@@ -565,6 +654,16 @@ first time and matched the PC and QEMU. Banners: `clock=pll480
 cpu_hz=480000000`, `flash_acr=0x24`, `oden=1`, `syscfg_pwrcr=0x00000081`;
 `itcm_bytes=64024` in `itcm-dtcm`.
 
+**Clock correction**: the clock of these runs was HSE-based and measured
+483.86 MHz, not 480 ("Clock check"); the images now run 472 MHz nominal
+from the HSI. Cycle counts per frame do not depend on the absolute clock,
+only on the flash wait states (4 in both), so the counts below stand for
+the 472 MHz images. The real-time frame budget at 472 MHz nominal is
+**7,902,557 cycles** (472 MHz / 59.7275 Hz; 3,951,279 for the 50% bar),
+against the 8,036,499 used for the percentages below; at the measured
+473.68 MHz it is 7,930,731. The percentages of a 472 MHz frame are those
+below x 1.0169 (worst case in `itcm-dtcm`: 41.6% / 42.1%).
+
 Cycles per frame, mean / max, and % of a 480 MHz frame (8,036,499 cycles
 at 59.7275 Hz):
 
@@ -659,8 +758,9 @@ ST-LINK's MCO) at about 8.07 MHz rather than 8.000. That is inside the
 ~1% the check allows, and cycle counts do not depend on it (the % of a
 frame above are against the nominal 480 MHz, so real time has 0.9% more
 margin than they show), but it means the core and the 240 MHz AXI/flash
-clock run about 0.9% above their DS12117/RM0433 maxima. Not explained
-here; see "Still not verified".
+clock run about 0.9% above their DS12117/RM0433 maxima. Confirmed on chip
+against the LSE crystal (483.86 MHz, MCO 8.064 MHz) and fixed: see "Clock
+check" and the clock correction above.
 
 The board is left running `bench-itcm-dtcm-pll480`.
 
@@ -712,13 +812,14 @@ counts and to the final chip.
 - That the Cortex-M4 sitting in lockup has no effect (nothing suggests one:
   the cycle counts repeat exactly).
 - `m4-stub`: built, never flashed.
-- Why `pll480` measures 484.3 MHz from the PC (2026-11-25, "NUCLEO-H753ZI
-  at 480 MHz"): an ST-LINK MCO about 0.9% above 8 MHz is the obvious
-  suspect (not measured with an instrument). If it is, the 480 MHz images
-  run 0.9% over the CPU and AXI maxima; every hash still matched.
-- The 400 MHz limit itself: the board ran at 392 MHz from the HSI, whose
-  exact frequency was not measured (the UART at 115200 baud works at both
-  clocks, which bounds the error to a few percent).
+- Why the ST-LINK's MCO is 8.064 MHz and wanders ("Clock check"): its
+  source inside the ST-LINK is not documented here. No longer used.
+- The LSE crystal's own accuracy (not measured with an instrument; the
+  HSI reading inside its datasheet range is the cross-check).
+- The 392 MHz images on the H753 at their real clock: with the HSI
+  measured at 64.230 MHz (+0.36%) they run at about 393.4 MHz, under the
+  400 MHz VOS1 limit (397.9 MHz at the HSI's +1.5% bound);
+  `clockcheck-pll` was built but not run.
 
 ## Flashing order on a board that has not run this
 
@@ -735,5 +836,7 @@ counts and to the final chip.
    cycle counts; `itcm_bytes=` non-zero in the banner.
 4. Only if 1 to 3 are right: `selftest-pll.bin`, then the `*-pll` bench
    images (`clock=pll392`; the hashes must not change).
-5. H753 only: `selftest-pll480.bin` (`clock=pll480`, `oden=1`,
+5. H753 only: `selftest-pll480.bin` (`clock=pll472`, `oden=1`,
    `flash_acr=0x24`), then the `*-pll480` bench images.
+6. Any time: `clockcheck*.bin` to measure the clock against the LSE
+   (`avg_cpu_hz_measured=`; read for a minute).
