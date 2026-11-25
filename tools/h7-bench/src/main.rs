@@ -40,6 +40,16 @@ mod bench {
         include_bytes!(concat!(env!("OUT_DIR"), "/dmg-raster.gb")),
         include_bytes!(concat!(env!("OUT_DIR"), "/event-storm.gb")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cpu_instrs.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/dma-storm.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/halt-irq.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/apu-writes.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/oam-lines.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-control.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-apu.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-spsw.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-div.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-gdma.gb")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/storm-ppu.gb")),
     ];
 
     /// The emulator's buffers. `mem` is a `.bss` static (DTCM or AXI SRAM,

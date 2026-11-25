@@ -32,7 +32,7 @@ pub struct Workload {
 
 /// The workloads, in report order. The synthetic ROMs come from
 /// `tools/bench/src/synth.rs` (`synth:<name>`), cpu_instrs from test-roms/.
-pub const WORKLOADS: [Workload; 5] = [
+pub const WORKLOADS: [Workload; 15] = [
     Workload {
         name: "worst-case",
         calls: 120,
@@ -52,6 +52,46 @@ pub const WORKLOADS: [Workload; 5] = [
     Workload {
         name: "cpu_instrs",
         calls: 600,
+    },
+    Workload {
+        name: "dma-storm",
+        calls: 120,
+    },
+    Workload {
+        name: "halt-irq",
+        calls: 120,
+    },
+    Workload {
+        name: "apu-writes",
+        calls: 120,
+    },
+    Workload {
+        name: "oam-lines",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-control",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-apu",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-spsw",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-div",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-gdma",
+        calls: 120,
+    },
+    Workload {
+        name: "storm-ppu",
+        calls: 120,
     },
 ];
 

@@ -15,7 +15,24 @@ use std::{env, fs};
 #[path = "../bench/src/synth.rs"]
 mod synth;
 
-const SYNTH: [&str; 4] = ["worst-case", "cgb-raster", "dmg-raster", "event-storm"];
+/// The synthetic workloads, in report order (`workload::WORKLOADS`, minus
+/// cpu_instrs).
+const SYNTH: [&str; 14] = [
+    "worst-case",
+    "cgb-raster",
+    "dmg-raster",
+    "event-storm",
+    "dma-storm",
+    "halt-irq",
+    "apu-writes",
+    "oam-lines",
+    "storm-control",
+    "storm-apu",
+    "storm-spsw",
+    "storm-div",
+    "storm-gdma",
+    "storm-ppu",
+];
 const CPU_INSTRS_DEFAULT: &str = "/home/jess/gbc-32/test-roms/blargg/cpu_instrs/cpu_instrs.gb";
 const ITCM_SET: &str = "../../perf/itcm-sections.txt";
 
