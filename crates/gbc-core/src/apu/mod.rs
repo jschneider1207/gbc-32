@@ -50,13 +50,14 @@ use wave::Wave;
 ///
 /// The mixed level of a side lies in `-M..=M` with `M = 960 * n * (v +
 /// 1)`, for `n` channels panned to it with their DACs on and NR50 volume
-/// `v`: at most 30,720. The filter rings around an edge: a step
-/// overshoots by up to 7.6% of its height on both sides (2.1% before
-/// it), and the samples can reach 1.30 `M` for a signal that alternates
-/// in step with the filter's taps. Above 81% of the full scale that would
-/// leave `i16`: the samples saturate at -32,768 and 32,767 (four channels
-/// at master volume 7 stepping between the extremes; three channels
-/// cannot get there).
+/// `v`: at most 30,720. The filter rings around an edge: a step of
+/// height `h` is preceded by a dip of up to 7.6% of `h` the other way
+/// and followed by an overshoot of as much, and the samples can reach
+/// 1.30 `M` for a signal that alternates in step with the filter's taps.
+/// Above 81% of the full scale that would leave `i16`: the samples
+/// saturate at -32,768 and 32,767 (four channels at master volume 7
+/// stepping to an extreme, even from 0; three channels cannot get
+/// there).
 ///
 /// Both ends are reached, and not symmetrically in time: four
 /// idle DACs are a constant +30,720 and four channels at digital 15 are
@@ -942,7 +943,7 @@ mod noise_tests {
         // Bit 0 is 0 for the first 124 clocks (+15), then 1 (-15) for 4:
         // the first window's sum is 64 x 15 x 8 = 7,680 and the second's
         // (60 - 4) x 15 x 8 = 6,720. The first one stands for the seven
-        // before it too (`mix::Output::at`), so the sample is 7,680 plus
+        // before it too (`mix::PRIME`), so the sample is 7,680 plus
         // the newest tap's share of the difference: -22 x -960 / 1,024 =
         // 20.6, rounded down.
         assert_eq!(buf[0].left, 7680 + 20);

@@ -54,7 +54,8 @@ The filter's sum is at most 1,336 x 30,720 = 41,041,920 in magnitude
 (1,336 = the sum of the taps' magnitudes): 2% of `i32`. The shift rounds
 down, as the old average did. The result can exceed `i16`: around a step
 the output overshoots by up to 78/1,024 = 7.6% of the step's height (and
-by 2.1% before it), and a signal alternating in step with the taps'
+dips by as much the other way just before it: the step response is
+symmetric), and a signal alternating in step with the taps'
 signs reaches 1,336/1,024 = 1.30 times its amplitude, 40,080 at full
 scale. So the sample **saturates** at -32,768 and 32,767. That needs a
 mix swinging over more than 81% of the full scale: all four channels at

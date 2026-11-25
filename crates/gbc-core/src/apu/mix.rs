@@ -227,9 +227,10 @@ impl Apu {
     /// integrated and one sample is written at `audio[*len]` per two
     /// completed windows while slots remain. A sample completing with
     /// none left would be dropped, but none does: `AUDIO_BUFFER_FULL` ends
-    /// the call within one window of the last slot's end (the rest of an
-    /// instruction, or at once inside a VRAM DMA stall:
-    /// `Ctx::vdma_stall`).
+    /// the call within one sample (two windows) of the last slot's end
+    /// (the rest of an instruction, or at once inside a VRAM DMA stall:
+    /// `Ctx::vdma_stall`). A window can complete in that stretch: its sum
+    /// joins the history like any other.
     /// With an empty buffer, the channels only advance (ADR 0021 section
     /// 9). `io` is `Memory::io`, for wave RAM and for NR50/NR51 (their
     /// writes come through `sync_write`).

@@ -547,16 +547,21 @@ impl<'a> Emulator<'a> {
     /// # Audio
     ///
     /// Audio samples ([`AUDIO_SAMPLE_RATE`]) are written from `audio[0]`
-    /// on; see [`RunResult::audio_samples`]. When the window of the last
-    /// free slot completes, [`Events::AUDIO_BUFFER_FULL`] ends the call at
-    /// the next instruction boundary (or inside a VRAM DMA stall, at the
-    /// M-cycle boundary that completes it), before another window can
-    /// complete: no sample is dropped, and a partial window carries over
-    /// to the next call. So for any non-empty buffers the samples, like
-    /// all emulated state, don't depend on how the run is split into
-    /// calls or buffers. An empty buffer discards audio: the APU only
-    /// advances, and the next call with a buffer starts a new window at
-    /// its start clock (the grid restarts).
+    /// on; see [`RunResult::audio_samples`]. When the last free slot's
+    /// sample completes (the end of its [`AUDIO_SAMPLE_CLOCKS`] clocks),
+    /// [`Events::AUDIO_BUFFER_FULL`] ends the call at the next
+    /// instruction boundary (or inside a VRAM DMA stall, at the M-cycle
+    /// boundary that completes it), before another sample can complete:
+    /// no sample is dropped, and what the filter has taken in of the
+    /// next ones (the clocks past the deadline included) carries over to
+    /// the next call. So for any non-empty buffers the samples, like all
+    /// emulated state, don't depend on how the run is split into calls
+    /// or buffers. An empty buffer discards audio: the APU only
+    /// advances. The next call with a buffer starts a new stream at its
+    /// start clock: the sample grid restarts there, and the filter takes
+    /// the signal before it to be steady at the level of the stream's
+    /// first 64 clocks, so a steady signal is steady from the first
+    /// sample on.
     ///
     /// # STOP mode
     ///
