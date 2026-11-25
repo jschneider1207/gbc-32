@@ -1756,9 +1756,22 @@ impl Ppu {
         // with `n & 7 == SCX & 7`: the first pixel and mode 3's end move by
         // `n - d` (gambatte `scx_during_m3`, `scx_m3_extend`). `w >= 0`:
         // earlier writes are latched (`latch`, dot `mode3 + 5`).
-        if reg == 0x43 && t + DISCARD_LEAD <= first_pixel {
+        //
+        // Objects at X = 0 are fetched before the discard, which waits
+        // for them: the compares run `held` dots later and a write made
+        // during those fetches is seen by all of them (`w` = 0). SameBoy
+        // display.c, `render_pixel_if_possible` (MIT): "Rendering
+        // (including scrolling adjustment) does not occur as long as an
+        // object at x=0 is pending". The DMG netlist has the same order
+        // (GateBoy, MIT: the sprite match FEPO stops CLKPIPE in
+        // VYBO_CLKPIPE, and the fine counter's clock PECU_FINE_CLK and
+        // its match flip-flop PUXA are clocked from CLKPIPE). The stalls
+        // stay listed at pixel 0, after the discard: the totals are the
+        // same, only the compares' dots differ.
+        let held = if reg == 0x43 { self.x0_fetch_dots() } else { 0 };
+        if reg == 0x43 && t + DISCARD_LEAD - held <= first_pixel {
             let start = i32::from(lt.mode3) + 12;
-            let w = t - start + DISCARD_LEAD;
+            let w = (t - start + DISCARD_LEAD - held).max(0);
             let n = w + ((i32::from(value) - w) & 7);
             let lt = &mut self.line;
             lt.end = (i32::from(lt.end) + start + n - first_pixel) as u16;
@@ -1768,6 +1781,10 @@ impl Ppu {
             // The objects' stalls follow the new tile alignment (`n & 7`).
             if !lt.stalls.is_empty() {
                 self.set_stalls(n as u8, self.renderer.window_wx());
+                if held != 0 && n >= 8 {
+                    // `held` is 5 + 6 per object at X = 0.
+                    self.unshare_junk_tile(n as u8, held as usize / 6);
+                }
             }
             self.end_moved();
         }
@@ -2301,6 +2318,59 @@ impl Ppu {
     fn window_wx(&self, mem: &Memory) -> Option<u8> {
         let wx = mem.io[0x4B];
         (self.lcdc & 0x20 != 0 && self.renderer.wy_triggered() && wx <= 166).then_some(wx)
+    }
+
+    /// The dots the current line's objects at X = 0 hold the pipeline for
+    /// at the start of mode 3, before the fine-scroll discard
+    /// ([`Self::hold_fetch`]): 11 for the first (Pan Docs: Rendering, "OBJ
+    /// penalty algorithm", X = 0 "always incurs a 11-dot penalty,
+    /// regardless of SCX"), 6 for each other one.
+    #[cold]
+    #[inline(never)]
+    fn x0_fetch_dots(&self) -> i32 {
+        let r = &self.renderer;
+        let k = (0..r.objects.len())
+            .filter(|&i| r.objects.get(i).2 == 0)
+            .count() as i32;
+        if k == 0 { 0 } else { 5 + 6 * k }
+    }
+
+    /// After [`Self::set_stalls`] in [`Self::hold_fetch`], on a line with
+    /// an object at X = 0 whose fine-scroll discard the SCX write moved
+    /// past the 8 junk pixels (to `scx`, 8 or more): the pixels left of
+    /// the first tile's are then a BG tile's, fetched after the objects at
+    /// X = 0, so the first object there (X < 8 - SCX % 8) waits for that
+    /// fetch like the first object of any tile ([`sorted_object_stalls`],
+    /// step 2), not sharing the junk tile with the one at X = 0. Adds
+    /// that wait to its stall. From SameBoy's fetcher by way of the
+    /// dot-stepped oracle (`mode3_oracle`). `at0`: how many objects are
+    /// at X = 0. Approximation: a later window write on the line rebuilds
+    /// the stalls without it.
+    #[cold]
+    #[inline(never)]
+    fn unshare_junk_tile(&mut self, scx: u8, at0: usize) {
+        let r = &self.renderer;
+        // The first object in fetch order (ascending X) not at X = 0.
+        let Some(&slot) = r.order.get(at0).filter(|_| at0 < r.objects.len()) else {
+            return;
+        };
+        let x = r.objects.get(usize::from(slot)).2;
+        // Pixels of the tile left of The Pixel.
+        let left = i32::from(x) + i32::from(scx & 7);
+        let win_x = r.window_wx().map_or(i32::MAX, |wx| i32::from(wx) - 7);
+        // In the window, or in a later tile: it has waited for its own.
+        if left >= 8 || i32::from(x) - 8 >= win_x {
+            return;
+        }
+        let wait = (5 - left).max(0) as u8;
+        let lt = &mut self.line;
+        // Its stall is at pixel 0, after those of the objects at X = 0 and
+        // of a window starting at pixel 0 (`Stalls::insert_window`; no
+        // re-trigger before the first pixel).
+        let i = at0 + usize::from(lt.stalls.window_index().is_some_and(|w| w <= at0));
+        lt.stalls.add_dots(i, wait);
+        let total = lt.stalls.total_dots();
+        lt.finish(total);
     }
 
     /// The pipeline stalls of the current line (`line.stalls`, and
@@ -3223,6 +3293,12 @@ pub(crate) fn object_stalls(
 
 /// [`object_stalls`] of X coordinates already in ascending order (the
 /// line's priority order, [`LineObjects::priority_order`]).
+///
+/// Objects at X = 0 are fetched in the junk tile, before the fine-scroll
+/// discard ([`Ppu::hold_fetch`]). The pixels left of the first tile's
+/// (X < 8 - SCX % 8) are that junk tile's too, so those objects wait for
+/// no fetch after one at X = 0, which step 2 gives as it is (but see
+/// [`Ppu::unshare_junk_tile`]).
 fn sorted_object_stalls(
     sorted: &[u8],
     scx: u8,
@@ -5096,6 +5172,92 @@ mod tests {
         // window write rebuilding the stalls keeps the object's 11 dots.
         assert_eq!(end(0, None, Some(160)), Some(256 + 11 + 6));
         assert_eq!(end(0, Some((150, 3)), Some(160)), Some(256 + 11 + 6));
+    }
+
+    /// Objects at X = 0 are fetched before the fine-scroll discard, whose
+    /// compares wait for them (SameBoy; the DMG netlist): an SCX write
+    /// during those fetches is seen by every compare.
+    #[test]
+    fn x0_objects_are_fetched_before_the_discard() {
+        use super::mode3_oracle::{Line, mode0_start};
+        // Line 5 with `n` objects at X = 0 and SCX `scx` at its start;
+        // `write`: (dot, SCX). -> mode 3's end, which the dot-stepped
+        // oracle gives too.
+        let end = |n: usize, scx: u8, write: (u32, u8)| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            for o in r.mem.oam.as_chunks_mut::<4>().0.iter_mut().take(n) {
+                *o = [16 + 5, 0, 0, 0];
+            }
+            r.ppu.oam_written();
+            r.mem.io[0x43] = scx;
+            let l5 = clock(on, 0, 5 * LINE);
+            write_fetch_reg(&mut r, l5 + u64::from(write.0), 0x43, write.1);
+            r.sync(l5 + 455);
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            let oracle = mode0_start(&Line {
+                scx,
+                wx: 0xFF,
+                window_on: false,
+                wy_triggered: false,
+                xs: [0; 10],
+                n,
+                scx_write: Some(write),
+            });
+            assert_eq!(end, Some(oracle), "{n} objects, SCX {scx}, write {write:?}");
+            oracle
+        };
+        // No object: a write at dot 89 comes after compare 0, which
+        // matched the line-start 0.
+        assert_eq!(end(0, 0, (89, 1)), 256);
+        // One object, 11 dots (89-99), compare 0 at dot 100: a write up to
+        // 99 is seen by it, and one pixel is discarded.
+        assert_eq!(end(1, 0, (89, 1)), 256 + 11 + 1);
+        assert_eq!(end(1, 0, (99, 1)), 256 + 11 + 1);
+        assert_eq!(end(1, 0, (100, 1)), 256 + 11);
+        // Line-start 3: seen at compare 3 (dot 102) a 0 wraps to 8; from
+        // dot 103 compare 3 has matched.
+        assert_eq!(end(1, 3, (102, 0)), 256 + 11 + 8);
+        assert_eq!(end(1, 3, (103, 0)), 256 + 11 + 3);
+        // Two objects: 6 dots more.
+        assert_eq!(end(2, 0, (105, 1)), 256 + 17 + 1);
+        assert_eq!(end(2, 0, (106, 1)), 256 + 17);
+    }
+
+    /// Once an SCX write has moved the discard past the 8 junk pixels, an
+    /// object left of the first tile waits for a BG fetch although one at
+    /// X = 0 came before it (`unshare_junk_tile`): its own stall grows,
+    /// also behind a window start at pixel 0.
+    #[test]
+    fn object_after_one_at_x0_waits_once_the_junk_tile_is_gone() {
+        // Line 5, objects at X = 0 and 4, SCX 1 at its start; `wx`: the
+        // window's; `write`: (dot, SCX). -> the line's stalls.
+        let stalls = |wx: Option<u8>, write: Option<(u32, u8)>| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            r.mem.oam[..8].copy_from_slice(&[16 + 5, 0, 0, 0, 16 + 5, 4, 0, 0]);
+            r.ppu.oam_written();
+            if let Some(wx) = wx {
+                r.ppu.lcdc |= 0x20;
+                r.mem.io[0x4B] = wx;
+            }
+            r.mem.io[0x43] = 1;
+            let l5 = clock(on, 0, 5 * LINE);
+            if let Some((t, v)) = write {
+                write_fetch_reg(&mut r, l5 + u64::from(t), 0x43, v);
+            }
+            r.sync(l5 + 455);
+            r.ppu.line.stalls.as_slice().to_vec()
+        };
+        // In the junk tile with the object at X = 0: no wait.
+        assert_eq!(stalls(None, None), [(0, 11), (0, 6)]);
+        // The compare at dot 100 misses, the discard wraps to 8 pixels and
+        // tile 1 is being fetched at X = 4: one dot.
+        assert_eq!(stalls(None, Some((100, 0))), [(0, 11), (0, 7)]);
+        // Not wrapped (SCX = 2, two pixels): no wait.
+        assert_eq!(stalls(None, Some((100, 2))), [(0, 11), (0, 6)]);
+        // The window's stall at pixel 0 comes first in the list.
+        assert_eq!(stalls(Some(7), Some((100, 0))), [(0, 6), (0, 11), (0, 7)]);
     }
 
     /// The pixels of tile 3 (x 24-31) and pixel 32 on line `ly`.

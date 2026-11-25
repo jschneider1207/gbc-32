@@ -49,9 +49,11 @@ makes a STAT read at the loop's last position see mode 0).
   and evenly spaced; 6,000 fixed-seed pseudo-random lines (0..=10
   objects spread, clustered or at the left edge, any OAM slots, LCDC.1
   on or off); a sample again with the WY condition not met.
-- `core_mode3_length_with_an_scx_write_matches_the_oracle`: about 29,000
+- `core_mode3_length_with_an_scx_write_matches_the_oracle`: about 40,000
   lines with one SCX write at every position 80..=124 and some later,
-  every pair of fine scrolls, with objects and windows.
+  every pair of fine scrolls, with objects (at X = 0 too: one, two, and
+  one beside an object at X = 4, that also behind a window at WX 3 and
+  7) and windows.
 - `..._exhaustive` (`#[ignore]`): the same with 1,000,000 and 500,000
   pseudo-random lines (about 45 s unoptimized).
 
@@ -65,9 +67,9 @@ writes in mode 3, OAM DMA lines, the HBlank interrupt's own end
 
 ## Disagreements (2026-11-24)
 
-Everything asserted agrees. Two classes disagree and are left out by the
-enumerated list in `excluded()`; the test prints their counts and fails
-if a listed class stops disagreeing.
+Everything asserted agrees. One class disagrees and is left out by the
+enumerated list in `excluded()`; the test prints its count and fails if
+a listed class stops disagreeing.
 
 1. **WX = 0, `SCX & 7 != 0` (= f), window starting, an object at X
    1..=167.** Without objects both give 6 + 1 dots. With one, its wait
@@ -134,15 +136,47 @@ if a listed class stops disagreeing.
    (the core is right) or 8 + f with 14 at f = 7 (SameBoy is right). The
    stalls alone: mode 3 with one object at each X in 9..=16 is longest
    at X = 9, 17 - f, or 16 - f (10 at f = 7).
-2. **An SCX write during the discard on a line with an object at X = 0**
-   (positions 89..=107, 6 more per further object at X = 0). SameBoy
-   fetches X = 0 objects before the discard, so the compares run 11 dots
-   later and see the write; the core stalls at pixel 0, after the
-   discard. Static lengths agree. Example: SCX 0, X = 0, SCX = 1 written
-   at 89: core 267, oracle 268. Verdict: core suspected (SameBoy states
-   the order explicitly); no ROM in the manifest covers it.
+
+A second class was the core's and is fixed (2026-11-24): **an SCX write
+during the discard on a line with an object at X = 0** (positions
+89..=107, 6 more per further object at X = 0; 745 of the sweep's 1,160
+such lines). Objects at X = 0 are fetched before the discard, so its
+compares run 11 dots later and see a write made meanwhile; the core
+compared from position 89 whatever the objects. Example: SCX 0, X = 0,
+SCX = 1 written at 89: 268 (the core gave 267). With it, when the write
+moves the discard past the 8 junk pixels, an object at X 1..=7 no
+longer shares its tile with the one at X = 0 (the junk tile is gone):
+SCX 1, X = 0 and 4, SCX = 0 written at 100: 282 (the core gave 281).
+(`Ppu::unshare_junk_tile`, applied at the SCX write only: a later window
+write on such a line rebuilds the stalls without it; not covered here.)
+Evidence, none of it a capture of this case:
+
+- SameBoy `render_pixel_if_possible`: "Rendering (including scrolling
+  adjustment) does not occur as long as an object at x=0 is pending". No
+  TODO on it, no model condition.
+- The DMG netlist (GateBoy, `GateBoy.cpp`): `VYBO_CLKPIPE = nor3(FEPO_
+  STORE_MATCH, WODU_HBLANK, MYVO)`; the fine counter's clock
+  `PECU_FINE_CLK` and the match flip-flop `PUXA_SCX_FINE_MATCH` are
+  clocked from CLKPIPE. A sprite match stops the discard's compares; the
+  X counter is 0 until the discard is done, so X = 0 matches first. DMG,
+  not CGB.
+- Pan Docs, "OBJ penalty algorithm": X = 0 "always incurs a 11-dot
+  penalty, regardless of SCX", which a fetch after the discard would not
+  give.
+
+No ROM here pins it. Gambatte `scx_during_m3_spx0` (and
+`scx_attrib_during_m3_spx0`, not in the manifest) writes SCX at
+positions 95 and 99 on its 8 lines with an object at X = 0, inside the
+window, but 0x00 -> 0x60 -> 0xC0: `SCX & 7` stays 0 and both orders give
+the same line. Mealybug `m3_scx_high_5_bits` changes `SCX & 7` on lines
+with an object at X = 0, at position 115, after the discard in both.
+No other ROM of the manifest writes SCX at 85..=125 on such a line
+(probed over the full manifest). A capture that would pin it: an object
+at X = 0, SCX 0 at the line start, SCX = 1 written at positions 89..=99,
+and the dot at which STAT reads mode 0 (268 against 267) or the image
+shifted by one pixel.
 
 One disagreement was the oracle's and is fixed: SCX writes were first
 applied to the loop's step at the write's own position; they come after
 it (see above). With that, the core's `DISCARD_LEAD` agrees everywhere
-outside class 2.
+(with the X = 0 fix above).

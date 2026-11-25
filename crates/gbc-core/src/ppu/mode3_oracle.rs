@@ -293,7 +293,7 @@ mod tests {
     extern crate std;
 
     use super::super::*;
-    use super::{LOOP_START, Line, mode0_start};
+    use super::{Line, mode0_start};
     use std::boxed::Box;
     use std::format;
     use std::string::String;
@@ -551,24 +551,6 @@ mod tests {
         if starts && l.wx == 0 && l.scx & 7 != 0 && on_screen && l.scx_write.is_none() {
             return Some("WX = 0 with SCX % 8 != 0 and an object");
         }
-        // 2. An SCX write while an object at X = 0 holds the fine-scroll
-        //    discard. SameBoy fetches objects at X = 0 at the pipeline's
-        //    start, before the discard ("Rendering (including scrolling
-        //    adjustment) does not occur as long as an object at x=0 is
-        //    pending"), so the compares against SCX % 8 run 11 dots later
-        //    (6 more per further object at X = 0) and see a write made
-        //    meanwhile. The core stalls for the object at pixel 0, after
-        //    the discard, with the compares from position 89. The static
-        //    lengths agree. No acceptance ROM in the manifest writes SCX
-        //    there with an object at X = 0. E.g. SCX 0, X = 0, SCX = 1
-        //    written at 89: core 267, oracle 268.
-        let at_x0 = l.xs[..l.n].iter().filter(|&&x| x == 0).count() as u32;
-        if let Some((t, _)) = l.scx_write
-            && at_x0 != 0
-            && (LOOP_START..LOOP_START + 11 + 6 * (at_x0 - 1) + 8).contains(&t)
-        {
-            return Some("SCX write in the discard with an object at X = 0");
-        }
         None
     }
 
@@ -778,7 +760,17 @@ mod tests {
     /// makes it in single speed.
     fn scx_write_cases(random: u32) -> Vec<Case> {
         let mut out = Vec::new();
-        let objects: [&[u8]; 7] = [&[], &[0], &[8], &[12], &[3, 20], &[9, 9, 30], &[100, 167]];
+        let objects: [&[u8]; 9] = [
+            &[],
+            &[0],
+            &[0, 0, 40],
+            &[0, 4],
+            &[8],
+            &[12],
+            &[3, 20],
+            &[9, 9, 30],
+            &[100, 167],
+        ];
         // Every dot around the discard, and a few after it.
         let dots = (80..=124u32).chain([140, 150, 200, 250, 262]);
         for t in dots {
@@ -794,6 +786,12 @@ mod tests {
                     }
                     for wx in [7u8, 20] {
                         let mut l = with_window(line(from), wx);
+                        l.scx_write = Some((t, to));
+                        out.push(case(l));
+                    }
+                    // A window stall at pixel 0 beside the objects'.
+                    for wx in [3u8, 7] {
+                        let mut l = with_objects(with_window(line(from), wx), &[0, 4]);
                         l.scx_write = Some((t, to));
                         out.push(case(l));
                     }

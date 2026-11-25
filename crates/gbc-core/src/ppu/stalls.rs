@@ -133,6 +133,14 @@ impl Stalls {
         self.list.get_mut(..usize::from(self.len))?.get_mut(i)
     }
 
+    /// Stall `i` takes `dots` more (`Ppu::unshare_junk_tile`).
+    pub(crate) fn add_dots(&mut self, i: usize, dots: u8) {
+        let list = self.list.get_mut(..usize::from(self.len));
+        if let Some(s) = list.and_then(|l| l.get_mut(i)) {
+            s.1 += dots;
+        }
+    }
+
     /// Replaces the list with the object stalls that `write` writes, in
     /// x order from the first entry, returning how many: no window stall.
     /// (Written in place: the list is rebuilt on every line with objects.)
