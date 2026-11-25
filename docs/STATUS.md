@@ -6,7 +6,8 @@
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
 - **Milestone:** M10 (in-depth review), in progress. M9 is `stage1-m9`
   (49c0756); M1-M8 tagged likewise.
-- **Last updated:** 2026-11-24, session 16 (log
+- **Last updated:** 2026-11-24, session 17 (log
+  `logs/2026-11-24-17-m10-perf-bench.md`; session 16:
   `logs/2026-11-24-16-m10-review.md`).
 - **Model (human, 2026-11-24): the main session for the rest of M10 must
   be Fable (`claude-fable-5-2`), as session 16 was.** If the main session
@@ -64,11 +65,15 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    4.02 M line); new `synth:dmg-raster` line. Baseline 782d01e:
    worst-case 287.7 M Ir, cpu_instrs 1,269.5 M, `.text` 113,832 B
    (margin 9,048 B).
-   **OPEN BUG found by the new program: `check-sync-invariance.sh` FAILS
-   on `main`** (eager-sync vs lazy audio samples differ on all five
-   `synth:worst-case` variants; video and clock-offset runs are equal).
-   Branch `m10-sync-apu` (agent, session 17) is finding the cause. Do not
-   tag or run the gate until it is fixed.
+   The new program found a core bug (`check-sync-invariance.sh` failed):
+   a mode-3 write that moves mode 0 (SCX in the discard, window
+   start/cut) left the HBlank HDMA trigger at the old time; fixed cab6e24
+   (`write_ppu` re-arms it; test seen failing; +120 B; only the five
+   `synth:worst-case` audio fingerprints changed). Baseline not
+   re-recorded after it (max +0.16%).
+   Small leftovers: add `synth:worst-case@0` (no APU) to the invariance
+   corpus (stricter: agent decision); `synth.rs` comment says the SCX
+   write lands 18-42 M-cycles into mode 3 but some land in the discard.
 5. Structure: line timeline as one table (E3), `bus.rs` split along
    D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
    experiment (A1-06).
@@ -137,10 +142,10 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Session 17 (2026-11-24): `m10-sync-apu` (agent; worktree in that
-  session's scratchpad) is fixing the sync-invariance failure, see item 4.
-  If the session died: `git log main..m10-sync-apu`, re-verify, merge or
-  restart from the description in item 4.
+- None at cab6e24 (session 17 clean point; log
+  `logs/2026-11-24-17-m10-perf-bench.md`): `m10-bus-fast`, `m10-rom-wide`,
+  `m10-bench-irq`, `m10-sched`, `m10-sync-apu` merged by fast-forward,
+  worktrees removed (branches left for the human to delete).
 - Before session 17: Session 16 ended at a clean point: every `m10-*` branch is merged
   by fast-forward and its worktree removed; `main` builds, passes tests and
   the checks listed under "How work is run" as of the last merge
@@ -148,6 +153,21 @@ Working rules that matter here:
   the M10 work started: run it before tagging (remaining item 8).
 
 ## Needs human
+
+Open (M10, session 17):
+- **M7 instruction counts without hardware:** the human offered to install
+  `qemu-system-arm` in WSL (`sudo apt install qemu-system-arm`) when they
+  get a chance; then build a bare-metal Cortex-M7 harness (e.g. machine
+  mps2-an500) counting thumb instructions for worst-case and cpu_instrs
+  (TCG insn plugin, or `-icount`). STM32CubeIDE (Windows) has no simulator;
+  useful only once a board exists.
+- **Gate edit made on the retire decision:** the byte-wide ROM load step
+  was removed from `gate-stage1.sh` and `check-rom-loads.sh` deleted
+  (6d8434f); say if a replacement check is wanted.
+- **Branches to delete** (session 17, merged): `m10-bus-fast`,
+  `m10-rom-wide`, `m10-bench-irq`, `m10-sched`, `m10-sync-apu`.
+- FYI: Shantae (heavy HDMA) is worth a replay after cab6e24 (HBlank HDMA
+  trigger fix); no evidence it was affected.
 
 Open (M10, session 16):
 - **A better M7 cycle proxy without hardware** (review B3): x86 Ir tracks
