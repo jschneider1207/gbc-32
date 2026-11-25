@@ -187,14 +187,14 @@ must equal the line of the same workload in `expected-hashes.txt`: the hash
 folds every call's clocks, events and audio samples and every completed
 frame, so a match means the board computed exactly what the PC does.
 
-**`expected-hashes.txt` is stale at `main` 74e7dc3** (2026-11-25): it was
-generated at bcd881e, and the core changes since then (20 commits to
-`crates/gbc-core`; not bisected, the APU decimation rewrite 7d389ce is the
-likely one) changed the `worst-case` and `cpu_instrs` hashes. `host/`'s `cargo test` (run by
-`build.sh`) fails on it for that reason, and the comparison that counts is
-with what `host/`'s `cargo run --release` prints for the same commit; the
-H753 results below were checked that way. Regenerating the file is left to
-the human (README "Results", H753).
+**`expected-hashes.txt` regenerated 2026-11-25** (human approved) from
+`host/`'s `cargo run --release` at f34bfd0: it had been made at bcd881e, and
+core changes since (not bisected; the APU decimation rewrite 7d389ce is
+the likely one) changed the `worst-case` and `cpu_instrs` hashes, so
+`host/`'s `cargo test` failed. The new values equal what the H753 printed
+in every placement at both clocks. If `host/`'s test fails again after a
+core change, regenerate with the command in the test's message, and say
+why in the commit.
 
 LEDs: LD1 (green) on from the first instructions of `main`, toggling while
 it works (every 8 frames; 1 Hz toggle in the selftest; 2 Hz after the
@@ -405,10 +405,8 @@ Core at `main` 74e7dc3 plus this crate's board selection (the same
 workloads, placements and clock code as on the H755). STM32H753ZIT6
 revision V (`idcode=0x20036450`), the same Cortex-M7 r1p1 (`cpuid=0x411fc271`),
 LDO supply (`cr3=0x42 supply=ldo actvosrdy=1`). Every run's `calls`,
-`frames`, `clocks` and `hash` equal what `host/` prints at 74e7dc3; against
-the committed `expected-hashes.txt` (bcd881e) `worst-case` and `cpu_instrs`
-differ, because that file is stale (see "Read the output"), not because of
-the board.
+`frames`, `clocks` and `hash` equal what `host/` prints at 74e7dc3, and the
+`expected-hashes.txt` regenerated from it (see "Read the output").
 
 64 MHz HSI (`hsi64`: VOS3, flash 7 wait states, AXI clock = CPU clock):
 
@@ -530,8 +528,8 @@ counts and to the final chip.
    line whose three values are equal. Then unplug and replug USB and check
    the same again (the real test of the supply write).
 2. `bench-flash-axi.bin`: the report lines; compare `calls`, `frames`,
-   `clocks`, `hash` with `expected-hashes.txt` (or, while it is stale, with
-   `host/`'s `cargo run --release`).
+   `clocks`, `hash` with `expected-hashes.txt` (and with `host/`'s
+   `cargo run --release` if the core changed since it was made).
 3. `bench-flash-dtcm.bin`, then `bench-itcm-dtcm.bin`: same hashes, lower
    cycle counts; `itcm_bytes=` non-zero in the banner.
 4. Only if 1 to 3 are right: `selftest-pll.bin`, then the `*-pll` bench

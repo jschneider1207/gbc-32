@@ -1,5 +1,5 @@
-h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=0 mean=0 max=0 hash=5e28abcc1c0ba868
+h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=0 mean=0 max=0 hash=de590b88792b5778
 h7bench v1 cgb-raster calls=120 frames=118 clocks=8370434 min=0 mean=0 max=0 hash=28517598fd7f8e17
 h7bench v1 dmg-raster calls=120 frames=118 clocks=8411052 min=0 mean=0 max=0 hash=08ce100a696ecbd6
 h7bench v1 event-storm calls=120 frames=120 clocks=8426718 min=0 mean=0 max=0 hash=b03f0faee1117987
-h7bench v1 cpu_instrs calls=600 frames=597 clocks=42131558 min=0 mean=0 max=0 hash=bac35ca009eed778
+h7bench v1 cpu_instrs calls=600 frames=597 clocks=42131558 min=0 mean=0 max=0 hash=d0e9954397cd56f4

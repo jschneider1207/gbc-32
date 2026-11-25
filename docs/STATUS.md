@@ -145,11 +145,9 @@ Open (session 19, 2026-11-25):
   rise is most likely core changes since, not separated). At 480 MHz
   (VOS0, allowed on this rev V part, not run) it would be ~41%. The final
   target (H735, 550 MHz) is unaffected; a Stage 2 decision.
-- **`tools/h7-bench/expected-hashes.txt` is stale** (made at bcd881e;
-  worst-case and cpu_instrs hashes changed with the core, likely 7d389ce),
-  so `build.sh`'s host test fails. Board output matches the host build
-  at 74e7dc3 for all three placements. Regenerating the file is the
-  human's call (it is an expected-output file).
+- **`tools/h7-bench/expected-hashes.txt`** regenerated (human approved,
+  2026-11-25): only worst-case and cpu_instrs changed, to the values the
+  board prints; `host/` test passes. Remove at the next STATUS rewrite.
 
 Open (M10, session 18):
 - **New figure for the APU budget:** `docs/perf.md`'s 230k Ir/frame
