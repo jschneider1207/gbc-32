@@ -743,7 +743,21 @@ kind due, so the event order is the old loop's.
 | A6 `schedule_serial`, `schedule_timer` unpinned | event-storm +0.22%, worst-case +0.09% | +1,450 | dropped |
 | A7 `read_io_other` unpinned | none (LLVM keeps it out of line) | 0 | attribute kept, see next row |
 | A7 `read_io_other` as arms of `read_io` | dma-storm +4.00%, event-storm +1.97%, cpu_instrs +1.07%, worst-case +1.07%, halt-irq +0.74%, cgb-raster +0.57%, apu-writes +0.37%, cgb_sound +0.04%, cgb-acid2 +0.02% | -78 | dropped |
-| L7 timer lazy whenever IF bit 2 is set | not tried | | |
+| L7 timer lazy whenever IF bit 2 is set, IE or not (measured later against 54c9836, 115,792 B, ten lines): the event only sets IF, the dispatch's acknowledge of the timer bit calls `schedule_timer`, the IE write no longer does | halt-irq +4.890%, apu-writes +1.613%, worst-case +0.845%; event-storm -0.335%, cgb-acid2 -0.155%, cgb_sound -0.103%, cpu_instrs -0.073%, dma-storm -0.059%, dmg-raster -0.049%, cgb-raster -0.034% | -198 (`boundary` 1,048 -> 888, `Cpu::run` 26,128 unchanged) | dropped |
+| L7 with the event still running its reload and the acknowledge only storing the deadline (an out-of-line `rearm_timer`: `Timer::deadline`, `set_inline`, `reschedule`; `schedule_timer` if a later reload is due) | halt-irq +2.762%, apu-writes +0.951%, worst-case +0.558%, cgb-acid2 +0.062%; others within +-0.001% | +206 (`boundary` 984) | dropped |
+
+L7 cannot pay on these lines: a serviced timer interrupt is acknowledged
+before the next overflow, so there is no event to save, and the deadline
+that the event re-armed in place (inside the scheduler pass, which folds
+the minimum anyway) has to be set again from the acknowledge, with a
+call and a `reschedule` of its own (about 80 Ir per interrupt in the
+first form, 45 in the second; halt-irq takes 16 thousand a second).
+It saves events only while IE bit 2 is set and more than one overflow
+goes by before the dispatch (IME off, or a higher-priority handler
+running, for longer than a timer period), which no bench line and no
+ordinary game does. Both forms passed `cargo test -p gbc-core` with the
+differential test's deadline check tightened to "`NEVER` whenever IF
+bit 2 is set"; neither was taken further (no fingerprint run).
 
 **OAM DMA read clears (theme 4).** `Memory::dma_read_clears` moved to
 `Sys` (still atomics behind `&`): cgb-acid2 +0.03%, worst-case +0.01%,
@@ -779,8 +793,8 @@ Result: 115,198 B (+1,246; 7,682 B under the total).
 Open: the `bus.rs` attributes of A14 one at a time (the batch says the
 read side, `read_during_dma` and `read_oam` into `read_high`, and the
 `write_io` and `boundary` callees cost more than they gain; none was
-measured alone), and L7 (timer lazy whenever IF bit 2 is set), not
-tried.
+measured alone). L7 (timer lazy whenever IF bit 2 is set) was measured
+afterwards and dropped: the rows in the table above.
 
 ### `Speed` enum (M10, review D4 first half, fbfdf96)
 
