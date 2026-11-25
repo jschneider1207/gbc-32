@@ -245,43 +245,72 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
 ## Gate
 
 `scripts/gate-stage1.sh` exits 0 only if **all** of these hold:
+The script runs these steps in this order. Each stops the gate at the first
+failure.
 
-1. `cargo fmt --check` is clean
-2. `cargo clippy --workspace --all-targets -- -D warnings` is clean
-3. `cargo test --workspace` passes
-4. `gbc-core` builds for `thumbv7em-none-eabihf`, which enforces `no_std`
+1. Preconditions: none of `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+   `CARGO_BUILD_RUSTFLAGS` or `CARGO_TARGET_*_RUSTFLAGS` may be set (they
+   replace the flags of `.cargo/config.toml`, so the gate would judge
+   another build; set but empty counts as set), and `cargo` and a Cargo
+   workspace must exist. The overrides `CODE_SIZE_BUDGETS_FILE`,
+   `ITCM_SET_FILE` and `TEST_ROMS` are unset: the gate judges the committed
+   files and the ROMs it fetches.
+2. `scripts/fetch-test-roms.sh` succeeds (pinned zip hash).
+3. `scripts/fetch-sm83-tests.sh` succeeds (SM83 single-step CPU test data,
+   pinned commit and per-file hashes), and the gate exports
+   `GBC_REQUIRE_TEST_DATA=1` so `tools/sm83-tests` fails instead of skipping
+   when the data is missing (step 7 then runs those cases).
+4. `cargo fmt --check` is clean
+5. `cargo clippy --workspace --all-targets -- -D warnings` is clean
+6. `RUSTDOCFLAGS="-D warnings" cargo doc -p gbc-core --no-deps
+   --document-private-items` is clean (no rustdoc warning, such as a
+   broken intra-doc link, in the core's documentation).
+7. `cargo test --workspace` passes (including the SM83 single-step cases
+   with the data required, see step 3).
+8. `gbc-core` builds for `thumbv7em-none-eabihf`, which enforces `no_std`
    because that target has no `std`. Separately, `alloc` is forbidden
    anywhere in `crates/gbc-core/src` (a whitespace- and line-break-tolerant
    search for `extern crate alloc`, `use alloc` and `alloc::`), and
    `crates/gbc-core/tests/hard_rules.rs` must exist and pass: `std` only
    inside `#[cfg(test)]` modules, no `#[path]` or `include!`, `#![no_std]`
    present, and no dependencies of any kind in the core's `Cargo.toml`.
-5. `scripts/check-code-size.sh` passes: the total `.text` of `gbc-core` in
+9. `scripts/check-code-size.sh` passes: the total `.text` of `gbc-core` in
    the `thumbv7em-none-eabihf` release build (`-C target-cpu=cortex-m7`)
    fits the `(total .text)` figure in `perf/code-size-budgets.txt` (sized
    for the STM32H735's ITCM, `docs/perf.md` "Code-size budgets"). The
    per-function lines in that file are reported, not gated (human,
    2026-11-24).
-6. `scripts/check-bench.sh` passes: the benchmark ROMs are present with the
-   hashes in `acceptance/test-roms.sha256`, and no ROM's instruction count
-   under valgrind exceeds `perf/bench-baseline.txt` by more than 3%.
-   Raising a budget or a baseline is committed together with the change
-   that needs it, with the measured numbers and the reason in the commit
-   body (`docs/perf.md`).
-7. `scripts/check-fuzz.sh` passes: every input in `tools/fuzz/corpus/` and
-   the fixed-seed generated inputs run through the core's public API
-   without a panic or a hang (`docs/fuzzing.md`).
-8. The desktop front end builds (`cargo build -p gbc-desktop --release`)
-   and the binary cargo just built runs
-   `test-roms/blargg/cpu_instrs/cpu_instrs.gb --headless --frames 600`
-   and exits 0 (M7 acceptance).
-9. The runner exits 0 with `--gate must` on the full manifest: every `must`
-   ROM passes and there are no regressions against
-   `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
-   runner error.
-10. `RUSTDOCFLAGS="-D warnings" cargo doc -p gbc-core --no-deps
-    --document-private-items` is clean (no rustdoc warning, such as a
-    broken intra-doc link, in the core's documentation).
+10. `scripts/check-itcm-set.sh` passes: every glob in
+    `perf/itcm-sections.txt` (the dev-board ITCM placement plan,
+    `docs/perf.md`) matches a function section, every `FLASH_OK` line has a
+    reason, and the build and relocations are understood. Fails on a stale
+    glob (`MISSING`), a `FLASH_OK` without a reason, or a build or
+    relocation error. Report-only (WARN, exit 0): the set's summed size
+    over the ITCM budget, and callee-closure leaks out of the set.
+11. `scripts/check-bench.sh` passes: the benchmark ROMs are present with the
+    hashes in `acceptance/test-roms.sha256`, and no ROM's instruction count
+    under valgrind exceeds `perf/bench-baseline.txt` by more than 3%.
+    Raising a budget or a baseline is committed together with the change
+    that needs it, with the measured numbers and the reason in the commit
+    body (`docs/perf.md`).
+12. `scripts/check-fuzz.sh` passes: every input in `tools/fuzz/corpus/` and
+    the fixed-seed generated inputs run through the core's public API
+    without a panic or a hang (`docs/fuzzing.md`).
+13. `scripts/check-sync-invariance.sh --long` passes (`docs/perf.md`
+    "Invariance checks"): the `eager-sync` build (every lazy component
+    caught up at every M-cycle) and the `clock-offset` build (powered on
+    just below 2^31, 2^32, 2^33 and 2^40 clocks) print the same
+    `--fingerprint` lines as the product build, apart from the listed known
+    differences (a stale entry fails too), and `bench --long` runs 30
+    emulated minutes without a panic. Any differing line fails.
+14. The desktop front end builds (`cargo build -p gbc-desktop --release`)
+    and the binary cargo just built runs
+    `test-roms/blargg/cpu_instrs/cpu_instrs.gb --headless --frames 600`
+    and exits 0 (M7 acceptance).
+15. The runner exits 0 with `--gate must` on the full manifest: every `must`
+    ROM passes and there are no regressions against
+    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
+    runner error.
 
 `should` and `stretch` scores are reported but don't block the gate.
 Finishing Stage 1 additionally requires the human to sign off on the
