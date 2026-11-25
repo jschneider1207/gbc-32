@@ -188,6 +188,7 @@ mod memory;
 mod ppu;
 mod schedule;
 mod serial;
+mod speed;
 mod timer;
 
 pub use apu::StereoSample;
@@ -461,8 +462,8 @@ impl<'a> Emulator<'a> {
     pub fn set_buttons_at(&mut self, clock: u64, buttons: Buttons) -> bool {
         let sys = &mut self.hw.sys;
         // Between run calls the clock is on an M-cycle boundary.
-        let mcycle = sys.hot.mcycle as u64;
-        if clock < sys.hot.clock() + mcycle {
+        let speed = sys.hot.speed();
+        if clock < sys.hot.clock() + speed.mcycle() {
             sys.set_joypad(buttons, sys.joyp_select);
             return true;
         }
@@ -473,7 +474,7 @@ impl<'a> Emulator<'a> {
         if !sys.inputs.push(clock, buttons) {
             return false;
         }
-        sys.schedule_inputs(mcycle);
+        sys.schedule_inputs(speed);
         true
     }
 
@@ -836,6 +837,7 @@ fn vdma_turn(cpu: &mut Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::speed::Speed;
     extern crate std;
     use super::*;
     use std::boxed::Box;
@@ -2026,7 +2028,7 @@ mod tests {
         // returns while `stopped`), 4 fewer for the held DIV reset (IME
         // off: `div_cycles = -4`), 4 more for LD B,B.
         assert_eq!(to_ld_b_b(emu), (28 + 0x8001 * 2 + 2, 0x107, 0x0008));
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         assert_eq!(emu.peek(0xFF4D) & 0x81, 0x80, "double speed, disarmed");
         // Back: LDH (6 clocks), STOP's two M-cycles (4), the halt (0x8001
         // normal-speed M-cycles less one clock: SameBoy counts 0x20003
@@ -2035,7 +2037,7 @@ mod tests {
         // without it.
         let back = 65568 + 10 + 0x8001 * 4 - 1 + 4;
         assert_eq!(to_ld_b_b(emu), (back, 0x10C, 0x0008));
-        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Normal);
     }
 
     #[test]
@@ -2094,7 +2096,7 @@ mod tests {
         // STOP's fetch ends at 48 (DIV reset), then the idle M-cycle and
         // LD B,B. The timer: the 4 T-cycles of LD B,B, less the held reset.
         assert_eq!(to_ld_b_b(emu), (48 + 2 + 2, 0x10A, 0));
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
     }
 
     #[test]
@@ -2118,12 +2120,12 @@ mod tests {
         // first M-cycle not counted: the hold), LD B,B. The timer counts
         // the dispatch's other 4 M-cycles and LD B,B: 20 T-cycles.
         assert_eq!(to_ld_b_b(emu), (52 + 2 + 10 + 2, 0x41, 0x14));
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         // Back to normal speed: the STOP fetch ends 16 clocks later, then
         // the dispatch and LD B,B, of which the timer again counts all but
         // the dispatch's first M-cycle.
         assert_eq!(to_ld_b_b(emu), (66 + 16 + 20 + 4, 0x41, 0x14));
-        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Normal);
     }
 
     #[test]
@@ -2193,7 +2195,7 @@ mod tests {
                 let _ = emu.step(&mut fb, &mut []);
                 assert!(emu.clock() < 200_000);
             }
-            assert_eq!(emu.hw.sys.hot.mcycle, 2);
+            assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
             // Before STOP's fetch (2 clocks): the flip-flop is 1 iff the
             // next shift is at the clock bit's next fall, within 4 clocks.
             let s = emu.clock();
@@ -2204,7 +2206,10 @@ mod tests {
             // STOP: fetch, second byte, the switch, the halt's 3 odd clocks.
             let _ = emu.step(&mut fb, &mut []);
             let now = s + 4;
-            assert_eq!((emu.clock(), emu.hw.sys.hot.mcycle), (now + 3, 4));
+            assert_eq!(
+                (emu.clock(), emu.hw.sys.hot.speed()),
+                (now + 3, Speed::Normal)
+            );
             assert_eq!(progress(emu).0, bits + u8::from(ff), "pad {pad}");
             let mut shifts = std::vec::Vec::new();
             let mut last = progress(emu).0;
@@ -2350,7 +2355,7 @@ mod tests {
         let r = emu.run_cycles(20_000, &mut frame(), &mut []);
         assert!(r.events.is_empty() && emu.hw.cpu.halted());
         assert_eq!(emu.hw.cpu.regs.pc, 0x108);
-        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Normal);
         assert_eq!(emu.peek(0xFF4D) & 0x81, 0x01, "still armed");
         // DIV ran on from its post-boot value through the STOP.
         let now = emu.clock();
@@ -2787,7 +2792,7 @@ mod tests {
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         assert!(cpu::Bus::speed_switch(&mut ctx, true, true));
         cpu::Bus::idle(&mut ctx);
-        assert_eq!(ctx.hot.mcycle, 2);
+        assert_eq!(ctx.hot.speed(), Speed::Double);
         cpu::Bus::write(&mut ctx, 0xFF46, 0xC0);
         let start = ctx.sys.ppu.dma.start;
         while ctx.clock() <= 2 * start + 8 {
@@ -2795,7 +2800,7 @@ mod tests {
         }
         assert!(ctx.clock() < ctx.sys.ppu.dma.end, "still running");
         assert!(!cpu::Bus::speed_switch(&mut ctx, true, true));
-        assert_eq!(ctx.hot.mcycle, 4);
+        assert_eq!(ctx.hot.speed(), Speed::Normal);
         // The PPU's view of it is defined too (past the wake-up M-cycle).
         let (_, seen) = ctx.sys.ppu.dma.ppu_at(ctx.clock() + 8);
         assert!(seen <= dma::LEN);
@@ -3161,12 +3166,16 @@ mod tests {
         emu.set_stop_events(Events::LD_B_B);
         let r = emu.run_cycles(100_000, &mut frame(), &mut []);
         assert_eq!(r.events, Events::LD_B_B);
-        assert_eq!(emu.hw.sys.hot.mcycle, 2, "in double speed");
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double, "in double speed");
         // Scheduled in double speed, landing after the switch back.
         let t = (emu.clock() + 40_000) & !3;
         assert!(emu.set_buttons_at(t, Buttons::A));
         run_to(emu, t - 7);
-        assert_eq!(emu.hw.sys.hot.mcycle, 4, "back in normal speed");
+        assert_eq!(
+            emu.hw.sys.hot.speed(),
+            Speed::Normal,
+            "back in normal speed"
+        );
         assert_eq!(p1(emu), 0x0F);
         // t is not a boundary on this grid: the M-cycle it falls in
         // starts at t - 3.
@@ -3355,7 +3364,7 @@ mod tests {
         emu.hw.sys.iflags = 0;
         // IE = 0 and IME = 0 after boot: IF bit 4 stays as set.
         let _ = emu.run_cycles(20_000, &mut frame(), &mut []);
-        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Normal);
         (emu.peek(0xFF0F) & 0x10, p1(emu))
     }
 
@@ -3404,7 +3413,7 @@ mod tests {
         let emu = with_program(&program, 0x80);
         assert!(emu.set_buttons_at(4167, Buttons::A));
         run_to(emu, 4164);
-        assert_eq!(emu.hw.sys.hot.mcycle, 2, "in double speed");
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double, "in double speed");
         assert_eq!(p1(emu), 0x0F, "not before its M-cycle");
         run_to(emu, 4166);
         assert_eq!(p1(emu), 0x0E, "from its M-cycle on");

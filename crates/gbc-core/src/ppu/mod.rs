@@ -73,6 +73,7 @@ use crate::dma::{OamDma, PpuView};
 use crate::irq::PendingIrq;
 use crate::memory::Memory;
 use crate::schedule::NEVER;
+use crate::speed::Speed;
 use crate::{DmgPalettes, Events, FRAME_CLOCKS};
 use objects::LineObjects;
 pub(crate) use render::ObjBuf;
@@ -458,8 +459,12 @@ const OBJ_HIGH_READ: u32 = 2;
 use edges::{WY_CHECK_AT, WY_DS_LATE, WY_LAST_AT};
 
 /// [`WY_LEAD`] or [`WY_LEAD_DS`].
-const fn wy_lead(double: bool) -> i32 {
-    if double { WY_LEAD_DS } else { WY_LEAD }
+const fn wy_lead(speed: Speed) -> i32 {
+    if speed.is_double() {
+        WY_LEAD_DS
+    } else {
+        WY_LEAD
+    }
 }
 
 impl LineTiming {
@@ -708,7 +713,7 @@ impl Ppu {
         self.lcdc = 0x91;
         self.frame_start = 0u64.wrapping_sub(u64::from(POST_BOOT_POS));
         // LY = 144 against LYC = 0: no coincidence, no source enabled.
-        self.seek(false);
+        self.seek(Speed::Normal);
     }
 
     /// The clock of the last [`Self::sync`] (the `eager-sync` test hook).
@@ -782,16 +787,16 @@ impl Ppu {
     /// access, has its access at most `latch` dots (single, double speed)
     /// before the line's mode-0 interrupt point and lands before or at it
     /// ([`edges::M0_STAT_LATCH`]).
-    fn m0_latched(&self, now: u64, double: bool, delay: u32, latch: [u32; 2]) -> bool {
+    fn m0_latched(&self, now: u64, speed: Speed, delay: u32, latch: [u32; 2]) -> bool {
         let a = self.at(now);
         let irq = self.m0_irq_at(now, a) + delay;
-        a.t < irq && irq <= a.t + latch[usize::from(double)]
+        a.t < irq && irq <= a.t + speed.pick(latch)
     }
 
     // --- Reads (side-effect free) ---
 
     /// LY at clock `now`.
-    pub(crate) fn ly(&self, now: u64, double: bool) -> u8 {
+    pub(crate) fn ly(&self, now: u64, speed: Speed) -> u8 {
         if !self.lcd_enabled() {
             return 0;
         }
@@ -807,10 +812,10 @@ impl Ppu {
             // only the CPU/PPU alignments after speed switches show the
             // glitch and the line 144-153 dot.
             1..=152 if t >= edges::LY_NEW => l,
-            1..=152 if t + edges::LY_GLITCH - double as u32 >= edges::LY_NEW => (l - 1) & l,
+            1..=152 if t + edges::LY_GLITCH - speed.extra() >= edges::LY_NEW => (l - 1) & l,
             1..=152 => l - 1,
             _ if t < edges::LY_NEW => 152,
-            _ if t < if double {
+            _ if t < if speed.is_double() {
                 edges::LY153_ZERO_DS
             } else {
                 edges::LY153_ZERO_SS
@@ -829,7 +834,7 @@ impl Ppu {
     /// STAT bit holds through it. Lines 144-152 keep the previous line's
     /// value to [`edges::CMP_OFF`] as lines 1-143 do; the walk drops it at
     /// [`edges::VCMP_OFF`] there.
-    fn cmp(a: At, double: bool) -> (Option<u8>, u8) {
+    fn cmp(a: At, speed: Speed) -> (Option<u8>, u8) {
         let (l, t) = (a.line, a.t);
         match l {
             0 => (Some(0), 0),
@@ -838,7 +843,7 @@ impl Ppu {
             1..=152 => (Some(l as u8), 0),
             _ if t < edges::L153_CMP => (None, 152),
             _ if t < edges::L153_OFF => (Some(153), 0),
-            _ if t < edges::L153_ZERO && !double => (None, 153),
+            _ if t < edges::L153_ZERO && !speed.is_double() => (None, 153),
             _ if t < edges::L153_ZERO => (Some(153), 0),
             _ => (Some(0), 0),
         }
@@ -850,22 +855,21 @@ impl Ppu {
     /// `End` deadline, at the earliest possible end, latches it first).
     /// `irq`: the HBlank interrupt's end instead, without the stalls at the
     /// last pixel ([`Self::latched_end`]).
-    fn mode3_end(&self, now: u64, a: At, double: bool, irq: bool) -> u32 {
+    fn mode3_end(&self, now: u64, a: At, speed: Speed, irq: bool) -> u32 {
         let start = now.wrapping_sub(u64::from(a.t));
         let edge = if irq { 0 } else { u32::from(self.line.edge) };
-        self.latched_end(start).map_or(LINE, |e| {
-            e + edge + edges::MODE0_DS_LATE * u32::from(double)
-        })
+        self.latched_end(start)
+            .map_or(LINE, |e| e + edge + edges::MODE0_DS_LATE * speed.extra())
     }
 
     /// STAT mode bits at `a` (Pan Docs: LCD Status Registers).
-    fn mode(&self, now: u64, a: At, double: bool, quirk: bool) -> u8 {
+    fn mode(&self, now: u64, a: At, speed: Speed, quirk: bool) -> u8 {
         let (l, t) = (a.line, a.t);
         if l >= LINES {
             return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
         }
         if a.first {
-            return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, double, false) {
+            return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, speed, false) {
                 0
             } else {
                 3
@@ -881,10 +885,10 @@ impl Ppu {
             // clears the mode there on DMG only: it models CGB-E here.
             // `quirk` is for STAT register reads only: internal HBlank
             // users (HDMA start) see mode 1 here, as SameBoy does.
-            u8::from(l == 0 && (t != edges::LINE0_MODE0_QUIRK || double || !quirk))
+            u8::from(l == 0 && (t != edges::LINE0_MODE0_QUIRK || speed.is_double() || !quirk))
         } else if t < edges::MODE3 {
             2
-        } else if t < self.mode3_end(now, a, double, false) {
+        } else if t < self.mode3_end(now, a, speed, false) {
             3
         } else {
             0
@@ -894,17 +898,17 @@ impl Ppu {
     /// STAT at clock `now`: bit 7 reads 1; mode 0 while the LCD is off,
     /// with the coincidence bit kept from when it was turned off (Pan
     /// Docs: LCD Status Registers; SameBoy `GB_lcd_off`).
-    pub(crate) fn stat(&self, now: u64, double: bool) -> u8 {
-        self.stat_with(now, double, true)
+    pub(crate) fn stat(&self, now: u64, speed: Speed) -> u8 {
+        self.stat_with(now, speed, true)
     }
 
-    fn stat_with(&self, now: u64, double: bool, quirk: bool) -> u8 {
+    fn stat_with(&self, now: u64, speed: Speed, quirk: bool) -> u8 {
         let v = 0x80 | self.stat_select;
         if !self.lcd_enabled() {
             return v | if self.lyc_flag_off { 0x04 } else { 0 };
         }
         let a = self.at(now);
-        v | self.mode(now, a, double, quirk) | if self.lyc_bit(a, double) { 0x04 } else { 0 }
+        v | self.mode(now, a, speed, quirk) | if self.lyc_bit(a, speed) { 0x04 } else { 0 }
     }
 
     /// [`Self::stat`] while an OAM DMA transfer runs (from the FF46 write
@@ -915,8 +919,8 @@ impl Ppu {
     /// during the OAM scan, so the mode reads 0 exactly while the transfer
     /// is active. Gambatte has no such rule; no test ROM we have checks
     /// it. Not affected: the STAT interrupt line.
-    pub(crate) fn stat_during_dma(&self, now: u64, double: bool) -> u8 {
-        let v = self.stat(now, double);
+    pub(crate) fn stat_during_dma(&self, now: u64, speed: Speed) -> u8 {
+        let v = self.stat(now, speed);
         if v & 3 == 2 { v & !3 } else { v }
     }
 
@@ -929,8 +933,8 @@ impl Ppu {
     /// ([`edges::LY0_PULSE_IRQ`]). A STAT write's phase 2 landing on the
     /// pulse (one dot after its access) sees line 0's mode-1 source still
     /// holding the line (`Ctx::write_ppu`).
-    pub(crate) fn on_ly0_pulse(&self, at: u64, double: bool) -> bool {
-        const PULSE: u32 = edges::ly0_pulse(false);
+    pub(crate) fn on_ly0_pulse(&self, at: u64, speed: Speed) -> bool {
+        const PULSE: u32 = edges::ly0_pulse(Speed::Normal);
         // As `at` (frame position; line 0 of the first frame has no pulse),
         // without its division.
         let mut p = at.wrapping_sub(self.frame_start) as u32;
@@ -939,7 +943,7 @@ impl Ppu {
             p -= FRAME;
             first = false;
         }
-        !double && self.lcd_enabled() && p == PULSE && !first
+        !speed.is_double() && self.lcd_enabled() && p == PULSE && !first
     }
 
     /// The STAT interrupt line is high.
@@ -951,10 +955,10 @@ impl Ppu {
     /// speed (CGB C), held in double speed (SameBoy `GB_STAT_update`). In
     /// double speed a LYC write during the off window is approximated (the
     /// hardware holds the old result).
-    fn lyc_bit(&self, a: At, double: bool) -> bool {
-        match Self::cmp(a, double) {
+    fn lyc_bit(&self, a: At, speed: Speed) -> bool {
+        match Self::cmp(a, speed) {
             (Some(v), _) => v == self.lyc,
-            (None, prev) => double && prev == self.lyc,
+            (None, prev) => speed.is_double() && prev == self.lyc,
         }
     }
 
@@ -965,13 +969,13 @@ impl Ppu {
     /// (single speed: 2 dots after it, [`edges::VRAM_FROM_SS`]; first line
     /// after LCD enable: the pipeline start, or the STAT change in double
     /// speed) to the mode-3 end (one dot later in double speed).
-    pub(crate) fn vram_blocked(&self, now: u64, double: bool) -> bool {
-        let from = if double {
+    pub(crate) fn vram_blocked(&self, now: u64, speed: Speed) -> bool {
+        let from = if speed.is_double() {
             [edges::VRAM_FROM_DS, edges::VRAM_FROM_FIRST_DS]
         } else {
             [edges::VRAM_FROM_SS, edges::VRAM_FROM_FIRST_SS]
         };
-        self.cpu_blocked(now, double, from, 0)
+        self.cpu_blocked(now, speed, from, 0)
     }
 
     /// The CPU access windows ([`Self::vram_blocked`],
@@ -982,14 +986,14 @@ impl Ppu {
     /// on cgb-acid2 (the others within 0.01%), and `palette_blocked`'s
     /// fast path then pays for the larger frame (cgb-raster +2.45%).
     #[inline(never)]
-    fn cpu_blocked(&self, now: u64, double: bool, from: [u32; 2], end_extra: u32) -> bool {
+    fn cpu_blocked(&self, now: u64, speed: Speed, from: [u32; 2], end_extra: u32) -> bool {
         if !self.lcd_enabled() {
             return false;
         }
         let a = self.at(now);
         a.line < LINES
             && a.t >= from[usize::from(a.first)]
-            && a.t < self.mode3_end(now, a, double, false) + end_extra
+            && a.t < self.mode3_end(now, a, speed, false) + end_extra
     }
 
     /// CPU access to CGB palette RAM (BCPD/OCPD) is blocked at clock `now`:
@@ -1004,8 +1008,8 @@ impl Ppu {
     /// `cgbpal_m3/*` and `enable_display/ly{0,1}_late_cgbp*` (CGB04C)
     /// pass with these edges; DMG compatibility mode never gets here
     /// (BCPD/OCPD are closed there).
-    pub(crate) fn palette_blocked(&self, now: u64, double: bool) -> bool {
-        let (from, extra) = if double {
+    pub(crate) fn palette_blocked(&self, now: u64, speed: Speed) -> bool {
+        let (from, extra) = if speed.is_double() {
             (edges::PALETTE_FROM_DS, edges::PALETTE_EXTRA_DS)
         } else {
             (edges::PALETTE_FROM, edges::PALETTE_EXTRA_SS)
@@ -1021,10 +1025,10 @@ impl Ppu {
             && self.lcd_enabled()
         {
             return t < u64::from(
-                u32::from(self.line.stat_end()) + edges::MODE0_DS_LATE * u32::from(double) + extra,
+                u32::from(self.line.stat_end()) + edges::MODE0_DS_LATE * speed.extra() + extra,
             );
         }
-        self.cpu_blocked(now, double, [from, edges::PALETTE_FROM_FIRST], extra)
+        self.cpu_blocked(now, speed, [from, edges::PALETTE_FROM_FIRST], extra)
     }
 
     /// CPU access to OAM (FE00-FEFF) is blocked at clock `now`: reads give
@@ -1036,23 +1040,23 @@ impl Ppu {
     /// speed: its fifth), both to the mode-3 end; on the first line after
     /// LCD enable, writes from SameBoy's nominal 76 and reads from 78 (no
     /// OAM scan).
-    pub(crate) fn oam_blocked(&self, now: u64, double: bool, write: bool) -> bool {
-        let from = match (write, double) {
+    pub(crate) fn oam_blocked(&self, now: u64, speed: Speed, write: bool) -> bool {
+        let from = match (write, speed.is_double()) {
             (true, false) => [edges::OAM_WRITE_FROM_SS, edges::OAM_WRITE_FROM_FIRST],
             (true, true) => [edges::OAM_WRITE_FROM_DS, edges::OAM_WRITE_FROM_FIRST],
             (false, false) => [edges::OAM_READ_FROM_SS, edges::OAM_READ_FROM_FIRST],
             (false, true) => [edges::OAM_READ_FROM_DS, edges::OAM_READ_FROM_FIRST],
         };
-        self.cpu_blocked(now, double, from, 0)
+        self.cpu_blocked(now, speed, from, 0)
     }
 
     /// `mode_for_interrupt` at `a` (SameBoy): the mode source a STAT
     /// update at this position sees, through `view`.
-    fn mode_source(&self, now: u64, a: At, double: bool, view: View) -> u8 {
+    fn mode_source(&self, now: u64, a: At, speed: Speed, view: View) -> u8 {
         let (l, t) = (a.line, a.t);
         // Single speed: the mode part holds for STAT writes in the window
         // of `MODE_HOLD_SS` (edges).
-        let hold = !double && view != View::LycWrite;
+        let hold = !speed.is_double() && view != View::LycWrite;
         if l >= LINES {
             // Single speed, VBlank: a STAT write landing 1-2 dots before
             // the walk compares LY=LYC (lines 145-153 at `CMP_WALK`, line
@@ -1077,7 +1081,7 @@ impl Ppu {
                 _ => MODE_0_2,
             };
         }
-        let end = self.mode3_end(now, a, double, true);
+        let end = self.mode3_end(now, a, speed, true);
         if a.first {
             return if t >= end { 0 } else { NO_MODE };
         }
@@ -1087,7 +1091,7 @@ impl Ppu {
         // our t < 5 single speed, t < 6 double speed (T in half-dots).
         // CGB04C `m2enable/late_enable_ds_1`, `late_enable_m0disable_ds_1`.
         let m2_end = match view {
-            View::StatPhase1 if l != 0 => edges::CMP_WALK + u32::from(double),
+            View::StatPhase1 if l != 0 => edges::CMP_WALK + speed.extra(),
             _ => edges::MODE2_SOURCE_END,
         };
         if t < m2_end {
@@ -1104,7 +1108,11 @@ impl Ppu {
                 // `m0enable/late_enable_ds_lcdoffset1_1`, a mode-0 enable
                 // with phase 2 at t = 2.5: interrupt; `late_enable_ds_2`,
                 // t = 3.5: none).
-                _ if t < edges::PT_LY + u32::from(double && view == View::StatPhase2) => 0,
+                _ if t < edges::PT_LY
+                    + u32::from(speed.is_double() && view == View::StatPhase2) =>
+                {
+                    0
+                }
                 _ => 2,
             }
         } else if t < end {
@@ -1120,7 +1128,7 @@ impl Ppu {
     /// with `start` the clock of frame position 0. A position past the
     /// frame belongs to the next one. A visible line's `End` is at its
     /// latched end, or at the earliest possible end if not latched yet.
-    fn next_point(&self, after: u32, first: bool, start: u64, double: bool) -> (u32, Pt) {
+    fn next_point(&self, after: u32, first: bool, start: u64, speed: Speed) -> (u32, Pt) {
         let (l, t) = (after / LINE, after % LINE);
         let base = l * LINE;
         if l < LINES {
@@ -1133,7 +1141,7 @@ impl Ppu {
             if !first_line {
                 // Line 0, double speed: both points a dot later.
                 let (ly, cmp) = match l {
-                    0 => (edges::ly0_pt(double), edges::ly0_pulse(double)),
+                    0 => (edges::ly0_pt(speed), edges::ly0_pulse(speed)),
                     _ => (edges::PT_LY, edges::CMP_WALK),
                 };
                 if t < ly {
@@ -1167,7 +1175,7 @@ impl Ppu {
             pt: Pt::V0,
         };
         while c.pos <= after {
-            c = self.step(c, start, double);
+            c = self.step(c, start, speed);
         }
         (c.pos, c.pt)
     }
@@ -1207,12 +1215,12 @@ impl Ppu {
 
     /// The cursor for the current state: the first update point after
     /// `synced` (`< frame_start + FRAME`, as between syncs), by search.
-    fn seek_point(&self, double: bool) -> Cursor {
+    fn seek_point(&self, speed: Speed) -> Cursor {
         let pos = self.synced.wrapping_sub(self.frame_start) as u32;
         let (pos, pt) = if self.quiet() {
             self.next_work_point(pos, self.first_frame, self.frame_start)
         } else {
-            self.next_point(pos, self.first_frame, self.frame_start, double)
+            self.next_point(pos, self.first_frame, self.frame_start, speed)
         };
         let line = if pos >= FRAME { 0 } else { (pos / LINE) as u8 };
         Cursor { pos, line, pt }
@@ -1225,18 +1233,18 @@ impl Ppu {
     /// point runs with the speed of the sync that reaches it, so none from
     /// before the switch may be left for a later sync.
     #[cold]
-    pub(crate) fn speed_changed(&mut self, double: bool) {
+    pub(crate) fn speed_changed(&mut self, speed: Speed) {
         // (While the LCD is off the cursor is meaningless: set on enable.)
         if self.lcd_enabled() {
-            self.seek(double);
+            self.seek(speed);
         }
     }
 
     /// Re-seeks the cursor after a change to what the walk visits (LCD
     /// enable, reset, the STAT selects becoming empty or not).
     #[cold]
-    fn seek(&mut self, double: bool) {
-        self.cursor = self.seek_point(double);
+    fn seek(&mut self, speed: Speed) {
+        self.cursor = self.seek_point(speed);
     }
 
     /// A visible line's `End` after its `Latch` at frame position `latch`
@@ -1281,7 +1289,7 @@ impl Ppu {
     /// clock of `c`'s frame position 0): what [`Self::next_point`] returns
     /// for `c.pos`, without dividing.
     #[inline(always)]
-    fn step(&self, c: Cursor, start: u64, double: bool) -> Cursor {
+    fn step(&self, c: Cursor, start: u64, speed: Speed) -> Cursor {
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
@@ -1318,7 +1326,7 @@ impl Ppu {
             Pt::VBlank => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
             Pt::L153Cmp => (c.pos + (edges::L153_OFF - edges::L153_CMP), l, Pt::L153Off),
             Pt::L153Off => (
-                c.pos + (edges::l153_zero_walk(double) - edges::L153_OFF),
+                c.pos + (edges::l153_zero_walk(speed) - edges::L153_OFF),
                 l,
                 Pt::L153Zero,
             ),
@@ -1348,7 +1356,7 @@ impl Ppu {
     /// shared `eval` for all cost ~7 Ir per point, 1% on cgb-acid2), and
     /// the walk inlines it (as a call: cgb-acid2 +1.2%).
     #[inline(always)]
-    fn point_irq(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
+    fn point_irq(&self, line: &mut IrqLine, pt: Pt, l: u32, speed: Speed) -> bool {
         let (sel, lyc) = (self.stat_select, self.lyc);
         let ly = l as u8;
         match pt {
@@ -1357,7 +1365,7 @@ impl Ppu {
             // then it lasts to the pulse, which a selected mode 1 so
             // blocks, as in single speed ([`edges::ly0_pt`]).
             Pt::Ly3 if l == 0 => {
-                if double && sel & SEL_MODE2 == 0 {
+                if speed.is_double() && sel & SEL_MODE2 == 0 {
                     line.eval_inline(sel, lyc, NO_MODE, Some(0))
                 } else {
                     line.eval_inline(sel, lyc, 1, Some(0))
@@ -1382,7 +1390,7 @@ impl Ppu {
             Pt::V4 => line.eval_inline(sel, lyc, 1, Some(ly)),
             Pt::VBlank => line.eval_inline(sel, lyc, 1, Some(144)),
             Pt::L153Cmp => line.eval_inline(sel, lyc, 1, Some(153)),
-            Pt::L153Off if double => line.eval_inline(sel, lyc, 1, Some(153)),
+            Pt::L153Off if speed.is_double() => line.eval_inline(sel, lyc, 1, Some(153)),
             Pt::L153Off => line.eval_inline(sel, lyc, 1, None),
             Pt::L153Zero => line.eval_inline(sel, lyc, 1, Some(0)),
         }
@@ -1394,8 +1402,8 @@ impl Ppu {
     /// instructions per look-ahead whatever points it visits, also with
     /// no source selected: halt-irq +0.7%, cpu_instrs +0.2%.)
     #[inline(never)]
-    fn point_irq_ahead(&self, line: &mut IrqLine, pt: Pt, l: u32, double: bool) -> bool {
-        self.point_irq(line, pt, l, double)
+    fn point_irq_ahead(&self, line: &mut IrqLine, pt: Pt, l: u32, speed: Speed) -> bool {
+        self.point_irq(line, pt, l, speed)
     }
 
     /// When [`Ppu::sync`] must next run: the first update point after the
@@ -1409,19 +1417,19 @@ impl Ppu {
     /// later, [`edges::LY0_PULSE_IRQ`] and [`edges::L153_ZERO_IRQ`]: the
     /// deadline is the point, and a sync on it makes the next deadline the
     /// request's clock.)
-    pub(crate) fn next_event(&self, double: bool) -> u64 {
-        self.next_walk_event(double).min(self.irq.next())
+    pub(crate) fn next_event(&self, speed: Speed) -> u64 {
+        self.next_walk_event(speed).min(self.irq.next())
     }
 
     /// [`Self::next_event`] of the walk alone.
     #[inline(always)]
-    fn next_walk_event(&self, double: bool) -> u64 {
+    fn next_walk_event(&self, speed: Speed) -> u64 {
         if !self.lcd_enabled() {
             NEVER
         } else if self.quiet() {
-            self.look_ahead::<true>(double)
+            self.look_ahead::<true>(speed)
         } else {
-            self.look_ahead::<false>(double)
+            self.look_ahead::<false>(speed)
         }
     }
 
@@ -1430,7 +1438,7 @@ impl Ppu {
     /// mode 3, on a copy of the STAT line. `QUIET`: [`Self::quiet`] (the
     /// walk of [`Self::step_work`], or that of [`Self::step`]).
     #[inline(always)]
-    fn look_ahead<const QUIET: bool>(&self, double: bool) -> u64 {
+    fn look_ahead<const QUIET: bool>(&self, speed: Speed) -> u64 {
         let mut line = self.line_irq;
         let mut start = self.frame_start;
         let mut c = self.cursor;
@@ -1443,7 +1451,7 @@ impl Ppu {
             let fires = match c.pt {
                 Pt::End | Pt::VBlank => true,
                 Pt::Latch => false,
-                pt => !QUIET && self.point_irq_ahead(&mut line, pt, u32::from(c.line), double),
+                pt => !QUIET && self.point_irq_ahead(&mut line, pt, u32::from(c.line), speed),
             };
             if fires {
                 return start.wrapping_add(u64::from(c.pos));
@@ -1451,7 +1459,7 @@ impl Ppu {
             c = if QUIET {
                 self.step_work(c, start)
             } else {
-                self.step(c, start, double)
+                self.step(c, start, speed)
             };
         }
     }
@@ -1467,9 +1475,9 @@ impl Ppu {
         mem: &mut Memory,
         frame: &mut Frame,
         iflags: &mut u8,
-        double: bool,
+        speed: Speed,
     ) -> Events {
-        let events = self.walk_to(now, mem, frame, iflags, double);
+        let events = self.walk_to(now, mem, frame, iflags, speed);
         self.post_irqs(now, iflags);
         events
     }
@@ -1484,12 +1492,12 @@ impl Ppu {
         mem: &mut Memory,
         frame: &mut Frame,
         iflags: &mut u8,
-        double: bool,
+        speed: Speed,
     ) -> Events {
         let events = if self.quiet() {
-            self.run_points::<true>(now, mem, frame, iflags, double)
+            self.run_points::<true>(now, mem, frame, iflags, speed)
         } else {
-            self.run_points::<false>(now, mem, frame, iflags, double)
+            self.run_points::<false>(now, mem, frame, iflags, speed)
         };
         self.post_irqs(now, iflags);
         events
@@ -1506,7 +1514,7 @@ impl Ppu {
         mem: &mut Memory,
         frame: &mut Frame,
         iflags: &mut u8,
-        double: bool,
+        speed: Speed,
     ) -> Events {
         // No update point to run (most register and palette writes):
         // `now` is before the cursor's point, in the cursor's frame.
@@ -1515,9 +1523,9 @@ impl Ppu {
             self.synced = now;
             Events::EMPTY
         } else if self.quiet() {
-            self.run_points::<true>(now, mem, frame, iflags, double)
+            self.run_points::<true>(now, mem, frame, iflags, speed)
         } else {
-            self.run_points::<false>(now, mem, frame, iflags, double)
+            self.run_points::<false>(now, mem, frame, iflags, speed)
         }
     }
 
@@ -1532,7 +1540,7 @@ impl Ppu {
         mem: &mut Memory,
         frame: &mut Frame,
         iflags: &mut u8,
-        double: bool,
+        speed: Speed,
     ) -> Events {
         let mut events = Events::EMPTY;
         if !self.lcd_enabled() {
@@ -1549,12 +1557,12 @@ impl Ppu {
             // `Latch` and `End` don't change the STAT line.
             if !QUIET && !matches!(c.pt, Pt::Latch | Pt::End) {
                 let mut line = self.line_irq;
-                if self.point_irq(&mut line, c.pt, l, double) {
+                if self.point_irq(&mut line, c.pt, l, speed) {
                     // Single speed: the requests of line 0's mode-2 pulse
                     // and of line 153's comparison against 0 reach IF a
                     // dot after their walk points.
                     let delay = match c.pt {
-                        _ if double => 0,
+                        _ if speed.is_double() => 0,
                         Pt::Ly4 if l == 0 => edges::LY0_PULSE_IRQ,
                         Pt::L153Zero => edges::L153_ZERO_IRQ,
                         _ => 0,
@@ -1568,7 +1576,7 @@ impl Ppu {
                 self.line_irq = line;
             }
             match c.pt {
-                Pt::Latch => self.latch(l, self.first_frame && l == 0, mem, double),
+                Pt::Latch => self.latch(l, self.first_frame && l == 0, mem, speed),
                 // The rest of line `l` (to pixel 160). VRAM, OAM and the
                 // palettes are blocked for the CPU during mode 3, so
                 // drawing here sees what the hardware saw; register writes
@@ -1590,7 +1598,7 @@ impl Ppu {
             self.cursor = if QUIET {
                 self.step_work(c, self.frame_start)
             } else {
-                self.step(c, self.frame_start, double)
+                self.step(c, self.frame_start, speed)
             };
         }
         self.synced = now;
@@ -1598,7 +1606,7 @@ impl Ppu {
             // Past line 153, before the next frame's first point.
             self.next_frame();
         }
-        debug_assert_eq!(self.cursor, self.seek_point(double));
+        debug_assert_eq!(self.cursor, self.seek_point(speed));
         events
     }
 
@@ -2211,10 +2219,10 @@ impl Ppu {
     /// `window/late_enable_afterVblank_lcdoffset1_1` sets LCDC.5 at 454 of
     /// line 0 with WY = 0 (window on line 1), `late_enable_afterVblank_2`
     /// at 455 (none); double speed `_ds_1` at 455 (window: the whole line).
-    pub(crate) fn check_wy_at(&mut self, now: u64, mem: &Memory, double: bool) {
+    pub(crate) fn check_wy_at(&mut self, now: u64, mem: &Memory, speed: Speed) {
         if self.lcd_enabled() {
             let a = self.at(now);
-            if a.line < LINES && a.t < WY_LAST_AT + WY_DS_LATE * u32::from(double) {
+            if a.line < LINES && a.t < WY_LAST_AT + WY_DS_LATE * speed.extra() {
                 self.check_wy(a.line, mem);
             }
         }
@@ -2229,10 +2237,10 @@ impl Ppu {
     /// then; gambatte (ppu.cpp `M2_LyNon0`, behaviour only) likewise.
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory, double: bool) {
+    pub(crate) fn wy_write(&mut self, now: u64, mem: &Memory, speed: Speed) {
         if self.lcd_enabled() {
             let a = self.at(now);
-            let at = WY_CHECK_AT[usize::from(a.line != 0)] + WY_DS_LATE * u32::from(double);
+            let at = WY_CHECK_AT[usize::from(a.line != 0)] + WY_DS_LATE * speed.extra();
             if a.line < LINES && a.t >= at {
                 self.check_wy(a.line, mem);
             }
@@ -2250,11 +2258,11 @@ impl Ppu {
     /// exist (`latch`, `Ppu::wy_late`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, double: bool) {
+    pub(crate) fn wy_written(&mut self, now: u64, mem: &Memory, speed: Speed) {
         if self.lcd_enabled() {
             let a = self.at(now);
             if a.line < LINES {
-                if a.t < WY_LAST_AT + WY_DS_LATE * u32::from(double) {
+                if a.t < WY_LAST_AT + WY_DS_LATE * speed.extra() {
                     self.check_wy(a.line, mem);
                 }
                 if a.t >= edges::MODE3 && self.line.start != now.wrapping_sub(u64::from(a.t)) {
@@ -2262,7 +2270,7 @@ impl Ppu {
                 }
             }
         }
-        self.window_write(now, mem, Some(wy_lead(double)));
+        self.window_write(now, mem, Some(wy_lead(speed)));
     }
 
     /// `latch` with a WY write in mode 3 before the pipeline started
@@ -2270,10 +2278,10 @@ impl Ppu {
     /// after it.
     #[cold]
     #[inline(never)]
-    fn wy_late_latched(&mut self, mem: &Memory, double: bool) {
+    fn wy_late_latched(&mut self, mem: &Memory, speed: Speed) {
         let t = core::mem::take(&mut self.wy_late);
         let at = self.line.start.wrapping_add(u64::from(t));
-        self.window_write(at, mem, Some(wy_lead(double)));
+        self.window_write(at, mem, Some(wy_lead(speed)));
     }
 
     /// The pixel pipeline of line `l` starts: fix its mode-3 timing from
@@ -2281,7 +2289,7 @@ impl Ppu {
     /// first line after LCD enable). Out of line: it runs once per line,
     /// and inlined, its register loads were hoisted into every sync.
     #[inline(never)]
-    fn latch(&mut self, l: u32, first: bool, mem: &mut Memory, double: bool) {
+    fn latch(&mut self, l: u32, first: bool, mem: &mut Memory, speed: Speed) {
         // SameBoy checks at the line start and on WY/LCDC writes (bus
         // `write_ppu` calls `check_wy` too); here before the window's
         // start is fixed.
@@ -2352,7 +2360,7 @@ impl Ppu {
             self.attr_on = n != 0;
         }
         if self.wy_late != 0 {
-            self.wy_late_latched(mem, double);
+            self.wy_late_latched(mem, speed);
         }
     }
 
@@ -2864,7 +2872,7 @@ impl Ppu {
     /// reads LCDC.2 at the fetch already (`render.rs`).
     #[cold]
     #[inline(never)]
-    pub(crate) fn obj_size_write(&mut self, now: u64, double: bool, mem: &Memory) {
+    pub(crate) fn obj_size_write(&mut self, now: u64, speed: Speed, mem: &Memory) {
         if !self.lcd_enabled() {
             return;
         }
@@ -2873,7 +2881,7 @@ impl Ppu {
         if a.line < LINES && !a.first && self.line.start != start {
             // The entry read at `now - 1` (single speed) is 8x16 with the
             // old value 8x16, and with the new one otherwise.
-            let either = u64::from(!double && self.lcdc & 0x04 != 0);
+            let either = u64::from(!speed.is_double() && self.lcdc & 0x04 != 0);
             self.scan_to(a.line, start, (now + either).saturating_sub(2), mem);
         }
     }
@@ -2940,9 +2948,9 @@ impl Ppu {
     /// A STAT update at clock `now` (a STAT or LYC write): re-evaluates the
     /// interrupt line with the mode source and comparison of that
     /// position.
-    fn update_at(&mut self, now: u64, iflags: &mut u8, double: bool, view: View) {
+    fn update_at(&mut self, now: u64, iflags: &mut u8, speed: Speed, view: View) {
         let a = self.at(now);
-        let mode = self.mode_source(now, a, double, view);
+        let mode = self.mode_source(now, a, speed, view);
         // Double speed: the second phase of a STAT write lands half a dot
         // after the first, which the whole-dot timeline puts a dot late
         // (`edges::Observer::delay`); the comparison only changes on whole
@@ -2951,19 +2959,19 @@ impl Ppu {
         // t = 3.5 still sees LY=LYC (143) holding the line (design doc
         // `lcd-offset-phase.md` step 4, comparison part only).
         // (Line start: its own dot; the comparison is off or holds there.)
-        let half = u32::from(double && view == View::StatPhase2);
+        let half = u32::from(speed.is_double() && view == View::StatPhase2);
         let ca = At {
             t: a.t.saturating_sub(half),
             ..a
         };
-        let cmp = Self::cmp(ca, double).0;
+        let cmp = Self::cmp(ca, speed).0;
         // Single speed, STAT writes at the comparison-off dot of lines
         // 1-152: the LY=LYC part is off, so the line drops to its mode
         // part before the write (gambatte `getLycCmpLy`: `lycperiod` needs
         // `timeToNextLy > 2` after its 2-cycle lead, our `t <= 2`; behavior
         // only). CGB04C `m1/m1irq_enable_after_lyc144_2`: LYC=144 selected,
         // a write at line 145 dot 3 selecting mode 1 instead requests it.
-        if !double
+        if !speed.is_double()
             && view == View::StatPhase1
             && a.t == edges::CMP_OFF
             && (1..=152).contains(&a.line)
@@ -2996,7 +3004,7 @@ impl Ppu {
     /// at most `cmp - CMP_ON` dots ahead: no division. While no source is
     /// selected the walk skips it, and the line, low, can't rise.
     #[inline]
-    fn early_cmp(&mut self, now: u64, iflags: &mut u8, double: bool, view: View) {
+    fn early_cmp(&mut self, now: u64, iflags: &mut u8, speed: Speed, view: View) {
         let c = self.cursor;
         let ahead = self
             .frame_start
@@ -3007,7 +3015,7 @@ impl Ppu {
             && ahead <= u64::from(edges::CMP_WALK - edges::CMP_ON)
             && self.lcd_enabled()
         {
-            self.update_at(now, iflags, double, view);
+            self.update_at(now, iflags, speed, view);
         }
     }
 
@@ -3021,10 +3029,10 @@ impl Ppu {
         now: u64,
         value: u8,
         iflags: &mut u8,
-        double: bool,
+        speed: Speed,
         view: View,
     ) {
-        self.early_cmp(now, iflags, double, view);
+        self.early_cmp(now, iflags, speed, view);
         let was_quiet = self.quiet();
         let cleared = self.stat_select & !value;
         let added = value & !self.stat_select;
@@ -3041,7 +3049,7 @@ impl Ppu {
         }
         if was_quiet != self.quiet() {
             // The walk visits other points now (synced to `now`).
-            self.seek(double);
+            self.seek(speed);
         }
         if was_quiet {
             // The line was low; its LY=LYC part wasn't tracked. While the
@@ -3049,7 +3057,7 @@ impl Ppu {
             // with the current LYC; exact unless LYC changed in the last
             // few dots).
             let a = self.at(now);
-            let lyc = match Self::cmp(a, double) {
+            let lyc = match Self::cmp(a, speed) {
                 (Some(v), _) | (None, v) => v == self.lyc,
             };
             self.line_irq = IrqLine { bits: 0, lyc };
@@ -3064,7 +3072,7 @@ impl Ppu {
         // the same M-cycle: the CPU sees IF only at M-cycle boundaries.
         let late = self.m0_latched(
             now,
-            double,
+            speed,
             u32::from(view == View::StatPhase2),
             edges::M0_STAT_LATCH,
         );
@@ -3074,7 +3082,7 @@ impl Ppu {
             && !low
             && self.line_irq.lyc
             && self.stat_select & (SEL_LYC | SEL_MODE0) == SEL_MODE0;
-        self.update_at(now, iflags, double, view);
+        self.update_at(now, iflags, speed, view);
         if late && cleared & SEL_MODE0 != 0 && low {
             *iflags |= INT_STAT;
         }
@@ -3090,7 +3098,7 @@ impl Ppu {
         // mode 1 is selected (kept: no ROM tells). CGB04C
         // `m2enable/late_enable_ly0_ds_{1,lcdoffset1_1}` (t = 5, 4: IRQ),
         // `_ds_2`, `_ds_lcdoffset1_2` (t = 7, 6: none).
-        if double
+        if speed.is_double()
             && view == View::StatPhase1
             && added & SEL_MODE2 != 0
             && self.stat_select & SEL_MODE0 == 0
@@ -3115,8 +3123,8 @@ impl Ppu {
     /// the PPU's own next one while LY is changing (SameBoy states 35, 26,
     /// 15 and 16), and in two windows of line 153 the new value is first
     /// compared with 153 (SameBoy's states 14 and 29 "hacks", measured).
-    pub(crate) fn write_lyc(&mut self, now: u64, value: u8, iflags: &mut u8, double: bool) {
-        self.early_cmp(now, iflags, double, View::LycWrite);
+    pub(crate) fn write_lyc(&mut self, now: u64, value: u8, iflags: &mut u8, speed: Speed) {
+        self.early_cmp(now, iflags, speed, View::LycWrite);
         self.lyc = value;
         if !self.lcd_enabled() {
             return;
@@ -3132,7 +3140,7 @@ impl Ppu {
         // `timeToNextLy <= 2` (access t = 3); from there on to dot 12 it
         // compares 0. CGB04C `lycEnable/lyc153_late_ff45_enable_3`,
         // `_lcdoffset1_1` (IRQ), `_2`, `_4` (none).
-        if !double && l == 153 && t < edges::LYC153_SS_UNTIL {
+        if !speed.is_double() && l == 153 && t < edges::LYC153_SS_UNTIL {
             if t >= edges::L153_CMP - 1 {
                 self.line_irq.drop_lyc();
             }
@@ -3141,7 +3149,7 @@ impl Ppu {
             }
             return;
         }
-        let defer_until = if double {
+        let defer_until = if speed.is_double() {
             edges::LYC_DEFER_UNTIL_DS
         } else {
             edges::LYC_DEFER_UNTIL_SS
@@ -3158,7 +3166,7 @@ impl Ppu {
         // follows. Single speed has no 12-23 window (gambatte compares 0
         // there: `lycEnable/lyc153_late_ff45_enable_5`, CGB04C).
         if l == 153
-            && double
+            && speed.is_double()
             && (edges::LYC153_OLD_FROM..edges::LYC153_OLD_UNTIL).contains(&t)
             && self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153))
         {
@@ -3173,11 +3181,11 @@ impl Ppu {
                 && self.line_irq.lyc
                 && self.m0_latched(
                     now,
-                    double,
-                    edges::LYC_WRITE.delay(double) as u32,
+                    speed,
+                    edges::LYC_WRITE.delay(speed) as u32,
                     edges::M0_LYC_LATCH,
                 );
-            self.update_at(now, iflags, double, View::LycWrite);
+            self.update_at(now, iflags, speed, View::LycWrite);
             if hold {
                 self.line_irq.bits |= IrqLine::STAT;
             }
@@ -3196,12 +3204,12 @@ impl Ppu {
     /// screen stays blank until the second one completes (Pan Docs: LCDC.7;
     /// SameBoy Core/display.c: enabling the LCD sets `frame_skip`, and
     /// `GB_display_vblank` then outputs a blank frame instead).
-    pub(crate) fn write_lcdc(&mut self, now: u64, value: u8, iflags: &mut u8, double: bool) {
+    pub(crate) fn write_lcdc(&mut self, now: u64, value: u8, iflags: &mut u8, speed: Speed) {
         debug_assert_eq!(self.synced, now);
         let was_on = self.lcd_enabled();
         let on = value & 0x80 != 0;
         if was_on && !on {
-            self.lyc_flag_off = self.lyc_bit(self.at(now), double);
+            self.lyc_flag_off = self.lyc_bit(self.at(now), speed);
             self.blanked = true;
             self.skip_frame = false;
             self.line = LineTiming::NONE;
@@ -3230,7 +3238,7 @@ impl Ppu {
             self.renderer.start_frame();
             self.line = LineTiming::NONE;
             self.wy_late = 0;
-            self.seek(double);
+            self.seek(speed);
             // SameBoy's first update, one dot after the write: no mode
             // source, LY = 0 against LYC.
             if self
@@ -3444,26 +3452,26 @@ mod tests {
                 iflags: 0,
             };
             r.ppu
-                .write_stat(0, select, &mut r.iflags, false, View::StatPhase2);
-            r.ppu.write_lyc(0, lyc, &mut r.iflags, false);
+                .write_stat(0, select, &mut r.iflags, Speed::Normal, View::StatPhase2);
+            r.ppu.write_lyc(0, lyc, &mut r.iflags, Speed::Normal);
             r.sync(on);
-            r.ppu.write_lcdc(on, 0x91, &mut r.iflags, false);
+            r.ppu.write_lcdc(on, 0x91, &mut r.iflags, Speed::Normal);
             r
         }
 
         fn sync(&mut self, now: u64) -> Events {
             let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
-            p.sync(now, m, f, &mut self.iflags, false)
+            p.sync(now, m, f, &mut self.iflags, Speed::Normal)
         }
 
         /// Runs every deadline up to `until`: the clocks at which IF bits
         /// were requested, with the bits.
         fn irqs(&mut self, until: u64) -> Vec<(u64, u8)> {
-            self.irqs_at_speed(until, false)
+            self.irqs_at_speed(until, Speed::Normal)
         }
 
         /// [`Self::irqs`] in single or double speed.
-        fn irqs_at_speed(&mut self, until: u64, double: bool) -> Vec<(u64, u8)> {
+        fn irqs_at_speed(&mut self, until: u64, double: Speed) -> Vec<(u64, u8)> {
             let mut out = Vec::new();
             loop {
                 let at = self.ppu.next_event(double);
@@ -3480,17 +3488,17 @@ mod tests {
             out
         }
 
-        fn sync_at_speed(&mut self, now: u64, double: bool) {
+        fn sync_at_speed(&mut self, now: u64, double: Speed) {
             let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
             p.sync(now, m, f, &mut self.iflags, double);
         }
 
         fn stat(&self, now: u64) -> u8 {
-            self.ppu.stat(now, false)
+            self.ppu.stat(now, Speed::Normal)
         }
 
         fn ly(&self, now: u64) -> u8 {
-            self.ppu.ly(now, false)
+            self.ppu.ly(now, Speed::Normal)
         }
     }
 
@@ -3573,7 +3581,7 @@ mod tests {
                     }
                     0x4A => {
                         r.mem.io[0x4A] = v;
-                        r.ppu.wy_written(now, &r.mem, false);
+                        r.ppu.wy_written(now, &r.mem, Speed::Normal);
                     }
                     _ => {
                         r.mem.io[0x4B] = v;
@@ -3637,10 +3645,10 @@ mod tests {
         let mut r = Rig::on_at(on, 0, 0xFF);
         let l0 = clock(on, 1, 0);
         r.sync(l0 + 8);
-        let at = |t: u64, double: bool| r.ppu.stat(l0 + t, double) & 3;
-        let single: Vec<u8> = (0..6).map(|t| at(t, false)).collect();
+        let at = |t: u64, double: Speed| r.ppu.stat(l0 + t, double) & 3;
+        let single: Vec<u8> = (0..6).map(|t| at(t, Speed::Normal)).collect();
         assert_eq!(single, [1, 1, 1, 0, 2, 2]);
-        let double: Vec<u8> = (0..6).map(|t| at(t, true)).collect();
+        let double: Vec<u8> = (0..6).map(|t| at(t, Speed::Double)).collect();
         assert_eq!(double, [1, 1, 1, 1, 2, 2]);
         assert_eq!((r.ly(l0 + 2), r.ly(l0 + 3)), (0, 0));
     }
@@ -3714,7 +3722,7 @@ mod tests {
         let l6 = l5 + 456;
         let mut r = Rig::on_at(on, SEL_LYC, 0xFF);
         r.sync(l6 + 20);
-        r.ppu.write_lyc(l6 + 20, 6, &mut r.iflags, false);
+        r.ppu.write_lyc(l6 + 20, 6, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, INT_STAT);
         // ...but at t = 0-1, while LY changes, the update waits for the
         // PPU's (SameBoy state 35): LYC = the old LY (still compared until
@@ -3722,13 +3730,13 @@ mod tests {
         // LY no longer matches.
         let mut r = Rig::on_at(on, SEL_LYC, 0xFF);
         r.sync(l6);
-        r.ppu.write_lyc(l6, 5, &mut r.iflags, false);
+        r.ppu.write_lyc(l6, 5, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, 0);
         assert_eq!(r.irqs(l6 + 10), []);
         // LYC = the new LY rises at t = 5 (the bit at t = 4).
         let mut r = Rig::on_at(on, SEL_LYC, 0xFF);
         r.sync(l6);
-        r.ppu.write_lyc(l6, 6, &mut r.iflags, false);
+        r.ppu.write_lyc(l6, 6, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, 0);
         assert_eq!(r.irqs(l6 + 10), [(l6 + 5, INT_STAT)]);
     }
@@ -3767,15 +3775,15 @@ mod tests {
             let l0 = clock(on, 2, 0);
             r.irqs(l0 - 10);
             r.iflags = 0;
-            assert_eq!(r.ppu.next_event(false), l0 + 4);
+            assert_eq!(r.ppu.next_event(Speed::Normal), l0 + 4);
             if stop_on_point {
                 r.sync(l0 + 4);
                 assert_eq!(r.iflags, 0);
-                assert_eq!(r.ppu.next_event(false), l0 + 5);
+                assert_eq!(r.ppu.next_event(Speed::Normal), l0 + 5);
             }
             r.sync(l0 + 5);
             assert_eq!(r.iflags, INT_STAT);
-            assert!(r.ppu.next_event(false) > l0 + 5);
+            assert!(r.ppu.next_event(Speed::Normal) > l0 + 5);
         }
     }
 
@@ -3792,23 +3800,23 @@ mod tests {
             let mut r = Rig::on_at(on, SEL_LYC, 0);
             r.irqs(l153);
             r.iflags = 0;
-            assert_eq!(r.ppu.next_event(false), l153 + 12);
+            assert_eq!(r.ppu.next_event(Speed::Normal), l153 + 12);
             if stop_on_point {
                 r.sync(l153 + 12);
                 assert_eq!(r.iflags, 0);
                 assert!(r.ppu.stat_line_high());
-                assert_eq!(r.ppu.next_event(false), l153 + 13);
+                assert_eq!(r.ppu.next_event(Speed::Normal), l153 + 13);
             }
             r.sync(l153 + 13);
             assert_eq!(r.iflags, INT_STAT);
-            assert!(r.ppu.next_event(false) > l153 + 13);
+            assert!(r.ppu.next_event(Speed::Normal) > l153 + 13);
         }
         let mut r = Rig::on_at(on, SEL_LYC, 0);
-        r.ppu.speed_changed(true);
-        r.irqs_at_speed(l153, true);
+        r.ppu.speed_changed(Speed::Double);
+        r.irqs_at_speed(l153, Speed::Double);
         r.iflags = 0;
-        assert_eq!(r.ppu.next_event(true), l153 + 13);
-        r.sync_at_speed(l153 + 13, true);
+        assert_eq!(r.ppu.next_event(Speed::Double), l153 + 13);
+        r.sync_at_speed(l153 + 13, Speed::Double);
         assert_eq!(r.iflags, INT_STAT);
     }
 
@@ -3823,21 +3831,31 @@ mod tests {
         // interrupts (gambatte `m2enable/late_enable_lcdoffset3_1`) ...
         let mut r = Rig::on_at(on, 0, 0xFF);
         r.ppu
-            .write_stat(0, SEL_MODE0, &mut r.iflags, false, View::StatPhase2);
+            .write_stat(0, SEL_MODE0, &mut r.iflags, Speed::Normal, View::StatPhase2);
         r.sync(l5 + 4);
         r.iflags = 0;
-        r.ppu
-            .write_stat(l5 + 4, SEL_MODE2, &mut r.iflags, false, View::StatPhase1);
+        r.ppu.write_stat(
+            l5 + 4,
+            SEL_MODE2,
+            &mut r.iflags,
+            Speed::Normal,
+            View::StatPhase1,
+        );
         assert_eq!(r.iflags, INT_STAT);
         // ... phase 2 (and a LYC write) don't, and neither does the walk's
         // point at t = 5 after it.
         let mut r = Rig::on_at(on, 0, 0xFF);
         r.ppu
-            .write_stat(0, SEL_MODE0, &mut r.iflags, false, View::StatPhase2);
+            .write_stat(0, SEL_MODE0, &mut r.iflags, Speed::Normal, View::StatPhase2);
         r.sync(l5 + 4);
         r.iflags = 0;
-        r.ppu
-            .write_stat(l5 + 4, SEL_MODE2, &mut r.iflags, false, View::StatPhase2);
+        r.ppu.write_stat(
+            l5 + 4,
+            SEL_MODE2,
+            &mut r.iflags,
+            Speed::Normal,
+            View::StatPhase2,
+        );
         assert_eq!(r.iflags, 0);
         assert_eq!(r.irqs(l5 + 10), []);
         // A LYC write at t = 4 comes after the comparison with the old LYC:
@@ -3846,7 +3864,7 @@ mod tests {
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 4);
         r.iflags = 0;
-        r.ppu.write_lyc(l5 + 4, 0xFF, &mut r.iflags, false);
+        r.ppu.write_lyc(l5 + 4, 0xFF, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, INT_STAT);
         assert_eq!(r.irqs(l5 + 10), []);
         // So does a STAT phase-2 write there that clears the LYC select.
@@ -3854,14 +3872,15 @@ mod tests {
         r.sync(l5 + 4);
         r.iflags = 0;
         r.ppu
-            .write_stat(l5 + 4, 0, &mut r.iflags, false, View::StatPhase2);
+            .write_stat(l5 + 4, 0, &mut r.iflags, Speed::Normal, View::StatPhase2);
         assert_eq!(r.iflags, INT_STAT);
         // Lines 144-152 too: LYC = 150 at t = 4 of line 150.
         let l150 = clock(on, 0, 150 * LINE);
         let mut r = Rig::on_at(on, SEL_LYC, 150);
         r.sync(l150 + 4);
         r.iflags = 0;
-        r.ppu.write_lyc(l150 + 4, 0xFF, &mut r.iflags, false);
+        r.ppu
+            .write_lyc(l150 + 4, 0xFF, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, INT_STAT);
     }
 
@@ -3875,17 +3894,22 @@ mod tests {
         let l6 = l5 + u64::from(LINE);
         let dsync = |r: &mut Rig, now: u64| {
             let (p, m, f) = (&mut r.ppu, &mut *r.mem, &mut *r.frame);
-            p.sync(now, m, f, &mut r.iflags, true);
+            p.sync(now, m, f, &mut r.iflags, Speed::Double);
         };
         // STAT phase 1 at t = 4 still sees the mode-2 source: enabling it
         // interrupts (gambatte `m2enable/late_enable_ds_lcdoffset1_1`).
         let mut r = Rig::on_at(on, 0, 0xFF);
         r.ppu
-            .write_stat(0, SEL_MODE0, &mut r.iflags, false, View::StatPhase2);
+            .write_stat(0, SEL_MODE0, &mut r.iflags, Speed::Normal, View::StatPhase2);
         dsync(&mut r, l5 + 4);
         r.iflags = 0;
-        r.ppu
-            .write_stat(l5 + 4, SEL_MODE2, &mut r.iflags, true, View::StatPhase1);
+        r.ppu.write_stat(
+            l5 + 4,
+            SEL_MODE2,
+            &mut r.iflags,
+            Speed::Double,
+            View::StatPhase1,
+        );
         assert_eq!(r.iflags, INT_STAT);
         // LYC = the new LY written at t = 2, the old LYC matching the old
         // LY: deferred to the walk, so the line stays high through the
@@ -3894,9 +3918,9 @@ mod tests {
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         dsync(&mut r, l6 + 2);
         r.iflags = 0;
-        r.ppu.write_lyc(l6 + 2, 6, &mut r.iflags, true);
+        r.ppu.write_lyc(l6 + 2, 6, &mut r.iflags, Speed::Double);
         loop {
-            let at = r.ppu.next_event(true);
+            let at = r.ppu.next_event(Speed::Double);
             if at > l6 + 10 {
                 break;
             }
@@ -3912,16 +3936,16 @@ mod tests {
         let l5 = clock(on, 0, 5 * LINE);
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5);
-        assert_eq!(r.ppu.next_event(false), l5 + 5);
-        assert_eq!(r.ppu.next_event(true), l5 + 5);
+        assert_eq!(r.ppu.next_event(Speed::Normal), l5 + 5);
+        assert_eq!(r.ppu.next_event(Speed::Double), l5 + 5);
         // Switching speed at t = 4, the comparison still ahead: nothing
         // fires early, and the point stays at 5.
         let mut r = Rig::on_at(on, SEL_LYC, 5);
         r.sync(l5 + 4);
         r.iflags = 0;
         assert_eq!(r.iflags, 0);
-        assert_eq!(r.ppu.next_event(true), l5 + 5);
-        assert_eq!(r.ppu.next_event(false), l5 + 5);
+        assert_eq!(r.ppu.next_event(Speed::Double), l5 + 5);
+        assert_eq!(r.ppu.next_event(Speed::Normal), l5 + 5);
     }
 
     #[test]
@@ -3939,7 +3963,10 @@ mod tests {
         assert_eq!(ly, [152, 152, 153, 153, 0, 0]);
         // Double speed: 0 from t = 8.
         assert_eq!(
-            (r.ppu.ly(l153 + 7, true), r.ppu.ly(l153 + 8, true)),
+            (
+                r.ppu.ly(l153 + 7, Speed::Double),
+                r.ppu.ly(l153 + 8, Speed::Double)
+            ),
             (153, 0)
         );
         // LYC = 0 matches from t = 12 of line 153, through line 0 (the
@@ -3965,7 +3992,7 @@ mod tests {
         let l0 = clock(on, 1, 0);
         let l153 = clock(on, 0, 153 * LINE);
         // The STAT requests of frame 1's line 0 and frame 0's line 153.
-        let stat = |select: u8, lyc: u8, double: bool| {
+        let stat = |select: u8, lyc: u8, double: Speed| {
             let mut r = Rig::on_at(on, select, lyc);
             r.ppu.speed_changed(double);
             r.irqs_at_speed(l153, double);
@@ -3975,35 +4002,36 @@ mod tests {
                 .map(|i| i.0)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(stat(SEL_MODE2, 0xFF, true), [l0 + 5]);
-        assert_eq!(stat(SEL_MODE2, 0xFF, false), [l0 + 5]);
-        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, true), []);
-        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, false), []);
-        assert_eq!(stat(SEL_LYC, 0, true), [l153 + 13]);
-        assert_eq!(stat(SEL_LYC, 0, false), [l153 + 13]);
+        assert_eq!(stat(SEL_MODE2, 0xFF, Speed::Double), [l0 + 5]);
+        assert_eq!(stat(SEL_MODE2, 0xFF, Speed::Normal), [l0 + 5]);
+        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, Speed::Double), []);
+        assert_eq!(stat(SEL_MODE2 | SEL_MODE1, 0xFF, Speed::Normal), []);
+        assert_eq!(stat(SEL_LYC, 0, Speed::Double), [l153 + 13]);
+        assert_eq!(stat(SEL_LYC, 0, Speed::Normal), [l153 + 13]);
         // The mode-1 source ends at `t = 4`: an LYC = 0 match written there
         // (LYC selected, at the access in double speed) interrupts.
         let mut r = Rig::on_at(on, SEL_MODE1 | SEL_LYC, 0xFF);
-        r.ppu.speed_changed(true);
-        r.irqs_at_speed(l0 + 4, true);
+        r.ppu.speed_changed(Speed::Double);
+        r.irqs_at_speed(l0 + 4, Speed::Double);
         r.iflags = 0;
-        r.ppu.write_lyc(l0 + 4, 0, &mut r.iflags, true);
+        r.ppu.write_lyc(l0 + 4, 0, &mut r.iflags, Speed::Double);
         assert_eq!(r.iflags, INT_STAT);
         // A switch to double speed between line 0's single-speed `Ly3`
         // and `Ly4` moves the pulse to 5.
         let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
         r.irqs(l0 + 3);
-        r.ppu.speed_changed(true);
-        assert_eq!(r.ppu.next_event(true), l0 + 5);
+        r.ppu.speed_changed(Speed::Double);
+        assert_eq!(r.ppu.next_event(Speed::Double), l0 + 5);
         // A switch with the LCD off leaves the cursor alone (it is set on
         // enable; seeking from the stale frame start walked garbage lines,
         // and hung once the line number wrapped).
         let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
         r.sync(l0 + 10);
-        r.ppu.write_lcdc(l0 + 10, 0x11, &mut r.iflags, false);
+        r.ppu
+            .write_lcdc(l0 + 10, 0x11, &mut r.iflags, Speed::Normal);
         r.sync(l0 + 160 * u64::from(LINE));
         let before = r.ppu.cursor;
-        r.ppu.speed_changed(true);
+        r.ppu.speed_changed(Speed::Double);
         assert_eq!(r.ppu.cursor, before);
     }
 
@@ -4015,20 +4043,23 @@ mod tests {
         let l144 = clock(on, 0, 0x90 * LINE + 10);
         r.irqs(l144);
         assert_eq!(r.stat(l144) & 4, 4);
-        r.ppu.write_lcdc(l144, 0x11, &mut r.iflags, false);
+        r.ppu.write_lcdc(l144, 0x11, &mut r.iflags, Speed::Normal);
         r.iflags = 0;
-        r.ppu.write_lyc(l144, 1, &mut r.iflags, false);
+        r.ppu.write_lyc(l144, 1, &mut r.iflags, Speed::Normal);
         assert_eq!(r.stat(l144 + 8), 0xC4, "kept while off");
         r.sync(l144 + 100);
-        r.ppu.write_lcdc(l144 + 100, 0x91, &mut r.iflags, false);
+        r.ppu
+            .write_lcdc(l144 + 100, 0x91, &mut r.iflags, Speed::Normal);
         assert_eq!(r.stat(l144 + 104), 0xC0);
         assert_eq!(r.iflags, 0, "the line falls: no interrupt");
         // Off with the bit clear, LYC = 0, on: the line rises.
         r.sync(l144 + 200);
-        r.ppu.write_lcdc(l144 + 200, 0x11, &mut r.iflags, false);
-        r.ppu.write_lyc(l144 + 200, 0, &mut r.iflags, false);
+        r.ppu
+            .write_lcdc(l144 + 200, 0x11, &mut r.iflags, Speed::Normal);
+        r.ppu.write_lyc(l144 + 200, 0, &mut r.iflags, Speed::Normal);
         r.sync(l144 + 300);
-        r.ppu.write_lcdc(l144 + 300, 0x91, &mut r.iflags, false);
+        r.ppu
+            .write_lcdc(l144 + 300, 0x91, &mut r.iflags, Speed::Normal);
         assert_eq!(r.iflags, INT_STAT);
     }
 
@@ -4039,27 +4070,33 @@ mod tests {
     fn ly_reads_mid_carry_before_it_changes() {
         let on = 1000;
         let r = Rig::on_at(on, 0, 0xFF);
-        let ly = |l: u32, double: bool| -> Vec<u8> {
+        let ly = |l: u32, double: Speed| -> Vec<u8> {
             let s = clock(on, 0, l * LINE);
             (0..4).map(|t| r.ppu.ly(s + t, double)).collect()
         };
-        assert_eq!(ly(4, false), [3, 0, 0, 4]);
-        assert_eq!(ly(4, true), [3, 3, 0, 4]);
-        assert_eq!(ly(144, false), [143, 0x80, 0x80, 144]);
-        assert_eq!(ly(146, true), [145, 145, 144, 146]);
+        assert_eq!(ly(4, Speed::Normal), [3, 0, 0, 4]);
+        assert_eq!(ly(4, Speed::Double), [3, 3, 0, 4]);
+        assert_eq!(ly(144, Speed::Normal), [143, 0x80, 0x80, 144]);
+        assert_eq!(ly(146, Speed::Double), [145, 145, 144, 146]);
     }
 
     #[test]
     fn power_on_is_in_vblank_on_the_mcycle_grid() {
         let mut p = Ppu::new();
         p.reset(false);
-        assert_eq!((p.ly(0, false), p.stat(0, false) & 3), (144, 1));
+        assert_eq!(
+            (p.ly(0, Speed::Normal), p.stat(0, Speed::Normal) & 3),
+            (144, 1)
+        );
         // Line 144, dot 171: line 145 starts 285 clocks later, and LY
         // reads 145 from its dot 3 (144 & 145 = 144 at dot 2).
-        assert_eq!((p.ly(287, false), p.ly(288, false)), (144, 145));
+        assert_eq!(
+            (p.ly(287, Speed::Normal), p.ly(288, Speed::Normal)),
+            (144, 145)
+        );
         // No interrupt source is enabled: the first deadline is the end of
         // the next frame's line 0 mode 3 (70224 - 65835 + 256).
-        assert_eq!(p.next_event(false), 4645);
+        assert_eq!(p.next_event(Speed::Normal), 4645);
         // Position 3 mod 4 at every M-cycle boundary, as after an enable.
         assert_eq!(POST_BOOT_POS % 4, 3);
     }
@@ -4074,14 +4111,14 @@ mod tests {
         // VRAM: single speed from dot 86, two dots after STAT reads mode
         // 3 (`vram_m3/pre{read,write}_lcdoffset2_1` and
         // `dma/hdma_late_enable_lcdoffset3_1` access at 85 and 84).
-        let vram = |t: u64| p.vram_blocked(l5 + t, false);
+        let vram = |t: u64| p.vram_blocked(l5 + t, Speed::Normal);
         assert_eq!(
             [vram(85), vram(86), vram(255), vram(256)],
             [false, true, true, false]
         );
         // OAM: writes and reads from dot 3 (gambatte `oamWritable`;
         // `oam_access/prewrite_lcdoffset1_1` writes at 2).
-        let oam = |t: u64, write| p.oam_blocked(l5 + t, false, write);
+        let oam = |t: u64, write| p.oam_blocked(l5 + t, Speed::Normal, write);
         assert_eq!(
             [
                 oam(2, true),
@@ -4097,17 +4134,17 @@ mod tests {
         // dot after the mode-3 end.
         assert_eq!(
             [
-                p.oam_blocked(l5 + 2, true, true),
-                p.oam_blocked(l5 + 3, true, true)
+                p.oam_blocked(l5 + 2, Speed::Double, true),
+                p.oam_blocked(l5 + 3, Speed::Double, true)
             ],
             [false, true]
         );
         assert_eq!(
             [
-                p.vram_blocked(l5 + 84, true),
-                p.vram_blocked(l5 + 85, true),
-                p.vram_blocked(l5 + 256, true),
-                p.vram_blocked(l5 + 257, true)
+                p.vram_blocked(l5 + 84, Speed::Double),
+                p.vram_blocked(l5 + 85, Speed::Double),
+                p.vram_blocked(l5 + 256, Speed::Double),
+                p.vram_blocked(l5 + 257, Speed::Double)
             ],
             [false, true, true, false]
         );
@@ -4121,10 +4158,10 @@ mod tests {
         };
         assert_eq!(
             [
-                pal(86, false),
-                pal(87, false),
-                pal(259, false),
-                pal(260, false)
+                pal(86, Speed::Normal),
+                pal(87, Speed::Normal),
+                pal(259, Speed::Normal),
+                pal(260, Speed::Normal)
             ],
             [false, true, true, false]
         );
@@ -4136,7 +4173,12 @@ mod tests {
         // Double speed from 86 (gambatte `cgbpAccessible`;
         // `cgbpal_m3/cgbpal_*_m3start_ds_lcdoffset1_2` access at 86).
         assert_eq!(
-            [pal(85, true), pal(86, true), pal(258, true), pal(259, true)],
+            [
+                pal(85, Speed::Double),
+                pal(86, Speed::Double),
+                pal(258, Speed::Double),
+                pal(259, Speed::Double)
+            ],
             [false, true, true, false]
         );
         // Synced to the line start (line 4 latched): 85 on the fast path,
@@ -4145,14 +4187,22 @@ mod tests {
         r2.sync(l5);
         let pal = |t: u64, double| r2.ppu.palette_blocked(l5 + t, double);
         assert_eq!(
-            [pal(86, false), pal(87, false), pal(85, true), pal(86, true)],
+            [
+                pal(86, Speed::Normal),
+                pal(87, Speed::Normal),
+                pal(85, Speed::Double),
+                pal(86, Speed::Double)
+            ],
             [false, true, false, true]
         );
         // VBlank: free.
         let l150 = clock(on, 0, 150 * LINE + 100);
         r.sync(l150);
-        assert!(!r.ppu.vram_blocked(l150, false) && !r.ppu.oam_blocked(l150, false, true));
-        assert!(!r.ppu.palette_blocked(l150, false));
+        assert!(
+            !r.ppu.vram_blocked(l150, Speed::Normal)
+                && !r.ppu.oam_blocked(l150, Speed::Normal, true)
+        );
+        assert!(!r.ppu.palette_blocked(l150, Speed::Normal));
         // The first line after LCD enable: OAM writes from SameBoy's 76,
         // reads from 78 (mode 3), VRAM from the pipeline start.
         let r = Rig::on_at(on, 0, 0xFF);
@@ -4160,32 +4210,32 @@ mod tests {
         let p = &r.ppu;
         assert_eq!(
             [
-                p.oam_blocked(first(83), false, true),
-                p.oam_blocked(first(84), false, true)
+                p.oam_blocked(first(83), Speed::Normal, true),
+                p.oam_blocked(first(84), Speed::Normal, true)
             ],
             [false, true]
         );
         assert_eq!(
             [
-                p.oam_blocked(first(85), false, false),
-                p.oam_blocked(first(86), false, false)
+                p.oam_blocked(first(85), Speed::Normal, false),
+                p.oam_blocked(first(86), Speed::Normal, false)
             ],
             [false, true]
         );
         assert_eq!(
             [
-                p.vram_blocked(first(90), false),
-                p.vram_blocked(first(91), false)
+                p.vram_blocked(first(90), Speed::Normal),
+                p.vram_blocked(first(91), Speed::Normal)
             ],
             [false, true]
         );
         // Palette RAM: from dot 88 in both speeds.
         assert_eq!(
             [
-                p.palette_blocked(first(87), false),
-                p.palette_blocked(first(88), false),
-                p.palette_blocked(first(87), true),
-                p.palette_blocked(first(88), true)
+                p.palette_blocked(first(87), Speed::Normal),
+                p.palette_blocked(first(88), Speed::Normal),
+                p.palette_blocked(first(87), Speed::Double),
+                p.palette_blocked(first(88), Speed::Double)
             ],
             [false, true, false, true]
         );
@@ -4265,7 +4315,7 @@ mod tests {
             let src = |t: u64| {
                 let now = l5 + t;
                 r.ppu
-                    .mode_source(now, r.ppu.at(now), false, View::StatPhase2)
+                    .mode_source(now, r.ppu.at(now), Speed::Normal, View::StatPhase2)
             };
             let src = (src(255), src(258));
             (m0, irq, src)
@@ -4388,14 +4438,17 @@ mod tests {
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.sync(l5 + t);
             was_drawing += u32::from(r.ppu.drawing());
-            r.ppu.write_lcdc(l5 + t, 0x11, &mut r.iflags, false);
+            r.ppu.write_lcdc(l5 + t, 0x11, &mut r.iflags, Speed::Normal);
             for now in [l5 + t, l5 + t + 4, l5 + t + 100_000] {
                 r.sync(now);
                 assert!(!r.ppu.drawing(), "off at {t}, at {now}");
                 assert!(r.ppu.mode3_pixel(now).is_none());
-                assert!(!r.ppu.palette_blocked(now, false) && !r.ppu.vram_blocked(now, false));
-                assert!(!r.ppu.oam_blocked(now, false, true));
-                assert_eq!(r.ppu.stat(now, false) & 3, 0);
+                assert!(
+                    !r.ppu.palette_blocked(now, Speed::Normal)
+                        && !r.ppu.vram_blocked(now, Speed::Normal)
+                );
+                assert!(!r.ppu.oam_blocked(now, Speed::Normal, true));
+                assert_eq!(r.ppu.stat(now, Speed::Normal) & 3, 0);
                 assert_eq!(r.ppu.mode0_start(), None);
             }
         }
@@ -4408,7 +4461,7 @@ mod tests {
     fn wy_write_after_the_line_check_keeps_the_old_match() {
         // (line, WY = line, then FF written at dot `t`) -> mode-3 end; the
         // window at x = 64 stalls 6 dots.
-        let end_at = |line: u32, t: u32, ds: bool| {
+        let end_at = |line: u32, t: u32, ds: Speed| {
             let on = 1000;
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.ppu.lcdc |= 0x20;
@@ -4424,7 +4477,7 @@ mod tests {
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
-        let end = |line, t| end_at(line, t, false);
+        let end = |line, t| end_at(line, t, Speed::Normal);
         assert_eq!(end(5, 2), Some(256));
         assert_eq!(end(5, 3), Some(256 + 6));
         assert_eq!(end(5, 40), Some(256 + 6));
@@ -4433,10 +4486,10 @@ mod tests {
         assert_eq!(end(0, 7), Some(256 + 6));
         // Double speed: both one dot later (`window/late_wy_ds_1`,
         // `window/arg/late_wy_1toFF_ds_1`).
-        assert_eq!(end_at(5, 3, true), Some(256));
-        assert_eq!(end_at(5, 4, true), Some(256 + 6));
-        assert_eq!(end_at(0, 7, true), Some(256));
-        assert_eq!(end_at(0, 8, true), Some(256 + 6));
+        assert_eq!(end_at(5, 3, Speed::Double), Some(256));
+        assert_eq!(end_at(5, 4, Speed::Double), Some(256 + 6));
+        assert_eq!(end_at(0, 7, Speed::Double), Some(256));
+        assert_eq!(end_at(0, 8, Speed::Double), Some(256 + 6));
     }
 
     /// When a WY write that makes WY == LY starts the window (gambatte
@@ -4450,7 +4503,7 @@ mod tests {
     fn wy_write_starts_the_window_until_its_check() {
         // (WY written on `line` at dot `t`, SCX, WX) -> mode-3 end of
         // `line + next`; WY = FF before.
-        let end_at = |line: u32, t: u32, next: u32, scx: u8, wx: u8, ds: bool| {
+        let end_at = |line: u32, t: u32, next: u32, scx: u8, wx: u8, ds: Speed| {
             let on = 1000;
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.ppu.lcdc |= 0x20;
@@ -4467,7 +4520,7 @@ mod tests {
             r.sync(l + 455);
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
-        let end = |line, t, next, scx, wx| end_at(line, t, next, scx, wx, false);
+        let end = |line, t, next, scx, wx| end_at(line, t, next, scx, wx, Speed::Normal);
         // (a) The window (x = 64) on the next line, or not.
         assert_eq!(end(5, 451, 1, 0, 0x47), Some(256 + 6));
         assert_eq!(end(5, 454, 1, 0, 0x47), Some(256 + 6));
@@ -4487,11 +4540,11 @@ mod tests {
         // Double speed (`WY_DS_LATE`, `WY_LEAD_DS`): (a) the whole
         // line (`window/arg/late_wy_FFto0_ly2_ds_1`); (b) until 1 dot
         // before the stall (`late_wy_FFto2_ly2_ds_1`, `_scx5_ds_2`).
-        assert_eq!(end_at(5, 455, 1, 0, 0x47, true), Some(256 + 6));
-        assert_eq!(end_at(5, 95, 0, 0, 0x07, true), Some(256 + 6));
-        assert_eq!(end_at(5, 96, 0, 0, 0x07, true), Some(256));
-        assert_eq!(end_at(5, 100, 0, 5, 0x07, true), Some(256 + 5 + 6));
-        assert_eq!(end_at(5, 101, 0, 5, 0x07, true), Some(256 + 5));
+        assert_eq!(end_at(5, 455, 1, 0, 0x47, Speed::Double), Some(256 + 6));
+        assert_eq!(end_at(5, 95, 0, 0, 0x07, Speed::Double), Some(256 + 6));
+        assert_eq!(end_at(5, 96, 0, 0, 0x07, Speed::Double), Some(256));
+        assert_eq!(end_at(5, 100, 0, 5, 0x07, Speed::Double), Some(256 + 5 + 6));
+        assert_eq!(end_at(5, 101, 0, 5, 0x07, Speed::Double), Some(256 + 5));
     }
 
     /// An LCDC.5 set at the end of line L with WY = L matches L only before
@@ -4504,7 +4557,7 @@ mod tests {
     fn window_enable_matches_wy_until_the_line_s_last_check() {
         // (LCDC.5 set on `line` at dot `t`, WY = line) -> mode-3 end of
         // `line + 1`; the window at x = 64 stalls 6 dots.
-        let end_at = |line: u32, t: u32, ds: bool| {
+        let end_at = |line: u32, t: u32, ds: Speed| {
             let on = 1000;
             let mut r = Rig::on_at(on, 0, 0xFF);
             r.mem.io[0x4A] = line as u8;
@@ -4521,10 +4574,10 @@ mod tests {
             (84..LINE).find(|&t| r.stat(l + u64::from(t)) & 3 == 0)
         };
         for line in [0, 1, 5] {
-            assert_eq!(end_at(line, 451, false), Some(256 + 6), "{line}");
-            assert_eq!(end_at(line, 454, false), Some(256 + 6), "{line}");
-            assert_eq!(end_at(line, 455, false), Some(256), "{line}");
-            assert_eq!(end_at(line, 455, true), Some(256 + 6), "{line}");
+            assert_eq!(end_at(line, 451, Speed::Normal), Some(256 + 6), "{line}");
+            assert_eq!(end_at(line, 454, Speed::Normal), Some(256 + 6), "{line}");
+            assert_eq!(end_at(line, 455, Speed::Normal), Some(256), "{line}");
+            assert_eq!(end_at(line, 455, Speed::Double), Some(256 + 6), "{line}");
         }
     }
 
@@ -4563,9 +4616,9 @@ mod tests {
                     r.mem.io[reg] = v;
                 }
                 match reg {
-                    0x4A => r.ppu.wy_written(now, &r.mem, false),
+                    0x4A => r.ppu.wy_written(now, &r.mem, Speed::Normal),
                     0x40 => {
-                        r.ppu.check_wy_at(now, &r.mem, false);
+                        r.ppu.check_wy_at(now, &r.mem, Speed::Normal);
                         r.ppu.window_write(now, &r.mem, None);
                     }
                     _ => r.ppu.window_write(now, &r.mem, None),
@@ -4639,7 +4692,7 @@ mod tests {
             let lcdc = |r: &mut Rig, t: u32, v: u8| {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(r, now, 0x40, v);
-                r.ppu.check_wy_at(now, &r.mem, false);
+                r.ppu.check_wy_at(now, &r.mem, Speed::Normal);
                 r.ppu.window_write(now, &r.mem, None);
             };
             let now = l5 + 122;
@@ -4748,7 +4801,7 @@ mod tests {
             for &(t, v) in writes {
                 let now = l5 + u64::from(t);
                 write_fetch_reg(&mut r, now, 0x40, v);
-                r.ppu.check_wy_at(now, &r.mem, false);
+                r.ppu.check_wy_at(now, &r.mem, Speed::Normal);
                 r.ppu.window_write(now, &r.mem, None);
             }
             (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0)
@@ -4787,7 +4840,7 @@ mod tests {
             r.ppu.lcdc = 0xD1;
             let now = l5 + u64::from(t);
             write_fetch_reg(&mut r, now, 0x40, 0xF1);
-            r.ppu.check_wy_at(now, &r.mem, false);
+            r.ppu.check_wy_at(now, &r.mem, Speed::Normal);
             r.ppu.window_write(now, &r.mem, None);
             r.sync(l5 + 2 * u64::from(LINE));
             let px = |x: usize| r.frame[5 * SCREEN_WIDTH + x];
@@ -4826,7 +4879,7 @@ mod tests {
             if (value ^ r.ppu.lcdc) & 0x04 != 0 {
                 r.ppu.obj_size_fetch(now, value, &mut r.mem);
             }
-            r.ppu.write_lcdc(now, value, &mut r.iflags, false);
+            r.ppu.write_lcdc(now, value, &mut r.iflags, Speed::Normal);
         } else {
             r.mem.io[reg] = value;
         }
@@ -5843,7 +5896,7 @@ mod tests {
             end: to.saturating_add(2),
             ppu_from: from,
             ppu_to: to,
-            mcycle: 4,
+            speed: Speed::Normal,
             ppu_live: true,
             ..OamDma::new()
         }
@@ -5862,10 +5915,10 @@ mod tests {
     /// `sprites/late_sizechange*`).
     #[test]
     fn obj_size_write_splits_the_oam_scan() {
-        for (lcdc, double, want) in [
-            (0x91, false, vec![2, 3, 4]),
-            (0x95, false, vec![1, 2]),
-            (0x95, true, vec![1]),
+        for (lcdc, speed, want) in [
+            (0x91, Speed::Normal, vec![2, 3, 4]),
+            (0x95, Speed::Normal, vec![1, 2]),
+            (0x95, Speed::Double, vec![1]),
         ] {
             let (mut r, l5) = dma_rig();
             r.mem.oam = [0; 0xA0];
@@ -5873,13 +5926,14 @@ mod tests {
                 r.mem.oam[e * 4] = 16 + 5 - 10;
             }
             r.ppu.oam_written();
-            r.ppu.write_lcdc(l5, lcdc, &mut r.iflags, false);
+            r.ppu.write_lcdc(l5, lcdc, &mut r.iflags, Speed::Normal);
             r.sync(l5 + 9);
-            r.ppu.obj_size_write(l5 + 9, double, &r.mem);
-            r.ppu.write_lcdc(l5 + 9, lcdc ^ 0x04, &mut r.iflags, false);
+            r.ppu.obj_size_write(l5 + 9, speed, &r.mem);
+            r.ppu
+                .write_lcdc(l5 + 9, lcdc ^ 0x04, &mut r.iflags, Speed::Normal);
             r.sync(l5 + 89);
             let got: Vec<u8> = line_objects(&r).iter().map(|o| o.0).collect();
-            assert_eq!(got, want, "LCDC {lcdc:02X}, double {double}");
+            assert_eq!(got, want, "LCDC {lcdc:02X}, {speed:?}");
         }
     }
 

@@ -28,6 +28,7 @@ use crate::memory::Memory;
 use crate::ppu::{self, Frame, Ppu, View, edges};
 use crate::schedule::{EventKind, NEVER, Schedule};
 use crate::serial::{INT_SERIAL, Serial};
+use crate::speed::Speed;
 use crate::timer::{INT_TIMER, Timer};
 use crate::{Buttons, Emulator, Events, RunResult};
 
@@ -130,11 +131,11 @@ impl Sys<'_> {
     }
 
     /// Sets the `Input` deadline for the earliest scheduled button change
-    /// at the current M-cycle length `mcycle` (ADR 0012). The caller
-    /// reschedules the countdown if it is running.
-    pub(crate) fn schedule_inputs(&mut self, mcycle: u64) {
+    /// at the current `speed` (ADR 0012). The caller reschedules the
+    /// countdown if it is running.
+    pub(crate) fn schedule_inputs(&mut self, speed: Speed) {
         self.sched
-            .set(EventKind::Input, self.inputs.deadline(mcycle));
+            .set(EventKind::Input, self.inputs.deadline(speed));
     }
 
     /// Sets the `DivApu` deadline at clock `now`: the next falling edge of
@@ -175,7 +176,8 @@ impl Sys<'_> {
             self.joyp_select = 0x30;
         }
         self.ppu.reset(self.cgb_mode);
-        self.sched.set(EventKind::Ppu, self.ppu.next_event(false));
+        self.sched
+            .set(EventKind::Ppu, self.ppu.next_event(Speed::Normal));
         // IF = E1: the boot ROM leaves VBlank requested (Pan Docs: Power
         // Up Sequence, "Hardware registers").
         self.iflags = 0x01;
@@ -331,9 +333,12 @@ pub(crate) struct Hot {
     /// First in `Hot`, and `Hot` first in [`Ctx`] (both `repr(C)`): the
     /// tick increments the word the CPU's bus pointer points at.
     t_minus: i32,
-    /// Base clocks per M-cycle: 4, or 2 in CGB double speed. Written
-    /// only by [`Hot::set_mcycle`] (the clock depends on it).
-    pub(crate) mcycle: i32,
+    /// Base clocks per M-cycle: 4, or 2 in CGB double speed. This is
+    /// the CPU speed ([`Hot::speed`]), kept as the number the clock is
+    /// computed with rather than as a [`Speed`]: read through
+    /// [`Hot::speed`] and [`Hot::mcycle`], written only by
+    /// [`Hot::set_speed`] (the clock depends on it).
+    mcycle: i32,
     /// The clock at which `t_minus` reaches 0: the first M-cycle boundary
     /// at or after the earliest due clock (or that clock capped,
     /// [`Hot::set_countdown`]).
@@ -364,13 +369,39 @@ impl Hot {
         self.deadline.wrapping_add_signed(ahead)
     }
 
-    /// Sets the M-cycle length, the clock staying what it is. The
-    /// countdown is left at zero: the caller reschedules, or the next
-    /// tick does.
-    pub(crate) fn set_mcycle(&mut self, mcycle: i32) {
-        debug_assert!(mcycle == 2 || mcycle == 4);
+    /// The CPU speed.
+    #[inline]
+    pub(crate) fn speed(&self) -> Speed {
+        if self.mcycle == 2 {
+            Speed::Double
+        } else {
+            Speed::Normal
+        }
+    }
+
+    /// Base clocks per M-cycle, [`Speed::mcycle`] of [`Self::speed`]
+    /// without the conversion.
+    #[inline]
+    pub(crate) fn mcycle(&self) -> u64 {
+        self.mcycle as u64
+    }
+
+    /// log2 of [`Self::mcycle`]: [`Speed::mcycle_shift`] of
+    /// [`Self::speed`], as one shift of the word the tick already has
+    /// (4 -> 2, 2 -> 1) for the paths that run on every access
+    /// (`set_countdown`, `dma_conflict`, `Ctx::dma_sync`: through
+    /// `speed()` the last costs 4 Ir per call, +0.4% on
+    /// `synth:dma-storm`, measured).
+    #[inline]
+    fn mcycle_shift(&self) -> u32 {
+        self.mcycle as u32 >> 1
+    }
+
+    /// Sets the CPU speed, the clock staying what it is. The countdown
+    /// is left at zero: the caller reschedules, or the next tick does.
+    pub(crate) fn set_speed(&mut self, speed: Speed) {
         self.set_clock(self.clock());
-        self.mcycle = mcycle;
+        self.mcycle = speed.mcycle() as i32;
     }
 
     /// Sets the clock, with the countdown at zero (the caller
@@ -387,13 +418,12 @@ impl Hot {
     /// deadline just reschedules), so `t_minus` always fits.
     #[inline(always)]
     fn set_countdown(&mut self, now: u64, ahead: u64) {
-        // `mcycle` is 4 or 2: a shift by 2 or 1, not a division (no
-        // divide-by-zero panic path on thumbv7em).
-        debug_assert!(self.mcycle == 2 || self.mcycle == 4);
-        let m = self.mcycle as u32;
-        let n = (ahead.min(i32::MAX as u64) as u32 + (m - 1)) >> (m >> 1);
+        // A shift by 2 or 1, not a division (no divide-by-zero panic
+        // path on thumbv7em).
+        let (m, s) = (self.mcycle as u32, self.mcycle_shift());
+        let n = (ahead.min(i32::MAX as u64) as u32 + (m - 1)) >> s;
         self.t_minus = -(n as i32);
-        self.deadline = now + (u64::from(n) << (m >> 1));
+        self.deadline = now + (u64::from(n) << s);
     }
 
     /// This clock with [`Self::dma`] clear: reads through it are
@@ -706,9 +736,9 @@ impl Ctx<'_, '_> {
         }
         // Synced, for `drawing` (as `write_palette_data`); reschedules.
         self.sync_ppu_to(now);
-        let double = self.hot.mcycle == 2;
+        let speed = self.hot.speed();
         let p = &self.sys.ppu;
-        self.sys.stop_black = p.lcd_enabled() && !p.drawing() && !p.palette_blocked(now, double);
+        self.sys.stop_black = p.lcd_enabled() && !p.drawing() && !p.palette_blocked(now, speed);
     }
 
     /// STOP mode is entered, after STOP's second byte: OAM DMA pauses
@@ -886,8 +916,8 @@ impl Ctx<'_, '_> {
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
                 let edge = self.sys.sched.deadline(EventKind::DivApu);
-                let double = self.hot.mcycle == 2;
-                self.mem.apu.write(reg, value, now, double, edge);
+                let speed = self.hot.speed();
+                self.mem.apu.write(reg, value, now, speed, edge);
             }
             // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,
@@ -922,7 +952,7 @@ impl Ctx<'_, '_> {
         // the pending cycles, then `GB_apu_init`). One M-cycle is
         // 4 counter ticks in either speed. Power-off ignores it.
         self.sys
-            .set_div_apu_deadline(self.mem.apu.fs, now + self.hot.mcycle as u64);
+            .set_div_apu_deadline(self.mem.apu.fs, now + self.hot.mcycle());
         self.reschedule();
     }
 
@@ -1075,12 +1105,12 @@ impl Ctx<'_, '_> {
     #[cold]
     #[inline(never)]
     fn apply_inputs(&mut self, now: u64) {
-        let m = self.hot.mcycle as u64;
+        let speed = self.hot.speed();
         let s = &mut *self.sys;
-        if let Some(buttons) = s.inputs.take_due(now + m - 1) {
+        if let Some(buttons) = s.inputs.take_due(now + speed.mcycle() - 1) {
             s.set_joypad(buttons, s.joyp_select);
         }
-        s.schedule_inputs(m);
+        s.schedule_inputs(speed);
     }
 
     /// The `Ppu` deadline: catches the PPU up to the current clock and
@@ -1089,7 +1119,7 @@ impl Ctx<'_, '_> {
     fn sync_ppu(&mut self, now: u64) {
         self.run_ppu::<PPU_DUE>(now);
         let s = &mut *self.sys;
-        let at = s.ppu.next_event(self.hot.mcycle == 2);
+        let at = s.ppu.next_event(self.hot.speed());
         s.sched.rearm(EventKind::Ppu, at);
     }
 
@@ -1114,13 +1144,13 @@ impl Ctx<'_, '_> {
         if self.hot.dma != 0 {
             self.dma_sync(self.clock());
         }
-        let double = self.hot.mcycle == 2;
+        let speed = self.hot.speed();
         let s = &mut *self.sys;
         let (ppu, iflags) = (&mut s.ppu, &mut s.iflags);
         let events = match HOW {
-            PPU_WALK => ppu.walk_to(at, self.mem, self.frame, iflags, double),
-            PPU_DUE => ppu.sync_due(at, self.mem, self.frame, iflags, double),
-            _ => ppu.sync(at, self.mem, self.frame, iflags, double),
+            PPU_WALK => ppu.walk_to(at, self.mem, self.frame, iflags, speed),
+            PPU_DUE => ppu.sync_due(at, self.mem, self.frame, iflags, speed),
+            _ => ppu.sync(at, self.mem, self.frame, iflags, speed),
         };
         self.raise(events);
         if self.sys.vdma.hblank {
@@ -1140,18 +1170,18 @@ impl Ctx<'_, '_> {
     fn schedule_ppu(&mut self) {
         let s = &mut *self.sys;
         s.sched
-            .set(EventKind::Ppu, s.ppu.next_event(self.hot.mcycle == 2));
+            .set(EventKind::Ppu, s.ppu.next_event(self.hot.speed()));
         self.reschedule();
     }
 
-    /// A speed switch (after `hot.mcycle` changed): the walk's line-0 and
+    /// A speed switch (after `Hot::set_speed`): the walk's line-0 and
     /// line-153 points differ per speed (`ppu::edges::ly0_pulse`), so the PPU
     /// re-seeks its cursor and the deadline moves (to single speed they
     /// come earlier).
     #[cold]
     #[inline(never)]
     fn ppu_speed_changed(&mut self) {
-        self.sys.ppu.speed_changed(self.hot.mcycle == 2);
+        self.sys.ppu.speed_changed(self.hot.speed());
         self.schedule_ppu();
     }
 
@@ -1162,36 +1192,36 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn write_ppu(&mut self, reg: usize, value: u8) {
         let now = self.clock();
-        let double = self.hot.mcycle == 2;
+        let speed = self.hot.speed();
         match reg {
             0x40 => {
                 self.run_ppu_to_call(now);
                 // Double speed: the fetcher sees the write one dot earlier
                 // (as SCX, SCY below; SameBoy `GB_CONFLICT_LCDC_CGB_DOUBLE`
                 // writes at `pending_cycles - 2`, 8 MHz ticks).
-                let at = now - u64::from(double);
+                let at = now - u64::from(speed.extra());
                 let s = &mut *self.sys;
                 s.ppu.flush(at, self.mem, self.frame);
                 s.ppu.hold_fetch(at, self.mem, reg, value, false);
                 // Turning the LCD off outside mode 0 starts an HBlank
                 // transfer block (SameBoy `GB_lcd_off`).
-                if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, double) & 3 != 0 {
+                if s.vdma.hblank && value & 0x80 == 0 && s.ppu.stat(now, speed) & 3 != 0 {
                     s.vdma.pending = true;
                     self.end_run();
                 }
                 let s = &mut *self.sys;
                 if (value ^ s.ppu.lcdc) & 0x04 != 0 {
-                    s.ppu.obj_size_write(now, double, self.mem);
+                    s.ppu.obj_size_write(now, speed, self.mem);
                     s.ppu.obj_size_fetch(at, value, self.mem);
                 }
                 let win = (value ^ s.ppu.lcdc) & 0x20 != 0;
                 // The line's WY check, if past, saw the old LCDC.5 (as for
                 // a WY write): clearing it doesn't undo a match.
                 if s.ppu.lcdc & 0x20 != 0 {
-                    s.ppu.wy_write(now, self.mem, double);
+                    s.ppu.wy_write(now, self.mem, speed);
                 }
-                s.ppu.write_lcdc(now, value, &mut s.iflags, double);
-                s.ppu.check_wy_at(now, self.mem, double);
+                s.ppu.write_lcdc(now, value, &mut s.iflags, speed);
+                s.ppu.check_wy_at(now, self.mem, speed);
                 if win {
                     s.ppu.window_write(at, self.mem, None);
                 }
@@ -1206,7 +1236,7 @@ impl Ctx<'_, '_> {
                 // interrupt (gambatte `miscmstatirq/lycstatwirq_trigger_*`
                 // CGB `E0`, `statChangeTriggersStatIrqCgb`; behavior only,
                 // GPL). SameBoy clears them at once, a one-dot low glitch.
-                let keep = if double { 0x08 } else { 0x40 };
+                let keep = if speed.is_double() { 0x08 } else { 0x40 };
                 let old = self.sys.ppu.stat_select();
                 let mut first = (value & !keep) | (old & keep);
                 if value & !old & keep != 0 {
@@ -1215,8 +1245,8 @@ impl Ctx<'_, '_> {
                 self.run_ppu_to_call(now);
                 let s = &mut *self.sys;
                 s.ppu
-                    .write_stat(now, first, &mut s.iflags, double, View::StatPhase1);
-                let at = now + edges::STAT_PHASE2.delay(double);
+                    .write_stat(now, first, &mut s.iflags, speed, View::StatPhase1);
+                let at = now + edges::STAT_PHASE2.delay(speed);
                 // Single speed, phase 2 on line 0's mode-2 pulse: mode 1
                 // still holds the line there (gambatte's line 0 starts a dot
                 // later, `Ppu::on_ly0_pulse`), so a write that keeps it up
@@ -1225,13 +1255,13 @@ impl Ctx<'_, '_> {
                 // `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1` (`10 ->
                 // 50`, LYC = 0: E0), `m2enable/late_enable_m1disable_ly0_2`.
                 // (Synced to `now`, the dot before, for phase 1.)
-                let pulse = self.sys.ppu.on_ly0_pulse(at, double);
+                let pulse = self.sys.ppu.on_ly0_pulse(at, speed);
                 let high = self.sys.ppu.stat_line_high();
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
                 let old = s.iflags;
                 s.ppu
-                    .write_stat(at, value, &mut s.iflags, double, View::StatPhase2);
+                    .write_stat(at, value, &mut s.iflags, speed, View::StatPhase2);
                 if pulse && high && s.ppu.stat_line_high() {
                     s.iflags &= old | !ppu::INT_STAT;
                 }
@@ -1241,11 +1271,11 @@ impl Ctx<'_, '_> {
                 // Single speed: one dot into the M-cycle (SameBoy
                 // `GB_CONFLICT_WRITE_CPU`); double speed: at the access
                 // (`GB_CONFLICT_READ_OLD`).
-                let at = now + edges::LYC_WRITE.delay(double);
+                let at = now + edges::LYC_WRITE.delay(speed);
                 self.run_ppu_to_call(at);
                 let s = &mut *self.sys;
-                if double {
-                    s.ppu.write_lyc(at, value, &mut s.iflags, true);
+                if speed.is_double() {
+                    s.ppu.write_lyc(at, value, &mut s.iflags, speed);
                 } else {
                     // Single speed: the STAT interrupt the write requests
                     // (LY = LYC newly true with the LYC select set)
@@ -1254,7 +1284,7 @@ impl Ctx<'_, '_> {
                     // check or IF read at the end of the write's M-cycle
                     // doesn't see it, one an M-cycle later does.
                     let mut requested = 0;
-                    s.ppu.write_lyc(at, value, &mut requested, false);
+                    s.ppu.write_lyc(at, value, &mut requested, speed);
                     if requested != 0 {
                         let due = at + edges::LYC_WRITE_IRQ;
                         s.ppu.request_irq(due, requested, &mut s.iflags);
@@ -1277,8 +1307,8 @@ impl Ctx<'_, '_> {
             // the access (approximation).
             _ => {
                 let at = match reg {
-                    0x42 | 0x43 if double => now - 1,
-                    _ if double => now,
+                    0x42 | 0x43 if speed.is_double() => now - 1,
+                    _ if speed.is_double() => now,
                     0x47..=0x49 => now - 1,
                     0x4B => now + 1,
                     _ => now,
@@ -1291,7 +1321,7 @@ impl Ctx<'_, '_> {
                     s.ppu.flush(at, self.mem, self.frame);
                 }
                 if reg == 0x4A {
-                    s.ppu.wy_write(now, self.mem, double);
+                    s.ppu.wy_write(now, self.mem, speed);
                 }
                 self.mem.io[reg] = value;
                 match reg {
@@ -1304,7 +1334,7 @@ impl Ctx<'_, '_> {
                     ),
                     // The WY condition and the window start in mode 3
                     // (`Ppu::wy_written`; WY lands at the access).
-                    0x4A => s.ppu.wy_written(now, self.mem, double),
+                    0x4A => s.ppu.wy_written(now, self.mem, speed),
                     0x4B => s.ppu.window_write(at, self.mem, Some(ppu::WX_ON_LEAD)),
                     _ => {}
                 }
@@ -1387,11 +1417,7 @@ impl Ctx<'_, '_> {
     /// position.
     #[inline(never)]
     fn write_vram(&mut self, addr: u16, value: u8) {
-        if self
-            .sys
-            .ppu
-            .vram_blocked(self.clock(), self.hot.mcycle == 2)
-        {
+        if self.sys.ppu.vram_blocked(self.clock(), self.hot.speed()) {
             return;
         }
         let a = usize::from(addr);
@@ -1406,7 +1432,7 @@ impl Ctx<'_, '_> {
         if self
             .sys
             .ppu
-            .oam_blocked(self.clock(), self.hot.mcycle == 2, true)
+            .oam_blocked(self.clock(), self.hot.speed(), true)
         {
             return;
         }
@@ -1448,7 +1474,7 @@ impl Ctx<'_, '_> {
         // Synced to `now`: drawing (latched, so past the window start, and
         // before the mode-3 end) means blocked, and when not drawing there
         // are no pixels to flush with the old colors.
-        if s.ppu.drawing() || s.ppu.palette_blocked(now, self.hot.mcycle == 2) {
+        if s.ppu.drawing() || s.ppu.palette_blocked(now, self.hot.speed()) {
             return;
         }
         if obj {
@@ -1510,7 +1536,7 @@ impl Ctx<'_, '_> {
         // The bit is cleared as in `push_acknowledge`.
         const PPU: u8 = crate::ppu::INT_VBLANK | crate::ppu::INT_STAT;
         if bit & PPU != 0 {
-            let mid = self.clock() + self.hot.mcycle as u64 / 2;
+            let mid = self.clock() + self.hot.mcycle() / 2;
             if self.sys.sched.deadline(EventKind::Ppu) <= mid {
                 self.run_ppu_to_call(mid);
             }
@@ -1593,7 +1619,7 @@ impl Ctx<'_, '_> {
         }
         self.dma_ppu_event(now);
         self.mem.io[0x46] = value;
-        let m = self.hot.mcycle as u64;
+        let m = self.hot.mcycle();
         let restart = self.hot.dma != 0 && {
             self.dma_sync(now);
             now + m < self.sys.ppu.dma.end
@@ -1611,7 +1637,7 @@ impl Ctx<'_, '_> {
             start,
             block_from: if restart { now } else { start },
             end,
-            mcycle: m as u8,
+            speed: self.hot.speed(),
             ppu_live: true,
             ..OamDma::new()
         };
@@ -1623,7 +1649,7 @@ impl Ctx<'_, '_> {
             // `tail` in the next M-cycle, so the CPU's conflict path
             // (`dma_conflict`) needs no test for it; `copied` keeps the
             // lazy copy from moving bytes meanwhile.
-            let tail = ((now + m - old) >> m.trailing_zeros()) as u8;
+            let tail = ((now + m - old) >> d.speed.mcycle_shift()) as u8;
             d.tail = tail;
             d.start = now + m - u64::from(tail) * m;
             d.copied = tail + 1;
@@ -1643,7 +1669,7 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn dma_tail_end(&mut self) {
         let d = &mut self.sys.ppu.dma;
-        let m = u64::from(d.mcycle);
+        let m = d.speed.mcycle();
         d.start += (u64::from(d.tail) + 1) * m;
         d.copied = 0;
         d.tail = dma::LEN;
@@ -1669,7 +1695,7 @@ impl Ctx<'_, '_> {
     fn dma_sync(&mut self, now: u64) {
         let d = self.sys.ppu.dma;
         // Paused while halted: no progress past the pause.
-        let due = d.due(now.min(d.paused), self.hot.mcycle as u64);
+        let due = d.due(now.min(d.paused), self.hot.mcycle_shift());
         for i in d.copied..due {
             let src = d.base + u16::from(i);
             // CGB: a source at E000-FFFF reads FF (SameBoy `GB_dma_run`).
@@ -1716,7 +1742,7 @@ impl Ctx<'_, '_> {
             }
             return;
         }
-        match dma_conflict(&self.sys.ppu.dma, now, self.hot.mcycle, addr) {
+        match dma_conflict(&self.sys.ppu.dma, &self.hot, now, addr) {
             (Conflict::None, _) => self.write_to(addr, value),
             (Conflict::Wram(a), _) => self.write_to(a, value),
             (Conflict::Open | Conflict::Dma | Conflict::DmaVram, i) => {
@@ -1781,7 +1807,7 @@ impl Ctx<'_, '_> {
     #[inline(never)]
     fn dma_resume(&mut self) {
         let now = self.clock();
-        let m = self.hot.mcycle as u64;
+        let m = self.hot.mcycle();
         let d = &mut self.sys.ppu.dma;
         let shift = now - d.paused;
         if d.block_from > d.paused {
@@ -1802,17 +1828,17 @@ impl Ctx<'_, '_> {
     }
 
     /// A speed switch while the transfer is paused ([`Self::dma_pause`]):
-    /// what is still ahead keeps its M-cycle count at the new M-cycle
-    /// length `m`, around the pause (SameBoy counts the DMA in CPU cycles,
+    /// what is still ahead keeps its M-cycle count at the new speed
+    /// `to`, around the pause (SameBoy counts the DMA in CPU cycles,
     /// `dma_cycles`). Unverified on hardware (`docs/reference/oam-dma.md`).
     #[cold]
     #[inline(never)]
-    fn dma_retime(&mut self, m: u64) {
+    fn dma_retime(&mut self, to: Speed) {
         let d = &mut self.sys.ppu.dma;
         let p = d.paused;
         // Clocks from `p` (on the old M-cycle grid, as `p` is) scaled to
         // the new M-cycle length: halved to double speed, else doubled.
-        let scale = |x: u64| if m == 2 { x >> 1 } else { x << 1 };
+        let scale = |x: u64| if to.is_double() { x >> 1 } else { x << 1 };
         let at = |t: u64| {
             if t >= p {
                 p + scale(t - p)
@@ -1831,8 +1857,8 @@ impl Ctx<'_, '_> {
             d.block_from = at(d.block_from);
         }
         d.start = at(d.start);
-        d.end = d.start + u64::from(dma::LEN) * m;
-        d.mcycle = m as u8;
+        d.end = d.start + u64::from(dma::LEN) * to.mcycle();
+        d.speed = to;
     }
 
     /// The CGB speed switch of a STOP ([`StopKind::Switch`]), after its second
@@ -1873,7 +1899,7 @@ impl Ctx<'_, '_> {
     ///    after it apply the same shifts and it needs none here, only
     ///    its deadline (step 3). The scheduled inputs keep no lazy state
     ///    (deadlines only).
-    /// 2. The speed changes (`hot.mcycle`, the timer's counter rate, the
+    /// 2. The speed changes (`Hot::set_speed`, the timer's counter rate, the
     ///    PPU's walk, a paused OAM DMA's M-cycle length).
     /// 3. Every deadline that depends on the speed is set again for the
     ///    **new** one: Ppu, DivApu, Input, Timer, Serial.
@@ -1890,7 +1916,8 @@ impl Ctx<'_, '_> {
     /// frame are deadlines).
     fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
         let now = self.clock();
-        let m = 6 - self.hot.mcycle as u64;
+        let to = self.hot.speed().toggled();
+        let m = to.mcycle();
         // Step 1 (the timer's part is in `Timer::speed_switch` below).
         // The PPU first, as before any change to what it sees: its walk's
         // points up to `now` belong to the old speed (a pipeline start's
@@ -1912,9 +1939,9 @@ impl Ctx<'_, '_> {
         // Step 2.
         self.sys.key1 = 0;
         if dma_paused {
-            self.dma_retime(m);
+            self.dma_retime(to);
         }
-        self.hot.set_mcycle(m as i32);
+        self.hot.set_speed(to);
         // (Sets the Ppu deadline for the new walk too: step 3's.)
         self.ppu_speed_changed();
         // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
@@ -1924,16 +1951,16 @@ impl Ctx<'_, '_> {
         // later on CGB B/C (`OFS_B`, verified on CPU CGB B and C) than on
         // CGB E, which SameBoy's model (no hold with IME on) matches.
         let mut freeze = if ime && !pending { 0 } else { 4 };
-        if pending && m == 2 {
+        if pending && to.is_double() {
             freeze += 4;
         }
         // To single speed the halt is one clock short of whole M-cycles
         // (below); the timer counts that clock, so it stays on the CPU's
         // M-cycle grid.
-        let short = i64::from(m == 4 && !pending);
+        let short = i64::from(!to.is_double() && !pending);
         // T-cycles to clocks at the new speed.
         self.sys.timer.speed_switch(now, freeze * m / 4, short != 0);
-        self.mem.apu.fs.ds_delay ^= m == 2;
+        self.mem.apu.fs.ds_delay ^= to.is_double();
         if !pending && self.sys.vdma.hblank {
             self.vdma_stop();
         }
@@ -1947,7 +1974,7 @@ impl Ctx<'_, '_> {
         // it. `schedule_serial` reschedules the countdown, for the DivApu
         // and Input deadlines too.
         self.set_apu_deadline(now);
-        self.sys.schedule_inputs(m);
+        self.sys.schedule_inputs(to);
         self.schedule_timer();
         self.schedule_serial();
         if short != 0 {
@@ -1980,7 +2007,7 @@ impl Ctx<'_, '_> {
             self.dma_resume();
         }
         // The CPU idles one M-cycle to double speed.
-        m == 2
+        to.is_double()
     }
 
     /// Whether the speed-switch halt has run its length.
@@ -2007,7 +2034,7 @@ impl Ctx<'_, '_> {
     pub(crate) fn speed_switch_end(&mut self) {
         let d = &mut self.sys.ppu.dma;
         if d.paused != NEVER {
-            d.paused -= self.hot.mcycle as u64;
+            d.paused -= self.hot.mcycle();
         }
         self.halt_end();
     }
@@ -2019,7 +2046,7 @@ impl Ctx<'_, '_> {
     /// on the grid, and asserts so) is passed rather than never reached.
     #[inline]
     pub(crate) fn idle_speed_switch(&mut self) {
-        let m = self.hot.mcycle as u32;
+        let m = self.hot.mcycle() as u32;
         // The halt is 0x20000 clocks at most: the difference fits.
         #[cfg(feature = "eager-sync")]
         self.eager_sync();
@@ -2095,7 +2122,7 @@ impl Ctx<'_, '_> {
             self.run_ppu_to_call(now);
             self.schedule_ppu();
         }
-        let mode0 = self.hdma_period(now + self.hot.mcycle as u64);
+        let mode0 = self.hdma_period(now + self.hot.mcycle());
         self.sys.vdma.write_hdma5(value, mode0);
         if self.sys.vdma.pending {
             self.end_run();
@@ -2192,12 +2219,14 @@ impl Ctx<'_, '_> {
     #[cold]
     #[inline(never)]
     fn vdma_stop(&mut self) {
-        let m = self.hot.mcycle as u64;
+        // The new speed (called after the switch); the margin below is
+        // the other speed's M-cycle length.
+        let speed = self.hot.speed();
         let trigger = self.sys.vdma.line.wrapping_add(hdma::HBLANK_DELAY);
-        if trigger + (6 - m) > self.clock() {
+        if trigger + speed.toggled().mcycle() > self.clock() {
             self.sys.vdma.pending = false;
         } else if self.sys.vdma.pending {
-            if m == 2 {
+            if speed.is_double() {
                 let blocks = self.sys.vdma.blocks;
                 self.vram_dma(false);
                 let v = &mut self.sys.vdma;
@@ -2275,12 +2304,11 @@ impl Ctx<'_, '_> {
         // At most 1 + 128 * 16 M-cycles: fits. One less for the block a
         // HALT's or speed-switch STOP's latched opcode waited for
         // (`VramDma::refetch`).
-        let m = self.hot.mcycle as u32;
-        let full = hdma::stall_mcycles(blocks, m);
+        let full = hdma::stall_mcycles(blocks, self.hot.speed());
         v.stall = full as u16;
         v.refetch = if v.refetch == Refetch::Requested {
             v.stall -= 1;
-            v.stall_end = now + u64::from(full * m);
+            v.stall_end = now + u64::from(full) * self.hot.mcycle();
             Refetch::Ran
         } else {
             Refetch::None
@@ -2314,8 +2342,8 @@ impl Ctx<'_, '_> {
         if d.paused != NEVER {
             return;
         }
-        let m = u64::from(d.mcycle);
-        let per = (self.hot.mcycle as u32 / 2).max(1);
+        let m = d.speed.mcycle();
+        let per = (self.hot.mcycle() as u32 / 2).max(1);
         let len = blocks * 16;
         let bank = self.sys.vram_off;
         let src0 = self.sys.vdma.src.wrapping_sub(len as u16);
@@ -2444,7 +2472,7 @@ impl Bus for Ctx<'_, '_> {
         let bit = pending.isolate_lowest_one();
         if bit & PPU != 0 {
             // Only if a PPU edge can fall there (its deadline).
-            let mid = self.clock() + self.hot.mcycle as u64 / 2;
+            let mid = self.clock() + self.hot.mcycle() / 2;
             if self.sys.sched.deadline(EventKind::Ppu) <= mid {
                 self.run_ppu_to_call(mid);
             }
@@ -2664,14 +2692,12 @@ pub(crate) fn read<const CPU: bool>(mem: &Memory, sys: &Sys, hot: &Hot, addr: u1
 /// in `d` as a transfer that started earlier: nothing here for it, as
 /// any test here cost every read during a transfer up to 3% Ir on
 /// `synth:dma-storm`, measured.)
-fn dma_conflict(d: &OamDma, now: u64, mcycle: i32, addr: u16) -> (Conflict, u8) {
+fn dma_conflict(d: &OamDma, hot: &Hot, now: u64, addr: u16) -> (Conflict, u8) {
     if now < d.start {
         return (Conflict::None, 0);
     }
-    // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
-    // thumbv7em).
-    debug_assert!(mcycle == 2 || mcycle == 4);
-    let i = ((now - d.start) >> mcycle.trailing_zeros()) as u8;
+    // A shift, not a u64 division (a libcall on thumbv7em).
+    let i = ((now - d.start) >> hot.mcycle_shift()) as u8;
     (dma::conflict(d.base, d.base + u16::from(i), addr), i)
 }
 
@@ -2689,11 +2715,11 @@ fn read_during_dma(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
             return 0xFF;
         }
         if addr == 0xFF41 {
-            return sys.ppu.stat_during_dma(now, hot.mcycle == 2);
+            return sys.ppu.stat_during_dma(now, hot.speed());
         }
         return read_high(mem, sys, &plain, addr);
     }
-    let addr = match dma_conflict(&sys.ppu.dma, now, hot.mcycle, addr) {
+    let addr = match dma_conflict(&sys.ppu.dma, hot, now, addr) {
         (Conflict::None, _) => addr,
         (Conflict::Open, _) => return 0xFF,
         (Conflict::Wram(a), _) => a,
@@ -2810,7 +2836,7 @@ fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // without incrementing it (SameBoy `read_high_memory`; Pan Docs:
         // FF69), and FF while the PPU blocks palette RAM
         // ([`Ppu::palette_blocked`]; Pan Docs: LCD Color Palettes).
-        0x69 | 0x6B if cgb && !sys.ppu.palette_blocked(hot.clock(), hot.mcycle == 2) => {
+        0x69 | 0x6B if cgb && !sys.ppu.palette_blocked(hot.clock(), hot.speed()) => {
             palette_byte(mem, reg)
         }
         // FF74 (GB_IO_PSW): R/W in CGB mode only (see `read_io`).
@@ -2835,7 +2861,7 @@ fn read_io_other(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
 /// Out of line: the check needs the PPU's position.
 #[inline(never)]
 fn read_vram(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
-    if sys.ppu.vram_blocked(hot.clock(), hot.mcycle == 2) {
+    if sys.ppu.vram_blocked(hot.clock(), hot.speed()) {
         return 0xFF;
     }
     mem.vram[(sys.vram_off | (usize::from(addr) & 0x1FFF)) & 0x3FFF]
@@ -2845,7 +2871,7 @@ fn read_vram(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
 /// ([`Ppu::oam_blocked`]), FEA0-FEFF included.
 #[inline(never)]
 fn read_oam(mem: &Memory, sys: &Sys, hot: &Hot, addr: u16) -> u8 {
-    if sys.ppu.oam_blocked(hot.clock(), hot.mcycle == 2, false) {
+    if sys.ppu.oam_blocked(hot.clock(), hot.speed(), false) {
         return 0xFF;
     }
     raw_oam(mem, addr)
@@ -2903,14 +2929,14 @@ fn read_io(mem: &Memory, sys: &Sys, hot: &Hot, reg: usize) -> u8 {
         // power off zeroes the stored bytes).
         0x10..=0x2F => mem.io[reg] | SOUND_READ_MASK[(reg - 0x10) & 0x1F],
         0x40 => sys.ppu.lcdc,
-        0x41 => sys.ppu.stat(hot.clock(), hot.mcycle == 2),
-        0x44 => sys.ppu.ly(hot.clock(), hot.mcycle == 2),
+        0x41 => sys.ppu.stat(hot.clock(), hot.speed()),
+        0x44 => sys.ppu.ly(hot.clock(), hot.speed()),
         0x45 => sys.ppu.lyc,
         0x42 | 0x43 | 0x46..=0x4B => mem.io[reg],
         // FF55 (HDMA5): FF in DMG compatibility mode, where no transfer
         // can start. FF51-FF54 are write-only (the `_` arm: FF).
         0x55 => sys.vdma.read_hdma5(),
-        0x4D if cgb => 0x7E | sys.key1 | if hot.mcycle == 2 { 0x80 } else { 0 },
+        0x4D if cgb => 0x7E | sys.key1 | hot.speed().key1(),
         // VBK reads FE | bank on a CGB in either mode (SameBoy
         // `read_high_memory`: only `GB_is_cgb`; Mooneye `misc/boot_hwio-C`
         // reads FE in DMG compatibility mode). Writes need CGB mode.
@@ -3006,6 +3032,28 @@ mod tests {
     use crate::{Config, FRAME_CLOCKS, Frame, cart_ram_size};
     use std::boxed::Box;
     use std::vec;
+
+    /// `Hot` keeps the speed as a number (the tick's `mcycle` word):
+    /// its accessors agree with `Speed`'s conversions, and a speed
+    /// change keeps the clock.
+    #[test]
+    fn hot_speed_forms_agree_with_speed() {
+        let mut hot = Hot::new();
+        assert_eq!(hot.speed(), Speed::Normal);
+        hot.set_countdown(1000, 40);
+        hot.t_minus += 3;
+        for speed in [Speed::Double, Speed::Normal, Speed::Double] {
+            let now = hot.clock();
+            hot.set_speed(speed);
+            assert_eq!(hot.speed(), speed);
+            assert_eq!(hot.mcycle(), speed.mcycle());
+            assert_eq!(hot.mcycle_shift(), speed.mcycle_shift());
+            assert_eq!(hot.clock(), now, "{speed:?}");
+            hot.set_countdown(now, 9);
+            hot.t_minus += 1;
+            assert_eq!(hot.clock(), now + speed.mcycle());
+        }
+    }
 
     /// An emulator with `rom` loaded and a RAM buffer of the header's size.
     fn load(rom: &'static [u8]) -> &'static mut Emulator<'static> {
@@ -3174,7 +3222,11 @@ mod tests {
             (2, i32::MAX, 1 << 31),
         ] {
             let start = ctx.clock();
-            ctx.hot.set_mcycle(mcycle);
+            ctx.hot.set_speed(if mcycle == 2 {
+                Speed::Double
+            } else {
+                Speed::Normal
+            });
             if budget >= 0 {
                 ctx.hot.set_countdown(start, budget as u64);
             } else {
@@ -3475,7 +3527,7 @@ mod tests {
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         // 2-clock M-cycles (`write_ppu` keys double speed on them; the
         // switch's own timing is not under test).
-        ctx.hot.set_mcycle(2);
+        ctx.hot.set_speed(Speed::Double);
         ctx.idle();
         assert_eq!(ctx.clock(), line + 145);
         ctx.write(0xFF43, 8);
@@ -3518,8 +3570,9 @@ mod tests {
             let Emulator { mem, hw } = &mut *emu;
             let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
             ctx.write(0xFF41, 0x20);
-            ctx.hot.set_mcycle(m);
-            ctx.sys.ppu.speed_changed(m == 2);
+            let speed = if m == 2 { Speed::Double } else { Speed::Normal };
+            ctx.hot.set_speed(speed);
+            ctx.sys.ppu.speed_changed(speed);
             while ctx.clock() < start {
                 ctx.idle();
             }
@@ -3557,8 +3610,9 @@ mod tests {
             let _ = emu.run_until(line5 - 40, &mut fb, &mut []);
             let Emulator { mem, hw } = &mut *emu;
             let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-            ctx.hot.set_mcycle(m);
-            ctx.sys.ppu.speed_changed(m == 2);
+            let speed = if m == 2 { Speed::Double } else { Speed::Normal };
+            ctx.hot.set_speed(speed);
+            ctx.sys.ppu.speed_changed(speed);
             ctx.write(0xFF41, 0x40);
             ctx.write(0xFF43, scx);
             while ctx.clock() < line5 + t {
@@ -5564,14 +5618,15 @@ mod dma_tests {
             ctx.write(0xFF40, 0x91);
             ctx.write(0xFF41, sel);
             // The switch's own timing is not under test.
-            ctx.hot.set_mcycle(if double { 2 } else { 4 });
+            ctx.hot
+                .set_speed(if double { Speed::Double } else { Speed::Normal });
             while ctx.clock() < e + pos - 3 {
                 ctx.idle();
             }
             assert_eq!(ctx.clock(), e + pos - 3);
             ctx.sys.iflags = 0;
             ctx.write(reg, value);
-            while ctx.clock() < e + pos - 3 + n * ctx.hot.mcycle as u64 {
+            while ctx.clock() < e + pos - 3 + n * ctx.hot.mcycle() {
                 ctx.idle();
             }
             stat = ctx.sys.iflags & crate::ppu::INT_STAT;

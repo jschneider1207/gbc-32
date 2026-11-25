@@ -289,7 +289,11 @@ event table's minimum and the target), which the tick increments towards
 zero (`Hot::t_minus`).
 The countdown (`Hot`) is copied into the `Ctx` for the call
 and back into `Sys::hot` when it is dropped, so the tick doesn't go
-through `ctx.sys`; the u64 clock is `deadline + t_minus * mcycle`. Scheduled work
+through `ctx.sys`; the u64 clock is `deadline + t_minus * mcycle`. `Hot::mcycle`
+(4 base clocks, or 2 in double speed) is the one place the CPU speed is kept
+as a number, because the tick reads it; everything else takes a `Speed`
+(`speed.rs`), whose methods are the only conversions (M-cycle length and its
+log2, the system counter's rate, KEY1 bit 7). Scheduled work
 lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
 deadline per `EventKind` (`NEVER` = none) and their minimum, maintained
 only when a deadline is set (incrementally: the table is rescanned only

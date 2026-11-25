@@ -19,13 +19,15 @@
 //!   at double speed). So 8 M-cycles per block plus one at single speed,
 //!   16 plus one at double speed.
 
+use crate::speed::Speed;
+
 /// What one transfer step does: the M-cycles the CPU is stalled for `n`
-/// 16-byte blocks at `mcycle` base clocks per M-cycle (4, or 2 in double
-/// speed): 2 dots per byte, plus one M-cycle.
-pub(crate) const fn stall_mcycles(blocks: u32, mcycle: u32) -> u32 {
-    // `mcycle` is 4 or 2: a shift by 2 or 1 (no division, so no
+/// 16-byte blocks at CPU speed `speed`: 2 dots per byte, plus one
+/// M-cycle.
+pub(crate) const fn stall_mcycles(blocks: u32, speed: Speed) -> u32 {
+    // 32 clocks per block, in M-cycles: a shift (no division, so no
     // divide-by-zero panic path).
-    1 + ((blocks * 32) >> (mcycle >> 1))
+    1 + ((blocks * 32) >> speed.mcycle_shift())
 }
 
 /// HDMA starts a block this many dots after the line's mode-3 end
@@ -189,6 +191,7 @@ impl VramDma {
 
 #[cfg(test)]
 mod tests {
+    use crate::speed::Speed;
     extern crate std;
     use super::HBLANK_DELAY;
     use crate::bus::Ctx;
@@ -300,7 +303,7 @@ mod tests {
     #[test]
     fn gdma_in_double_speed_takes_16_mcycles_per_block() {
         let emu = setup(0x11, 0x80);
-        emu.hw.sys.hot.set_mcycle(2);
+        emu.hw.sys.hot.set_speed(Speed::Double);
         write(emu, 0xFF55, 0x00);
         assert_eq!(step(emu), 2 * (1 + 16 + 1));
     }
@@ -679,7 +682,7 @@ mod tests {
             step(emu);
         }
         write(emu, 0xFF55, 0x80 | len);
-        let m = emu.hw.sys.hot.mcycle as u64;
+        let m = emu.hw.sys.hot.mcycle();
         while emu.clock() + m < t {
             step(emu);
         }
@@ -696,7 +699,7 @@ mod tests {
         // set, length kept), and STOP's second byte runs as an opcode.
         let emu = setup(0x91, 0x80);
         stop_on_trigger(emu, 0x01);
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         assert_eq!(emu.mem.vram[..16], block(0));
         assert_eq!(emu.peek(0xFF55), 0x81);
         // INC A, latched at the STOP, runs with PC unchanged.
@@ -721,9 +724,9 @@ mod tests {
         arm_stop(emu);
         step(emu);
         step_until_pc_moves(emu, 0x7102);
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         stop_on_trigger(emu, 0x00);
-        assert_eq!(emu.hw.sys.hot.mcycle, 4);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Normal);
         assert_eq!(emu.mem.vram[0], 0);
         assert_eq!(emu.peek(0xFF55), 0x00);
         let d = step_until_a(emu, 2);
@@ -786,7 +789,7 @@ mod tests {
         assert_eq!(emu.mem.vram[..16], block(0));
         arm_stop(emu);
         step(emu);
-        assert_eq!(emu.hw.sys.hot.mcycle, 2);
+        assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         // Wake up 1 clock before a trigger (double speed: it falls in the
         // wake-up M-cycle).
         end_switch_halt(emu, |e| {

@@ -19,6 +19,8 @@
 //! Positions are ours (ADR 0014, ADR 0020 amendment): LY changes at
 //! `t = 3`. The module docs of [`super`] ("Timeline") describe each line.
 
+use crate::speed::Speed;
+
 /// A line-relative position in half-dots.
 #[derive(Clone, Copy)]
 pub(crate) struct H(u16);
@@ -52,8 +54,8 @@ impl Observer {
     /// a 1-T observer lands half a dot after the access, which the
     /// whole-dot timeline places a full dot late (design doc 3.4, step 4).
     #[inline]
-    pub(crate) const fn delay(self, double: bool) -> u64 {
-        if double {
+    pub(crate) const fn delay(self, speed: Speed) -> u64 {
+        if speed.is_double() {
             (self.ds as u64).div_ceil(2)
         } else {
             self.ss as u64
@@ -366,15 +368,15 @@ pub(crate) const CMP_WALK: u32 = t(h(5));
 /// 4 `m2enable/*ly0*` single-speed rows (their write views at line 0
 /// assume the old points).
 #[inline(always)]
-pub(crate) const fn ly0_pt(double: bool) -> u32 {
-    PT_LY + double as u32
+pub(crate) const fn ly0_pt(speed: Speed) -> u32 {
+    PT_LY + speed.extra()
 }
 
 /// Line 0: the mode-2 pulse (`Pt::Ly4`), one dot after [`ly0_pt`]:
 /// [`CMP_ON`], double speed [`CMP_WALK`].
 #[inline(always)]
-pub(crate) const fn ly0_pulse(double: bool) -> u32 {
-    CMP_ON + double as u32
+pub(crate) const fn ly0_pulse(speed: Speed) -> u32 {
+    CMP_ON + speed.extra()
 }
 
 const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
@@ -429,6 +431,6 @@ pub(crate) const L153_ZERO_IRQ: u64 = 1;
 /// write views are calibrated on it) and delays the request
 /// ([`L153_ZERO_IRQ`]).
 #[inline(always)]
-pub(crate) const fn l153_zero_walk(double: bool) -> u32 {
-    L153_ZERO + double as u32
+pub(crate) const fn l153_zero_walk(speed: Speed) -> u32 {
+    L153_ZERO + speed.extra()
 }

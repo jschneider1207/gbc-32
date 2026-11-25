@@ -13,6 +13,7 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering::Relaxed;
 
 use crate::schedule::NEVER;
+use crate::speed::Speed;
 
 /// The PPU sees each step of a transfer this many dots before the CPU
 /// access it is due by, in both speeds (gambatte `oamdma/late_sp*`, cgb04c:
@@ -59,8 +60,8 @@ pub(crate) struct OamDma {
     /// and `copied` describe such a transfer (`Ctx::oam_dma`,
     /// `Ctx::dma_tail_end`).
     pub(crate) tail: u8,
-    /// The M-cycle length (4, or 2 in double speed) the transfer runs at.
-    pub(crate) mcycle: u8,
+    /// The CPU speed the transfer runs at (one byte per M-cycle).
+    pub(crate) speed: Speed,
     /// Set by the FF46 write; cleared by the PPU at the first line start
     /// past `ppu_to` (`Ppu::dma_touches`), so lines after the transfer
     /// skip the DMA-aware path with one flag test.
@@ -164,7 +165,7 @@ impl OamDma {
             halt_to: NEVER,
             halt_dest: 0,
             tail: LEN,
-            mcycle: 4,
+            speed: Speed::Normal,
             ppu_live: false,
         }
     }
@@ -200,10 +201,8 @@ impl OamDma {
         }
         // Byte `i` is written at `start + i * mcycle - PPU_LEAD` and seen
         // after it (`start` has moved out past any earlier halt).
-        // `mcycle` is 2 or 4: a shift.
-        debug_assert!(self.mcycle == 2 || self.mcycle == 4);
         let since = c.saturating_sub(self.start - PPU_LEAD + 1);
-        let n = (since >> self.mcycle.trailing_zeros()) + 1;
+        let n = (since >> self.speed.mcycle_shift()) + 1;
         (PpuView::Running, n.min(u64::from(LEN)) as u8)
     }
 
@@ -234,14 +233,16 @@ impl OamDma {
     /// before the CPU access at `start + i * mcycle` (SameBoy
     /// `GB_dma_run`, half an M-cycle earlier), so it counts from that
     /// access on.
-    pub(crate) fn due(&self, now: u64, mcycle: u64) -> u8 {
+    ///
+    /// `mcycle_shift`: log2 of the M-cycle length
+    /// ([`Speed::mcycle_shift`]; the bus passes `Hot::mcycle_shift`, its
+    /// hot-path form), so the count is a shift, not a u64 division (a
+    /// libcall on thumbv7em).
+    pub(crate) fn due(&self, now: u64, mcycle_shift: u32) -> u8 {
         if now < self.start {
             return 0;
         }
-        // `mcycle` is 2 or 4: a shift, not a u64 division (a libcall on
-        // thumbv7em).
-        debug_assert!(mcycle == 2 || mcycle == 4);
-        (((now - self.start) >> mcycle.trailing_zeros()) + 1).min(u64::from(LEN)) as u8
+        (((now - self.start) >> mcycle_shift) + 1).min(u64::from(LEN)) as u8
     }
 }
 
@@ -322,6 +323,7 @@ pub(crate) fn conflict(base: u16, cur: u16, addr: u16) -> Conflict {
 #[cfg(test)]
 mod tests {
     use super::{Conflict, LEN, OamDma, PpuView, conflict};
+    use crate::speed::Speed;
 
     #[test]
     fn due_counts_from_start_and_stops_at_160() {
@@ -329,13 +331,13 @@ mod tests {
             start: 100,
             ..OamDma::new()
         };
-        assert_eq!(d.due(96, 4), 0);
-        assert_eq!(d.due(99, 4), 0);
-        assert_eq!(d.due(100, 4), 1);
-        assert_eq!(d.due(104, 4), 2);
-        assert_eq!(d.due(100 + 159 * 4, 4), LEN);
-        assert_eq!(d.due(100 + 400 * 4, 4), LEN);
-        assert_eq!(d.due(102, 2), 2);
+        assert_eq!(d.due(96, Speed::Normal.mcycle_shift()), 0);
+        assert_eq!(d.due(99, Speed::Normal.mcycle_shift()), 0);
+        assert_eq!(d.due(100, Speed::Normal.mcycle_shift()), 1);
+        assert_eq!(d.due(104, Speed::Normal.mcycle_shift()), 2);
+        assert_eq!(d.due(100 + 159 * 4, Speed::Normal.mcycle_shift()), LEN);
+        assert_eq!(d.due(100 + 400 * 4, Speed::Normal.mcycle_shift()), LEN);
+        assert_eq!(d.due(102, Speed::Double.mcycle_shift()), 2);
     }
 
     #[test]
@@ -370,14 +372,15 @@ mod tests {
         assert_eq!(conflict(0xE000, 0xE010, 0xC011), None);
     }
 
-    /// A transfer written at clock 1000 at M-cycle length `m`, as the bus
-    /// sets it up.
-    fn written_at_1000(m: u64) -> OamDma {
+    /// A transfer written at clock 1000 at `speed`, as the bus sets it
+    /// up.
+    fn written_at_1000(speed: Speed) -> OamDma {
+        let m = speed.mcycle();
         let start = 1000 + 2 * m;
         let mut d = OamDma {
             start,
             end: start + u64::from(LEN) * m,
-            mcycle: m as u8,
+            speed,
             ppu_live: true,
             ..OamDma::new()
         };
@@ -392,7 +395,7 @@ mod tests {
         use PpuView::*;
         // Single speed: byte 0 is due by the access at 1008, seen after
         // 1006; the last step is due by 1648, seen after 1646.
-        let d = written_at_1000(4);
+        let d = written_at_1000(Speed::Normal);
         assert_eq!(d.ppu_at(1006), (Off, 0));
         assert_eq!(d.ppu_at(1007), (Running, 1));
         assert_eq!(d.ppu_at(1010), (Running, 1));
@@ -402,7 +405,7 @@ mod tests {
         assert_eq!(d.ppu_at(1646), (Running, 160));
         assert_eq!(d.ppu_at(1647), (Off, 160));
         // Double speed: due by 1004, seen after 1002; a byte per 2 dots.
-        let d = written_at_1000(2);
+        let d = written_at_1000(Speed::Double);
         assert_eq!(d.ppu_at(1002), (Off, 0));
         assert_eq!(d.ppu_at(1003), (Running, 1));
         assert_eq!(d.ppu_at(1005), (Running, 2));

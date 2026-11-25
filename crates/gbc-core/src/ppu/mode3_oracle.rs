@@ -380,13 +380,13 @@ mod tests {
             r.mem.io[0x4A] = wy;
             r.mem.io[0x4B] = 0xFF;
             r.sync(on);
-            r.ppu.write_lcdc(on, 0xB3, &mut r.iflags, false);
+            r.ppu.write_lcdc(on, 0xB3, &mut r.iflags, Speed::Normal);
             r
         }
 
         fn sync(&mut self, now: u64) {
             let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
-            p.sync(now, m, f, &mut self.iflags, false);
+            p.sync(now, m, f, &mut self.iflags, Speed::Normal);
         }
 
         /// Clock of position 0 of line `ly` in frame `frame`.
@@ -403,7 +403,8 @@ mod tests {
             let lcdc =
                 0x91 | if c.line.window_on { 0x20 } else { 0 } | if c.obj_on { 0x02 } else { 0 };
             if lcdc != self.ppu.lcdc {
-                self.ppu.write_lcdc(now, lcdc, &mut self.iflags, false);
+                self.ppu
+                    .write_lcdc(now, lcdc, &mut self.iflags, Speed::Normal);
             }
             self.mem.io[0x43] = c.line.scx;
             self.mem.io[0x4B] = c.line.wx;
@@ -430,7 +431,7 @@ mod tests {
                 for t in 80..SETUP_AT {
                     let now = l + u64::from(t);
                     self.sync(now);
-                    if end.is_none() && t >= 84 && self.ppu.stat(now, false) & 3 == 0 {
+                    if end.is_none() && t >= 84 && self.ppu.stat(now, Speed::Normal) & 3 == 0 {
                         end = Some(t);
                     }
                     self.write_scx(l, c, t);
@@ -442,7 +443,7 @@ mod tests {
                     self.write_scx(l, c, t);
                 }
                 self.sync(l + u64::from(SETUP_AT));
-                (84..SETUP_AT).find(|&t| self.ppu.stat(l + u64::from(t), false) & 3 == 0)
+                (84..SETUP_AT).find(|&t| self.ppu.stat(l + u64::from(t), Speed::Normal) & 3 == 0)
             }
         }
 

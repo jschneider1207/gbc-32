@@ -70,6 +70,7 @@ pub(crate) mod reference;
 mod differential;
 
 use crate::schedule::NEVER;
+use crate::speed::Speed;
 
 /// Counter bit per TAC clock select: 4096, 262144, 65536, 16384 Hz.
 const TAC_BITS: [u64; 4] = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
@@ -118,8 +119,9 @@ pub(crate) struct Timer {
     /// The clock from which the counter runs again (after a speed-switch
     /// pause, later than the clock it was set at).
     base_clock: u64,
-    /// log2 of counter steps per base clock: 0 normal, 1 double speed.
-    shift: u32,
+    /// The CPU speed: the counter counts T-cycles, one per base clock
+    /// or two in double speed ([`Speed::counter_shift`]).
+    speed: Speed,
     /// TIMA as of counter value `tima_from` (outside cycle A).
     tima: u8,
     tima_from: u64,
@@ -143,7 +145,7 @@ impl Timer {
         Self {
             base: 0,
             base_clock: 0,
-            shift: 0,
+            speed: Speed::Normal,
             tima: 0,
             tima_from: 0,
             tma: 0,
@@ -181,19 +183,19 @@ impl Timer {
     /// The system counter at clock `now`.
     #[inline]
     pub(crate) fn sc(&self, now: u64) -> u64 {
-        self.base + (now.saturating_sub(self.base_clock) << self.shift)
+        self.base + (now.saturating_sub(self.base_clock) << self.speed.counter_shift())
     }
 
     /// The clock at which the counter reaches `v` (`v >= base`).
     #[inline]
     fn clock_of(&self, v: u64) -> u64 {
-        self.base_clock + ((v - self.base) >> self.shift)
+        self.base_clock + ((v - self.base) >> self.speed.counter_shift())
     }
 
     /// Base clocks per M-cycle.
     #[inline]
     fn mcycle(&self) -> u64 {
-        4 >> self.shift
+        self.speed.mcycle()
     }
 
     /// The clock at which the counter reaches `v` (`v >= sc(now)`, a
@@ -215,7 +217,7 @@ impl Timer {
     /// 512 Hz.
     #[inline]
     pub(crate) fn div_apu_bit(&self) -> u32 {
-        12 + self.shift
+        12 + self.speed.counter_shift()
     }
 
     /// Reads FF04-FF07 (by the low address bits) at clock `now`. Out of
@@ -290,7 +292,7 @@ impl Timer {
             return;
         }
         // log2 of the clocks per fall of the selected bit.
-        let fall = self.tima_bit.trailing_zeros() + 1 - self.shift;
+        let fall = self.tima_bit.trailing_zeros() + 1 - self.speed.counter_shift();
         let falls = (now - second) >> fall;
         let whole = falls - rem(falls, 256 - u32::from(self.tma));
         self.reload(second + (whole << fall));
@@ -508,7 +510,7 @@ impl Timer {
         self.catch_up(now);
         let from = now + pause - u64::from(short);
         self.base = self.sc(now);
-        self.shift ^= 1;
+        self.speed = self.speed.toggled();
         self.base_clock = from;
         if self.in_cycle_a(now) {
             self.overflow_at = if short { now - 1 } else { from.max(now) };

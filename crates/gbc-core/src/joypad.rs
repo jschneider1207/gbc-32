@@ -2,6 +2,7 @@
 
 use crate::bitset::bitset;
 use crate::schedule::NEVER;
+use crate::speed::Speed;
 
 bitset! {
     /// Buttons currently held, passed to [`Emulator::set_buttons`](crate::Emulator::set_buttons).
@@ -81,14 +82,14 @@ impl InputQueue {
         }
     }
 
-    /// The `Input` deadline for M-cycles of `mcycle` clocks: the earliest
-    /// change's clock less `mcycle - 1`, so the countdown stops at the
-    /// last M-cycle boundary at or before that clock (ADR 0012, rounded
-    /// down). [`NEVER`] if nothing is pending.
-    pub(crate) const fn deadline(&self, mcycle: u64) -> u64 {
+    /// The `Input` deadline at CPU speed `speed`: the earliest change's
+    /// clock less an M-cycle's clocks minus one, so the countdown stops
+    /// at the last M-cycle boundary at or before that clock (ADR 0012,
+    /// rounded down). [`NEVER`] if nothing is pending.
+    pub(crate) const fn deadline(&self, speed: Speed) -> u64 {
         match self.at[0] {
             NEVER => NEVER,
-            at => at.saturating_sub(mcycle - 1),
+            at => at.saturating_sub(speed.mcycle() - 1),
         }
     }
 

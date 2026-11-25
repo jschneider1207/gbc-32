@@ -676,7 +676,7 @@ mod tests {
         [
             t.base,
             t.base_clock,
-            u64::from(t.shift),
+            u64::from(t.speed.counter_shift()),
             u64::from(t.tima),
             t.tima_from,
             u64::from(t.tma),
@@ -737,9 +737,9 @@ mod tests {
                 assert_eq!(fields(&caught_up), fields(&eager), "{n} reloads to {now}");
                 assert_eq!(lazy.read(now, 5), eager.read(now, 5));
                 let (op, v) = (rng.below(9), random_tima(&mut rng));
-                let pause = (2 + 2 * u64::from(eager.shift)) * rng.below(3);
+                let pause = (2 + 2 * u64::from(eager.speed.counter_shift())) * rng.below(3);
                 // To single speed: the halt that moves the CPU's grid.
-                let short = eager.shift == 1 && rng.below(2) == 0;
+                let short = eager.speed.is_double() && rng.below(2) == 0;
                 let mut results = [0; 2];
                 for (t, r) in [&mut lazy, &mut eager].into_iter().zip(&mut results) {
                     match op {
@@ -783,7 +783,7 @@ mod tests {
             let first = t.deadline();
             // Up to 2^50 clocks (8 years).
             let now = start + m * (rng.next() >> (16 + rng.below(40)));
-            let period = ((256 - u64::from(t.tma)) * 2 * t.tima_bit) >> t.shift;
+            let period = ((256 - u64::from(t.tma)) * 2 * t.tima_bit) >> t.speed.counter_shift();
             let mut two_steps = t;
             two_steps.catch_up(start + m * rng.below((now - start) / m + 1));
             two_steps.catch_up(now);
