@@ -53,12 +53,22 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    removed from the gate and deleted (6d8434f). Baseline eb31bf6:
    worst-case 276.1 M Ir, cpu_instrs 1,275.7 M, `.text` 113,580 B
    (margin 9,300 B).
-3. Scheduler one-pass (B5); inventory themes 1 (small scalar state), 4
-   (OAM DMA read clears), 10 (timer/scheduler attributes), 11 (attribute
-   sweep per file family).
-4. `synth:worst-case` gains a serviced timer IRQ (human approved) and a
-   DMG-mode bench line is added (no bench line runs a DMG-mode ROM; the
-   renderer's -6.6% there is unguarded); re-record the baseline.
+3. PARTLY DONE (session 17, m10-sched merged): one-pass scheduler (B5),
+   theme 10 attributes by measurement, theme 4 move (read clears in
+   `Sys`), T2. Numbers in docs/perf.md "Scheduler and attribute pass".
+   Left: theme 1 (S2/S3/S9/S10), theme 11 (A14/A8/A11, L7), S4 `&mut`
+   read path; re-measure the dropped `schedule_overflow` inline
+   (+1,270 B) on the new serviced-timer worst-case.
+4. DONE (session 17): `synth:worst-case` services a 16,384 Hz timer IRQ
+   playing PCM through NR50 (2.422 M Ir/frame at merge, 60.2% of the
+   4.02 M line); new `synth:dmg-raster` line. Baseline 782d01e:
+   worst-case 287.7 M Ir, cpu_instrs 1,269.5 M, `.text` 113,832 B
+   (margin 9,048 B).
+   **OPEN BUG found by the new program: `check-sync-invariance.sh` FAILS
+   on `main`** (eager-sync vs lazy audio samples differ on all five
+   `synth:worst-case` variants; video and clock-offset runs are equal).
+   Branch `m10-sync-apu` (agent, session 17) is finding the cause. Do not
+   tag or run the gate until it is fixed.
 5. Structure: line timeline as one table (E3), `bus.rs` split along
    D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
    experiment (A1-06).
@@ -127,11 +137,10 @@ Working rules that matter here:
 - PPU design size estimates ran ~2-3x low; measure early.
 
 ## In flight
-- Session 17 (2026-11-24): items 3 and 4 run as agents on branches
-  `m10-sched` and `m10-bench-irq` (worktrees in that session's scratchpad;
-  if the session died, inspect the branches with `git log main..<b>`,
-  re-verify and merge, or delete). Item 4 needs a baseline re-record
-  after merge (new `synth:dmg-raster` line, worst-case with a timer IRQ).
+- Session 17 (2026-11-24): `m10-sync-apu` (agent; worktree in that
+  session's scratchpad) is fixing the sync-invariance failure, see item 4.
+  If the session died: `git log main..m10-sync-apu`, re-verify, merge or
+  restart from the description in item 4.
 - Before session 17: Session 16 ended at a clean point: every `m10-*` branch is merged
   by fast-forward and its worktree removed; `main` builds, passes tests and
   the checks listed under "How work is run" as of the last merge
