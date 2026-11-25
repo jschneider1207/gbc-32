@@ -840,6 +840,88 @@ Measured and not taken:
   instead of returned by value: `synth:worst-case` +17,114 Ir (+0.006%),
   +40 B.
 
+## Measured on a Cortex-M7 (NUCLEO-H755ZI-Q)
+
+Measured 2026-11-24 with `tools/h7-bench` (its README has the method, the
+board facts and all six result tables) on an STM32H755ZIT6: Cortex-M7 r1p1,
+16 KiB I- and D-cache, 64 KiB ITCM, 128 KiB DTCM. CPU cycles from the DWT
+cycle counter around each frame-sized `run_until` call, no interrupts;
+every run reproduced the PC's checksums of frames and audio. Core at `main`
+bcd881e. The board supplies VCORE from the SMPS, which limits it to VOS1
+and 400 MHz (DS12919 Table 14), so 392 MHz is the fastest clock measured.
+
+Placements: `flash` is all code in flash behind the I-cache (data in DTCM;
+with the data in AXI SRAM the figures differ by under 3%); `ITCM` is the
+set of `perf/itcm-sections.txt` in ITCM **minus the plain tile path**
+(`Renderer::render`, `fill_tiles`), because the whole set no longer fits
+64 KiB (below).
+
+**Measured: cycles per frame at 392 MHz, mean / max over 120 calls
+(cpu_instrs 600):**
+
+| Workload | flash | ITCM | ITCM share of a frame at 392 MHz (mean / max) |
+|---|---|---|---|
+| `synth:worst-case` | 4,383,420 / 4,435,230 | 3,100,670 / 3,137,337 | 47.2% / 47.8% |
+| `synth:cgb-raster` | 2,804,392 / 2,850,104 | 2,530,564 / 2,569,295 | 38.6% / 39.1% |
+| `synth:dmg-raster` | 2,150,011 / 2,179,232 | 1,815,665 / 1,837,309 | 27.7% / 28.0% |
+| `synth:event-storm` | 2,195,649 / 2,213,436 | 1,952,834 / 1,967,362 | 29.8% / 30.0% |
+| `blargg/cpu_instrs` | 1,398,842 / 1,951,152 | 1,210,549 / 1,683,911 | 18.4% / 25.7% |
+
+A frame is 6,563,140 cycles at 392 MHz (59.7275 Hz). So the worst case
+meets the 50% bar on this board at 392 MHz with the hot set in ITCM, by
+2.2 points at its slowest frame, and misses it from flash (66.8% / 67.6%).
+At the 64 MHz HSI the ITCM placement costs the same cycles within 0.3%
+(worst case 3,093,762 / 3,130,103); the flash placement costs up to 3% fewer
+there (the AXI clock is then the CPU clock).
+
+**x86 Ir against M7 cycles.** Ir per frame is the baseline's Ir
+(`perf/bench-baseline.txt` at 0270845) divided by the frames the bench
+counts in the same emulated seconds (118, 118, 117, 119; 1,191 for
+cpu_instrs, which the bench runs for 20 s while the board ran its first
+10 s, so that row compares different windows):
+
+| Workload | Ir / frame | cycles / Ir, ITCM | cycles / Ir, flash |
+|---|---|---|---|
+| `synth:worst-case` | 2,423,362 | 1.28 | 1.81 |
+| `synth:cgb-raster` | 2,263,989 | 1.12 | 1.24 |
+| `synth:dmg-raster` | 1,577,114 | 1.15 | 1.36 |
+| `synth:event-storm` | 1,471,309 | 1.33 | 1.49 |
+| `blargg/cpu_instrs` | 1,061,445 | 1.14 | 1.32 |
+
+The proxy "one x86 instruction is one M7 cycle" was optimistic by 12 to
+33% with the hot code in ITCM and by 24 to 81% from flash. The "4.02 M
+line" in this file is 50% of a frame at 480 MHz in *cycles*; in Ir the
+same bar is about 3.1 M Ir/frame for the worst case at this ratio (4.02 M /
+1.28), which the baseline's 2.42 M meets.
+
+**Extrapolated, not measured** (the ITCM cycle counts above divided by the
+frame length at each clock, assuming the cycle count does not change with
+frequency, as it did not between 64 and 392 MHz):
+
+| Workload (ITCM, max) | 392 MHz (measured) | 480 MHz | 550 MHz |
+|---|---|---|---|
+| `synth:worst-case` | 47.8% | 39.0% | 34.1% |
+| `synth:cgb-raster` | 39.1% | 32.0% | 27.9% |
+| `synth:dmg-raster` | 28.0% | 22.9% | 20.0% |
+| `synth:event-storm` | 30.0% | 24.5% | 21.4% |
+| `blargg/cpu_instrs` | 25.7% | 21.0% | 18.3% |
+
+What the extrapolation leaves out: 480 MHz needs VOS0 (LDO supply; not
+possible on this board as built) and more flash wait states, which slows
+the part of the core still in flash; 550 MHz is the STM32H735, a different
+chip, where all of gbc-core is in a 128 KiB ITCM (so the plain tile path
+is too, which should make it faster than these figures, not slower). No
+front-end work (LCD, audio, input) is in any of these numbers.
+
+**The ITCM set does not fit 64 KiB.** In the firmware ELF its functions
+are 68,832 B (`check-itcm-set.sh` reports 69,078 B on the rlib, against a
+57,344 B budget); the 55 KB figures under "Dev board: NUCLEO-H753ZI" below
+are older than the current set. `tools/h7-bench` drops the
+tier the list names first, the plain tile path (8,078 B), and then fills
+64,664 of the 65,280 B it uses with 61,284 B of gbc-core, the memory
+routines and 89 long-branch thunks: nothing is left for front-end ISRs. A
+Stage 2 front end on an H753/H755 must drop more.
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce
@@ -957,8 +1039,12 @@ about 10+ CPU cycles at 480 MHz before bus latency. The H753 L1 I-cache is
 **Totals.** gbc-core `.text` 94,960 B (all `.text*` sections, 224
 functions, 54 of them `#[cold]` in `.text.unlikely.*`, 15,696 B),
 `.rodata` 3,865 B. `run` + `execute_cb` = 24,512 + 6,892 = 31,404 B.
-(Since then `.text` is 97,136 B; the set is 55,072 B, 64 globs, margin
-2,272 B. `check-itcm-set.sh` prints the current figures.)
+(Since then the set has outgrown the budget: 69,078 B in 53 globs on
+2026-11-24, 11,734 B over 57,344 B and over the 64 KiB ITCM itself.
+`check-itcm-set.sh` prints the current figures; "Measured on a Cortex-M7"
+above has what the H755 build did about it. The table and the placement
+below are the 2026-11-24 morning state and are kept for the tiers and the
+method, not for the sizes.)
 
 **The ITCM set** (`perf/itcm-sections.txt`, 63 globs, 68 functions at the
 time of the table), by tier:
@@ -1115,8 +1201,8 @@ are 31,404 B now. With the interpreter in ITCM, its I-cache footprint (the
 M2 "2.6x the I-cache" concern) no longer matters, because TCM fetches
 bypass the cache. On the final chip the whole core is in ITCM and the
 binding constraint is the total, 97,136 of 122,880 B, which
-`check-code-size.sh` gates. On the H753 the set total (55,072 of
-57,344 B) is reported, not gated.
+`check-code-size.sh` gates. On the H753 the set total (69,078 B against a
+57,344 B budget on 2026-11-24: over) is reported, not gated.
 
 ## Build flags
 

@@ -7,8 +7,9 @@ the results on the ST-LINK virtual COM port. The figures replace the x86
 instruction-count proxy of `docs/perf.md` (the bar: 50% of the CPU in the
 worst case).
 
-**Status: built, never run on hardware.** Everything under "Board facts" comes
-from ST's documents, not from a board. Flash the selftest image first.
+**Status: measured on the board, 2026-11-24.** All three placements run at
+both clocks and reproduce the PC's hashes; see "Results". The selftest image
+is still the one to flash first on a board that has not run this before.
 
 Not part of the root workspace: `cargo build` at the repo root does not see
 it.
@@ -37,25 +38,26 @@ Built 2026-11-24 (bytes; `build.sh` prints the current figures):
 
 | Image | `.bin` | `.itcm` | `.text` (flash) | `.rodata` | DTCM (`.dtcm_rodata` + `.bss`) | AXI SRAM |
 |---|---|---|---|---|---|---|
-| `selftest` | 8,796 | - | 7,040 | 1,092 | - | 4 |
-| `bench-flash-axi` | 327,024 | - | 124,592 | 201,768 | - | 50,996 + 58,368 |
-| `bench-flash-dtcm` | 327,152 | - | 124,720 | 199,464 | 2,304 + 50,996 | 58,368 |
-| `bench-itcm-dtcm` | 328,272 | 64,224 | 61,616 | 199,464 | 2,304 + 50,996 | 58,368 |
+| `selftest` | 9,560 | - | 7,588 | 1,308 | - | 4 |
+| `bench-flash-axi` | 329,328 | - | 126,716 | 201,944 | - | 50,996 + 58,368 |
+| `bench-flash-dtcm` | 329,504 | - | 126,892 | 199,640 | 2,304 + 50,996 | 58,368 |
+| `bench-itcm-dtcm` | 330,552 | 64,664 | 63,280 | 199,640 | 2,304 + 50,996 | 58,368 |
 
 `.rodata` is mostly the five ROM images (192 KiB). The stack starts at the
-top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`.
+top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
+use measured is 2,952 B (the `stack used=` line).
 
-**The ITCM set of `perf/itcm-sections.txt` no longer fits 64 KiB**: its
-functions are 68,358 B in this build (docs/perf.md still says 55 KB). The
-build therefore leaves the tier the file names "first to drop" in flash, the
-plain tile path (`Renderer::render`, `fill_tiles`, 8,078 B);
-`H7_BENCH_ITCM_DROP` chooses other tiers by a substring of their `# Tier`
-header. In ITCM now: 110 gbc-core functions (60,810 B), the memory routines
-they call (`__aeabi_memcpy*`, `__aeabi_memclr*`, `__aeabi_memset*`), and the
-linker's long-branch thunks to flash; 64,224 of 65,280 B (ITCM is used from
-0x100, so nothing sits at address 0). Five globs match nothing in the ELF
-because the linker removed the functions as unused (`run_frame`,
-`run_cycles`, `halt_begin`, `halt_end`, `idle_halted`).
+**The ITCM set of `perf/itcm-sections.txt` does not fit 64 KiB**: its
+functions are 68,832 B in this build. The build therefore leaves the tier
+the file names "first to drop" in flash, the plain tile path
+(`Renderer::render`, `fill_tiles`, 8,078 B); `H7_BENCH_ITCM_DROP` chooses
+other tiers by a substring of their `# Tier` header. In ITCM now: 101
+gbc-core functions (61,284 B), the memory routines they call
+(`__aeabi_memcpy*`, `__aeabi_memclr*`, `__aeabi_memset*`), and the linker's
+long-branch thunks to flash; 64,664 of 65,280 B (ITCM is used from 0x100,
+so nothing sits at address 0). Five globs match nothing in the ELF because
+the linker removed the functions as unused (`run_frame`, `run_cycles`,
+`halt_begin`, `halt_end`, `idle_halted`).
 
 Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 0x100 whose load address is in flash, which only the `.bin` flattens.
@@ -93,11 +95,12 @@ peripherals, so nothing in `src/board.rs` is covered by it.
 ./flash.sh out/selftest.bin
 ```
 
-It copies the `.bin` to the ST-LINK mass-storage drive (`/mnt/e`, label
-`NOD_H755ZIQ`), which programs it at 0x0800_0000 and resets the target. It
-checks the image's vectors, the drive's label and files first, and reports
-the `FAIL.TXT` the drive writes on an error. The M4 stub cannot be flashed
-this way.
+It copies the `.bin` to the ST-LINK mass-storage drive (`E:`, mounted at
+`/mnt/e`, label `NOD_H755ZIQ`) with a native Windows `copy`; the drive
+programs it at 0x0800_0000 and resets the target. It checks the image's
+vectors, the drive's label and files first, and reports the `FAIL.TXT` the
+drive writes on an error. Close the serial port first. The M4 stub cannot
+be flashed this way.
 
 ## Read the output
 
@@ -112,9 +115,13 @@ h7bench v1 banner board=NUCLEO-H755ZI-Q image=selftest placement=flash-axi clock
 h7bench v1 power cr3=0x........ csr1=0x........ d3cr=0x........ actvosrdy=1 supply=direct-smps
 h7bench v1 clock rcc_cr=0x........ cfgr=0x........ d1cfgr=0x........ flash_acr=0x.. rsr=0x........
 h7bench v1 cpu cpuid=0x411fc27. idcode=0x........ icache=1 dcache=1 cyccnt=1 itcm_bytes=0 dtcm_table_bytes=0
+h7bench v1 tcm itcmcr=0x3b dtcmcr=0x43 at_init=0x3b,0x43 msp=0x2403ff60
 h7bench v1 dualcore optsr=0x........ bcm7=1 bcm4=1 boot_c2=0
-h7bench v1 selftest n=0 delay=8000000 cycles=<about 4 to 12 million, the same on every line> cyccnt=...
+h7bench v1 selftest n=0 delay=8000000 cycles=8000020 cyccnt=... stack_used=368
+h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
 ```
+
+`cycles=` is 8,000,008 to 8,000,020 on this board, at both clocks.
 
 Expected, bench (the workloads run once, about a minute at 64 MHz; then the
 whole report repeats every 3 s forever):
@@ -125,6 +132,7 @@ h7bench v1 start worst-case calls=120
 h7bench v1 worst-case calls=120 frames=... clocks=... min=... mean=... max=... hash=................
 ...
 h7bench v1 cpu_instrs calls=600 frames=... clocks=... min=... mean=... max=... hash=................
+h7bench v1 stack used=2952 of=77772
 h7bench v1 end pass=1
 ```
 
@@ -253,23 +261,97 @@ cannot connect, `FAIL.TXT` on the drive):
 3. Power-cycle (unplug USB) after any recovery: `PWR_CR3` only resets on a
    power-on reset.
 
-## What is not verified without hardware
+## Results (2026-11-24, this board)
 
-In order of risk: the supply configuration on this board's actual solder
-bridges; `__pre_init` running before any RAM access on real silicon; the
-UART pins and baud rate; the cycle counter enable sequence (DWT lock
-register); cache enable with this memory layout; the ITCM copy and ITCM-to-flash
-thunks on the real ITCM (they pass on QEMU with a stand-in region); the
-M4's lockup being harmless as analysed; phase B
-(voltage scale, PLL, flash latency), which no build step can check at all;
-`flash.sh` and `read-serial.sh`, which were written and never run.
+CPU cycles per frame-sized `run_until` call, mean / max over the calls of
+each workload (120; cpu_instrs 600). Every run printed the hashes of
+`expected-hashes.txt`. Core at `main` bcd881e plus this crate.
 
-## Flashing order
+64 MHz HSI (`hsi64`: VOS3, flash 7 wait states, AXI clock = CPU clock):
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` |
+|---|---|---|---|
+| worst-case | 4,268,540 / 4,318,514 | 4,269,141 / 4,316,296 | 3,093,762 / 3,130,103 |
+| cgb-raster | 2,733,452 / 2,785,631 | 2,812,219 / 2,861,092 | 2,523,885 / 2,562,492 |
+| dmg-raster | 2,128,850 / 2,160,853 | 2,115,847 / 2,144,013 | 1,814,678 / 1,836,588 |
+| event-storm | 2,137,949 / 2,165,333 | 2,182,405 / 2,200,172 | 1,951,620 / 1,966,095 |
+| cpu_instrs | 1,407,257 / 1,945,378 | 1,388,040 / 1,930,482 | 1,210,401 / 1,683,198 |
+
+392 MHz PLL (`pll392`: VOS1, flash 2 wait states, AXI clock = CPU clock / 2):
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` |
+|---|---|---|---|
+| worst-case | 4,444,323 / 4,496,832 | 4,383,420 / 4,435,230 | 3,100,670 / 3,137,337 |
+| cgb-raster | 2,754,115 / 2,806,027 | 2,804,392 / 2,850,104 | 2,530,564 / 2,569,295 |
+| dmg-raster | 2,183,739 / 2,216,313 | 2,150,011 / 2,179,232 | 1,815,665 / 1,837,309 |
+| event-storm | 2,153,336 / 2,178,869 | 2,195,649 / 2,213,436 | 1,952,834 / 1,967,362 |
+| cpu_instrs | 1,418,142 / 1,965,786 | 1,398,842 / 1,951,152 | 1,210,549 / 1,683,911 |
+
+- A frame at 392 MHz is 6,563,140 cycles (59.7275 Hz). The worst case in
+  `itcm-dtcm` takes 47.2% of it on average and 47.8% at most, under the 50%
+  bar; from flash it takes 67 to 69%.
+- The hot set in ITCM is 1.38x (hsi64) to 1.41x (pll392) faster than flash
+  on the worst case and 1.11x to 1.18x on the other workloads, with the
+  plain tile path still in flash. DTCM against AXI SRAM for the data makes
+  under 3% either way.
+- `itcm-dtcm` costs the same number of cycles at both clocks (within
+  0.3%): what it leaves in flash and AXI SRAM hardly matters. The flash
+  placements cost up to 4% more cycles at 392 MHz.
+- Runs are exactly repeatable: a second flash of `bench-itcm-dtcm-pll`
+  printed the same cycle counts to the last digit.
+
+docs/perf.md "Measured on a Cortex-M7" relates these to the x86 instruction
+counts and to the final chip.
+
+## What the first hardware runs found
+
+- **The DTCM images died in the startup code.** `.axisram` was inserted
+  `AFTER .bss` (build.rs). cortex-m-rt takes `__ebss` from the location
+  counter after that point, so with `.bss` in DTCM and `.axisram` in AXI
+  SRAM the zeroing loop ran from DTCM towards 0x2400_0000 and took a bus
+  fault at the end of DTCM (HardFault, IMPRECISERR, PC in `Reset`). The
+  AXI-only image merely zeroed more than it needed; QEMU's RAM is
+  contiguous. Fixed by inserting the section after `.got`; `build.sh` now
+  checks that `__sdata`..`_stack_start` are ordered and inside RAM (seen
+  failing on the old script).
+- The fault was silent because the handler used the stack it was given and
+  a UART that `init` had not set up yet. The HardFault entry now switches
+  to its own stack (top of AXI SRAM) and the fault path sets up LEDs and
+  UART itself, then prints `h7bench v1 FAULT hardfault sp= exc_return=
+  frame= pc= lr= cfsr= hfsr= bfar= mmfar=` once a second.
+- ITCM and DTCM are enabled at reset on this part (`ITCMCR` = 0x3b,
+  `DTCMCR` = 0x43: EN and RMW set; the banner's `tcm` line), and the
+  selftest's `tcmprobe` line writes and reads back a word in each.
+- The supply write, the UART, the cycle counter, the caches, the ITCM copy
+  and thunks and the 392 MHz clock tree all worked as written (`cr3` reads
+  0x00010044, `actvosrdy=1`; at 392 MHz `d3cr=0x0000e000`,
+  `cfgr=0x0000001b`, `flash_acr=0x22`).
+- Flashing: a `cp` through the WSL mount is unreliable for the bench
+  images, hence the native copy in `flash.sh`. The ST-LINK accepted one
+  copy and never programmed it while a program held the COM port open.
+  After a flash the first lines read are often the previous image's last
+  ones (buffered in the ST-LINK), so read for a few seconds and trust the
+  lines after the new banner.
+
+## Still not verified
+
+- The supply write after a power cycle with this firmware in flash:
+  `PWR_CR3` is write-once per power-on, and these notes do not record
+  whether the board was power-cycled between runs.
+- That the Cortex-M4 sitting in lockup has no effect (nothing suggests one:
+  the cycle counts repeat exactly).
+- `m4-stub`: built, never flashed.
+- The 400 MHz limit itself: the board ran at 392 MHz from the HSI, whose
+  exact frequency was not measured (the UART at 115200 baud works at both
+  clocks, which bounds the error to a few percent).
+
+## Flashing order on a board that has not run this
 
 1. `selftest.bin`: LD1 on then toggling at 1 Hz, LD2 on, banner with
    `supply=direct-smps actvosrdy=1 icache=1 dcache=1 cyccnt=1`, one
-   `selftest` line a second with a constant `cycles=`. Then unplug and
-   replug USB and check the same again (the real test of the supply write).
+   `selftest` line a second with a constant `cycles=`, and a `tcmprobe`
+   line whose three values are equal. Then unplug and replug USB and check
+   the same again (the real test of the supply write).
 2. `bench-flash-axi.bin`: the report lines; compare `calls`, `frames`,
    `clocks`, `hash` with `expected-hashes.txt`.
 3. `bench-flash-dtcm.bin`, then `bench-itcm-dtcm.bin`: same hashes, lower
