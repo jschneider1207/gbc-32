@@ -179,7 +179,9 @@ channels on); 427.0k with the second `apu_sync` entry (from
 recorded. (b) APU register writes: 731.1 Ir per write (`synth:apu-writes`
 103,354,637 minus `@hram` 91,355,345, over 16,411 `write_apu` calls): the
 control now pays the doubled window cost too. `synth:worst-case` 2.630 M
-Ir/frame, APU share 652.7k. New figures are the human's (STATUS).
+Ir/frame, APU share 652.7k. **New budgets (human, 2026-11-25; ADR 0021
+amendment): (a) 450k Ir/frame, (b) <= 770 Ir per write**, both
+report-only; the split-budget paragraph above is superseded.
 
 **Output filter (ADR 0035, 2026-11-24).** The output is now 64-clock
 window sums and an 8-tap FIR at half rate instead of 128-clock averages

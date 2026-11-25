@@ -138,8 +138,8 @@ Open (M10, session 18):
   (ADR 0035). Re-measured session 19 (docs/perf.md "Re-measured"):
   (a) 402.8k Ir/frame (427.0k counting both `apu_sync` entries; the old
   224.1k's method is ambiguous on that), (b) 731.1 Ir per write (under
-  950). Agent proposal: (a) 450k, (b) keep 950 or tighten to 770.
-  Report-only today.
+  950). DECIDED (human, 2026-11-25): (a) 450k, (b) 770 (ADR 0021
+  amendment). Report-only. Remove this item at the next STATUS rewrite.
 - **Costs of the filter beyond the worst case** (told to the human, no
   answer needed unless they object): apu-writes +33.6%, halt-irq +14.6%,
   cgb-acid2 +10.6%. The filter saturates to i16 (unity gain kept; only a

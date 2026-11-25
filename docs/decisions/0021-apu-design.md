@@ -643,3 +643,11 @@ amendment's bound: the samples can ring past ±30,720, and a DC blocker's
 output reaches up to ±65,535. The rate, the buffer contract, DC kept,
 sections 9 and 10 (the restart keeps "silence = constant samples"; the
 blind spot for periods that divide 128 clocks is the same) stand.
+
+### 2026-11-25: APU budget re-set after the output filter (human)
+Measured at c07fb77 (docs/perf.md "Re-measured (session 19)"): (a)
+channels and mixing 402.8k Ir/frame (427.0k with both `apu_sync`
+entries), (b) 731.1 Ir per APU register write. The human set (a) to
+**450k Ir/frame** (was 230k) and tightened (b) to **<= 770 Ir per write**
+(was 950). Both stay report-only; `synth:worst-case` <= 4.02 M Ir/frame
+remains the gating bound.
