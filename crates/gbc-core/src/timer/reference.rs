@@ -170,21 +170,23 @@ impl Timer {
     /// Writing DIV clears the whole counter. If the selected bit was 1,
     /// that is a falling edge and TIMA increments. Returns the bits that
     /// fell (they clock the serial port too).
-    /// Before STOP's DIV reset with nothing pending: a timer bit that
-    /// rises during STOP's second byte also counts as falling, except the
-    /// 4 kHz one (AGE resets DIV after the second byte, with the CGB B/C
-    /// "speed change glitch"; ADR 0020, [`super::Timer::stop_edge`]).
-    pub(crate) fn stop_edge(&mut self) {
-        let b = self.tima_bit;
-        if b & 0xA8 != 0 && self.counter & (2 * b - 1) == b - 4 {
-            self.increment();
-        }
+    pub(crate) fn write_div(&mut self) -> u16 {
+        self.div_reset(false)
     }
 
-    pub(crate) fn write_div(&mut self) -> u16 {
+    /// The DIV reset of a two-byte STOP ([`super::Timer::stop_div`]):
+    /// the 4 kHz timer's bit, risen on exactly this M-cycle, doesn't
+    /// count as falling (AGE, CGB B/C "speed change glitch"; ADR 0020).
+    pub(crate) fn stop_div(&mut self) -> u16 {
+        self.div_reset(true)
+    }
+
+    fn div_reset(&mut self, stop: bool) -> u16 {
         let fell = self.counter;
         self.counter = 0;
-        if fell & self.tima_bit != 0 {
+        let b = self.tima_bit;
+        let glitch = stop && b == 0x200 && fell & (2 * b - 1) == b;
+        if fell & b != 0 && !glitch {
             self.increment();
         }
         fell

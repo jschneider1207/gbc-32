@@ -97,11 +97,14 @@ mod tests {
         /// doesn't tick the timer, then (CGB B/C) the held DIV reset, one
         /// more at the new speed (`Ctx::speed_switch`).
         fn stop(&mut self, switch: bool) {
-            // With nothing pending, STOP is two bytes.
-            if self.ie & self.iflags == 0 {
-                self.timer.stop_edge();
-            }
-            let fell = self.timer.write_div();
+            // With nothing pending, STOP is two bytes (its second isn't
+            // run here: the reset is on the same M-cycle). The switch
+            // is the pending kind whatever IE & IF say.
+            let fell = if !switch && self.ie & self.iflags == 0 {
+                self.timer.stop_div()
+            } else {
+                self.timer.write_div()
+            };
             self.clock_serial(fell);
             if switch {
                 self.mcycle = if self.mcycle == 4 { 2 } else { 4 };
@@ -461,6 +464,7 @@ mod tests {
                 crate::cpu::Bus::idle(&mut self.ctx);
             }
             if !switch {
+                crate::cpu::Bus::stop_enter(&mut self.ctx);
                 // STOP mode stops the counter: for the eager model, whose
                 // M-cycles are its counter's ticks, no time passes (after
                 // its DIV reset, below). Mostly ended on the same clock (a
@@ -729,11 +733,8 @@ mod tests {
                         1 => t.write_tac(now, v & 7),
                         2 => t.write_tima(now, v),
                         3 => *r = t.write_div(now),
-                        // STOP: the edge, then the DIV reset schedules.
-                        4 => {
-                            t.stop_edge(now);
-                            *r = t.write_div(now);
-                        }
+                        // A two-byte STOP's DIV reset.
+                        4 => *r = t.stop_div(now),
                         5 => t.speed_switch(now, pause, short),
                         _ => {}
                     }
@@ -845,15 +846,14 @@ mod tests {
             let mut t = ctx.sys.timer;
             t.catch_up(now + 3);
             assert_eq!(t.reloaded_at, now + 3);
-            // The next overflow: 16 edges of 16 clocks, the first one 4
-            // clocks later with the DIV reset held (IME off).
-            assert_eq!(t.overflow_at, now + if ime { 255 } else { 259 });
+            // The next overflow: 16 edges of 16 clocks, whatever IME is.
+            assert_eq!(t.overflow_at, now + 255);
             let mut tima = [0; 5];
             for v in &mut tima {
                 *v = read::<true>(ctx.mem, ctx.sys, &ctx.hot, 0xFF05);
                 ctx.idle();
             }
-            let f1_from = if ime { 3 } else { 4 };
+            let f1_from = 3;
             for (i, v) in tima.into_iter().enumerate() {
                 assert_eq!(v, if i < f1_from { 0xF0 } else { 0xF1 }, "ime {ime} +{i}");
             }

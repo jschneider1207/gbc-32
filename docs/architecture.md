@@ -610,7 +610,8 @@ holds HBlank transfers (`vdma_halt`, `vdma_wake`, `Bus::wake_stalls`).
 ### STOP and the speed switch (ADR 0020)
 
 `bus/stop.rs`. STOP with a selected button held does nothing. Otherwise
-it resets DIV, and then either enters STOP mode (`stop_freeze`: the
+it resets DIV after its last byte (the second, when nothing is pending;
+AGE's model, verified on CGB B/C), and either enters STOP mode (`stop_freeze`: the
 system counter and its deadlines freeze, frames and samples keep their
 rate, frames are black unless the STOP was in mode 3; `stop_wake` ends
 it on a button) or, with KEY1 armed in CGB mode, switches speed.

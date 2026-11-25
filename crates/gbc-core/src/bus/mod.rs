@@ -964,16 +964,22 @@ impl Bus for Ctx<'_, '_> {
 
     /// SameBoy `stop()`: a button held on a selected P1 line ends STOP at
     /// once, with no DIV reset and no speed switch (Pan Docs: "Using the
-    /// STOP instruction"). Otherwise STOP resets DIV (Pan Docs: FF04).
+    /// STOP instruction"). Otherwise STOP resets DIV (Pan Docs: FF04)
+    /// after its last byte: here if this M-cycle is it, else in
+    /// [`Ctx::speed_switch`] or [`Ctx::stop_enter`].
     fn stop_begin(&mut self) -> StopKind {
         if p1_lines(self.sys.buttons, self.sys.joyp_select) != 0x0F {
             return StopKind::Joypad;
         }
-        self.stop_div_reset();
         if self.sys.cgb_mode && self.sys.key1 & 0x01 != 0 {
+            // DIV resets after STOP's last byte (`Ctx::speed_switch`).
             StopKind::Switch
         } else {
-            self.stop_freeze();
+            self.stop_screen();
+            if self.sys.ie & self.sys.iflags != 0 {
+                // One byte: this M-cycle is STOP's last.
+                self.stop_freeze(false);
+            }
             StopKind::Stop
         }
     }

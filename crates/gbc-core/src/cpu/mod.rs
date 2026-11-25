@@ -178,8 +178,10 @@ pub trait Bus {
     fn event(&mut self, event: Events) {
         let _ = event;
     }
-    /// STOP was executed, at the end of its fetch M-cycle. Free: the
-    /// emulator resets DIV here unless the result is `StopKind::Joypad`.
+    /// STOP was executed, at the end of its fetch M-cycle. Free. Unless
+    /// the result is `StopKind::Joypad`, the emulator resets DIV after
+    /// STOP's last byte: here, or in [`Bus::speed_switch`] or
+    /// [`Bus::stop_enter`] after the second.
     fn stop_begin(&mut self) -> StopKind {
         StopKind::Stop
     }
@@ -220,8 +222,8 @@ pub trait Bus {
         0xFF
     }
     /// STOP mode was entered (`StopKind::Stop`), after STOP's second
-    /// byte (if read). Free. The emulator pauses OAM DMA and HDMA here;
-    /// it stopped the timer in [`Bus::stop_begin`].
+    /// byte (if read). Free. The emulator pauses OAM DMA and HDMA here,
+    /// and stops the timer (a one-byte STOP's: in [`Bus::stop_begin`]).
     fn stop_enter(&mut self) {}
     /// One step of a CPU in STOP mode. If a selected P1 line is low, STOP
     /// mode ends: this returns true without an M-cycle (the emulator

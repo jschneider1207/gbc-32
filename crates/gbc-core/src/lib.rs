@@ -2105,15 +2105,12 @@ mod tests {
             0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40, 0xE0, 0x4D, 0x10, 0x00, 0x40,
         ];
         let emu = with_program(&program, 0x80);
-        // SameBoy `stop()`: STOP's fetch (20-24, DIV reset at its end),
-        // its second byte (24-28), then the switch. The halt is 0x20008
-        // T-cycles (0x8002 M-cycles) by the timer; the PPU is frozen for
-        // the first 5 (`speed_switch_freeze`), so it sees 0x8001
-        // double-speed M-cycles (the last the wake-up), then LD B,B's
-        // fetch. The timer counts 0x20008 T-cycles from the DIV reset to
-        // the end of LD B,B: none for the second byte (`timers_run`
-        // returns while `stopped`), 4 fewer for the held DIV reset (IME
-        // off: `div_cycles = -4`), 4 more for LD B,B.
+        // STOP's fetch (20-24), its second byte (24-28, DIV reset at
+        // its end: AGE `execute_stop`), then the switch. The halt is
+        // 0x8001 double-speed M-cycles (the last the wake-up; SameBoy
+        // `stop()`: 0x20008 T-cycles, the PPU frozen for the first 5),
+        // then LD B,B's fetch. The timer counts all of it from the DIV
+        // reset to the end of LD B,B: 0x20008 T-cycles.
         assert_eq!(to_ld_b_b(emu), (28 + 0x8001 * 2 + 2, 0x107, 0x0008));
         assert_eq!(emu.hw.sys.hot.speed(), Speed::Double);
         assert_eq!(emu.peek(0xFF4D) & 0x81, 0x80, "double speed, disarmed");
@@ -2128,12 +2125,14 @@ mod tests {
     }
 
     #[test]
-    fn speed_switch_with_ime_on_does_not_hold_the_div_reset() {
+    fn speed_switch_timer_is_the_same_with_ime_on() {
         // EI first: the same switch as above, one M-cycle later, and the
-        // timer is 4 T-cycles further on (no `div_cycles = -4`).
+        // same timer: DIV resets after STOP's second byte whatever IME
+        // is (AGE `gb_bus::execute_stop`, verified on CGB B/C; SameBoy,
+        // modelling CGB E, has the timer 4 T-cycles further on here).
         let program = [0xFB, 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, 0x40];
         let emu = with_program(&program, 0x80);
-        assert_eq!(to_ld_b_b(emu), (32 + 0x8001 * 2 + 2, 0x108, 0x000C));
+        assert_eq!(to_ld_b_b(emu), (32 + 0x8001 * 2 + 2, 0x108, 0x0008));
     }
 
     /// TIMA after a switch to double speed whose STOP fetch ends `nops`
@@ -2153,11 +2152,13 @@ mod tests {
 
     #[test]
     fn stop_div_reset_counts_a_timer_bit_rising_during_the_second_byte() {
-        // The counter is 4 * (nops + 2) at the end of STOP's fetch (our DIV
-        // reset); AGE resets it 4 later, after the second byte (ADR 0020).
-        // 262 kHz (bit 3): at 8 and 12 the bit is set (an increment); at 16
-        // it just fell (a plain edge); at 20 it rises during the byte and
-        // falls at AGE's reset (both); at 24 it fell and is set again.
+        // The counter is 4 * (nops + 2) at the end of STOP's fetch and 4
+        // more at the DIV reset, after the second byte (AGE
+        // `gb_bus::execute_stop`; ADR 0020).
+        // 262 kHz (bit 3): at 8 and 12 the bit is set at the reset (an
+        // increment); at 16 it fell during the byte (a plain edge) and
+        // is clear; at 20 it rises during the byte and falls at the
+        // reset (both); at 24 it fell and is set again.
         let t: [u8; 5] = core::array::from_fn(|n| tima_after_switch(0x05, n));
         let d = t.map(|v| v.wrapping_sub(t[0]));
         assert_eq!(d, [0, 0, 0, 1, 1], "262 kHz {t:?}");
@@ -2265,6 +2266,7 @@ mod tests {
             (bits, next.map_or(u64::MAX, |v| s.timer.clock_at(v)))
         };
         let mut seen = [false; 2];
+        let mut seen_early = [false; 2];
         for pad in 0..4 {
             let mut program = vec![
                 0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00, // LD A,01; LDH (4D),A; STOP 00
@@ -2290,6 +2292,16 @@ mod tests {
             let ff = next <= s + 4;
             seen[usize::from(ff)] = true;
             assert!(bits < 6, "pad {pad}");
+            // The clock bit falls every 4 clocks: once in STOP's two
+            // M-cycles, at the end of its fetch (`early`) or of its
+            // second byte, where DIV resets. After an early fall the bit
+            // has just risen at the reset and falls again there (two
+            // toggles: one shift, the flip-flop as before); otherwise
+            // the reset is the one fall (a shift iff the flip-flop was 1).
+            let early = (if ff { next } else { next - 4 }) == s + 2;
+            seen_early[usize::from(early)] = true;
+            let shifted = early || ff;
+            let ff = ff != early;
             // STOP: fetch, second byte, the switch, the halt's 3 odd clocks.
             let _ = emu.step(&mut fb, &mut []);
             let now = s + 4;
@@ -2297,6 +2309,7 @@ mod tests {
                 (emu.clock(), emu.hw.sys.hot.speed()),
                 (now + 3, Speed::Normal)
             );
+            let bits = bits + u8::from(shifted) - u8::from(ff);
             assert_eq!(progress(emu).0, bits + u8::from(ff), "pad {pad}");
             let mut shifts = std::vec::Vec::new();
             let mut last = progress(emu).0;
@@ -2318,6 +2331,7 @@ mod tests {
             assert_eq!(emu.peek(0xFF0F) & 0x08, 0x08);
         }
         assert_eq!(seen, [true; 2], "both flip-flop phases");
+        assert_eq!(seen_early, [true; 2], "both clock-bit phases");
     }
 
     /// Runs a CGB program that enables the window (WX = `wx`, WY = FF,
@@ -2810,9 +2824,12 @@ mod tests {
     fn stop_mode_holds_a_tima_reload_in_flight() {
         // TMA = 12, TAC = 05, TIMA = FF, then STOP, at the four phases of
         // the 16-clock timer period. Where the overflow (or the DIV
-        // reset's glitch increment) falls on STOP's reset, cycle A is held
-        // with the counter: TIMA reads 00 and the interrupt waits until
-        // one M-cycle after the wake-up.
+        // reset's glitch increment) falls on STOP's reset, after its
+        // second byte, cycle A is held with the counter: TIMA reads 00
+        // and the interrupt waits until one M-cycle after the wake-up.
+        // In the other two the overflow is before the reset: on the
+        // TIMA write's M-cycle, or at the end of STOP's fetch (reloaded
+        // at the reset).
         let mut held = 0;
         for pad in 0..4 {
             let mut rest = vec![0x3E, 0x12, 0xE0, 0x06, 0x3E, 0x05, 0xE0, 0x07];
@@ -2832,7 +2849,7 @@ mod tests {
             assert_eq!(emu.peek(0xFF0F) & 0x04, 4, "{pad}");
             assert!(matches!(emu.peek(0xFF05), 0x12 | 0x13), "{pad}");
         }
-        assert_eq!(held, 3);
+        assert_eq!(held, 2);
     }
     #[test]
     fn speed_switch_halt_pauses_oam_dma() {

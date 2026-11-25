@@ -16,12 +16,17 @@ impl Ctx<'_, '_> {
     // Out of line: measured with the other bus helpers as one batch, not
     // alone (docs/perf.md, "Small-state and attribute pass", A14).
     #[inline(never)]
-    pub(super) fn apu_div_reset(&mut self, old: u64) {
+    pub(super) fn apu_div_reset(&mut self, old: u64, stop: bool) {
         if !self.mem.apu.powered() {
             return;
         }
         let now = self.clock();
-        if old >> self.sys.timer.div_apu_bit() & 1 != 0 {
+        // The reset of a two-byte STOP on exactly the M-cycle the bit
+        // rose doesn't step (AGE `gb_sound::after_div_reset`, "sound
+        // STOP glitch", after gambatte's `speedchange*_ch2_nr52_*`): as
+        // the 4 kHz timer's (`Timer::stop_div`).
+        let b = 1u64 << self.sys.timer.div_apu_bit();
+        if old & b != 0 && !(stop && old & (2 * b - 1) == b) {
             self.apu_sync(now);
             self.mem.apu.step();
         }
@@ -316,6 +321,9 @@ mod tests {
             let edge = t.clock_at(((t.sc(ctx.clock()) >> k) + 1) << k);
             ctx.sys.sched.deadline(EventKind::DivApu) - edge
         };
+        // Not at clock 0: to single speed the counter runs from one
+        // clock before the switch.
+        crate::cpu::Bus::idle(&mut ctx);
         let mut lates = [0; 6];
         for l in &mut lates {
             assert!(crate::cpu::Bus::speed_switch(&mut ctx, false, false));

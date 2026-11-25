@@ -12,26 +12,10 @@ use crate::schedule::{EventKind, NEVER};
 use crate::{cpu::StopKind, joypad::p1_interrupt, timer::Timer};
 
 impl Ctx<'_, '_> {
-    /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
-    /// the TIMA edge of AGE's later reset ([`Timer::stop_edge`], ADR 0020).
-    ///
-    /// UNPINNED: spsw-div-reset-point (c): the reset is at the end of
-    /// STOP's fetch (SameBoy `enter_stop_mode`, CGB E); AGE (verified on
-    /// CGB B/C) has it after the second byte. No ROM tells by itself; the
-    /// change needs the human (ADR 0020; `docs/reference/speed-switch.md`).
-    /// UNPINNED: spsw-reset-edges (a): the serial clock's edge at this
-    /// reset, and the 4 kHz TIMA and frame-sequencer edges of a one-byte
-    /// STOP's reset, are the plain DIV-reset rule; no ROM covers them.
-    pub(super) fn stop_div_reset(&mut self) {
-        if self.sys.ie & self.sys.iflags == 0 {
-            let now = self.clock();
-            self.sys.timer.stop_edge(now);
-        }
-        self.div_reset();
-    }
-
-    /// STOP mode begins, at the end of STOP's fetch and after its DIV
-    /// reset (SameBoy `enter_stop_mode`; ADR 0020, STOP mode amendment).
+    /// STOP mode begins, after STOP's last byte (`two_bytes`: its
+    /// second), with its DIV reset (AGE `gb_bus::execute_stop`; SameBoy
+    /// `enter_stop_mode`; ADR 0020, STOP mode amendment and the
+    /// 2026-11-24 "follow AGE" amendment).
     ///
     /// - The system counter stops ([`Timer::freeze`]), and with it
     ///   everything clocked from it: TIMA, the serial bit clock and the
@@ -62,12 +46,21 @@ impl Ctx<'_, '_> {
     /// and TIMA around a STOP ended by a button would settle the counter.
     #[cold]
     #[inline(never)]
-    pub(super) fn stop_freeze(&mut self) {
+    pub(super) fn stop_freeze(&mut self, two_bytes: bool) {
+        self.div_reset_as(two_bytes);
         let now = self.clock();
         self.sys.timer.freeze(now);
         for kind in [EventKind::Timer, EventKind::Serial, EventKind::DivApu] {
             self.sys.sched.set(kind, NEVER);
         }
+    }
+
+    /// The screen of STOP mode, decided at the end of STOP's fetch
+    /// ([`Self::stop_freeze`]'s docs).
+    #[cold]
+    #[inline(never)]
+    pub(super) fn stop_screen(&mut self) {
+        let now = self.clock();
         // Synced, for `drawing` (as `write_palette_data`); reschedules.
         self.sync_ppu_to(now);
         let speed = self.hot.speed();
@@ -85,6 +78,10 @@ impl Ctx<'_, '_> {
     #[cold]
     #[inline(never)]
     pub(crate) fn stop_enter(&mut self) {
+        // A one-byte STOP stopped the counter in `stop_begin`.
+        if !self.sys.timer.frozen() {
+            self.stop_freeze(true);
+        }
         if self.hot.dma != 0 {
             self.dma_pause();
         }
@@ -141,29 +138,33 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// The CGB speed switch of a STOP ([`StopKind::Switch`]), after its second
-    /// byte if read; returns whether the CPU waits ([`Bus::speed_switch`]).
-    /// After SameBoy `stop()`
-    /// and `GB_advance_cycles` (MIT; ADR 0020 has the derivation):
+    /// The CGB speed switch of a STOP ([`StopKind::Switch`]), after its last
+    /// byte (the second, if read); returns whether the CPU waits
+    /// ([`Bus::speed_switch`]). `docs/reference/speed-switch.md` has the
+    /// source of each piece; ADR 0020 the derivations.
     ///
+    /// - DIV resets, here: after STOP's last byte (AGE
+    ///   `gb_bus::execute_stop`, Apache-2.0, read only; its `spsw-*` tests
+    ///   are verified on CGB B/C). The counter runs on from 0 through the
+    ///   switch (Pan Docs: FF4D - KEY1), whatever IME is.
     /// - KEY1 bit 0 clears and the speed toggles.
-    /// - Nothing pending: the CPU halts for 0x20008 T-cycles (0x8002
-    ///   M-cycles; `speed_switch_halt_countdown`) by the timer, which keeps
-    ///   running (Pan Docs: FF4D - KEY1). The rest of the machine is frozen
-    ///   for its first 5 T-cycles (`speed_switch_freeze`), so it sees
-    ///   0x8001 M-cycles at the new speed (exact to double speed, one clock
-    ///   long to single speed, where SameBoy itself avoids "odd mode"): the
-    ///   timer runs one M-cycle ahead, which cancels STOP's second byte,
-    ///   whose M-cycle it doesn't count (`timers_run` returns while
-    ///   `stopped`). An interrupt ends the halt early. OAM DMA is paused
-    ///   through it (`GB_dma_run` returns while `halted`), as in HALT.
-    /// - An interrupt pending: no halt; to double speed the next two
-    ///   M-cycles take 6 clocks for the PPU (one more M-cycle here, which
-    ///   the timer doesn't count).
-    /// - IME off: the timer starts 4 T-cycles late (`enter_stop_mode`:
-    ///   `div_cycles = -4`, the DIV reset held). On CGB B/C the same hold
-    ///   applies with an interrupt pending and IME on (below; SameBoy,
-    ///   modelling CGB E, has none there).
+    /// - Nothing pending: the CPU halts for 0x8001 M-cycles at the new
+    ///   speed, the last the wake-up (SameBoy `stop()`,
+    ///   `GB_advance_cycles`: `speed_switch_halt_countdown = 0x20008`
+    ///   T-cycles less the 5 of `speed_switch_freeze`; AGE: 0x8000 and the
+    ///   CGB's halt-exit M-cycle), one clock less to single speed (below).
+    ///   An interrupt ends the halt early. OAM DMA is paused through it
+    ///   (`GB_dma_run` returns while `halted`), as in HALT.
+    /// - An interrupt pending (STOP is one byte): no halt; to double speed
+    ///   the next two M-cycles take 6 clocks for the PPU (SameBoy
+    ///   `speed_switch_countdown = 6`: one more M-cycle here, which the
+    ///   timer doesn't count), and the timer starts 4 T-cycles late (the
+    ///   `holds` table below).
+    ///
+    /// UNPINNED: spsw-div-reset-point (c): the reset is after STOP's last
+    /// byte (AGE, verified on CGB B/C); SameBoy (CGB E) has it at the end
+    /// of the fetch. With IME off the two give the same counter; no ROM
+    /// tells them apart by itself (ADR 0020, human 2026-11-24).
     ///
     /// # Order (ADR 0020, 2026-11-24 amendment)
     /// The speed is an input to every lazily evaluated component and to
@@ -195,6 +196,10 @@ impl Ctx<'_, '_> {
     /// a point, and only points that raise an interrupt or end a line or
     /// frame are deadlines).
     pub(super) fn speed_switch(&mut self, ime: bool, pending: bool) -> bool {
+        // No part of the switch depends on IME (the `holds` table).
+        let _ = ime;
+        // With the old speed's rules, as every DIV reset.
+        self.div_reset_as(!pending);
         let now = self.clock();
         let to = self.hot.speed().toggled();
         let m = to.mcycle();
@@ -224,21 +229,36 @@ impl Ctx<'_, '_> {
         self.hot.set_speed(to);
         // (Sets the Ppu deadline for the new walk too: step 3's.)
         self.ppu_speed_changed();
-        // The held DIV reset (4 T-cycles): with IME off (SameBoy), and on
-        // CGB B/C also with an interrupt pending. AGE `spsw-interrupts`
-        // (pending, IME on, both directions): the first DIV increment and
-        // the 16 kHz TIMA increment after the switch come one M-cycle
-        // later on CGB B/C (`OFS_B`, verified on CPU CGB B and C) than on
-        // CGB E, which SameBoy's model (no hold with IME on) matches.
-        // UNPINNED: spsw-ime-on-timer (c): IME on with nothing pending has
-        // no hold (SameBoy, CGB E, "I don't trust this if"); AGE's model
-        // leaves the timer 4 T-cycles later. No ROM decides it: `ei`, a
-        // two-byte switch with IE = 0, then a DIV or 262 kHz TIMA read
-        // would (`docs/reference/speed-switch.md`; with the human).
-        let mut freeze = if ime && !pending { 0 } else { 4 };
-        if pending && to.is_double() {
-            freeze += 4;
-        }
+        // T-cycles (at the new speed) the counter waits before it runs
+        // on from the reset's 0:
+        //
+        // | pending | to     | hold | source                             |
+        // |---------|--------|------|------------------------------------|
+        // | no      | either | 0    | AGE: reset after the second byte   |
+        // | yes     | single | 4    | AGE `spsw-interrupts` (CGB B/C)    |
+        // | yes     | double | 4+4  | the same, and SameBoy's idle       |
+        // |         |        |      | M-cycle, which the timer skips     |
+        //
+        // IME changes no row. (SameBoy, modelling CGB E, holds the reset
+        // of a two-byte STOP 4 T-cycles with IME off, from a reset one
+        // M-cycle earlier: the same counter as row 1.) AGE
+        // `spsw-interrupts` (pending, IME on, both directions): the
+        // first DIV increment and the 16 kHz TIMA increment after the
+        // switch come one M-cycle later on CGB B/C (`OFS_B`, verified on
+        // CPU CGB B and C) than on CGB E; AGE runs an M-cycle before a
+        // pending STOP's reset too.
+        // UNPINNED: spsw-ime-on-timer (c): IME on with nothing pending is
+        // row 1 (AGE's model, verified on CGB B/C only with IME off or
+        // relative to an interrupt): the timer is 4 T-cycles behind
+        // SameBoy's (CGB E, "I don't trust this if"). No ROM decides it:
+        // `ei`, a two-byte switch with IE = 0, then a DIV or 262 kHz TIMA
+        // read would (`docs/reference/speed-switch.md`).
+        let holds = |pending: bool, double: bool| match (pending, double) {
+            (false, _) => 0,
+            (true, false) => 4,
+            (true, true) => 8,
+        };
+        let freeze = holds(pending, to.is_double());
         // To single speed the halt is one clock short of whole M-cycles
         // (below); the timer counts that clock, so it stays on the CPU's
         // M-cycle grid.

@@ -27,7 +27,7 @@ References, read for behavior:
 
 - A button held on a selected P1 line: no DIV reset, no switch; with
   nothing pending the CPU halts (plain HALT).
-- Otherwise DIV resets at the end of STOP's fetch. With nothing pending
+- Otherwise DIV resets at the end of STOP's fetch. *(Superseded 2026-11-24: see the last amendment, "Speed switch and STOP follow AGE for two-byte STOPs".)* With nothing pending
   (IE & IF = 0) STOP's second byte is read (one M-cycle at the old speed),
   then the speed toggles and the CPU enters `Mode::SpeedSwitch`: a HALT
   that also ends when `Bus::speed_switch_over` (its countdown) is reached,
@@ -51,7 +51,7 @@ References, read for behavior:
     Gambatte `lcd_offset` tests name. The timer counts that clock
     (`Timer::speed_switch` with pause -1), so it stays on the CPU's grid.
 - The timer runs through the halt (SameBoy). With IME off it starts 4
-  T-cycles late (the held DIV reset). With an interrupt pending there is
+  T-cycles late (the held DIV reset). *(Superseded 2026-11-24: see the last amendment, "Speed switch and STOP follow AGE for two-byte STOPs".)* With an interrupt pending there is
   no halt, and to double speed the CPU idles one M-cycle the timer doesn't
   count.
 - Plain STOP (no switch) follows the same length rule (see "STOP length")
@@ -159,6 +159,9 @@ cell: the 262 kHz read after a switch to double speed (c = 68, 68 mod 16
 DELAY 14 (c = 124), in both directions; the 4 kHz rows pass because the
 glitch cancels the same case. (The 16 kHz edge cells failed too; the
 earlier note that they passed was a misread.)
+
+*(This rule is superseded 2026-11-24: see the last amendment. The reset
+itself is now where AGE has it, and only the 4 kHz carve-out remains.)*
 
 Rule (`Timer::stop_edge`, called by `Ctx::stop_div_reset` before the
 reset when STOP is two bytes, i.e. IE & IF = 0): if the timer runs at
@@ -268,6 +271,9 @@ encoded by "STOP length" above); SameBoy (MIT) `Core/sm83_cpu.c`
 `Core/memory.c` `GB_dma_run`. The model is a CGB in both CGB mode and DMG
 compatibility mode (ADR 0003); where SameBoy separates DMG from CGB, the
 CGB side is taken.
+
+*(The entry point of the counter's stop, and which reload counts as "in
+flight at the reset", are superseded 2026-11-24: see the last amendment.)*
 
 **Entry** (`Bus::stop_begin` -> `Ctx::stop_freeze`, at the end of STOP's
 fetch; then `Bus::stop_enter` after the second byte, if read). Which STOP
@@ -381,3 +387,78 @@ executes STOP 00 at 1.07 s with P1 = FF and is in STOP mode from there.
 review finding and the task brief assumed it stops; SameBoy's CGB path
 keeps the channels running, which is what is implemented. No hardware
 test decides it.
+
+## Amendment (2026-11-24): Speed switch and STOP follow AGE for two-byte STOPs (human approved, 2026-11-24)
+
+M10 review A1-06. Approved by the human ("Go with your recommendation",
+2026-11-24, relayed by the orchestrating session).
+
+**Supersedes** (the old text stays above, marked):
+1. Decision: "Otherwise DIV resets at the end of STOP's fetch."
+2. Decision: "With IME off it starts 4 T-cycles late (the held DIV reset)."
+3. Amendment "the TIMA edge of STOP's DIV reset": its rule
+   (`Timer::stop_edge`: "if the timer runs at 262, 65 or 16 kHz and
+   c mod 2b = b - 4, TIMA increments"). Its analysis stands and is the
+   reason for this change.
+4. Amendment "STOP mode": "Entry (`Bus::stop_begin` -> `Ctx::stop_freeze`,
+   at the end of STOP's fetch ...)" for the counter, and which TIMA reload
+   is "in flight at the reset".
+
+**Decision.**
+- STOP resets DIV **after its last byte**: after the second byte when
+  nothing is pending (IE & IF = 0), at the end of the fetch when STOP is
+  one byte. For the speed switch (`Ctx::speed_switch`) and for STOP mode
+  (`Ctx::stop_enter` -> `stop_freeze`; a one-byte STOP's in
+  `Bus::stop_begin`). Source: AGE `gb_cpu` opcode 10 and
+  `gb_bus::execute_stop` (Apache-2.0, read only), whose `speed-switch`
+  tests are verified on CGB B and C, the revision modelled (ADR 0003).
+- The reset of a two-byte STOP has two carve-outs, both "a bit that rose
+  on exactly the reset's M-cycle doesn't count as falling": the 4 kHz
+  timer bit (`Timer::stop_div`; AGE `gb_timer::after_div_reset`, "speed
+  change glitch", CGB B/C) and the DIV-APU bit (`apu_div_reset`; AGE
+  `gb_sound::after_div_reset`, "sound STOP glitch"). `Timer::stop_edge` is
+  gone: the later reset makes that edge itself. The serial clock gets the
+  plain reset rule, as in AGE.
+- After a two-byte switch the counter runs on from the reset's 0 with no
+  hold, **whatever IME is**. With IME off this is the same counter as
+  before (reset at the fetch, 4 through the byte, 4 T-cycles held). With
+  IME on and nothing pending the timer is now 4 T-cycles behind the old
+  model and SameBoy's (CGB E; "I don't trust this if" in its source).
+- Unchanged: the one-byte (pending) rows (reset at the end of the fetch,
+  4 T-cycles late on CGB B/C, the idle M-cycle to double speed), the halt
+  lengths, the grid move to single speed, the order of operations, OAM
+  DMA, and the STOP-mode screen, still decided at the end of STOP's fetch
+  (`Ctx::stop_screen`).
+- STOP mode: the counter, the serial clock and the frame sequencer run
+  through the second byte before they stop. A TIMA overflow at the end of
+  STOP's fetch reloads at the reset; one at the reset is the held one.
+- `Bus::speed_switch` keeps its `ime` argument, now unused by the
+  emulator's bus: the trait is exported (`gbc_core::sm83`), and CGB E's
+  rule would need it.
+
+**Why.** The old model was SameBoy's CGB E base with AGE's CGB B/C results
+laid on top; `stop_edge` and the IME-off hold both existed only because
+the reset was one M-cycle earlier than on the revision AGE measured
+(`docs/reference/speed-switch.md` has the piece-by-piece table).
+
+**Measured** (full stage 1 manifest, 3592 runs, against the parent):
+- reset moved, `stop_edge` and the hold deleted, no APU carve-out: 8
+  pass -> fail (`spsw-ch2-lc-delay-cgbBCE`, 7 gambatte
+  `speedchange*_ch2_nr52_*`), 0 fail -> pass;
+- with the APU carve-out: no status change in either direction.
+- `diff-fingerprint.sh --audio-buffer 7 --hash-samples`: 4 ROMs differ,
+  all IME-on speed switches: AGE `m3-bg-lcdc-ds`, `m3-bg-scx-ds`,
+  `spsw-interrupts-cgbBC`, `spsw-interrupts-cgbE`.
+
+**Not decided by any ROM** (`docs/reference/unpinned.md`:
+`spsw-div-reset-point`, `spsw-ime-on-timer`, `spsw-reset-edges`): the
+IME-on, nothing-pending timer phase (AGE's model against SameBoy's); the
+serial edge of the reset; STOP mode.
+
+**Tests** (each seen failing on the old core):
+`speed_switch_timer_is_the_same_with_ime_on` (counter 000C, now 0008),
+`serial_bit_in_flight_across_a_switch_to_single_speed_shifts_once` (a
+clock bit rising during the second byte), `stop_mode_holds_a_tima_reload_in_flight`
+(3 phases held, now 2);
+`stop_div_reset_counts_a_timer_bit_rising_during_the_second_byte` fails
+with the 4 kHz carve-out removed. The 8 ROMs above guard the APU carve-out.

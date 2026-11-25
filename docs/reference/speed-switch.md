@@ -2,7 +2,7 @@
 
 Implemented in `crates/gbc-core/src/bus/stop.rs` (`Ctx::speed_switch`)
 and `bus/mod.rs` (`Bus::stop_begin`), `crates/gbc-core/src/timer/mod.rs`
-(`Timer::speed_switch`, `Timer::stop_edge`) and `Cpu::stop`. The decisions
+(`Timer::speed_switch`, `Timer::stop_div`) and `Cpu::stop`. The decisions
 are in ADR 0020; this note records which reference each piece follows,
 which ROMs pin it, and what the M10 review's A1-06 experiment measured.
 
@@ -29,7 +29,11 @@ DIV**. SameBoy: at the end of STOP's fetch, before the second byte is read.
 AGE: after the second byte (`READ_BYTE; TICK_MACHINE_CYCLE; execute_stop`),
 for every STOP, whatever IME and IE & IF are.
 
-## The model on `main`: piece by piece
+## The model up to 2026-11-24: piece by piece
+
+Replaced for two-byte STOPs by the experiment below (landed, ADR 0020's
+2026-11-24 "follow AGE" amendment). The rows on the reset point, the
+IME hold and `stop_edge` are history; the others still hold.
 
 | Piece | Follows | Pinned by |
 |---|---|---|
@@ -52,7 +56,7 @@ because the reset is one M-cycle earlier than on the revision AGE measured.
 
 ## Experiment (M10 review A1-06, 2026-11-24): AGE's reset point throughout
 
-Change, on branch `m10-spsw-div-code` (not merged, see "Status"):
+The change (landed, see "Status"; "`main`" below means the model before it):
 
 1. STOP's DIV reset moves to **after STOP's last byte**: after the second
    byte when nothing is pending, at the end of the fetch when STOP is one
@@ -136,22 +140,18 @@ What that shows:
 
 ## Status
 
-Not on `main`. The change is equally simple or simpler (one reset point,
-no hold for two-byte STOPs, no `stop_edge`), has no regressions and one
-cited reference, but it replaces sentences ADR 0020 decides, which needs
-the human:
+Landed (human approved, 2026-11-24): ADR 0020, amendment "Speed switch and
+STOP follow AGE for two-byte STOPs", which marks the four sentences it
+supersedes (the reset point, the IME-off hold, the `stop_edge` rule, STOP
+mode's entry). Two-byte STOPs now follow one reference, AGE, verified on
+CGB B/C.
 
-- Decision: "Otherwise DIV resets at the end of STOP's fetch."
-- Decision: "With IME off it starts 4 T-cycles late (the held DIV reset)."
-- Amendment "the TIMA edge of STOP's DIV reset": the rule
-  (`Timer::stop_edge` ... "if the timer runs at 262, 65 or 16 kHz and
-  c mod 2b = b - 4, TIMA increments").
-- Amendment "STOP mode": "Entry (`Bus::stop_begin` -> `Ctx::stop_freeze`,
-  at the end of STOP's fetch ...)" and "A TIMA reload in flight at the
-  reset" (which overflow is in flight moves by one M-cycle).
+What stays open is in `docs/reference/unpinned.md`: `spsw-div-reset-point`,
+`spsw-ime-on-timer` (with IME on and nothing pending the timer is 4
+T-cycles behind SameBoy's; no ROM decides) and `spsw-reset-edges`.
 
-The one-byte rows would stay a SameBoy/AGE composite either way: AGE runs
-an M-cycle at the old speed after a pending STOP's fetch and resets DIV
-after it, SameBoy and this core run none (to single speed) or one at the
-new speed (to double), and the CPU/PPU phase there is pinned by gambatte's
+The one-byte rows are still a SameBoy/AGE composite: AGE runs an M-cycle
+at the old speed after a pending STOP's fetch and resets DIV after it,
+SameBoy and this core run none (to single speed) or one at the new speed
+(to double), and the CPU/PPU phase there is pinned by gambatte's
 pending-row captures.

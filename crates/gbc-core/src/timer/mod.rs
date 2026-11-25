@@ -406,14 +406,33 @@ impl Timer {
     /// Returns the counter before the write: its set bits all fall, which
     /// the caller applies to the serial bit clock (SameBoy
     /// `GB_set_internal_div_counter`: `triggers = div_counter & ~value`).
-    #[inline(never)] // See `sync`.
+    #[inline]
     pub(crate) fn write_div(&mut self, now: u64) -> u64 {
+        self.div_reset(now, false)
+    }
+
+    /// The DIV reset of a two-byte STOP at `now`, after its
+    /// second byte (AGE `gb_bus::execute_stop`, Apache-2.0, read only).
+    /// As [`Self::write_div`], except on CGB B/C for the 4 kHz timer: if
+    /// its input bit rose on exactly this M-cycle, the reset doesn't
+    /// increment TIMA (`gb_timer::after_div_reset`, "speed change
+    /// glitch": the next increment is a whole period on). Verified by
+    /// AGE `spsw-tima-cgbBC` (CGB B/C); CGB E (all but 262 kHz) is not
+    /// modelled.
+    pub(crate) fn stop_div(&mut self, now: u64) -> u64 {
+        self.div_reset(now, true)
+    }
+
+    #[inline(never)] // See `sync`.
+    fn div_reset(&mut self, now: u64, stop: bool) -> u64 {
         self.catch_up(now);
         let old = self.sc(now);
         let cycle_a = self.in_cycle_a(now);
         if !cycle_a {
             self.sync(now);
-            if old & self.tima_bit != 0 {
+            let b = self.tima_bit;
+            let glitch = stop && b == 0x200 && old & (2 * b - 1) == b;
+            if old & b != 0 && !glitch {
                 self.increment(now);
             }
         }
@@ -424,30 +443,6 @@ impl Timer {
             self.schedule_overflow();
         }
         old
-    }
-
-    /// Before STOP's DIV reset at `now` (the end of its fetch) when STOP
-    /// is two bytes (nothing pending): the TIMA edge the reset would make
-    /// one M-cycle later. AGE (Apache-2.0, read only) resets DIV after
-    /// STOP's second byte; there a timer bit that rises during the second
-    /// byte falls at the reset (an increment our earlier reset misses),
-    /// except for the 4 kHz timer on CGB B/C, where a bit that rose on the
-    /// reset's M-cycle doesn't count (`gb_timer::after_div_reset`, "speed
-    /// change glitch"). Our reset then sees the bit as AGE does in every
-    /// other case: a fall during the byte is our reset's fall.
-    /// Verified by AGE `spsw-tima-cgbBC` (CGB B/C), ADR 0020.
-    #[inline(never)]
-    pub(crate) fn stop_edge(&mut self, now: u64) {
-        self.catch_up(now);
-        let b = self.tima_bit;
-        // The 4 kHz timer (bit 9) and a stopped timer (0) have none.
-        if b & 0xA8 == 0 || self.in_cycle_a(now) {
-            return;
-        }
-        if self.sc(now) & (2 * b - 1) == b - 4 {
-            self.sync(now);
-            self.increment(now);
-        }
     }
 
     /// STOP mode begins at `now`, after STOP's DIV reset: the oscillator
@@ -476,6 +471,12 @@ impl Timer {
         self.tima_from = self.base;
         self.base_clock = NEVER;
         self.overflow_at = NEVER;
+    }
+
+    /// Whether the counter is stopped ([`Self::freeze`]).
+    #[inline]
+    pub(crate) fn frozen(&self) -> bool {
+        self.base_clock == NEVER
     }
 
     /// STOP mode ends at `now`: the counter runs again from the value it

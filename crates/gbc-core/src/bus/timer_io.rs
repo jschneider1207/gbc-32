@@ -122,12 +122,27 @@ impl Ctx<'_, '_> {
     /// value; Pan Docs FF04), then both deadlines move with the rebased
     /// counter.
     pub(super) fn div_reset(&mut self) {
+        self.div_reset_as(false);
+    }
+
+    /// `stop`: the reset of a two-byte STOP ([`Timer::stop_div`]), after
+    /// its second byte (AGE `gb_bus::execute_stop`; ADR 0020).
+    ///
+    /// UNPINNED: spsw-reset-edges (a): the serial clock's edge at STOP's
+    /// reset is the plain DIV-reset rule (as in AGE), as are the 4 kHz
+    /// TIMA and frame-sequencer edges of a one-byte STOP's reset; no ROM
+    /// covers them.
+    pub(super) fn div_reset_as(&mut self, stop: bool) {
         let now = self.clock();
-        let old = self.sys.timer.write_div(now);
+        let old = if stop {
+            self.sys.timer.stop_div(now)
+        } else {
+            self.sys.timer.write_div(now)
+        };
         let new = self.sys.timer.sc(now);
         let done = self.sys.serial.div_reset(old, new);
         self.serial_done(done);
-        self.apu_div_reset(old);
+        self.apu_div_reset(old, stop);
         self.schedule_timer();
         self.schedule_serial();
     }
