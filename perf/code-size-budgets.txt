@@ -77,13 +77,15 @@ report 173 <gbc_core::ppu::Ppu>::ly
 report 150 <gbc_core::bus::Ctx>::run_ppu_to_call
 report 139 <gbc_core::ppu::Ppu>::check_wy_at
 report 135 <gbc_core::apu::square::Square>::advance
+report 3698 <gbc_core::apu::Apu>::flush
+report 1600 <gbc_core::ppu::Ppu>::hold_fetch
 #
 # Other functions.
 report 735 <gbc_core::bus::Ctx>::write_timer_io
 report 380 <gbc_core::timer::Timer>::read
 report 615 gbc_core::bus::oam_dma::read_during_dma
 report 860 <gbc_core::bus::Ctx>::write_during_dma
-report 540 <gbc_core::bus::Ctx>::div_reset
+report 540 <gbc_core::bus::Ctx>::div_reset_as
 report 720 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
 report 605 <gbc_core::ppu::Ppu>::seek
 report 97 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::stop_begin
