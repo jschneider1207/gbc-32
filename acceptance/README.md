@@ -245,6 +245,7 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
 ## Gate
 
 `scripts/gate-stage1.sh` exits 0 only if **all** of these hold:
+
 The script runs these steps in this order. Each stops the gate at the first
 failure.
 
