@@ -85,13 +85,30 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    stalls follow the renderer's 7+f window grid (ADR 0034, f21ea36 line;
    test seen failing). References split 7 / 7+f / 8+f; the oracle
    exclusion stays for 7+f vs SameBoy's 8+f (892 of 1,348 lines).
-   (b) SCX write at positions 89..=107 with an object at X=0: core 267 vs
-   oracle 268 (SameBoy fetches X=0 objects before the discard). Note
-   gambatte `scx_during_m3_spx0` (cgb04c capture) PASSES on the core:
-   check whether it reaches these positions before blaming the core.
+   (b) SCX write with an object at X=0: FIXED (session 17, 2244e84 +
+   705757c): X=0 objects are fetched before the fine-scroll discard
+   (SameBoy, GateBoy netlist, Pan Docs; no ROM reaches it), plus a
+   junk-tile sharing correction when the write wraps the discard;
+   exclusion removed, 40,400 fast / 536,400 exhaustive lines agree.
+   Open from it: (c) NEW unlisted class, not in the sweep: WX=0 with a
+   mid-line SCX write: 2,791 disagreements in a probe, 427 with no
+   objects (SCX 1->0 at 89: core 270, oracle 263): needs its own
+   one-behavior agent; (d) a later window write on a line whose discard
+   wrapped rebuilds stalls without the junk-tile correction (untested).
    Not covered by the oracle: double speed, first line after LCD on,
    WX/WY/LCDC mid-line writes, OAM DMA lines, pixels. Audio alias
    measurement (A3-1) is still open under item 7.
+   `.text` 116,104 B (margin 6,776 B); baseline 0270845 (latest core is
+   up to +0.47% on dmg-raster over it).
+   **First real M7 numbers** (NUCLEO-H755ZI-Q, all code in flash, caches
+   on, HSI 64 MHz, hashes match the host): cycles/frame mean/max:
+   worst-case 4.35 M / 4.40 M, cgb-raster 2.93 / 2.99, dmg-raster
+   2.22 / 2.26, event-storm 2.22 / 2.25, cpu_instrs 1.44 / 2.05. About
+   1.8 cycles per x86 Ir on worst-case; 4.40 M is ~55% of a frame at
+   480 MHz, ~48% at 550 MHz (extrapolated). DTCM-stack and ITCM images
+   fault on the board (agent debugging on `m10-h7-spike`; results go to
+   docs/perf.md). Flash large images with a native Windows copy
+   (`cmd.exe copy` to E:), not `cp` to /mnt/e (silently fails).
 5. Structure: line timeline as one table (E3), `bus.rs` split along
    D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
    experiment (A1-06).
