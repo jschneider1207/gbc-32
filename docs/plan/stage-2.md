@@ -125,12 +125,12 @@ Answers the question everything else depends on before any new driver
 exists: where does the worst case land against 50% at 480 MHz (reported, not
 gated)?
 
-- [ ] `pll480` clock in h7-bench: HSE bypass 8 MHz (ST-LINK MCO) → PLL1 480 MHz; VOS1 → ODEN → wait VOSRDY → VOS0 (RM0433 PWR/SYSCFG sequence: cite section in code); flash 4 WS / WRHIGHFREQ=10 before the switch; AXI/AHB 240, APB 120. Banner prints `d3cr`, `SYSCFG_PWRCR`, `flash_acr`, `cpu_hz=480000000`
-- [ ] `selftest-480` on the board: constant `cycles=`, UART at 115200 (it bounds the clock error), `tcmprobe` equal
-- [ ] All three placements at 480 MHz: hashes equal `expected-hashes.txt`; record mean/max and % of an 8,036,499-cycle frame in the h7-bench README and `docs/perf.md` (replacing the scaled figures)
-- [ ] Add the bench workloads the board does not run yet: `dma-storm`, `halt-irq`, `apu-writes`, `oam-lines`, and the five `synth:storm-*` (the Stage 1 M8 task "measure the dense mid-mode-3 programs on the M7"; outside the bound, recorded for context). Regenerate `expected-hashes.txt` for the new lines only (old lines unchanged, say so in the commit)
-- [ ] Re-baseline the event-density question (Stage 1 M8 "worst-case event density on the M7") with the 480 MHz `event-storm` figure; close it or open B4 below
-- [ ] Update `docs/perf.md` "Measured on a Cortex-M7" (still titled H755) and `docs/architecture.md` workspace line (h7-bench "on a NUCLEO-H755ZI-Q")
+- [x] (6dfcfda; banner `d3cr=0x0000e000 syscfg_pwrcr=0x00000081 oden=1 flash_acr=0x24 cpu_hz=480000000`) `pll480` clock in h7-bench: HSE bypass 8 MHz (ST-LINK MCO) → PLL1 480 MHz; VOS1 → ODEN → wait VOSRDY → VOS0 (RM0433 PWR/SYSCFG sequence: cite section in code); flash 4 WS / WRHIGHFREQ=10 before the switch; AXI/AHB 240, APB 120. Banner prints `d3cr`, `SYSCFG_PWRCR`, `flash_acr`, `cpu_hz=480000000`
+- [x] (7d4b026; `cycles=8000008` each line, `tcmprobe` equal, clean UART; bf6f7a5: the PC timed it at 484.3 MHz, 0.9% fast, HSE (ST-LINK MCO) the suspect) `selftest-480` on the board: constant `cycles=`, UART at 115200 (it bounds the clock error), `tcmprobe` equal
+- [x] (bf6f7a5; all 15 hashes equal in all three placements; worst case `itcm-dtcm` 3,291,153 / 3,328,005 cycles = 41.0% / 41.4% of a frame, 82.8% of the 50% bar at most; flash 64.0%; nothing in the bound near a whole frame) All three placements at 480 MHz: hashes equal `expected-hashes.txt`; record mean/max and % of an 8,036,499-cycle frame in the h7-bench README and `docs/perf.md` (replacing the scaled figures)
+- [x] (60ef23d; first board run bf6f7a5, hashes equal; storms 1.8-3.6 frame times per frame in ITCM, docs/perf.md "Outside the bound") Add the bench workloads the board does not run yet: `dma-storm`, `halt-irq`, `apu-writes`, `oam-lines`, and the five `synth:storm-*` (the Stage 1 M8 task "measure the dense mid-mode-3 programs on the M7"; outside the bound, recorded for context). Regenerate `expected-hashes.txt` for the new lines only (old lines unchanged, say so in the commit)
+- [x] (bf6f7a5; closed: `event-storm` at 480 MHz is 2,014,882 / 2,028,825 cycles in ITCM, 2,143,998 max from flash, at most 50.5% (ITCM) and 53.4% (flash) of the 4,018,249 bar; B4 not opened for it) Re-baseline the event-density question (Stage 1 M8 "worst-case event density on the M7") with the 480 MHz `event-storm` figure; close it or open B4 below
+- [x] (bf6f7a5) Update `docs/perf.md` "Measured on a Cortex-M7" (still titled H755) and `docs/architecture.md` workspace line (h7-bench "on a NUCLEO-H755ZI-Q")
 
 **Acceptance:** `bench-itcm-dtcm-pll480` on the board prints `end pass=1`,
 hashes equal to `expected-hashes.txt` for every workload, and its cycle
