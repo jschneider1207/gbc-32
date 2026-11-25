@@ -4,11 +4,9 @@ This is the living description of how the code is structured. Update it when
 the structure changes. The reasons behind decisions belong in
 `docs/decisions/`; this file describes the current shape.
 
-> Status: the workspace and the core's public API (ADR 0006) are concrete as
-> of M0; the CPU, memory bus, timer and serial port as of M1 (ADR 0008).
-> PPU mode timing and the DMG-compatibility renderer as of M3 (ADR 0014); the APU
-> (four channels, frame sequencer, 32,768 Hz output) as of M6 (ADR 0021). Targets
-> (dev board, then custom board) as of 2026-11-21.
+> Status: checked against the code on 2026-11-24 (Stage 1, M10: after the
+> `bus/` split, the `Speed` enum, the PPU line timeline table and the
+> budget reform). Targets (dev board, then custom board) as of 2026-11-21.
 
 ## Workspace
 
@@ -22,10 +20,14 @@ crates/
 tools/
   romtest/                 acceptance runner (contract: acceptance/README.md)
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
+  bench/                   headless runs for check-bench.sh (Ir), the behavior fingerprint, synthetic ROMs (docs/perf.md)
+  fuzz/                    fuzz targets over the public API: no panic, no hang (scripts/check-fuzz.sh)
+  h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H755ZI-Q (its README)
 ```
 
 Workspace: edition 2024, resolver 3. The release profile keeps unwinding
-panics (`romtest` catches them per ROM) and line-table debug info. Workspace
+panics (`romtest` catches them per ROM) and line-table debug info, and
+builds with one codegen unit, as the firmware will. Workspace
 lints deny `unsafe_op_in_unsafe_fn` and `clippy::undocumented_unsafe_blocks`
 (every `unsafe` block needs a `// SAFETY:` comment). `gbc-core` itself has
 no `unsafe` at all: `#![forbid(unsafe_code)]`, checked by
@@ -74,7 +76,7 @@ crate docs in
 MCU usage examples.
 
 ```text
-Memory                             // the ~49 KiB of RAM arrays, provided by the caller
+Memory                             // the ~50 KiB of RAM arrays, provided by the caller
   const fn new() -> Self                            // all zero bytes: a static goes to .bss
 Emulator<'a>                       // 'a = lifetime of the Memory and cartridge ROM/RAM borrows
   fn new(mem: &'a mut Memory) -> Self               // powered off, no cartridge; zero-fills mem
@@ -201,160 +203,226 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   plain field reads; nothing is on the hot path (no callbacks or dynamic
   dispatch).
 
-The large RAM arrays (WRAM 32 KiB + VRAM 16 KiB + OAM, etc.) are the
-caller's `Memory`, which must never be required to live on the stack
-(ADR 0009). `Memory::new()` is all zero bytes, so on the MCU a
-`static MEM: Memory` goes to `.bss` (no flash image, no boot copy); the
-desktop and `romtest` use `Box::new(Memory::new())`. `Emulator` holds
-`mem: &'a mut Memory` and `hw: Hw<'a>` (everything else; 896 B with the pointer on thumbv7em, printed by `scripts/check-code-size.sh`, no fixed cap)
-and is small enough for the stack. Run calls copy the `mem` pointer into
-the per-call `Ctx`, so the hot path is the same as with an inline field.
-The APU's internal state is `Memory::apu` (all zero = powered off, at most 128 B, checked by a test; ADR 0021 section 2); its register bytes stay in `Memory::io`. The renderer's large line scratch lives in `Memory` too: the object line buffer `Memory::obj_buf` (`ppu::ObjBuf`: the line's object pixels and their drawing-priority ranks, 352 B), which the renderer gets as one `&mut` per `render` call, and the BG pixel-pair tables `Memory::bg_pairs` (512 B). The per-line fetcher state (held fetches, the object fetch cursor, the TILE_SEL glitch latch, the window zero pixel) is not there: it belongs to `Renderer`, in `Hw`. `Memory::clear` (`new`, `load`, `reset`, `eject`) restores exactly `Memory::new()`, checked field by field by a test.
-New large state goes in `Memory` as fields whose power-on value is zero
-(non-zero post-boot values are written by `reset`); everything else goes in
-`Hw`.
 
 Core unit tests live in `#[cfg(test)]` modules, which may use `std`. The
 gate only forbids `alloc` in `gbc-core/src`, and the `thumbv7em` build
 enforces `no_std` for non-test code.
 
+## Who owns what state
+
+```text
+Emulator<'a>
+  mem: &'a mut Memory        the caller's large arrays (ADR 0009)
+  hw:  Hw<'a>
+    cpu: Cpu                 registers, IME, mode (running, halted, stopped, speed switch, latched opcode)
+    sys: Sys<'a>             everything the bus reaches except the arrays
+    stop_on: Events          optional stop events
+```
+
+- **`Memory`** (50,984 B on thumbv7em): WRAM (32 KiB), VRAM (16 KiB), OAM,
+  the OAM copy an OAM DMA started from (`oam_dma_old`), HRAM, FEA0-FEFF,
+  the I/O backing store `io` (registers that are plain storage: the sound
+  register bytes and wave RAM, SCY/SCX/WY/WX, the DMG palettes, BCPS/OCPS
+  and the undocumented CGB registers), CGB palette RAM (`bg_pal`,
+  `obj_pal`), the renderer's line scratch (`obj_buf`: the line's object
+  pixels and their priority ranks; `bg_pairs`: a pixel-pair table per BG
+  palette, kept up to date on palette writes) and the APU's state (`apu`,
+  ADR 0021 section 2). Every field's power-on value is zero, so
+  `Memory::new()` is all zero bytes: on the MCU a `static MEM: Memory`
+  goes to `.bss` (no flash image, no boot copy); the desktop and `romtest`
+  use `Box::new(Memory::new())`. It must never be required to live on the
+  stack. `Memory::clear` (`new`, `load`, `reset`, `eject`) restores exactly
+  `Memory::new()`; non-zero post-boot values are written by `reset`. Two
+  tests check both, field by field. `repr(C)`: the field order is the
+  layout.
+- **`Sys`** (`bus/mod.rs`): the cartridge (`Cart`: ROM bank windows, RAM,
+  mapper, RTC), IE and IF, the bank registers (VBK, SVBK), KEY1, the
+  joypad lines and the scheduled inputs, the serial port, the timer, the
+  PPU, the VRAM DMA, the event table, the clock (`Hot`) and the OAM DMA
+  read clears. `repr(C)` with the fields the inlined bus path reads
+  first: Thumb-2 has short loads only for small offsets.
+- **`Ppu`** (`Sys::ppu`): LCDC and LYC, the frame's start clock, the walk
+  cursor, the current line's mode-3 timing (`LineTiming`), the STAT
+  interrupt line, the timed interrupt requests (`irq::PendingIrq`), the
+  resolved colors (`Colors`), the renderer (`Renderer`, with the
+  fetcher's per-line state for mid-mode-3 writes) and the OAM DMA
+  transfer (`dma::OamDma`: the bus drives it, the PPU reads it).
+- **`Ctx`** (`bus/mod.rs`) exists for one run call: the live clock
+  countdown (`Hot`, copied from `Sys::hot` and back on drop), `&mut
+  Memory`, `&mut Sys`, the caller's frame and audio buffers, the events
+  raised, the target, and the `done` and `attention` flags.
+
+There is no size cap on `Hw` or `Memory` (ADR 0006, 2026-11-24
+amendment). `Emulator` is 952 B on thumbv7em (2026-11-24) and is meant to
+fit on the stack; `scripts/check-code-size.sh` prints both sizes. State
+belongs with the component that owns it. Only something large (a buffer,
+a table) goes in `Memory`, as a field whose power-on value is zero.
+
 ## Timing model
 
 See ADR 0002. In short:
-- The CPU is the master clock (ADR 0008). The per-M-cycle tick is only a
-  clock countdown; the timer, serial bit clock (and the DIV-APU edge)
-  are computed from the clock on access and act through deadlines in the
-  event table (ADR 0011). A serial transfer has one deadline, its
-  completion; the bits before it are shifted on access.
-- The PPU and APU are lazily caught up to the current cycle whenever one of
-  their registers is written, and at scheduled events (PPU: STAT interrupt
-  edges, VBlank, each visible line's mode-3 end; APU: `DivApu` and
-  `AudioBuffer`, below). PPU register reads are computed from the clock.
-  APU register reads are pure (they advance a copy of the channel).
-- PPU mode timing is exact (ADR 0014, below). Pixel output is drawn a
-  scanline at a time, with
-  a mid-line flush on register writes.
+- The CPU is the master clock (ADR 0008). All times are base clocks
+  (4,194,304 Hz). The per-M-cycle tick is only a clock countdown.
+- Nothing else runs per M-cycle. The timer and the serial port are
+  functions of the clock, computed on access; the PPU and APU are caught
+  up when one of their registers is written and at their deadlines in the
+  event table (ADR 0011). PPU register reads are computed from the clock;
+  APU register reads advance a copy of the channel.
+- A component's state is a function of the clock and the writes, never
+  of when it was last synced. The `eager-sync` test build syncs
+  everything on every M-cycle and must behave identically
+  (`scripts/check-sync-invariance.sh`).
+- PPU mode timing is exact (ADR 0014). Pixels are drawn a scanline at a
+  time, with a flush up to the current pixel before a register write that
+  changes the picture.
+- The CPU speed is a `Speed` (`speed.rs`: normal or double). Its methods
+  are the only conversions to numbers (M-cycle length and its log2, the
+  system counter's rate, KEY1 bit 7). `Hot::mcycle` is the one place it
+  is kept as a number, because the tick's clock arithmetic reads it.
 
-## Module sketch (`gbc-core`)
-
-All modules listed exist.
+## Module map (`gbc-core/src`)
 
 ```
-lib.rs      * Emulator, Hw (cpu + sys), RunResult, run loop, public re-exports, sm83 test API
-memory.rs   * Memory: the large RAM arrays (WRAM, VRAM, OAM, HRAM, FEA0 area, stub I/O storage)
-bitset.rs   * bitset! macro behind Buttons and Events
-events.rs   * Events
-schedule.rs * event table (ADR 0011): EventKind (dispatch order), Schedule (one u64 deadline per kind + their minimum)
-joypad.rs   * Buttons, P1 line logic, the joypad interrupt edge, InputQueue (scheduled changes, ADR 0012; P1/JOYP register access is in bus/mod.rs)
-config.rs   * Config, DmgPalettes, RGB555 helpers
-cpu/        * SM83: Registers, Bus trait, Cpu (run loop, step, interrupts, HALT/HALT bug, STOP, STOP mode)
-  exec.rs   *   opcode tables: per-opcode monomorphized bodies behind a 256-arm match
-bus/        * Sys (state the bus reaches), Hot (clock countdown), Ctx (per-run-call context), the tick and event dispatch, `impl Bus for Ctx`, memory map, I/O decode, interrupt-ack writes, peek. Each file below adds an `impl Ctx` block for one subsystem's glue
-  reset.rs  *   `Sys::new`, `Sys::reset`: the post-boot state (I/O values, boot logo tiles)
-  timer_io.rs * timer and serial: register writes, DIV reset, their deadlines and the Serial event
-  apu_io.rs *   APU: register writes, DIV-APU and audio-buffer events, the lazy sync
-  ppu_io.rs *   PPU: syncs to the clock, its deadline, `write_ppu`, palette data writes
-  oam_dma.rs *  OAM DMA: start, lazy copy, pause/resume/retime, CPU reads and writes during a transfer
-  vram_dma.rs * VRAM DMA: FF55 writes, arming, the HBlank trigger, the stall and the block copy
-  stop.rs   *   STOP mode (freeze, wake-up) and the CGB speed switch
-timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clock, TIMA reload as the Timer event, serial edge clocks
-  reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
-ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
-  objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
-  timeline.rs *  the line timeline: one row per update point of each line class (dot per speed, mode source, comparison value, where reads see it); the walk, its cursor search and the comparison reads derive from it
-  stalls.rs  *   `Stalls`: one line's mode-3 pipeline stalls (objects, window starts), a bounded list and the one timed walk over it
-  render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
-apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register write entry, pure reads (`read_apu`), StereoSample, output constants
-  units.rs  *   Length and Envelope, shared by the channels that have them
-  square.rs *   Square (CH1 and CH2, one impl) and Sweep (CH1)
-  wave.rs   *   Wave (CH3): period, wave RAM position, cached waveform sum
-  noise.rs  *   Noise (CH4): LFSR as its output sequence (word-parallel steps)
-  mix.rs    *   Output: window integrator, NR50/NR51 weights, buffer deadline
-dma.rs      * OAM DMA: transfer state (`OamDma`, owned by `Ppu`, driven by the bus), CGB C conflict table, what the PPU sees (`ppu_at`)
-hdma.rs     * VRAM DMA (GDMA/HDMA): `VramDma`, block copy, the resumable CPU stall (ADR 0021 GDMA amendment)
-cart/       * header (cart_ram_size), RtcState, ROM bank windows, MBC1/2/3(+RTC)/5, HuC1/HuC3 (huc3.rs: the HuC3 clock chip)
-serial.rs   * SB/SC internal-clock transfers, lazy (ADR 0011): shifts caught up on access, completion as the Serial event, last byte sent
+lib.rs        Emulator, Hw, RunResult, the run call (`Emulator::run`, `vdma_turn`), public re-exports, sm83 test API
+memory.rs     Memory: the large arrays
+config.rs     Config, DmgPalettes, RGB555 helpers
+bitset.rs     bitset! macro behind Buttons and Events
+events.rs     Events
+speed.rs      Speed and its conversions
+schedule.rs   event table (ADR 0011): EventKind (dispatch order), Schedule (one u64 deadline per kind, their minimum, the slow kinds' cached minimum)
+irq.rs        PendingIrq: interrupt requests that reach IF at a later clock (ADR 0033)
+joypad.rs     Buttons, P1 line logic, the joypad interrupt edge, InputQueue (ADR 0012)
+cpu/          SM83: Registers, Bus trait, Cpu (run loop, checked steps, interrupts, HALT and the HALT bug, STOP)
+  exec.rs       opcode bodies behind a 256-arm match; the CB page out of line
+bus/          mod.rs: Sys, Hot, Ctx, the tick, event dispatch, `impl Bus for Ctx`, memory map, I/O decode, peek.
+              Each file below is a further `impl Ctx` block for one subsystem's glue
+  reset.rs      `Sys::new`, `Sys::reset`: the post-boot state (I/O values, boot logo tiles)
+  timer_io.rs   timer and serial: register writes, DIV reset, their deadlines, the Serial event
+  apu_io.rs     APU: register writes, DIV-APU and audio-buffer events, the lazy sync
+  ppu_io.rs     PPU: syncs to the clock, its deadline, `write_ppu`, palette data writes
+  oam_dma.rs    OAM DMA: start, lazy copy, pause/resume/retime, CPU reads and writes during a transfer
+  vram_dma.rs   VRAM DMA: FF55 writes, arming, the HBlank trigger, the stall, the block copy
+  stop.rs       STOP mode (freeze, wake-up) and the CGB speed switch
+timer/        DIV/TIMA/TMA/TAC, lazy (ADR 0011): system counter from the clock, TIMA reloads, serial edge clocks
+  reference.rs, differential.rs   (test only) the eager per-M-cycle model, and the lazy one checked against it
+serial.rs     SB/SC internal-clock transfers, lazy: shifts caught up on access, completion as the Serial event
+ppu/          mod.rs: Frame, Ppu, mode timing (ADR 0014): LY/STAT/LYC, the STAT and VBlank interrupts, mode-3 length,
+              access blocking, mid-mode-3 write handling
+  edges.rs      the dots: where each edge sits and where each observer sees it, with sources
+  timeline.rs   the line timeline: one row per update point of each line class; the walk derives from it
+  stalls.rs     `Stalls`: one line's mode-3 pipeline stalls, a bounded list and the one timed walk over it
+  objects.rs    OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
+  render.rs     scanline renderer (`Renderer`, spans of a line), resolved colors (`Colors`, ADR 0013), DMG and CGB mode
+  mode3_oracle.rs   (test only) a dot-stepped mode 3 the closed-form timing is checked against
+apu/          mod.rs: Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register writes, pure reads (`read_apu`)
+  units.rs      Length and Envelope
+  square.rs     Square (CH1 and CH2) and Sweep (CH1)
+  wave.rs       Wave (CH3)
+  noise.rs      Noise (CH4): the LFSR as its output sequence, stepped a word at a time
+  mix.rs        Output: spans, the window integrator, NR50/NR51 weights, the buffer deadline
+dma.rs        OAM DMA state (`OamDma`), the CGB C conflict table, what the PPU sees (`ppu_at`), `ReadClears`
+hdma.rs       VRAM DMA state (`VramDma`): registers, the HBlank period constants, stall length (ADR 0017)
+cart/         mod.rs: header, `cart_info`, ROM bank windows, MBC1/1M/2/3/5, HuC1, HuC3, save-dirty tracking
+  rtc.rs        the MBC3 clock and `RtcState`
+  huc3.rs       the HuC3 clock chip
 ```
 
 ### CPU and bus (ADR 0008)
 
-`Hw` holds `cpu: Cpu` and `sys: Sys<'a>` (everything the bus reaches:
-clock, PPU, timer, serial, cartridge, interrupt and banking registers).
-Each run call builds one `Ctx` (`Ctx::new`: the memory, `sys`, the frame
-and audio buffers, the stop events and the target) and calls
-`cpu.run(&mut ctx)`, which loops over instructions until the context
-reports the call done (target reached or a stop event raised); the opcode
-dispatch is inlined into that loop. Between two instructions the loop
-tests one flag, `Bus::attention` (`Ctx::attention`), which the context
-raises when the call is done or `IE & IF` may have become nonzero and the
-CPU raises for its own state (EI, RETI, HALT, STOP); only then does it
-look at the mode, IME and the interrupts (`Cpu::checked_fetch`; ADR 0008,
-2026-11-24 amendment). The CPU is generic over the `Bus`
-trait; every `read`/`write`/`idle` is one M-cycle: the access at the
-current clock, then a tick: only an `i32` count of the M-cycles to the
-next deadline (the first M-cycle boundary at or after the earlier of the
-event table's minimum and the target), which the tick increments towards
-zero (`Hot::t_minus`).
-The countdown (`Hot`) is copied into the `Ctx` for the call
-and back into `Sys::hot` when it is dropped, so the tick doesn't go
-through `ctx.sys`; the u64 clock is `deadline + t_minus * mcycle`. `Hot::mcycle`
-(4 base clocks, or 2 in double speed) is the one place the CPU speed is kept
-as a number, because the tick reads it; everything else takes a `Speed`
-(`speed.rs`), whose methods are the only conversions (M-cycle length and its
-log2, the system counter's rate, KEY1 bit 7). Scheduled work
-lives in the event table `Sys::sched` (ADR 0011; `schedule.rs`): one u64
-deadline per `EventKind` (`NEVER` = none) and their minimum, maintained
-only when a deadline is set (incrementally: the table is rescanned only
-when the earliest entry moves later or is taken), never per M-cycle. When the countdown runs
-out, `Ctx::boundary` runs every kind due at the current clock in
-`EventKind` declaration order (fixed, so same-clock events are
-deterministic), each handler setting its next deadline, then reschedules
-the countdown; register writes that move a deadline (LCDC, SC, DIV, TIMA,
-TMA, TAC, STOP) reschedule too. A halted, stopped, locked-up or powered-off CPU
-idles through `Bus::idle_halted`, which `Ctx` implements as one skip
-straight to the next deadline (`-t_minus` M-cycles, at least
-one, then `boundary`): only a deadline can change `IE & IF`, a stop
-wake-up or the end of the call, so the wake-up lands on the same M-cycle
-as idling one M-cycle at a time. The CGB speed-switch pause skips the same
-way, a deadline at a time. `Emulator::step` targets `clock + 1`, so its
-halted step stays one M-cycle. On the event table so far: the TIMA reload (`Timer`),
-a serial transfer's completion (`Serial`; its earlier bit shifts are
-computed from the system counter when SB or SC is accessed or DIV is
-reset, `Serial::catch_up`), the PPU (`Ppu`: STAT interrupt edges,
-VBlank and each visible line's mode-3 end) and scheduled
-button changes (`Input`, `Sys::inputs`, ADR 0012). The timer
-(`Sys::timer`) keeps an unwrapped u64 system counter as a linear function
-of the clock (rebased on DIV writes and speed switches), computes DIV and
-TIMA from it on reads, and stores the overflow clock and the last reload
-clock for the cycle A/B window; timer, serial and DIV writes go through
-the out-of-line `Ctx::write_timer_io` and reads through `Timer::read`
-and `Serial::read_sb`, off
-the inlined bus path. `Sys` is `repr(C)` with the
-fields the inlined bus path reads first, to keep their Thumb-2 load
-offsets small (the event table at the front cost `Cpu::run` about 1 KB).
-Reads have no
-side effects, so the CPU and `Emulator::peek` share one `read` function
-(given the live `Hot`). The same CPU runs against a flat test bus in
-`tools/sm83-tests`, which runs only with the data from
-`scripts/fetch-sm83-tests.sh`, verified file by file against the committed
-`tools/sm83-tests/sm83-v1.sha256` (`GBC_REQUIRE_TEST_DATA=1` makes missing
-data a failure instead of a skip).
+Each run call builds one `Ctx` and calls `cpu.run(&mut ctx)`, which loops
+over instructions until the context reports the call done (target reached
+or a stop event raised); the opcode dispatch is inlined into that loop.
+The CPU is generic over the `Bus` trait. The same CPU runs against a flat
+test bus in `tools/sm83-tests` (data from `scripts/fetch-sm83-tests.sh`,
+verified against `tools/sm83-tests/sm83-v1.sha256`;
+`GBC_REQUIRE_TEST_DATA=1` makes missing data a failure instead of a skip).
+
+Between two instructions the loop tests one flag, `Bus::attention`. The
+context raises it when the call is done or `IE & IF` may have become
+nonzero (after a boundary's events, and after a write to IF, IE, P1 or a
+PPU register); the CPU raises it for its own state (EI, RETI, HALT,
+STOP). Only then does the CPU look at the mode, IME and the interrupts
+(`Cpu::checked_fetch`; ADR 0008, 2026-11-24 amendment).
+
+Every `read`/`write`/`idle` is one M-cycle: the access at the current
+clock, then the tick. The tick increments `Hot::t_minus`, an `i32` count
+of the M-cycles to the next deadline (the first M-cycle boundary at or
+after the earlier of the event table's minimum and the target), and calls
+`Ctx::boundary` when it reaches zero. The u64 clock is `deadline +
+t_minus * mcycle`.
+
+The address decode is inlined for reads (`bus::read`: ROM, then WRAM,
+then `read_high`, cartridge RAM, VRAM, in the order code reads them) and
+one out-of-line function for writes (`Ctx::write_mapped`); the measured
+alternatives are in `docs/perf.md` ("CPU write path", "CPU read path").
+`Hot::dma` is FE00 while an OAM DMA runs and is ORed into the region
+test, so during a transfer every access takes the E000-FFFF arm, the
+only one that tests it. VRAM and OAM accesses check the PPU's blocking
+windows out of line. The CPU and `Emulator::peek` share the read path,
+which takes shared references: the one read side effect (a CPU read that
+conflicts with an OAM DMA from VRAM clears an OAM byte, ADR 0028) is
+recorded through `&` in `Sys::dma_read_clears` and applied by the next
+`Ctx::dma_sync`. `peek` and the DMA's own reads use `read::<false>`,
+which ignores the PPU's blocking and the conflicts.
+
+A halted, stopped, locked-up or powered-off CPU idles through
+`Bus::idle_halted`, one skip straight to the next deadline: only a
+deadline can change `IE & IF`, wake a stopped CPU or end the call, so the
+wake-up lands on the same M-cycle as idling one M-cycle at a time.
+`Emulator::step` targets `clock + 1`, so its halted step is one M-cycle.
+
+### Scheduler (ADR 0011)
+
+`Sys::sched` holds one u64 deadline per `EventKind` (`NEVER` = none) and
+their minimum. A deadline changes only when its work is rescheduled (a
+sync, a register write), never per M-cycle. `Ctx::boundary` runs every
+kind due at the current clock in `EventKind` declaration order (fixed, so
+same-clock events are deterministic), each handler storing its next
+deadline, then sets the countdown again (`run_events`: the three hot
+kinds are tested in place; the others go through a cached minimum).
+
+| Kind | Deadline | Handler |
+|---|---|---|
+| `Timer` | the next TIMA reload, while it has an interrupt to request | sets IF bit 2, reloads |
+| `Serial` | a transfer's completion | `Ctx::serial_event` |
+| `Ppu` | `Ppu::next_event` | `Ctx::sync_ppu` |
+| `Dma` | an OAM DMA's end (or the end of a restarted transfer's tail) | last copy, clears `Hot::dma` |
+| `VramDma` | the HBlank trigger of an armed HDMA | `Ctx::vdma_hblank` |
+| `Input` | the earliest scheduled button change (ADR 0012) | `Ctx::apply_inputs` |
+| `DivApu` | the next DIV-APU falling edge, or a pending sweep event | `Ctx::div_apu_event` |
+| `AudioBuffer` | the end of the audio buffer's last free window | `Ctx::audio_buffer_event` |
+
+Register writes that move a deadline reschedule the countdown themselves.
+
+### Timer and serial
+
+The timer (`Sys::timer`) keeps an unwrapped u64 system counter as a linear
+function of the clock (rebased on DIV writes, STOP and speed switches)
+and computes DIV and TIMA from it on reads. Reloads are caught up on
+access (`Timer::catch_up`). The `Timer` deadline exists only for the
+interrupt request: while IF bit 2 is set and IE bit 2 is clear there is
+none, and a write to either bit sets it again (`Ctx::schedule_timer`;
+ADR 0011, 2026-11-24 amendment). A serial transfer has one deadline, its
+completion; the bits before it are shifted when SB or SC is accessed or
+DIV is reset (`Serial::catch_up`). Their register writes go through the
+out-of-line `Ctx::write_timer_io`, and reads through `Timer::read` and
+`read_sb`, off the inlined bus path.
 
 ### APU (ADR 0021)
 
 `apu/`. State is `Memory::apu` (`Apu`: `Output`, `Fs`, `[Square; 2]`,
-`Sweep`, `Wave`, `Noise`); nothing runs per M-cycle. `Apu::sync(now, io,
-audio, len)` advances every channel exactly in base clocks from
+`Sweep`, `Wave`, `Noise`); its register bytes stay in `Memory::io`.
+`Apu::sync` advances every channel exactly in base clocks from
 `Output::synced` to `now` and, for a non-empty buffer, integrates the span
-into samples. It is called (out of line, `Ctx::apu_sync`) at:
+into samples. It is called (`Ctx::apu_sync`) at:
 
 - every APU register write, FF10-FF3F (`Ctx::write_apu`: sync, then the
-  write; NR52 power via `write_nr52`);
+  write);
 - each `EventKind::DivApu` deadline (`div_apu_event`: sync, then the
-  frame-sequencer step), the falling edge of the system counter's bit 12
-  (13 in double speed); a DIV write or STOP that is such an edge steps it
-  at once (`apu_div_reset`); a speed switch and reset recompute the
-  deadline (`Sys::set_div_apu_deadline`); it is `NEVER` while off;
+  frame-sequencer step or the pending sweep event), the falling edge of
+  the system counter's bit 12 (13 in double speed); a DIV write or STOP
+  that is such an edge steps it at once (`apu_div_reset`); a speed switch
+  and reset recompute the deadline; it is `NEVER` while the APU is off;
 - the `EventKind::AudioBuffer` deadline (`audio_buffer_event`: sync, raise
   `AUDIO_BUFFER_FULL`), set at call start (`start_audio`) where the last
   free slot's window ends, `NEVER` for an empty buffer;
@@ -362,127 +430,92 @@ into samples. It is called (out of line, `Ctx::apu_sync`) at:
 
 Reads are pure: FF10-FF25 are `mem.io | mask`; NR52, wave RAM and
 PCM12/PCM34 go through `read_apu`, which advances a copy of the channel to
-the access clock. The invariant is that register-visible state is a
-function of the clock and the register writes only, never of where syncs
-happened or whether a buffer was passed (unit tests split calls randomly;
-`bench --fingerprint --audio-buffer` checks the whole machine).
+the access clock. Register-visible state is a function of the clock and
+the register writes only, never of where syncs happened or whether a
+buffer was passed (unit tests split calls randomly; `bench --fingerprint
+--audio-buffer` checks the whole machine).
 
 Output: one stereo sample per 128 base clocks (32,768 Hz), the exact
 average of the mixed signal over the window; the core keeps DC and does no
 filtering. Hardware rules and the SameBoy count conversions are in
-`docs/reference/apu.md`; cost and code size in `docs/perf.md` ("APU cost").
+`docs/reference/apu.md`; cost in `docs/perf.md` ("APU cost").
 
 ### PPU timing (ADR 0014)
 
 `ppu/mod.rs`. The PPU keeps `frame_start` (the clock of frame position 0;
-LCD enable is position 7, the post-boot state line 144 dot 163) and
-computes LY, the STAT mode and coincidence bits and the VRAM/OAM blocking
-windows from the position `now - frame_start` on every read, without side
-effects. Positions are SameBoy's nominal action times converted so that
-the state at a position includes the actions at it (an M-cycle boundary in
-single speed is at position 3 mod 4).
+LCD enable is position 7) and computes LY, the STAT mode and coincidence
+bits and the VRAM/OAM/palette blocking windows from the position `now -
+frame_start` on every read, without side effects. Positions are SameBoy's
+nominal action times converted so that the state at a position includes
+the actions at it (an M-cycle boundary in single speed is at position 3
+mod 4).
 
-The STAT interrupt line is walked over *update points*, 3-5 per line
-(`Pt`: LY change and mode 2 at `t = 3, 4`, the pipeline start `Latch` at
-89, mode-3 `End`, the HBlank source at `End + 1`, the VBlank-line and
-line-153 comparison points), with SameBoy's `mode_for_interrupt`,
-`ly_for_comparison` and held LYC-line semantics; rising edges request IF
-bit 1. `Ppu::sync(now)` commits the points up to `now`; `Ppu::next_event`
-walks ahead without committing to the first point that requests an
-interrupt, completes the frame (VBlank, `FRAME_READY`) or ends a visible
-line's mode 3, which is the `EventKind::Ppu` deadline. With no STAT source
-selected the walk skips to `Latch`/`End`/`VBlank` only: the two walks are
-separate code (`step_work`; `step` + `point_irq`), each compiled into the
-sync (`run_points::<QUIET>`) and the look-ahead, chosen once per call.
-The sequence of points, what each evaluates and where reads and write
-views see it are one table, `ppu/timeline.rs` (review E3): `step`,
-`step_work` and `point_irq` take each arm's numbers from it by `const`
-lookup (same code as hand-written immediates), the cursor search
-(`seek_point`) is a line's first row plus `step`, and `Ppu::cmp` and the
-write views take their dots from it. Its tests interpret the table for
-every line, dot and speed and compare with that code.
-`Ppu::sync` and `walk_to` inline only the test for "no point to run"
-(most register and palette writes); the deadline's own sync
-(`Ppu::sync_due`) skips it.
+Three files hold the timing, each with one job:
+
+- `edges.rs`: the dots. Where each edge sits on a line, per speed, and
+  from which dot each observer (a read, the dispatch, a STAT or LYC
+  write) sees it, with the source for each.
+- `timeline.rs`: the order and meaning. One row per *update point* (`Pt`)
+  of each line class: its dot, what the STAT line evaluates there (mode
+  source, comparison value), how late its request reaches IF, and where
+  reads see its comparison. The walk's code takes each arm's numbers from
+  the table by `const` lookup, and the table's tests interpret it for
+  every line, dot and speed and compare with that code.
+- `mod.rs`: the walk. `Ppu::cursor` is the next point after the last
+  sync; `Ppu::step` advances it point by point with no division.
+  `Ppu::sync(now)` commits the points up to `now`, keeping the STAT
+  interrupt line exact (SameBoy `mode_for_interrupt`, `ly_for_comparison`
+  and the held LYC line; a rising edge requests IF bit 1).
+  `Ppu::next_event` walks ahead without committing to the first point
+  that requests an interrupt, completes the frame (VBlank, `FRAME_READY`)
+  or ends a visible line's mode 3: the `EventKind::Ppu` deadline. With no
+  STAT source selected the walk is separate code that visits only the
+  points with work (`step_work`); the choice is made once per call
+  (`run_points::<QUIET>`). `Ppu::seek` finds the cursor again after LCD
+  enable, reset, a speed switch or a STAT write that changes whether any
+  source is selected. `Ppu::sync` and `walk_to` inline only the test for
+  "no point to run" (most register and palette writes); the deadline's
+  own sync (`Ppu::sync_due`) skips it.
 
 IF (`Sys::iflags`) holds bits 0-4 and nothing else, so the CPU's
 interrupt checks are `IE & IF` with no mask. A request that reaches IF at
 a later clock than the point or write that makes it (single speed: a LYC
 write's request, line 0's mode-2 pulse, line 153's LYC=0 point) waits as
-"bits B at clock T" in
-`Ppu::irq` (`irq::PendingIrq`, ADR 0033): `Ppu::next_event` is at most T,
-and `Ppu::sync` to T or later posts it, so IF never depends on when the
-PPU was last synced. Rules: `docs/reference/stat-irq.md`, "Timed
-requests".
+"bits B at clock T" in `Ppu::irq` (`irq::PendingIrq`, ADR 0033):
+`Ppu::next_event` is at most T, and `Ppu::sync` to T or later posts it,
+so IF never depends on when the PPU was last synced. Rules:
+`docs/reference/stat-irq.md`, "Timed requests".
 
-Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
-`SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
-"OBJ penalty algorithm"; an object in the window waits on the tile grid
-the renderer draws, at WX = 0 with a fine scroll too: ADR 0034), as
-`LineTiming` with the per-pixel stalls so
-`Ppu::mode3_pixel(now)` can say which pixel is being drawn. The stalls
-are a `Stalls` list (`ppu/stalls.rs`: at most 11, the window's as an
-`Option`), and everything that needs a stall's place in the line walks
-it through one iterator (`Stalls::timed`, `LineTiming::walk`). Objects come
-from one OAM scan per line (`objects.rs`, `LineObjects::scan`) that feeds
-both the stalls and the renderer, skipped for lines a cached object-line
-map (`ObjectLines`, invalidated by `Ppu::oam_written` on CPU and DMA OAM
-writes) shows empty, and on the first line after LCD enable (no OAM scan).
+Mode 3 of a visible line is fixed at its pipeline start (the `Latch`
+point, `Ppu::latch`): 172 dots plus `SCX % 8`, 6 for the window and 6-11
+per object (Pan Docs "OBJ penalty algorithm"; an object in the window
+waits on the tile grid the renderer draws, ADR 0034), as `LineTiming`
+with the per-pixel stalls so `Ppu::mode3_pixel(now)` can say which pixel
+is being drawn. The stalls are a `Stalls` list (`ppu/stalls.rs`: at most
+11, the window's as an `Option`), and everything that needs a stall's
+place in the line walks it through one iterator (`Stalls::timed`,
+`LineTiming::walk`). Objects come from one OAM scan per line
+(`objects.rs`, `LineObjects::scan`) that feeds both the stalls and the
+renderer. The scan is skipped for lines a cached object-line map
+(`ObjectLines`, invalidated by `Ppu::oam_written` on CPU and DMA OAM
+writes) shows empty, and on the first line after LCD enable (the
+hardware does no OAM scan there). The closed-form mode-3 timing is
+checked against a dot-stepped model in tests (`mode3_oracle.rs`).
 
 Every PPU register write goes through `Ctx::write_ppu`: sync first, then
 the write (STAT in two phases one dot apart, LYC one dot into the M-cycle
-in single speed, as SameBoy's conflict maps), then reschedule. CPU VRAM
-and OAM accesses check `Ppu::vram_blocked`/`oam_blocked` out of line
-(`read_vram`, `Ctx::write_vram`, `read_oam`, `Ctx::write_oam`); `peek` and
-the OAM DMA's reads use `read::<false>` and see memory as it is.
-
-### OAM DMA as the PPU sees it
-
-`docs/reference/oam-dma.md` has the hardware rules. The transfer's state
-(`dma::OamDma`) lives in the `Ppu` (`Ppu::dma`): the bus drives it (FF46
-write, HALT pause and wake-up, CPU conflicts, lazy copying) and both read
-it, so the PPU's sync and draw calls take no extra arguments.
-`OamDma::ppu_at(clock)` says what a PPU OAM read at a clock sees (off,
-running, halted) and how many bytes are written by then; it is a pure
-function of the state since its last change. So before each change (an
-FF46 write, a halt during a transfer) the bus calls `Ctx::dma_ppu_event`:
-the PPU syncs, scans the OAM entries read so far (`Ppu::scan_to`, keeping
-the partial scan in `Ppu::scan`), fixes the attributes of the objects
-fetched so far and draws the line up to now (`Ppu::fix_attrs`, `flush`).
-The wake-up from HALT needs no sync: it changes nothing up to it.
-
-A line is DMA-aware from the FF46 write (`OamDma::ppu_live`) until the
-first line that starts after the transfer's end as the PPU sees it
-(`Ppu::dma_touches` clears the flag), so the normal path costs one flag
-test per line. On an aware line the OAM scan runs entry by entry in runs
-of equal state, tracking the mode-2 bus (`Ppu::bus`), and the objects' tile
-index and attributes come from `Ppu::obj_attr` (passed to the renderer as
-`Sources::attrs`), filled lazily at each draw from the clock of each
-object's fetch in its stall. OAM bytes the transfer hasn't written yet are
-read from `Memory::oam_dma_old` (OAM at the FF46 write); the written ones
-are in `mem.oam`, because the bus copies the bytes due before every PPU
-sync.
+in single speed, as SameBoy's conflict maps), then reschedule.
 
 ### Scanline renderer
 
 `ppu/render.rs`, driven by the PPU (`Ppu::renderer`); pixels go straight
-into the caller's `Frame` row by row. The `Latch` point starts the line
+into the caller's `Frame`. The `Latch` point starts the line
 (`Renderer::start_line`: SCX & 7, the line's objects in drawing order),
 the `End` point draws whatever of the line is left up to pixel 160
 (`Ppu::draw`), and `Ppu::next_frame` and LCD enable start a frame (window
 line counter and WY condition; the renderer's WY condition is the only
 copy, which the window stall reads too). `Ppu::drawn` counts the pixels
 of the current line already in the frame.
-
-The renderer owns the fetcher's per-line state for mid-mode-3 writes
-(`docs/design/mid-line-ppu.md`): the held parts of the line (`Held`:
-pixels fetched before a map-select, tile-data, SCX or SCY write, drawn
-with the old values, and which planes of the last tile were read after
-it, `Mixed`), the object fetch cursor, the CGB TILE_SEL glitch latch
-(`SelLatch`) and the window zero pixel. The timing code decides them
-(`Ppu::hold_fetch`, `Ppu::window_write`) and hands them over
-(`Renderer::push_hold`, `sel_set`/`sel_clear`, `set_zero`); `Memory` only
-supplies registers, VRAM, OAM and the object line buffer.
 
 Mid-line writes (ADR 0002 catch-up): `Ctx::write_ppu` for LCDC, SCY, SCX,
 BGP, OBP0, OBP1, WY and WX calls `Ppu::flush(at)` before the write lands,
@@ -493,13 +526,108 @@ palettes (CGB C), one dot later for WX. Drawing at the mode-3 end is exact
 for VRAM and OAM because the CPU can't write them during mode 3 (and OAM
 during mode 2, when the scan happens); OAM DMA is the exception, below.
 
+The fetcher has already read some tiles when such a write lands, so the
+renderer owns the fetcher's per-line state (`docs/design/mid-line-ppu.md`):
+the held parts of the line (`Held`: pixels fetched before a map-select,
+tile-data, SCX or SCY write, drawn with the old values, and which planes
+of the last tile were read after it, `Mixed`), the object fetch cursor,
+the CGB TILE_SEL glitch latch (`SelLatch`) and the window zero pixel. The
+timing code decides them (`Ppu::hold_fetch`, `Ppu::window_write`) and
+hands them over (`Renderer::push_hold`, `sel_set`/`sel_clear`,
+`set_zero`); `Memory` only supplies registers, VRAM, OAM, palette RAM and
+the object line buffer.
+
 Registers: LCDC lives in `Ppu`; SCY, SCX, WY, WX and the raw BGP/OBP0/OBP1
-stay in the `mem.io` backing store (reads unchanged on the bus path), and
-the renderer reads them through `Ppu::regs` when it draws. Colors are
-resolved when written (ADR 0013): `Ppu::colors` holds RGB555 tables, rebuilt
-on BGP/OBPx writes, at reset and by `Emulator::set_dmg_palettes`. Spans
-without object pixels go straight from tile bits to RGB555; others mix an
-index buffer with the object buffer. `frame_done` no longer writes the
-frame; `screen_blank` and the LCD-off rules are unchanged (ADR 0006
-amendments). Cost and code size: `docs/perf.md`. CGB-mode rendering
-(attributes, VRAM bank 1, CGB palettes, OAM-index priority) is M5.
+stay in `mem.io` (reads unchanged on the bus path), and the renderer reads
+them through `Ppu::regs` when it draws. Colors are resolved when written
+(ADR 0013): `Ppu::colors` holds RGB555 tables, rebuilt on BGP/OBPx writes
+(DMG compatibility mode, through the caller's `DmgPalettes`) and on
+BCPD/OCPD writes (CGB mode, from palette RAM). In CGB mode each tile
+fetch reads its attribute byte (palette, VRAM bank, flips, BG-to-OBJ
+priority) and objects win pixels by OAM index instead of X; compatibility
+mode has its own copy of the tile loops with no attribute read. Spans
+without object pixels go straight from tile bits to RGB555; others mix
+with the object buffer. Cost: `docs/perf.md`.
+
+### OAM DMA
+
+`docs/reference/oam-dma.md` has the hardware rules. The transfer's state
+(`dma::OamDma`) lives in the `Ppu` (`Ppu::dma`): the bus drives it
+(`bus/oam_dma.rs`: the FF46 write, HALT pause and wake-up, the speed
+switch's retime, CPU conflicts) and both read it, so the PPU's sync and
+draw calls take no extra arguments.
+
+For the CPU: `Hot::dma` routes every access during a transfer to
+`read_during_dma`/`write_during_dma` (`dma::conflict`, the CGB C table).
+The bytes are copied lazily (`Ctx::dma_sync`): before a CPU write during
+the transfer, a restart, every PPU sync, the end of a run call and the
+`Dma` deadline.
+
+For the PPU: `OamDma::ppu_at(clock)` says what a PPU OAM read at a clock
+sees (off, running, halted) and how many bytes are written by then; it is
+a pure function of the state since its last change. So before each change
+(an FF46 write, a halt during a transfer) the bus calls
+`Ctx::dma_ppu_event`: the PPU syncs, scans the OAM entries read so far
+(`Ppu::scan_to`, keeping the partial scan in `Ppu::scan`), fixes the
+attributes of the objects fetched so far and draws the line up to now
+(`Ppu::fix_attrs`, `flush`). The wake-up from HALT needs no sync: it
+changes nothing up to it.
+
+A line is DMA-aware from the FF46 write (`OamDma::ppu_live`) until the
+first line that starts after the transfer's end as the PPU sees it
+(`Ppu::dma_touches` clears the flag), so the normal path costs one flag
+test per line. On an aware line the OAM scan runs entry by entry in runs
+of equal state, tracking the mode-2 bus (`Ppu::bus`), and the objects' tile
+index and attributes come from `Ppu::obj_attr` (passed to the renderer as
+`Sources::attrs`), filled lazily at each draw from the clock of each
+object's fetch in its stall. OAM bytes the transfer hasn't written yet are
+read from `Memory::oam_dma_old` (OAM at the FF46 write); the written ones
+are in `mem.oam`.
+
+### VRAM DMA (ADR 0017)
+
+State is `Sys::vdma` (`hdma::VramDma`: the running source and destination
+counters, the block count, and the flags below); the glue is
+`bus/vram_dma.rs`. FF51-FF54 only store. An FF55 write
+(`Ctx::write_hdma5`) starts a general-purpose transfer, or arms an HBlank
+one: `Ctx::vdma_arm` then sets the `VramDma` deadline once per visible
+line, `hdma::HBLANK_DELAY` dots after the line's mode-0 start (every PPU
+sync during an HBlank transfer checks it, and `write_ppu` arms it again
+when a mid-mode-3 write moves that start).
+
+A transfer step does not run inside an instruction. The trigger sets
+`VramDma::pending`, which ends `Cpu::run` after the current instruction;
+`Emulator::run` then calls `vdma_turn`, which latches the next opcode
+fetch (`Cpu::latch_fetch`), runs the step (`Ctx::vram_dma`: all blocks of
+a GDMA or one HDMA block, copied at once, 16 bytes at a time from the ROM
+window, cartridge RAM or WRAM, after the PPU has drawn everything before
+it) and then the CPU's stall (`Ctx::vdma_stall`). The stall is skipped a
+deadline at a time and is resumable: `VramDma::stall` holds the M-cycles
+left, so a stop event or the call's target can end the run call inside
+it and the next call continues (ADR 0021, GDMA stall amendment). HALT
+holds HBlank transfers (`vdma_halt`, `vdma_wake`, `Bus::wake_stalls`).
+
+### STOP and the speed switch (ADR 0020)
+
+`bus/stop.rs`. STOP with a selected button held does nothing. Otherwise
+it resets DIV, and then either enters STOP mode (`stop_freeze`: the
+system counter and its deadlines freeze, frames and samples keep their
+rate, frames are black unless the STOP was in mode 3; `stop_wake` ends
+it on a button) or, with KEY1 armed in CGB mode, switches speed.
+
+The speed is an input to every lazy component and every deadline, so
+`Ctx::speed_switch` goes in a fixed order: bring everything lazy up to
+the switch clock under the old speed's rules, change the speed
+(`Hot::set_speed`, the timer's counter rate, the PPU's walk, a paused OAM
+DMA), set every speed-dependent deadline again, and only then let time
+pass. The CPU then halts for about 0x8000 M-cycles unless an interrupt
+is pending (ADR 0020 has the exact counts; `Bus::speed_switch_halt`,
+skipped a deadline at a time like HALT).
+
+### Test-only builds
+
+Two cargo features of `gbc-core` exist for the invariance checks in
+`docs/perf.md` and are never in a product build: `eager-sync`
+(`Ctx::eager_sync` before every access) and `clock-offset`
+(`Emulator::start_clock_at`: power on with the clock at an arbitrary
+value).
