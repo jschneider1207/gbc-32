@@ -117,7 +117,14 @@ pub(crate) const MODE2: u32 = CMP_ON;
 /// mode 1). Shared by the walk and the STAT/LYC write views.
 pub(crate) const MODE2_SOURCE_END: u32 = CMP_ON;
 
-/// Line 0's mode-0 read quirk (CGB B/C, single speed): mode 0 at this dot.
+/// Line 0's mode-0 read quirk (CGB B/C, single speed): STAT reads mode 0
+/// at this one dot, the last before [`MODE2`], and mode 1 before it. The
+/// default CPU grid reads at `t = 3 mod 4`, so this is the one read AGE's
+/// "mode-0 m-cycle at the end of mode 1" names (`Ppu::mode`, with the
+/// ROMs: AGE `stat-mode`, gambatte `ly0/lycint152_ly0stat_2`,
+/// `enable_display/frame1_m2stat_count_1`). Mode 1 at 0:2 and at 0:0 are
+/// gambatte `lcd_offset/offset1_lyc99int_m2stat_count_1` and
+/// `offset3_lyc99int_m2stat_count_1` (CGB04C); no ROM reads at 0:1.
 pub(crate) const LINE0_MODE0_QUIRK: u32 = 3;
 
 // --- Mode 3 and the access windows (lines 0-143) ---

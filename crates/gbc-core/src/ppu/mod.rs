@@ -918,12 +918,21 @@ impl Ppu {
         }
         if t < edges::MODE2 {
             // Line 0 is still mode 1 from VBlank, but on CGB B/C it reads
-            // mode 0 for one M-cycle at `t = 3` in single speed. AGE
-            // `stat-mode/stat-mode.inc` (`M1E`: "no mode-0 m-cycle at the
-            // end of mode-1 on CGB-E", so B/C have one; `stat-mode-
-            // dmgC-cgbBC`, `-ncmBC`); Gambatte `ly0/lycint152_ly0stat_2`
-            // and `enable_display/frame1_m2stat_count_1` (CGB04C). SameBoy
-            // clears the mode there on DMG only: it models CGB-E here.
+            // mode 0 at `t = 3` in single speed: one dot
+            // (`edges::LINE0_MODE0_QUIRK`), the last before mode 2, and
+            // the one read of the default CPU grid there (reads at `t = 3
+            // mod 4`), which is AGE's "m-cycle": `stat-mode/stat-mode.inc`
+            // (`M1E`: "no mode-0 m-cycle at the end of mode-1 on CGB-E",
+            // so B/C have one; `stat-mode-dmgC-cgbBC`, `-ncmBC`). Gambatte
+            // `ly0/lycint152_ly0stat_2` and
+            // `enable_display/frame1_m2stat_count_1` (CGB04C) read it at
+            // `t = 3` too. SameBoy clears the mode there on DMG only: it
+            // models CGB-E here.
+            // Not wider: the other CPU grids read mode 1 before it,
+            // gambatte `lcd_offset/offset1_lyc99int_m2stat_count_1` at
+            // 0:2 and `offset3_lyc99int_m2stat_count_1` at 0:0 (CGB04C;
+            // each fails with mode 0 there; no ROM reads at 0:1), and
+            // mode 2 from `t = 4`.
             // `quirk` is for STAT register reads only: internal HBlank
             // users (HDMA start) see mode 1 here, as SameBoy does.
             u8::from(l == 0 && (t != edges::LINE0_MODE0_QUIRK || speed.is_double() || !quirk))
@@ -3341,11 +3350,30 @@ impl Ppu {
         // the new value is compared with 153, and from dot 4 the held
         // comparison of 152 is over first. gambatte (behaviour only,
         // `lycRegChangeTriggersStatIrq` with `getLycCmpLy`): from line
-        // 152's `T <= 8` the write compares the next LY, 153, up to line
-        // 153's start (our access t = 6); the old LYC's period ends at
-        // `timeToNextLy <= 2` (access t = 3); from there on to dot 12 it
-        // compares 0. CGB04C `lycEnable/lyc153_late_ff45_enable_3`,
+        // 152's `T <= 8` the write compares the next LY, 153, up to its
+        // line 153's start; the old LYC's period ends at
+        // `timeToNextLy <= 2` (access t = 3); from its line 153's start
+        // on to dot 12 it compares 0. Its `T` (cycles to its next line,
+        // at the write's access) is 7 - t on our next line, so `T <= 8`
+        // is our access from 152:455, the view from 153:0, the first dot
+        // of `l == 153` here, and its line 153 starts at our access
+        // t = 7: the last access comparing 153 is at t = 6, the view at 7
+        // (`edges::LYC153_SS_UNTIL`). (The start of the window doesn't
+        // show in IF: what a write landing on 153:0 requests reaches IF
+        // at 153:5, where the walk's comparison with 153 would request
+        // it too.) CGB04C `lycEnable/lyc153_late_ff45_enable_3`,
         // `_lcdoffset1_1` (IRQ), `_2`, `_4` (none).
+        //
+        // UNPINNED: l153-lyc-write-before-cmp (c): a write landing on
+        // 153:4, a dot before the walk compares 153, comes before that
+        // comparison here: one that changes LYC from 153 loses the
+        // interrupt, and one that writes 153 again requests it as its
+        // own, 4 dots after the walk would. gambatte (`lyc_irq.cpp`
+        // `regChange`): its LYC event keeps the old LYC for a write at
+        // most 2 cycles before it, on line 153 as on lines 1-152
+        // (`Self::early_cmp`), and a write of the same value does
+        // nothing. A `lycEnable/ff45_disable`-style capture with LYC =
+        // 153 would settle it (`docs/reference/stat-irq.md`).
         if !speed.is_double() && l == 153 && t < edges::LYC153_SS_UNTIL {
             if t >= timeline::L153_CMP_SEEN - 1 {
                 self.line_irq.drop_lyc();

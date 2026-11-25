@@ -379,5 +379,9 @@ dot, t = 5).
   boundary there (see "Line 0 and line 153's LYC=0" above): a capture of
   `lycint152_lyc0irq`-style rows at lcd offset 3 would settle the read
   side directly.
+- A LYC write landing a dot before line 153's comparison with 153
+  (153:4) is not too late for it, unlike on lines 1-152 ("IF writes, the
+  LYC-write request" above); gambatte's latch says it is. No ROM
+  (`unpinned.md`, `l153-lyc-write-before-cmp`).
 - The mode-0 latch on the first line after LCD enable follows gambatte's
   model alone (`unpinned.md`, `m0-latch-first-line`).
