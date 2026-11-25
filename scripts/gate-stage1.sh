@@ -35,6 +35,13 @@ cargo fmt --all --check || fail "formatting"
 step "cargo clippy"
 cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 
+step "cargo doc (gbc-core, private items, warnings denied)"
+# The core's comments cite hardware behaviour and each other through
+# intra-doc links; a broken or ambiguous one is a rustdoc warning.
+# CARGO_ENCODED_RUSTDOCFLAGS would replace RUSTDOCFLAGS (and drop -D warnings).
+env -u CARGO_ENCODED_RUSTDOCFLAGS RUSTDOCFLAGS="-D warnings" \
+    cargo doc -p gbc-core --no-deps --document-private-items || fail "cargo doc (gbc-core)"
+
 step "cargo test"
 cargo test --workspace || fail "tests"
 

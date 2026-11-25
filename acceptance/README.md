@@ -279,6 +279,9 @@ early (`crash`). Keep the full-manifest run time in `docs/STATUS.md` under
    ROM passes and there are no regressions against
    `acceptance/results/stage1.json`. Exit code 2 is reported separately as a
    runner error.
+10. `RUSTDOCFLAGS="-D warnings" cargo doc -p gbc-core --no-deps
+    --document-private-items` is clean (no rustdoc warning, such as a
+    broken intra-doc link, in the core's documentation).
 
 `should` and `stretch` scores are reported but don't block the gate.
 Finishing Stage 1 additionally requires the human to sign off on the
