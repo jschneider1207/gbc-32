@@ -2820,7 +2820,7 @@ impl Ppu {
     /// OAM changed (a CPU or DMA write): the object summary is stale.
     #[inline]
     pub(crate) fn oam_written(&mut self) {
-        self.objects.valid = false;
+        self.objects.state = Summary::Written;
     }
 
     // --- OAM DMA as the PPU sees it (`docs/reference/oam-dma.md`) ---
@@ -3504,47 +3504,197 @@ impl Ppu {
     }
 }
 
-/// The visible lines any object covers (bit `ly`), from OAM Y and the
-/// object height, rebuilt when OAM or the height changed: most lines have
-/// no object, and their OAM scan is skipped (`Ppu::latch`).
+/// The visible lines any object covers, from OAM Y and the object height,
+/// rebuilt when OAM or the height changed: most lines have no object, and
+/// their OAM scan is skipped (`Ppu::latch`). Bit `ly + 16`, the OAM Y of
+/// an object whose first row is line `ly`: an object at Y covers bits
+/// Y .. Y + height, so the 160 bits are lines -16 ..= 143 and the screen's
+/// top and bottom clip by themselves.
 #[derive(Clone, Copy)]
 struct ObjectLines {
     bits: [u32; 5],
     tall: bool,
-    /// No OAM write since the bits were built ([`Ppu::oam_written`]).
-    valid: bool,
+    /// Whether OAM was written since the bits were built.
+    state: Summary,
+}
+
+/// [`ObjectLines`] against OAM.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Summary {
+    /// OAM was written since the last line's scan ([`Ppu::oam_written`]).
+    Written,
+    /// OAM was written before the last line's scan, which went ahead
+    /// without the bits, and not since.
+    Deferred,
+    /// The bits are OAM's.
+    Fresh,
 }
 
 impl ObjectLines {
     const STALE: Self = Self {
         bits: [0; 5],
         tall: false,
-        valid: false,
+        state: Summary::Written,
     };
 
-    /// Some object covers line `ly`.
+    /// Some object may cover line `ly`: `false` only if none does. The
+    /// first line after an OAM write is not looked up (its scan finds out),
+    /// and the bits are rebuilt for the next one only if OAM was left
+    /// alone in between: a program that writes OAM on every line (HBlank
+    /// sprite multiplexing) never pays for a rebuild, and one that writes
+    /// it once a frame pays one scan of a line that may have no object
+    /// (docs/perf.md, "Object-line summary").
     fn on_line(&mut self, oam: &[u8; 0xA0], ly: u32, tall: bool) -> bool {
-        if !self.valid || self.tall != tall {
+        if self.state != Summary::Fresh || self.tall != tall {
+            if self.state == Summary::Written {
+                self.state = Summary::Deferred;
+                return true;
+            }
             self.build(oam, tall);
         }
-        // (No line past the screen has a bit.)
-        self.bits
-            .get((ly >> 5) as usize)
-            .is_some_and(|w| w & (1 << (ly & 31)) != 0)
+        self.covered(ly)
     }
 
+    /// Some object covered line `ly` when the bits were built.
+    #[inline]
+    fn covered(&self, ly: u32) -> bool {
+        // (No line past the screen has a bit.)
+        let at = ly + 16;
+        self.bits
+            .get((at >> 5) as usize)
+            .is_some_and(|w| w & (1 << (at & 31)) != 0)
+    }
+
+    /// Word-wide: a bit per object, then the words smeared in three or
+    /// four steps, not a bit per object row (docs/perf.md, "Object-line
+    /// summary"). Out of line: `Ppu::latch` runs it at most once per OAM
+    /// write, and inlined it costs more code than it saves time.
+    #[inline(never)]
     fn build(&mut self, oam: &[u8; 0xA0], tall: bool) {
-        let height = if tall { 16 } else { 8 };
-        self.bits = [0; 5];
+        // Each object's first row: bit Y, in eight words (every Y has a
+        // bit: no bounds check; Y >= 160 is below the screen and its
+        // words are dropped).
+        let mut bits = [0u32; 8];
         for obj in oam.as_chunks::<4>().0 {
-            // Rows Y-16 .. Y-16+height, clipped to the screen.
-            let top = i32::from(obj[0]) - 16;
-            for ly in top.max(0)..(top + height).min(LINES as i32) {
-                self.bits[(ly >> 5) as usize] |= 1 << (ly & 31);
+            bits[usize::from(obj[0] >> 5)] |= 1 << (obj[0] & 31);
+        }
+        // The rows below it: each bit smeared up over height - 1 more, by
+        // 1, 2 and 4 (8 rows), then by 8 (16 rows).
+        let mut s = 1;
+        while s < if tall { 16 } else { 8 } {
+            let mut carry = 0;
+            for w in &mut bits[..5] {
+                let below = carry;
+                carry = *w >> (32 - s);
+                *w |= *w << s | below;
+            }
+            s <<= 1;
+        }
+        self.bits = [bits[0], bits[1], bits[2], bits[3], bits[4]];
+        self.tall = tall;
+        self.state = Summary::Fresh;
+    }
+}
+
+#[cfg(test)]
+mod object_lines_tests {
+    extern crate std;
+    use super::*;
+
+    /// Line by line and object by object ([`LineObjects::covers`], what
+    /// the scan itself asks).
+    fn reference(oam: &[u8; 0xA0], ly: u32, tall: bool) -> bool {
+        ly < LINES
+            && oam
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|o| LineObjects::covers(o[0], ly as u8, tall))
+    }
+
+    /// `build` agrees with the reference on every line, and past the
+    /// screen, in both heights.
+    fn check(oam: &[u8; 0xA0]) {
+        for tall in [false, true] {
+            let mut lines = ObjectLines::STALE;
+            lines.build(oam, tall);
+            assert!(lines.state == Summary::Fresh && lines.tall == tall);
+            for ly in 0..=255 {
+                assert_eq!(
+                    lines.covered(ly),
+                    reference(oam, ly, tall),
+                    "line {ly}, tall {tall}, Y {:?}",
+                    oam.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|o| o[0])
+                        .collect::<std::vec::Vec<_>>()
+                );
             }
         }
-        self.tall = tall;
-        self.valid = true;
+    }
+
+    /// The first line after an OAM write is scanned without the bits; the
+    /// next one rebuilds them, unless OAM was written again.
+    #[test]
+    fn a_write_defers_the_rebuild_by_one_line() {
+        // One 8x8 object on lines 4-11.
+        let mut oam = [0u8; 0xA0];
+        oam[0] = 20;
+        let mut lines = ObjectLines::STALE;
+        // Written before every line: never built, every line scanned.
+        for ly in 0..LINES {
+            lines.state = Summary::Written;
+            assert!(lines.on_line(&oam, ly, false), "line {ly}");
+            assert_eq!(lines.state, Summary::Deferred);
+        }
+        // Left alone: built at the next line, and exact from then on.
+        for ly in 0..LINES {
+            assert_eq!(lines.on_line(&oam, ly, false), (4..12).contains(&ly));
+            assert_eq!(lines.state, Summary::Fresh);
+        }
+        // A height change alone rebuilds at once.
+        assert!(lines.on_line(&oam, 15, true) && lines.tall);
+        assert_eq!(lines.state, Summary::Fresh);
+        // One write: line 30 is scanned (no object there), line 31 is not.
+        oam[0] = 0;
+        lines.state = Summary::Written;
+        assert!(lines.on_line(&oam, 30, true));
+        assert!(!lines.on_line(&oam, 31, true));
+        assert!(!lines.on_line(&oam, 4, true));
+    }
+
+    /// The word-wide construction against the per-line reference: every Y
+    /// alone (clipped at the top, Y < 16, and at the bottom, Y > 144;
+    /// ranges across every 32-bit word boundary), every Y with a second
+    /// object 0-40 rows below it (overlapping, touching, apart), and full
+    /// OAMs of pseudo-random Y.
+    #[test]
+    fn build_matches_the_per_line_reference() {
+        // Y = 0 is off screen in both heights.
+        check(&[0; 0xA0]);
+        for y in 0..=255u8 {
+            let mut oam = [0u8; 0xA0];
+            oam[usize::from(y % 40) * 4] = y;
+            check(&oam);
+            for gap in 0..=40u8 {
+                let mut two = oam;
+                two[(usize::from(y) + 1) % 40 * 4] = y.wrapping_add(gap);
+                check(&two);
+            }
+        }
+        // A 32-bit LCG (Numerical Recipes), its high byte: all of 0-255,
+        // then only on-screen values (dense coverage).
+        let mut seed = 0x1234_5678u32;
+        for round in 0..2000 {
+            let mut oam = [0u8; 0xA0];
+            for b in &mut oam {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let v = (seed >> 24) as u8;
+                *b = if round % 2 == 0 { v } else { v % 176 };
+            }
+            check(&oam);
+        }
     }
 }
 
@@ -5108,7 +5258,7 @@ mod tests {
             for (i, &x) in objs.iter().enumerate() {
                 r.mem.oam[i * 4..i * 4 + 4].copy_from_slice(&[16 + 5, x, 0, 0]);
             }
-            r.ppu.objects.valid = false;
+            r.ppu.oam_written();
             r.ppu.lcdc = 0xF3;
             r.mem.io[0x4A] = 0;
             r.mem.io[0x4B] = 0x0B;

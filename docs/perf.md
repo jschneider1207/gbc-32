@@ -131,6 +131,16 @@ in git):
   (KEY1 locked, the objects drawn in the caller's DMG OBJ colors) and
   that a frame shows objects on exactly the 64 lines, the tenth
   object of each line, a changing BG and a flat window.
+- `synth:oam-lines` (2 s, M10 2026-11-24): OAM written on every visible
+  line, which no other line did (HBlank sprite multiplexing). An ordinary
+  single-speed CGB frame: BG (map 9800, a four-color tile), 40 8x16
+  objects in the worst-case layout (10 per line on 64 of 144 lines, none
+  on the other 80), LCDC=97. Per line: wait for mode 0, write a counter
+  to the X of objects 0, 10, 20 and 30 (14 M-cycles, done at most 104
+  dots into an HBlank of 121 or more, so OAM is open), wait for mode 3:
+  144 rounds a frame. A unit test checks that all four X bytes take
+  every write and advance by 144 a frame. Numbers: "Object-line summary"
+  below. Not in `check-bench.sh`'s list until its baseline is recorded.
 
 **Audio buffers (M6 task 8).** `run_emulation` calls the core the way the
 MCU front end will: at most one frame per call (`run_until(min(target,
@@ -1355,6 +1365,82 @@ re-validate on the new toolchain: run `scripts/check-bench.sh` and
 "without" build; the guards accept it, so nothing else needs editing).
 Keep the flag only if it still lowers Ir and `.text`; record both sets of
 numbers in ADR 0008 and restore `=100000`.
+
+## Object-line summary (M10 review, 2026-11-24)
+
+`Ppu::latch` skips the OAM scan of a line no object covers, from a
+160-bit summary of OAM (`ObjectLines`, `ppu/mod.rs`) that every OAM
+write (CPU, OAM DMA) makes stale. The rebuild at the next line set one
+bit per object row: 40 objects, up to 16 rows each. A program that writes
+OAM on every line (HBlank sprite multiplexing) paid it 144 times a frame,
+and no bench line measured it. `synth:oam-lines` (above) does. Two
+changes:
+
+- **Word-wide build.** The bits are indexed by OAM Y (bit `ly + 16`), so
+  an object is one bit at Y and the screen's top and bottom need no
+  clipping; the five words are then smeared up by 1, 2, 4 (8 rows) and 8
+  (16 rows). 40 single-bit ORs and 15 or 20 word steps instead of up to
+  640 single-bit ORs.
+- **One line's delay.** The first line after a write is scanned without
+  the summary (the scan itself finds an empty line empty), and the bits
+  are rebuilt at the next line only if OAM was not written in between. A
+  program that writes OAM on every line never rebuilds; one that writes
+  it once a frame (DMA in VBlank) pays one direct scan of a line that
+  might have had no object.
+
+Ir, each variant on the same base (2 s; 119.455 frames):
+
+| Variant | `synth:oam-lines` | per frame | cgb-acid2 (20 s) | `synth:worst-case` |
+|---|---|---|---|---|
+| before (2821437 + the program) | 233,214,859 | 1.952 M | 649,967,201 | 286,911,384 |
+| word-wide build | 152,119,282 | 1.273 M | 642,136,703 | 286,847,468 |
+| and one line's delay | 145,605,876 | 1.219 M | 642,250,198 | 286,863,036 |
+
+The build alone is 679k Ir a frame (4.7k per rebuild, more than the
+review's 3.4k estimate), 17% of the 4.02 M line; the delay takes another
+55k for 0.018% on cgb-acid2 and 0.005% on worst-case (one scan of a
+line without the summary per OAM write that is followed by a clean line). Both stay: the delay
+alone would leave a program that writes OAM every other line with 72 of
+the old rebuilds a frame.
+
+As landed (`build` out of line and compact, see the size below), every
+line against `main` (6367b5b, with the ADR 0035 audio filter) measured
+the same way:
+
+| Line | main | with the change | delta |
+|---|---|---|---|
+| cpu_instrs.gb | 1,327,813,432 | 1,327,470,396 | -0.026% |
+| cgb_sound.gb | 973,851,265 | 973,508,274 | -0.035% |
+| cgb-acid2.gbc | 726,390,252 | 717,976,794 | -1.158% |
+| synth:event-storm | 182,973,533 | 182,939,314 | -0.019% |
+| synth:dma-storm | 393,398,153 | 393,269,184 | -0.033% |
+| synth:halt-irq | 301,522,527 | 301,350,701 | -0.057% |
+| synth:worst-case | 314,276,521 | 314,195,604 | -0.026% |
+| synth:cgb-raster | 275,061,275 | 275,027,138 | -0.012% |
+| synth:apu-writes | 103,388,853 | 103,354,637 | -0.033% |
+| synth:dmg-raster | 193,438,927 | 193,358,653 | -0.041% |
+| synth:oam-lines | 240,856,971 | 153,181,406 | -36.40% |
+
+`synth:oam-lines` is 2.016 M -> **1.282 M Ir per frame** (-734k).
+
+Size: total `.text` 115,940 -> 116,076 B (+136). Written the plain way
+(a loop over a step table, inlined into `latch`) the build cost +1,004 B:
+the 40-object loop and every smear step come out unrolled. What brought
+it down: `build` out of line (`latch` 1,720 ->
+1,406 B, `build` 466 B), the smear as one loop over the step with a
+carry between words, eight local words so the object loop has no bounds
+check, and the stale state as the all-zero value (`Ppu::reset` and
+`Sys::new` clear the PPU in one block; with a non-zero stale state they
+grew by 52 B). The object loop is still unrolled (306 B of it when
+built as a function of its own).
+
+Behaviour: `diff-fingerprint.sh` against the commit that adds the
+program (audio buffer 7, samples hashed) is identical, the invariance
+checks pass with the new program in their corpus, and romtest shows no
+status change. A unit test compares `build` with the scan's own
+per-line test (`LineObjects::covers`) for every Y alone, every Y with a
+second object 0-40 rows below, and 2,000 pseudo-random OAMs, in both
+heights, on lines 0-255.
 
 ## Instruction-count benchmark
 

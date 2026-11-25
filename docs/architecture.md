@@ -511,8 +511,9 @@ place in the line walks it through one iterator (`Stalls::timed`,
 (`objects.rs`, `LineObjects::scan`) that feeds both the stalls and the
 renderer. The scan is skipped for lines a cached object-line map
 (`ObjectLines`, invalidated by `Ppu::oam_written` on CPU and DMA OAM
-writes) shows empty, and on the first line after LCD enable (the
-hardware does no OAM scan there). The closed-form mode-3 timing is
+writes; rebuilt one line after a write, if no other write follows:
+`docs/perf.md`, "Object-line summary") shows empty, and on the first
+line after LCD enable (the hardware does no OAM scan there). The closed-form mode-3 timing is
 checked against a dot-stepped model in tests (`mode3_oracle.rs`).
 
 Every PPU register write goes through `Ctx::write_ppu`: sync first, then
