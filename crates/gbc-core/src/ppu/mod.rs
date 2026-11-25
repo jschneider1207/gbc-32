@@ -141,6 +141,11 @@ pub(crate) const VBLANK_POS: u32 = 144 * LINE + timeline::VBLANK;
 /// position, but no test we have measures it (ADR 0022: the post-boot
 /// DIV does differ by mode). Gambatte's own post-boot state,
 /// `videoCycles = 144*456 + 164`, is in its line origin, not ours.
+///
+/// UNPINNED: post-boot-pos-dmg-mode (a): for DMG-mode cartridges the
+/// position is the CGB-mode one (gambatte `display_startstate/*`);
+/// Mooneye passes at 155-171. A `display_startstate`-style ROM with a
+/// DMG-mode header on a CGB would settle it (ADR 0014, ADR 0022).
 pub(crate) const POST_BOOT_POS: u32 = 144 * LINE + 171;
 
 const _: () = assert!(POST_BOOT_POS % 4 == ON_POS % 4);
@@ -443,6 +448,12 @@ const WY_LEAD: i32 = 5;
 /// (`edges::WY_DS_LATE`): gambatte (behaviour only) delays `wy2` 2.5
 /// dots there instead of 6. CGB04C: `window/arg/late_wy_FFto2_ly2_ds_1`
 /// writes 1 dot before the stall (window), `_scx5_ds_2` at it (none).
+///
+/// UNPINNED: wy-lead-phase (a): `WY_LEAD` and `WY_LEAD_DS` are constants
+/// fitted at the CPU phase gambatte's `late_wy_*` ROMs run at; SameBoy's
+/// check sits on an 8-dot grid from the LCD-on clock, so other phases
+/// may be off by up to 4 dots. `late_wy` captures at the other lcd
+/// offsets would settle it (review E7).
 const WY_LEAD_DS: i32 = 1;
 /// Stall dots kept by an LCDC.5 clear during the window stall: those
 /// before the write's clock plus this (calibrated, step E2).
@@ -937,6 +948,10 @@ impl Ppu {
     /// during the OAM scan, so the mode reads 0 exactly while the transfer
     /// is active. Gambatte has no such rule; no test ROM we have checks
     /// it. Not affected: the STAT interrupt line.
+    ///
+    /// UNPINNED: stat-during-dma (c): SameBoy against gambatte, no ROM. A
+    /// ROM polling STAT from its DMA wait loop outside VBlank, run on
+    /// hardware, would settle it (reviews E7, A2-11).
     pub(crate) fn stat_during_dma(&self, now: u64, speed: Speed) -> u8 {
         let v = self.stat(now, speed);
         if v & 3 == 2 { v & !3 } else { v }
@@ -1138,6 +1153,10 @@ impl Ppu {
         // keeps the block (the single-speed `MODE_HOLD` at t = 3). And
         // `10 -> 30` at t = 4 requests one (`Ppu::write_stat`), gambatte
         // none. No ROM for either.
+        // UNPINNED: ly0-ds-dot4-mode1-clear (c): SameBoy's level model
+        // (the pulse is unblocked) against gambatte's latch (still
+        // blocked). A `late_m1disable_ly0_ds` capture with the write at
+        // dot 4 (`lcdoffset1` grid) would settle it (review E3).
         if l == 0
             && speed.is_double()
             && t == edges::ly0_pt(Speed::Double)
@@ -1811,6 +1830,16 @@ impl Ppu {
     /// `FETCH_SAMPLED` dots later) or completely during an object or window
     /// stall at or after that pixel (SameBoy finishes the BG fetch before
     /// fetching an object). `docs/design/mid-line-ppu.md` step 1.
+    ///
+    /// UNPINNED: x0-object-before-discard (a): objects at X = 0 are
+    /// fetched before the fine-scroll discard (SameBoy, the DMG netlist,
+    /// Pan Docs; no CGB capture, no ROM reaches it). An object at X = 0
+    /// with SCX = 1 written at positions 89..=99 settles it: mode 0 at
+    /// 268 or 267 (`docs/reference/mode3-oracle.md`).
+    /// UNPINNED: wx0-discard-after-window (a): at WX = 0 the discard's
+    /// compares wait for the window's first tile (the same sources;
+    /// gambatte's model has the window after the discard). CGB, WX = 0,
+    /// SCX 1, SCX = 0 written at 89..=97: mode 0 at 263, 271 (at 96), 264.
     #[cold]
     #[inline(never)]
     pub(crate) fn hold_fetch(
@@ -2505,6 +2534,11 @@ impl Ppu {
     /// The pipeline stalls of the current line (`line.stalls`, and
     /// `end` from `first_pixel`): the renderer's objects in fetch order
     /// and the window start at WX `window`.
+    ///
+    /// UNPINNED: discard-wrap-window-write (a): a later window write on a
+    /// line whose discard wrapped rebuilds these without the junk-tile
+    /// correction or the kept WX = 0 dot: not modelled, no ROM or capture
+    /// (mode-3 oracle open edge (d), `docs/reference/mode3-oracle.md`).
     fn set_stalls(&mut self, scx: u8, window: Option<u8>) {
         if self.line.prev_wx != 0 {
             return self.set_stalls_retriggered(scx, window);
@@ -2669,6 +2703,11 @@ impl Ppu {
     /// `drawn` gives the same manifest (its WX = LY write lands at pixel 0
     /// on line 12), from 6 on loses it; the WX = 80 write takes back line
     /// 100's (x = 93), not line 92's (x = 85).
+    ///
+    /// UNPINNED: window-zero-pixel (b): on CGB this rests on the one
+    /// Mealybug ROM (a CGB C capture), against SameBoy (DMG only), and so
+    /// does the pixel it counts from. A second ROM with the WX write at
+    /// another pixel phase would settle it (review A2-08).
     #[cold]
     #[inline(never)]
     fn window_zero(&mut self, mem: &Memory) {
@@ -2689,6 +2728,10 @@ impl Ppu {
     /// (the BG FIFO is cleared and the fetch restarts). Approximations: one
     /// re-trigger per line, and none with 10 objects on it (the stalls hold
     /// two window starts and up to 9 objects then).
+    ///
+    /// UNPINNED: window-retrigger-once (a): the two approximations above
+    /// stand in for SameBoy's any number of activations; no ROM starts
+    /// the window three times on a line (review E7).
     #[cold]
     #[inline(never)]
     fn retrigger(&mut self, t: i32, mem: &Memory) {
@@ -2772,6 +2815,11 @@ impl Ppu {
     ///   object as being off-screen");
     /// - halted (the CPU in HALT with bytes left): the scan reads the word
     ///   being written, but on CGB revisions 0-D finds nothing.
+    ///
+    /// UNPINNED: oam-scan-dma-bus (c): SameBoy's mode-2 bus (a last Y
+    /// that covers the line makes each entry an object) against Pan Docs
+    /// ("off-screen"). A ROM whose last-read Y covers the line while a
+    /// DMA runs through mode 2 would settle it.
     #[cold]
     #[inline(never)]
     fn scan_to(&mut self, l: u32, start: u64, until: u64, mem: &Memory) {
@@ -2855,6 +2903,10 @@ impl Ppu {
     /// written ([`OamDma::ppu_read`]). The fetch's OAM read is placed
     /// `d - 5` dots into the object's `d`-dot stall (SameBoy: after the
     /// wait for the BG fetch and one more dot; untested).
+    ///
+    /// UNPINNED: dma-fetch-read-dot (a): what is read follows SameBoy and
+    /// Pan Docs, the dot is this model's; no ROM runs an OAM DMA through
+    /// mode 3 with objects (review A2-11, `docs/reference/oam-dma.md`).
     #[cold]
     #[inline(never)]
     fn fix_attrs(&mut self, mem: &Memory, upto: u64) {
@@ -3127,6 +3179,11 @@ impl Ppu {
     /// `MODE_HOLD`; 2-3 dots before line 153's comparison:
     /// `MODE_1_STICKY`). ROMs: [`edges::LY0_PULSE`],
     /// [`edges::L153_ZERO_WALK`].
+    ///
+    /// UNPINNED: l153-ds-write-before-point (c): double speed has no such
+    /// rule for line 153's point: a write at 153:12 that ends the match
+    /// loses the interrupt gambatte's latch would keep. No ROM
+    /// (`docs/reference/stat-irq.md`, "Open").
     #[cold]
     #[inline(never)]
     fn point_before_write(&mut self, c: Cursor, at: u64, iflags: &mut u8, speed: Speed) {
@@ -3216,6 +3273,10 @@ impl Ppu {
         // mode 1 is selected (kept: no ROM tells). CGB04C
         // `m2enable/late_enable_ly0_ds_{1,lcdoffset1_1}` (t = 5, 4: IRQ),
         // `_ds_2`, `_ds_lcdoffset1_2` (t = 7, 6: none).
+        // UNPINNED: ly0-ds-dot4-stat-10-30 (c): at t = 4 with mode 1
+        // selected the write requests the interrupt; gambatte requests
+        // none. A `late_enable_ly0_ds` capture with mode 1 selected
+        // would settle it (review E3).
         if speed.is_double()
             && view == View::StatPhase1
             && added & SEL_MODE2 != 0
@@ -3489,6 +3550,9 @@ fn sorted_object_stalls(
     // in, so the two must agree. A single-source choice, no hardware
     // capture yet: ADR 0034. What is in the window is still decided by
     // `win_x`: an object at X = 0 stays outside it, as at SCX & 7 = 0.
+    // UNPINNED: wx0-window-grid-stalls (c): the renderer's 7 + f grid
+    // (Pan Docs) against SameBoy's 8 + f and gambatte's 7; no ROM
+    // reaches it (`docs/reference/mode3-oracle.md`, disagreement 1).
     let win_grid = if window == Some(0) {
         win_x - i32::from(scx & 7)
     } else {

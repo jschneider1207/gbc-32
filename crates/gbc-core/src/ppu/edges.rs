@@ -421,6 +421,12 @@ const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
 /// phase with boundaries at `t = 0 mod 4` has one there; no ROM we have
 /// reads IF or checks interrupts at that phase.
 ///
+/// UNPINNED: ly153-zero-if-read (a): the read side (an IF read, interrupt
+/// check or acknowledge on 153:12 at a phase with a boundary there)
+/// rests on gambatte's model and the write-side captures above; SameBoy
+/// has the request at 12. A `lycint152_lyc0irq`-style capture at lcd
+/// offset 3 settles it (`docs/reference/stat-irq.md`, "Open"; ADR 0033).
+///
 /// Single speed: a STAT or LYC write landing on [`L153_ZERO`] no longer
 /// changes what the comparison sees (gambatte `lyc_irq.cpp` `regChange`:
 /// the event sees the selects and LYC as of the last write more than 2

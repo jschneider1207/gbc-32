@@ -618,6 +618,16 @@ impl Renderer {
 
     /// The pixels cut from the window's first tile when it starts at the
     /// line's trigger WX (`win_wx`).
+    ///
+    /// UNPINNED: wx0-window-grid (c): at WX = 0 the window loses 7 + f
+    /// pixels (f = SCX & 7; Pan Docs); gambatte's model 7, SameBoy 8 + f.
+    /// No ROM or capture shows the pixels (ADR 0034, with the human; the
+    /// stalls use the same grid, `sorted_object_stalls`). A CGB capture
+    /// of WX = 0 with f = 1..=7 and distinguishable columns settles it.
+    /// UNPINNED: wx0-discard-wrap-pixels (a): after an SCX write that
+    /// wraps the discard (n >= 8 pixels) the cut is still 7 + n % 8, not
+    /// 7 + n: not modelled, no ROM reaches it (mode-3 oracle open edge
+    /// (e), `docs/reference/mode3-oracle.md`).
     #[inline(always)]
     const fn trigger_skip(&self) -> u8 {
         match self.win_wx {

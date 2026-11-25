@@ -226,6 +226,12 @@ impl Square {
     /// clocks on steps 1 clock late (no ROM). A trigger's countdown counts
     /// as reloaded one period before its first step (`delay` clocks on; no
     /// ROM). Then the length (`Length::write_nrx4`) and the trigger.
+    ///
+    /// UNPINNED: sq-nrx4-window-edges (a): the two "no ROM" cases above (a
+    /// 4-clock period; an NRx4 write within 4 clocks of a trigger's
+    /// reload point) extend the SameSuite window by this model alone. A
+    /// `channel_1_freq_change_timing`-style ROM at f = 0x7FF, and one
+    /// writing right after a trigger, would settle them.
     fn write_nrx4(&mut self, value: u8, fs: u8, delay: u8) {
         let since = self.since_step();
         self.freq = self.freq & 0xFF | u16::from(value & 7) << 8;

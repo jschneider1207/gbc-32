@@ -214,6 +214,10 @@ impl MapperKind {
             0x22 => Self::Mbc7,
             0xFC => Self::PocketCamera,
             0xFD => Self::Tama5,
+            // UNPINNED: filler-header-huc (c): a ROM-only image whose 0147
+            // is FE/FF (padding) loads as HuC3/HuC1 (Pan Docs' type
+            // table); SameBoy and real no-MBC boards ignore 0147 there.
+            // ADR 0031; with the human. No ROM in the manifest has either.
             0xFE => Self::HuC3,
             0xFF => Self::HuC1,
             _ => Self::Unknown,
@@ -1000,6 +1004,9 @@ impl<'a> Cart<'a> {
             // high), so the same C0 is returned; SameBoy returns only the
             // light bit (00) with a "what are the other bits?" note.
             // Bits 1-6 on a HuC3 are unverified on hardware.
+            // UNPINNED: huc3-ir-read-bits (c): C0 (Pan Docs, by analogy
+            // with HuC1) against SameBoy's 00; no ROM. A HuC3 cartridge
+            // read in mode E would settle it.
             SEL_IR => 0xC0,
             SEL_CLOCK_RESPONSE => self.huc3.read_response(),
             SEL_CLOCK_SEMAPHORE => self.huc3.read_semaphore(),
@@ -1007,6 +1014,9 @@ impl<'a> Cart<'a> {
             // write-only mode B, or read-only RAM on a cartridge without
             // RAM: Pan Docs says open bus, "often $FF" (SameBoy returns
             // 01 for the unknown modes, with a TODO).
+            // UNPINNED: huc3-unmapped-read (c): FF (Pan Docs, "often")
+            // against SameBoy's 01; no ROM. A read on a HuC3 cartridge in
+            // modes 1-9, B and F would settle it.
             _ => 0xFF,
         }
     }
@@ -1175,6 +1185,10 @@ impl<'a> Cart<'a> {
                     // follow Pan Docs (bit 0 going 0 -> 1 latches);
                     // SameBoy (`Core/memory.c`) latches on every write to
                     // 6000-7FFF. Unverified on hardware (plan task).
+                    // UNPINNED: mbc3-latch-edge (c): Pan Docs' 0 -> 1 edge
+                    // against SameBoy's every write; rtc3test only writes
+                    // 00 then 01 (review A4-9). A ROM writing 01 twice
+                    // and comparing the latched seconds would settle it.
                     _ => {
                         let bit = value & 1 != 0;
                         if bit && !self.rtc_latch && rtc {
@@ -1206,6 +1220,11 @@ impl<'a> Cart<'a> {
                 // (GB_HUC1) and `Core/gb.h` (`huc1`: `bank_low:6`,
                 // `bank_high:3`), which is where the register widths come
                 // from (Pan Docs: "at least 6 bits", "at least 2 bits").
+                // UNPINNED: huc1-registers (a): no test ROM covers HuC1;
+                // the widths, the missing RAM enable and the IR value
+                // rest on SameBoy and Pan Docs
+                // (`docs/reference/hudson-mappers.md`). A HuC1 cartridge
+                // on hardware would settle them.
                 match addr >> 13 {
                     // RAM/IR select, not a RAM enable: 0E maps the IR
                     // register at A000-BFFF, anything else the RAM (games
@@ -1213,12 +1232,16 @@ impl<'a> Cart<'a> {
                     // compares the low nibble (`(value & 0xF) == 0xE`);
                     // Pan Docs only says "write $0E". Unverified on
                     // hardware which of the two it is for 1E-FE.
+                    // UNPINNED: huc1-ir-select-nibble (a): SameBoy's low
+                    // nibble compare; Pan Docs names only 0E. No ROM.
                     0 => self.rtc_sel = if value & 0x0F == 0x0E { SEL_IR } else { 0 },
                     // ROM bank, 6 bits. No 0 -> 1 fix-up: SameBoy maps the
                     // value as written (`Core/mbc.c`
                     // `GB_update_mbc_mappings`, GB_HUC1), so 0 puts bank 0
                     // at 4000-7FFF. Pan Docs doesn't say; unverified on
                     // hardware. Power-on is bank 1 (`GB_reset_mbc`).
+                    // UNPINNED: huc1-rom-bank-0 (a): SameBoy only (bank 0
+                    // maps bank 0); Pan Docs is silent. No ROM.
                     1 => self.mbc5_rom = u16::from(value & 0x3F),
                     // RAM bank; the RAM size masks it (`ram_index`).
                     2 => self.mbc5_ram = value & 0x07,

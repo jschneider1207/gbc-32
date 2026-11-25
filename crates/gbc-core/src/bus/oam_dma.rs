@@ -17,6 +17,12 @@ impl Ctx<'_, '_> {
     /// delay unless it was in its last M-cycle (SameBoy `GB_IO_DMA`,
     /// `dma_restarting`; Mooneye `oam_dma_restart`).
     ///
+    /// UNPINNED: dma-restart-ppu-window (c): for the PPU the old transfer
+    /// stops at this write and the new one starts 2 dots before its byte
+    /// 0 (the `late_sp*` lead applied to a restart); SameBoy keeps it
+    /// active throughout. No ROM (`docs/reference/oam-dma.md`,
+    /// "Unverified"); a restart around the OAM scan would settle it.
+    ///
     /// The PPU is brought up to the write first (its OAM reads so far saw
     /// the old state), and OAM is kept as it is now for the PPU's reads of
     /// bytes not written yet (`Memory::oam_dma_old`).
@@ -242,6 +248,13 @@ impl Ctx<'_, '_> {
     /// what is still ahead keeps its M-cycle count at the new speed
     /// `to`, around the pause (SameBoy counts the DMA in CPU cycles,
     /// `dma_cycles`). Unverified on hardware (`docs/reference/oam-dma.md`).
+    ///
+    /// UNPINNED: dma-speed-switch-retime (a): SameBoy only. Two gambatte
+    /// ROMs run it, to double speed with nothing pending
+    /// (`oamdmasrcC0_speedchange_readC000`,
+    /// `hdma_transition_speedchange_oamdma`); to single speed, or with an
+    /// interrupt pending, no ROM does (review A4-11). A cgb04c capture of
+    /// a switch to single speed mid-transfer would settle it.
     #[cold]
     #[inline(never)]
     pub(super) fn dma_retime(&mut self, to: Speed) {

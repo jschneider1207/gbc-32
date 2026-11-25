@@ -92,6 +92,10 @@ impl Sys<'_> {
         // OBJ palette RAM is not written (left at zero here; random on
         // hardware). DMG compatibility mode: palette RAM is unreadable
         // (BCPD/OCPD read FF), so its contents don't matter.
+        // UNPINNED: obj-palette-power-on (c): zero is this core's choice
+        // (determinism); the one cgb04c capture that shows it has
+        // 0x21926C on that console (gambatte `scx_during_m3_spx2*`,
+        // signed off by the human as depending on uninitialised RAM).
         if self.cgb_mode {
             for c in mem.bg_pal.as_chunks_mut::<2>().0 {
                 *c = 0x7FFFu16.to_le_bytes();
@@ -109,6 +113,9 @@ impl Sys<'_> {
         // compatibility mode: where the boot ROM's palette setup leaves
         // them (Mooneye `misc/boot_hwio-C` reads C8 and D0, bit 6 reading
         // 1). The CGB-mode values are unverified (no test); left at 0.
+        // UNPINNED: post-boot-bcps-ocps-cgb (a): no reference and no ROM
+        // for BCPS/OCPS after the boot ROM in CGB mode; a `boot_hwio`-style
+        // ROM with a CGB-mode header, run on hardware, would settle it.
         if !self.cgb_mode {
             mem.io[0x68] = 0x88;
             mem.io[0x6A] = 0x90;

@@ -348,6 +348,16 @@ impl Apu {
     ///   the 1 MHz phase is one 2 MHz tick late too: `lf_div` flips
     ///   (cgb04c `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_1`/`_2`:
     ///   power on, switch, trigger; 6 clocks, not 8).
+    ///
+    /// UNPINNED: apu-trigger-ss-odd-grid (a): a single-speed trigger on the
+    /// odd CPU grid (after a switch back to single speed) stays on the
+    /// absolute 1 mod 4 grid, whatever the APU's power-on phase: gambatte's
+    /// shape, no ROM triggers there (review A3-4). A cgb04c capture of a
+    /// trigger after two switches would settle it.
+    /// UNPINNED: apu-trigger-ds-delay-phase (b): the `lf_div` flip under
+    /// `Fs::ds_delay` rests on the one `nr4init` ROM pair above; AGE
+    /// delays only its frame sequencer there. Another double-speed
+    /// trigger capture with the flag set would settle it.
     #[inline]
     fn trigger_delay(&self, now: u64, speed: Speed) -> u8 {
         if speed.is_double() {

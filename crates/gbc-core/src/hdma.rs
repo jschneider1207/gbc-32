@@ -164,6 +164,10 @@ impl VramDma {
             // with `hdma_on` set its loop runs every block of the new
             // length. FF55 follows gambatte here already, so the block
             // does too.
+            // UNPINNED: hdma-cancel-nonzero (c): gambatte against SameBoy
+            // (value + 1 blocks); the captures only cancel with 00, so a
+            // non-zero value is single-source (review A4-2; STATUS,
+            // "Needs human"). A capture cancelling with 01 would settle it.
             self.hblank = false;
             self.single = self.pending;
             return;
@@ -177,6 +181,9 @@ impl VramDma {
         // disagrees: with HDMA enabled its FF55 write only stores the
         // length, with no new request. No test ROM here tells them apart
         // (review finding A4-6, stage1-m10).
+        // UNPINNED: hdma-rearm-in-hblank (c): SameBoy (a second block in
+        // the same HBlank) against gambatte (none). A ROM writing FF55 =
+        // 8n twice in one HBlank and reading the destination settles it.
         self.hblank = hblank;
         self.pending = !hblank || mode0;
     }

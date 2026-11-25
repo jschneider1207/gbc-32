@@ -9,6 +9,12 @@
 //! comment at that rule says which one is followed. No test ROM covers
 //! the chip, so every rule is unverified on hardware beyond those sources.
 //!
+//! UNPINNED: huc3-clock-protocol (a): the whole command protocol and
+//! location map (Pan Docs, SameBoy for the gaps); no test ROM. The rules
+//! where the two sources differ or are silent carry their own tag below.
+//! A HuC3 cartridge on hardware, or a test ROM run on one, would settle
+//! them.
+//!
 //! Like the MBC3 clock (`rtc.rs`) it counts emulated time only and is
 //! caught up lazily: [`Cart`](super::Cart) advances it by the elapsed base
 //! clocks when a command that reads or sets the time runs, and for
@@ -49,6 +55,9 @@ pub struct Huc3RtcState {
     /// Day counter, 16 bits (four nibbles in the time buffer, as in
     /// SameBoy; Pan Docs lists three for the counter itself). Wraps to 0
     /// after 65535 with no overflow flag.
+    ///
+    /// UNPINNED: huc3-day-width (c): four nibbles (SameBoy, and the
+    /// 17-byte save footer) against Pan Docs' three (locations 13-15).
     pub days: u16,
     /// Event (alarm) time, minute of the day: locations 58-5A, 12 bits.
     /// Stored for the game to read back; the alarm itself (a tone from
@@ -118,6 +127,10 @@ impl Huc3RtcState {
     /// chip does (SameBoy compares for equality with 1440 on a wider
     /// variable, so such a value would count on to 65535). `minutes`
     /// must be 12 bits (callers mask).
+    ///
+    /// UNPINNED: huc3-minute-overflow (a): no source; the MBC3 rule by
+    /// analogy. Setting the minute to 1440 or more on a cartridge and
+    /// reading it back over time would settle it.
     fn add_minutes(&mut self, mut n: u64) {
         let mut m = u64::from(self.minutes & 0xFFF);
         if m >= DAY_MINUTES {
@@ -216,6 +229,9 @@ impl Huc3 {
     /// write (`huc3_write`, "Not sure what writes here mean, they're
     /// always 0xFE"). Games always do both, in this order, so the two
     /// models differ only for a program that skips the semaphore write.
+    ///
+    /// UNPINNED: huc3-command-on-semaphore (c): Pan Docs (the semaphore
+    /// write runs the command) against SameBoy (this write does).
     pub(super) fn write_command(&mut self, value: u8) {
         self.mailbox = value & 0x7F;
     }
@@ -225,6 +241,9 @@ impl Huc3 {
     /// "$C"), and bit 7, which is not connected and reads as open bus,
     /// "usually high". SameBoy returns the result alone (bits 4-7 clear);
     /// games use the low nibble only.
+    ///
+    /// UNPINNED: huc3-response-high-bits (c): Pan Docs' command echo and
+    /// open-bus bit 7 against SameBoy's zeros.
     pub(super) const fn read_response(&self) -> u8 {
         0x80 | (self.mailbox & 0x70) | self.response
     }
@@ -234,6 +253,9 @@ impl Huc3 {
     /// finish at once here, so it always is; how long the real chip stays
     /// busy is not documented. Bit 7 as in `read_response`; bits 1-6 are
     /// not documented and read 0 (SameBoy returns 01).
+    ///
+    /// UNPINNED: huc3-semaphore-read (c): 81 against SameBoy's 01, and
+    /// never busy (no source for the busy time).
     pub(super) const fn read_semaphore(&self) -> u8 {
         0x81
     }
@@ -253,6 +275,9 @@ impl Huc3 {
     /// - 4, 5: set the low, high nibble of the access address;
     /// - 6: an extended command, chosen by the argument;
     /// - 0, 7: never observed; nothing happens.
+    ///
+    /// UNPINNED: huc3-command-2 (a): SameBoy's reading only (write, no
+    /// increment); Pan Docs: "purpose unknown".
     pub(super) fn execute(&mut self) -> bool {
         let arg = self.mailbox & 0x0F;
         match self.mailbox >> 4 {
@@ -297,6 +322,11 @@ impl Huc3 {
     /// and extended commands 0 and 1 do nothing. For a game that follows
     /// the documented sequence (0, then read; or write, then 1) the two
     /// models give the same values.
+    ///
+    /// UNPINNED: huc3-time-buffer (c): Pan Docs' buffer at 00-06 with
+    /// extended commands 0 and 1, against SameBoy's live counters there.
+    /// UNPINNED: huc3-set-time-restarts-minute (a): no source; assumed by
+    /// analogy with the MBC3 seconds write.
     fn extended(&mut self, arg: u8) -> bool {
         match arg {
             0 => {
@@ -346,6 +376,9 @@ impl Huc3 {
     /// counters at 10-16 are not: games set the time through the buffer
     /// and extended command 1, and whether the chip accepts a direct
     /// write there is not documented. Other locations are not kept.
+    ///
+    /// UNPINNED: huc3-counter-direct-write (a): no source says whether a
+    /// write to 10-16 lands; ignored here (SameBoy has no such locations).
     fn write_location(&mut self, v: u8) -> bool {
         let c = &mut self.clock;
         match self.address {

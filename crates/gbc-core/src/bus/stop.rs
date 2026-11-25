@@ -14,6 +14,14 @@ use crate::{cpu::StopKind, joypad::p1_interrupt, timer::Timer};
 impl Ctx<'_, '_> {
     /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
     /// the TIMA edge of AGE's later reset ([`Timer::stop_edge`], ADR 0020).
+    ///
+    /// UNPINNED: spsw-div-reset-point (c): the reset is at the end of
+    /// STOP's fetch (SameBoy `enter_stop_mode`, CGB E); AGE (verified on
+    /// CGB B/C) has it after the second byte. No ROM tells by itself; the
+    /// change needs the human (ADR 0020; `docs/reference/speed-switch.md`).
+    /// UNPINNED: spsw-reset-edges (a): the serial clock's edge at this
+    /// reset, and the 4 kHz TIMA and frame-sequencer edges of a one-byte
+    /// STOP's reset, are the plain DIV-reset rule; no ROM covers them.
     pub(super) fn stop_div_reset(&mut self) {
         if self.sys.ie & self.sys.iflags == 0 {
             let now = self.clock();
@@ -46,6 +54,12 @@ impl Ctx<'_, '_> {
     ///   STOP (`cgb_palettes_ppu_blocked = !cgb_palettes_blocked`), and
     ///   draws black without it, in either CGB mode. Whole frames here
     ///   ([`Self::stop_frame`]).
+    ///
+    /// UNPINNED: stop-mode (a): all of STOP mode (this, [`Self::stop_enter`],
+    /// [`Self::stop_wake`]) follows SameBoy's CGB path and Pan Docs; no
+    /// ROM in the manifest enters plain STOP (review A1-01). Accepted as
+    /// implemented by the human (2026-11-24). A hardware ROM reading DIV
+    /// and TIMA around a STOP ended by a button would settle the counter.
     #[cold]
     #[inline(never)]
     pub(super) fn stop_freeze(&mut self) {
@@ -116,6 +130,10 @@ impl Ctx<'_, '_> {
     /// ([`Self::stop_freeze`]). A simplification of SameBoy's per-pixel
     /// rule: the frame STOP mode begins in is black from its top, and the
     /// one it ends in is drawn normally from its top.
+    ///
+    /// UNPINNED: stop-mode-screen (a): whole black frames stand for
+    /// SameBoy's per-pixel palette rule and Pan Docs' "black screen
+    /// unless in mode 3"; no ROM or capture shows the screen in STOP mode.
     #[inline]
     pub(crate) fn stop_frame(&mut self) {
         if self.sys.stop_black && self.events.contains(Events::FRAME_READY) {
@@ -212,6 +230,11 @@ impl Ctx<'_, '_> {
         // the 16 kHz TIMA increment after the switch come one M-cycle
         // later on CGB B/C (`OFS_B`, verified on CPU CGB B and C) than on
         // CGB E, which SameBoy's model (no hold with IME on) matches.
+        // UNPINNED: spsw-ime-on-timer (c): IME on with nothing pending has
+        // no hold (SameBoy, CGB E, "I don't trust this if"); AGE's model
+        // leaves the timer 4 T-cycles later. No ROM decides it: `ei`, a
+        // two-byte switch with IE = 0, then a DIV or 262 kHz TIMA read
+        // would (`docs/reference/speed-switch.md`; with the human).
         let mut freeze = if ime && !pending { 0 } else { 4 };
         if pending && to.is_double() {
             freeze += 4;
