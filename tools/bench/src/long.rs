@@ -9,9 +9,10 @@
 //!
 //! The property: no panic, the run reaches its end, and the two rates that
 //! must hold over any length do: one audio sample per 128 clocks exactly,
-//! and (for workloads that leave the LCD on once their setup is done) one
-//! frame per 70,224 clocks, every frame, from the first one on
-//! ([`FrameCheck`]).
+//! and one frame per 70,224 clocks, every frame, from the first one on
+//! (or, for a workload that turns the LCD off during its setup, from the
+//! first one after its last LCD-off gap, which must come before its setup
+//! deadline: [`Lcd`], [`FrameCheck`]).
 //! Wall time is reported; it is the tool reading the host clock, not the
 //! core.
 //!
@@ -34,24 +35,59 @@ use gbc_core::{
 
 use crate::{AUDIO_SLOTS, synth};
 
-/// `synth:<name>` or a path under the test-ROM root, and whether the LCD
-/// stays on from the first frame to the end of the run (then the frame
-/// rate is checked, [`FrameCheck`]). The LCD may be off before the first
-/// frame (setup with the LCD off, as `synth:dmg-raster` does).
-const WORKLOADS: &[(&str, bool)] = &[
-    ("synth:event-storm", true),
-    ("synth:dma-storm", true),
-    ("synth:halt-irq", true),
-    ("synth:worst-case", true),
-    ("synth:cgb-raster", true),
-    ("synth:apu-writes", true),
-    ("synth:dmg-raster", true),
-    ("synth:oam-lines", true),
-    // (It turns the LCD off while it sets up.)
-    ("cgb-acid2/cgb-acid2.gbc", false),
-    ("blargg/cpu_instrs/cpu_instrs.gb", false),
-    ("blargg/cgb_sound/cgb_sound.gb", false),
-    ("rtc3test/rtc3test.gb", false),
+/// How a workload's frames are checked ([`FrameCheck`]).
+#[derive(Clone, Copy, Debug)]
+enum Lcd {
+    /// The LCD stays on from the first frame to the end of the run. It may
+    /// be off before the first frame (setup with the LCD off, as
+    /// `synth:dmg-raster` does), which must end its call by
+    /// [`FIRST_FRAME_LIMIT`].
+    OnFromStart,
+    /// The workload turns the LCD off during its setup, so frames stop and
+    /// later resume out of phase. A frame that ends its call more than
+    /// [`FRAME_CLOCKS`] + [`OVERSHOOT`] clocks after the previous one (or
+    /// after power-on: the first) is an LCD-off gap; at a gap the check
+    /// restarts from that frame, which must end its call at or before
+    /// `until` (this replaces [`FIRST_FRAME_LIMIT`]). Every other frame,
+    /// before the deadline too, and every frame after it, is checked as
+    /// for [`Lcd::OnFromStart`]; a gap after `until`, or no frame by it,
+    /// fails.
+    SetupGaps { until: u64 },
+}
+
+/// `synth:<name>` or a path under the test-ROM root, and how its frames
+/// are checked.
+///
+/// The setup deadlines are the clock of the first frame after the last
+/// LCD-off gap, measured over 30 minutes (2026-11-25, `checked` profile;
+/// after it, offsets cgb-acid2 0..0, cpu_instrs -10..11, cgb_sound -4..16,
+/// rtc3test 0..0), with about 25-30% headroom: cgb-acid2 no gap, first
+/// frame at 959,452 (it sets up with the LCD off from power-on);
+/// cpu_instrs one gap (278,224 clocks), frame at 348,288; cgb_sound one
+/// (278,212), at 348,276; rtc3test two (299,672, then 99,424), at
+/// 469,156.
+const WORKLOADS: &[(&str, Lcd)] = &[
+    ("synth:event-storm", Lcd::OnFromStart),
+    ("synth:dma-storm", Lcd::OnFromStart),
+    ("synth:halt-irq", Lcd::OnFromStart),
+    ("synth:worst-case", Lcd::OnFromStart),
+    ("synth:cgb-raster", Lcd::OnFromStart),
+    ("synth:apu-writes", Lcd::OnFromStart),
+    ("synth:dmg-raster", Lcd::OnFromStart),
+    ("synth:oam-lines", Lcd::OnFromStart),
+    (
+        "cgb-acid2/cgb-acid2.gbc",
+        Lcd::SetupGaps { until: 1_200_000 },
+    ),
+    (
+        "blargg/cpu_instrs/cpu_instrs.gb",
+        Lcd::SetupGaps { until: 450_000 },
+    ),
+    (
+        "blargg/cgb_sound/cgb_sound.gb",
+        Lcd::SetupGaps { until: 450_000 },
+    ),
+    ("rtc3test/rtc3test.gb", Lcd::SetupGaps { until: 600_000 }),
 ];
 
 struct Outcome {
@@ -59,10 +95,8 @@ struct Outcome {
     frames: u64,
     samples: u64,
     wall: f64,
-    /// For a workload whose frames are checked: the clock after the call
-    /// that reported the first `FRAME_READY`, and the lowest and highest
-    /// offset of a frame from its due clock ([`FrameCheck`]).
-    frame_check: Option<(u64, i64, i64)>,
+    /// The frame check's result ([`FrameCheck::end`]).
+    frame_check: Checked,
 }
 
 /// How far after the frame boundary (line 144, dot 5) a run call that
@@ -103,9 +137,22 @@ const ANCHOR_TOLERANCE: i64 = 23;
 /// 194,844).
 const FIRST_FRAME_LIMIT: u64 = 3 * FRAME_CLOCKS as u64;
 
-/// The frame check of a workload that keeps the LCD on: counted from the
-/// first completed frame (the LCD may be off before it, up to
-/// [`FIRST_FRAME_LIMIT`]). Frame `k`'s offset is `clock - (first + k *
+/// A passed frame check: the clock after the call that reported frame 0
+/// (the first, or the first after the last LCD-off gap), the lowest and
+/// highest offset of a frame from its due clock, and the number of
+/// LCD-off gaps ([`Lcd::SetupGaps`]; 0 otherwise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Checked {
+    first: u64,
+    lo: i64,
+    hi: i64,
+    gaps: u32,
+}
+
+/// The frame check: counted from the first completed frame (the LCD may
+/// be off before it, up to [`FIRST_FRAME_LIMIT`]), or, for
+/// [`Lcd::SetupGaps`], from the first after the last LCD-off gap (up to
+/// its deadline). Frame `k`'s offset is `clock - (first + k *
 /// FRAME_CLOCKS)`, `first` being frame 0's clock (offset 0); every
 /// frame's call ends between the boundary and [`OVERSHOOT`] after it, so
 /// the offsets span at most [`OVERSHOOT`] (frame 0's own overshoot
@@ -114,7 +161,10 @@ const FIRST_FRAME_LIMIT: u64 = 3 * FRAME_CLOCKS as u64;
 /// the end, the run must not have reached the next frame's boundary:
 /// frames stopping fails too.
 struct FrameCheck {
-    /// The clock after the call that reported the first frame.
+    lcd: Lcd,
+    /// The LCD-off gaps so far ([`Lcd::SetupGaps`]).
+    gaps: u32,
+    /// The clock after the call that reported frame 0.
     first: Option<u64>,
     /// The clock after the call that reported the latest frame.
     last: u64,
@@ -125,8 +175,10 @@ struct FrameCheck {
 }
 
 impl FrameCheck {
-    const fn new() -> Self {
+    const fn new(lcd: Lcd) -> Self {
         Self {
+            lcd,
+            gaps: 0,
             first: None,
             last: 0,
             frames: 0,
@@ -137,6 +189,30 @@ impl FrameCheck {
 
     /// The call that ended at `clock` reported `FRAME_READY`.
     fn frame(&mut self, clock: u64) -> Result<(), String> {
+        if let Lcd::SetupGaps { until } = self.lcd {
+            // A frame later than any in-phase one can be (the previous
+            // one's call ended at or after its boundary, this one's ends
+            // at most OVERSHOOT after its own): frames stopped, the LCD
+            // was off. The first frame counts as one, from clock 0.
+            let gap = clock - self.last > u64::from(FRAME_CLOCKS) + OVERSHOOT as u64;
+            if self.first.is_none() || gap {
+                if clock > until {
+                    return Err(format!(
+                        "frame at clock {clock}, {} clocks after the previous \
+                         at {}: an LCD-off gap (or the first frame) after \
+                         the setup deadline {until} ({} gaps before)",
+                        clock - self.last,
+                        self.last,
+                        self.gaps
+                    ));
+                }
+                if self.first.is_some() {
+                    self.gaps += 1;
+                }
+                // Restart the check from this frame.
+                (self.first, self.frames, self.lo, self.hi) = (Some(clock), 0, 0, 0);
+            }
+        }
         let first = match self.first {
             Some(f) => f,
             None if clock > FIRST_FRAME_LIMIT => {
@@ -169,10 +245,19 @@ impl FrameCheck {
     }
 
     /// The run ended at `clock`.
-    fn end(&self, clock: u64) -> Result<(u64, i64, i64), String> {
+    fn end(&self, clock: u64) -> Result<Checked, String> {
         let Some(first) = self.first else {
             return Err(format!("no frame in {clock} clocks"));
         };
+        if let Lcd::SetupGaps { until } = self.lcd {
+            // `frame` restarts only at or before `until`; stated as the
+            // end-of-run invariant.
+            if first > until {
+                return Err(format!(
+                    "frame 0 at clock {first}, after the setup deadline {until}"
+                ));
+            }
+        }
         let span = u64::from(FRAME_CLOCKS);
         // Implied by `frame` (offsets within one `OVERSHOOT` of 0); stated
         // as the end-of-run invariant.
@@ -195,14 +280,19 @@ impl FrameCheck {
                 self.frames, self.last, self.frames
             ));
         }
-        Ok((first, self.lo, self.hi))
+        Ok(Checked {
+            first,
+            lo: self.lo,
+            hi: self.hi,
+            gaps: self.gaps,
+        })
     }
 }
 
 /// Runs `src` for `end` clocks in frame-sized calls with an audio buffer,
 /// as the MCU front end will. `Err`: the ROM did not load, or a rate
 /// check failed.
-fn run_one(src: &str, lcd_on: bool, root: &Path, end: u64) -> Result<Outcome, String> {
+fn run_one(src: &str, lcd: Lcd, root: &Path, end: u64) -> Result<Outcome, String> {
     let rom = match src.strip_prefix("synth:") {
         Some(name) => synth::build(name).ok_or("unknown synthetic ROM")?,
         None => std::fs::read(root.join(src)).map_err(|e| e.to_string())?,
@@ -222,7 +312,7 @@ fn run_one(src: &str, lcd_on: bool, root: &Path, end: u64) -> Result<Outcome, St
         .expect("frame size");
     let mut audio = vec![StereoSample::default(); AUDIO_SLOTS];
     let (mut frames, mut samples) = (0u64, 0u64);
-    let mut check = FrameCheck::new();
+    let mut check = FrameCheck::new(lcd);
     let t0 = Instant::now();
     while emu.clock() < end {
         let before = emu.clock();
@@ -238,9 +328,7 @@ fn run_one(src: &str, lcd_on: bool, root: &Path, end: u64) -> Result<Outcome, St
         samples += r.audio_samples as u64;
         if r.events.contains(Events::FRAME_READY) {
             frames += 1;
-            if lcd_on {
-                check.frame(emu.clock())?;
-            }
+            check.frame(emu.clock())?;
         }
     }
     let wall = t0.elapsed().as_secs_f64();
@@ -253,11 +341,7 @@ fn run_one(src: &str, lcd_on: bool, root: &Path, end: u64) -> Result<Outcome, St
             "{samples} samples in {clocks} clocks, expected {want}"
         ));
     }
-    let frame_check = if lcd_on {
-        Some(check.end(clocks)?)
-    } else {
-        None
-    };
+    let frame_check = check.end(clocks)?;
     Ok(Outcome {
         clocks,
         frames,
@@ -292,7 +376,7 @@ pub fn main(args: &[String]) -> ExitCode {
     let results: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = WORKLOADS
             .iter()
-            .map(|&(src, lcd_on)| s.spawn(move || run_one(src, lcd_on, root, end)))
+            .map(|&(src, lcd)| s.spawn(move || run_one(src, lcd, root, end)))
             .collect();
         handles.into_iter().map(|h| h.join()).collect()
     });
@@ -300,13 +384,17 @@ pub fn main(args: &[String]) -> ExitCode {
     for (&(src, _), r) in WORKLOADS.iter().zip(results) {
         match r {
             Ok(Ok(o)) => println!(
-                "ok    {src}: {} clocks, {} frames{}, {} samples, {:.1} s",
+                "ok    {src}: {} clocks, {} frames (from clock {}, every {FRAME_CLOCKS}, \
+                 offsets {}..{}{}), {} samples, {:.1} s",
                 o.clocks,
                 o.frames,
-                o.frame_check
-                    .map_or(String::new(), |(first, lo, hi)| format!(
-                        " (from clock {first}, every {FRAME_CLOCKS}, offsets {lo}..{hi})"
-                    )),
+                o.frame_check.first,
+                o.frame_check.lo,
+                o.frame_check.hi,
+                match o.frame_check.gaps {
+                    0 => String::new(),
+                    n => format!(", after {n} LCD-off gaps"),
+                },
                 o.samples,
                 o.wall
             ),
@@ -330,5 +418,114 @@ pub fn main(args: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const F: u64 = FRAME_CLOCKS as u64;
+
+    /// `r` failed with a message that contains `needle`.
+    #[track_caller]
+    fn fails(r: Result<Checked, String>, needle: &str) {
+        match r {
+            Err(e) => assert!(e.contains(needle), "{e:?} lacks {needle:?}"),
+            Ok(c) => panic!("passed: {c:?}"),
+        }
+    }
+
+    /// Feeds `clocks` as frame calls, then ends the run at `end`.
+    fn run(lcd: Lcd, clocks: &[u64], end: u64) -> Result<Checked, String> {
+        let mut c = FrameCheck::new(lcd);
+        for &k in clocks {
+            c.frame(k)?;
+        }
+        c.end(end)
+    }
+
+    /// `n` in-phase frames from `first`, each `off(k)` from its due clock.
+    fn frames(first: u64, n: u64, off: impl Fn(u64) -> u64) -> Vec<u64> {
+        (0..n).map(|k| first + k * F + off(k)).collect()
+    }
+
+    #[test]
+    fn lcd_on_from_start_passes_in_phase_and_fails_a_gap() {
+        let ok = frames(70_060, 10, |k| if k % 3 == 0 { 0 } else { 16 });
+        let r = run(Lcd::OnFromStart, &ok, 70_060 + 10 * F - 1).unwrap();
+        assert_eq!((r.first, r.lo, r.hi, r.gaps), (70_060, 0, 16, 0));
+        // One frame lost (an LCD-off gap): no setup gaps for this kind.
+        let mut gap = ok.clone();
+        gap.remove(5);
+        fails(
+            run(Lcd::OnFromStart, &gap, 70_060 + 10 * F - 1),
+            "offset 70224",
+        );
+        // A first frame past FIRST_FRAME_LIMIT.
+        let late = frames(FIRST_FRAME_LIMIT + 4, 3, |_| 0);
+        fails(
+            run(Lcd::OnFromStart, &late, FIRST_FRAME_LIMIT + 3 * F),
+            "later than",
+        );
+    }
+
+    #[test]
+    fn setup_gaps_restart_before_the_deadline() {
+        let lcd = Lcd::SetupGaps { until: 450_000 };
+        // The first frame may be past FIRST_FRAME_LIMIT; one gap, then in
+        // phase from the frame after it.
+        let mut seq = vec![70_064];
+        seq.extend(frames(348_288, 20, |k| if k % 2 == 0 { 0 } else { 21 }));
+        let end = 348_288 + 20 * F - 1;
+        let r = run(lcd, &seq, end).unwrap();
+        assert_eq!((r.first, r.lo, r.hi, r.gaps), (348_288, 0, 21, 1));
+        let r = run(Lcd::SetupGaps { until: 1_200_000 }, &[959_452], 959_452 + 1).unwrap();
+        assert_eq!((r.first, r.gaps), (959_452, 0));
+    }
+
+    #[test]
+    fn setup_gaps_fail_after_the_deadline() {
+        let until = 450_000;
+        let lcd = Lcd::SetupGaps { until };
+        // The last re-anchor past the deadline.
+        let mut seq = vec![70_064];
+        seq.extend(frames(until + 4, 5, |_| 0));
+        fails(run(lcd, &seq, until + 4 + 5 * F - 1), "an LCD-off gap");
+        // The first frame past it.
+        fails(
+            run(lcd, &frames(until + 4, 5, |_| 0), until + 4 + 5 * F - 1),
+            "an LCD-off gap",
+        );
+        // A gap long after it.
+        let mut seq = frames(348_288, 20, |_| 0);
+        seq.remove(15);
+        fails(run(lcd, &seq, 348_288 + 20 * F - 1), "an LCD-off gap");
+        // No frame at all.
+        fails(run(lcd, &[], 10 * F), "no frame in");
+    }
+
+    #[test]
+    fn setup_gaps_keep_the_standard_rules_between_gaps() {
+        let lcd = Lcd::SetupGaps { until: 450_000 };
+        let anchor = 348_288;
+        // A frame 24 late (past ANCHOR_TOLERANCE) is no gap: it fails,
+        // before the deadline too.
+        for at in [1, 15] {
+            let seq = frames(anchor, 20, |k| if k >= at { 24 } else { 0 });
+            fails(run(lcd, &seq, anchor + 20 * F + 23), "offset 24");
+        }
+        // Offsets -12 and 20: each within ANCHOR_TOLERANCE, spread 32,
+        // past OVERSHOOT.
+        let mut seq = frames(anchor, 20, |k| if k == 10 { 20 } else { 0 });
+        seq[12] -= 12;
+        fails(run(lcd, &seq, anchor + 20 * F - 1), "offsets now -12..20");
+        // An extra frame between two.
+        let mut seq = frames(anchor, 20, |_| 0);
+        seq.insert(10, seq[9] + F / 2);
+        fails(run(lcd, &seq, anchor + 20 * F - 1), "offset -35112");
+        // Frames that stop at the end.
+        let seq = frames(anchor, 20, |_| 0);
+        fails(run(lcd, &seq, anchor + 20 * F), "frames stopped");
     }
 }

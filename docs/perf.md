@@ -1655,8 +1655,10 @@ rustc flags of `.cargo/config.toml` (every build of the script is checked
 with `bench --rustflags`: a RUSTFLAGS-style variable could turn on
 `--cfg feature="eager-sync"` while cargo reports no feature). It fails on
 a panic, a call that makes no progress, a sample count other than one per
-128 clocks, or (for the workloads that keep the LCD on from their first
-frame to the end) a frame that is not where one per 70,224 clocks puts it.
+128 clocks, or a frame that is not where one per 70,224 clocks puts it
+(for cgb-acid2, cpu_instrs, cgb_sound and rtc3test, which turn the LCD off
+during their setup, from the first frame after the last LCD-off gap,
+below).
 
 That frame check (`FrameCheck` in `tools/bench/src/long.rs`) counts from
 the first completed frame, so setup with the LCD off costs nothing, but
@@ -1676,6 +1678,20 @@ that nothing it rejected passes) each must be within 23 of 0. Seen: spread
 0 to 16. At the end the count must equal `1 + (last - first + 31) /
 70,224`, the run must not reach the next frame's boundary (`first + n *
 70,224`; frames that stop fail), and a workload with no frame fails.
+
+The four ROM workloads that turn the LCD off while they set up
+(`Lcd::SetupGaps`; checked since 2026-11-25, unchecked from fe99394 until
+then) may have LCD-off gaps only before a per-workload setup deadline: a
+frame whose call ends more than 70,224 + 31 clocks after the previous one
+(or the first frame) restarts the check from that frame, and must end its
+call by the deadline, which replaces the three-frame first-frame limit for
+them. Every other frame, before the deadline too, and every frame after
+it, is checked by the rules above; a gap after the deadline, or no frame by
+it, fails. Measured (30 minutes, `checked`): cgb-acid2 no gap, first frame
+at 959,452 (deadline 1,200,000); cpu_instrs one gap of 278,224 clocks,
+re-anchored at 348,288 (deadline 450,000); cgb_sound one of 278,212, at
+348,276 (450,000); rtc3test two, 299,672 then 99,424, at 469,156
+(600,000). Offsets after: 0..0, -10..11, -4..16, 0..0.
 Before 2026-11-24 the check was a count within one of `clocks / 70,224`,
 which failed dmg-raster's setup (two short) and hid a lost frame
 elsewhere.
