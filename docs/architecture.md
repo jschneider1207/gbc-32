@@ -24,7 +24,7 @@ tools/
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
   bench/                   headless runs for check-bench.sh (Ir), the behavior fingerprint, synthetic ROMs (docs/perf.md)
   fuzz/                    fuzz targets over the public API: no panic, no hang (scripts/check-fuzz.sh)
-  h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H755ZI-Q (its README)
+  h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H753ZI (first on a NUCLEO-H755ZI-Q; its README)
   gbc-pc/                  (Stage 2, not yet created) PC companion, native Windows .exe (x86_64-pc-windows-gnu): sends ROM/.sav, pulls saves, forwards keys, prints stats; deps gbc-link + serial crate (plan D9)
 ```
 

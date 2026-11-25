@@ -968,7 +968,58 @@ Measured and not taken:
   instead of returned by value: `synth:worst-case` +17,114 Ir (+0.006%),
   +40 B.
 
-## Measured on a Cortex-M7 (NUCLEO-H755ZI-Q)
+## Measured on a Cortex-M7 (NUCLEO-H755ZI-Q, NUCLEO-H753ZI)
+
+Two boards, the same Cortex-M7 r1p1 core and the same `tools/h7-bench`
+placements: a NUCLEO-H755ZI-Q at up to 392 MHz (2026-11-24, below), then
+the Stage 2 dev board, a NUCLEO-H753ZI, at 64, 392 and 480 MHz
+(2026-11-25). The h7-bench README has every table, the 64 and 392 MHz H753
+runs included.
+
+### NUCLEO-H753ZI at 480 MHz (2026-11-25)
+
+STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed
+(DS12117 Table 111); flash 4 wait states, AXI 240 MHz. Images at 7d4b026.
+All fifteen h7-bench workloads, three placements; every line's calls,
+frames, clocks and hash equal `expected-hashes.txt` (the PC and QEMU).
+`flash` is code in flash with data in DTCM; `ITCM` is the ITCM set minus
+the plain tile path, as below.
+
+**Measured: cycles per frame at 480 MHz, mean / max over 120 calls
+(cpu_instrs 600), and % of a 480 MHz frame (8,036,499 cycles):**
+
+| Workload | flash | ITCM | % of a frame, flash | % of a frame, ITCM |
+|---|---|---|---|---|
+| `synth:worst-case` | 5,079,014 / 5,142,534 | 3,291,153 / 3,328,005 | 63.2% / 64.0% | **41.0% / 41.4%** |
+| `synth:cgb-raster` | 2,894,227 / 2,942,521 | 2,607,183 / 2,646,327 | 36.0% / 36.6% | 32.4% / 32.9% |
+| `synth:dmg-raster` | 2,335,260 / 2,367,324 | 1,927,981 / 1,950,733 | 29.1% / 29.5% | 24.0% / 24.3% |
+| `synth:event-storm` | 2,127,321 / 2,143,998 | 2,014,882 / 2,028,825 | 26.5% / 26.7% | 25.1% / 25.2% |
+| `blargg/cpu_instrs` | 1,531,800 / 2,137,526 | 1,294,743 / 1,767,346 | 19.1% / 26.6% | 16.1% / 22.0% |
+| `synth:dma-storm` | 3,211,272 / 3,219,188 | 3,033,551 / 3,039,197 | 40.0% / 40.1% | 37.7% / 37.8% |
+| `synth:halt-irq` | 739,531 / 742,716 | 656,976 / 658,854 | 9.2% / 9.2% | 8.2% / 8.2% |
+| `synth:apu-writes` | 1,137,090 / 1,163,168 | 897,762 / 919,997 | 14.1% / 14.5% | 11.2% / 11.4% |
+| `synth:oam-lines` | 1,673,067 / 1,691,083 | 1,447,229 / 1,463,331 | 20.8% / 21.0% | 18.0% / 18.2% |
+
+So on the dev board at 480 MHz the worst case takes **81.9% / 82.8% of
+the 50% bar** (4,018,249 cycles) with the hot set in ITCM, and misses it
+from flash (126% / 128% of the bar). Nothing in the bound or in `BENCHES`
+comes near a whole frame. The storms ("Outside the bound") are measured
+there.
+
+- ITCM costs the same cycles at 480 as at 392 MHz (ratio 1.000 to 1.003
+  on the five workloads both ran) and at 64 MHz. Flash costs more: 4 wait
+  states make a miss 10 CPU cycles against 6 at 392 MHz, and the flash
+  placements take 1.00x to 1.11x the 392 MHz cycles (the worst case
+  1.10x). ITCM against flash is now 1.54x on the worst case (1.36x to
+  1.41x at 392 MHz), 1.06x to 1.27x on the rest.
+- Against the H755 figures below (core bcd881e) the H753 worst case in
+  ITCM is 6% dearer at any clock: the core's code changed between the two
+  (not separated, the H755 is gone).
+- The PC timed `selftest-pll480`'s DWT lines at 484.3 MHz, 0.9% fast
+  (h7-bench README, "NUCLEO-H753ZI at 480 MHz"): the % above are against
+  the nominal 480 MHz.
+
+### NUCLEO-H755ZI-Q (2026-11-24)
 
 Measured 2026-11-24 with `tools/h7-bench` (its README has the method, the
 board facts and all six result tables) on an STM32H755ZIT6: Cortex-M7 r1p1,
@@ -1022,21 +1073,22 @@ line" in this file is 50% of a frame at 480 MHz in *cycles*; in Ir the
 same bar is about 3.1 M Ir/frame for the worst case at this ratio (4.02 M /
 1.28), which the baseline's 2.42 M meets.
 
-**Extrapolated, not measured** (the ITCM cycle counts above divided by the
-frame length at each clock, assuming the cycle count does not change with
-frequency, as it did not between 64 and 392 MHz):
+**Extrapolated to 550 MHz, not measured** (the H753's measured ITCM cycle
+counts at 480 MHz, above, over a 550 MHz frame of 9,208,488 cycles,
+assuming the cycle count does not change with frequency, as it did not
+between 64, 392 and 480 MHz). The 480 MHz column this table used to
+extrapolate from the H755 (worst case 39.0% at most) is replaced by the
+measurement above (41.4%; the core changed in between):
 
-| Workload (ITCM, max) | 392 MHz (measured) | 480 MHz | 550 MHz |
-|---|---|---|---|
-| `synth:worst-case` | 47.8% | 39.0% | 34.1% |
-| `synth:cgb-raster` | 39.1% | 32.0% | 27.9% |
-| `synth:dmg-raster` | 28.0% | 22.9% | 20.0% |
-| `synth:event-storm` | 30.0% | 24.5% | 21.4% |
-| `blargg/cpu_instrs` | 25.7% | 21.0% | 18.3% |
+| Workload (ITCM, max) | 480 MHz (H753, measured) | 550 MHz |
+|---|---|---|
+| `synth:worst-case` | 41.4% | 36.1% |
+| `synth:cgb-raster` | 32.9% | 28.7% |
+| `synth:dmg-raster` | 24.3% | 21.2% |
+| `synth:event-storm` | 25.2% | 22.0% |
+| `blargg/cpu_instrs` | 22.0% | 19.2% |
 
-What the extrapolation leaves out: 480 MHz needs VOS0 (LDO supply; not
-possible on this board as built) and more flash wait states, which slows
-the part of the core still in flash; 550 MHz is the STM32H735, a different
+What the extrapolation leaves out: 550 MHz is the STM32H735, a different
 chip, where all of gbc-core is in a 128 KiB ITCM (so the plain tile path
 is too, which should make it faster than these figures, not slower). No
 front-end work (LCD, audio, input) is in any of these numbers.
@@ -1816,6 +1868,8 @@ Cortex-M7"), over a frame's cycles at 392 MHz (6,563,140; the NUCLEO) and
 550 MHz (9,208,488; the STM32H735). No storm has run on the board, and
 their mix of code (and so the ratio) may differ from the measured
 workloads'. Over 100% means slower than real time by that factor.
+They have since run on the board: see "Measured on the M7" after the
+table.
 
 | Program | What the loop does, per frame | Ir (2 s) | M Ir / frame | x line | Ir per event | est. % of a frame, 392 MHz | est. %, 550 MHz |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -1826,6 +1880,30 @@ workloads'. Over 100% means slower than real time by that factor.
 | `synth:storm-div` | 17,154 DIV writes (c) | 1,139,033,945 | 9.65 | 2.40 | 447 | 165-196% | 117-139% |
 | `synth:storm-gdma` | 1,665 one-block GDMAs (d) | 276,970,510 | 2.35 | 0.58 | 216 | 40-48% | 29-34% |
 | `synth:storm-ppu` | 17,154 LCDC writes (e) | 2,597,774,395 | 22.02 | 5.48 | 1,167 | 376-446% | 268-318% |
+
+**Measured on the M7** (2026-11-25, NUCLEO-H753ZI at 480 MHz,
+`tools/h7-bench` at 7d4b026, the default variant of each storm, 120
+frame-sized calls; hashes equal the PC's). Cycles per frame with the hot
+set in ITCM, mean / max; % of a 480 MHz frame (8,036,499) at most; the
+550 MHz column scales the same cycles to the STM32H735's frame
+(9,208,488), an extrapolation; cycles per Ir uses the M Ir / frame above,
+measured on an older core (86d01ef), so it is approximate:
+
+| Program | cycles / frame, ITCM | % of a frame, 480 MHz | est. %, 550 MHz | cycles / Ir | flash (data in DTCM) |
+|---|---:|---:|---:|---:|---:|
+| `synth:storm-control` | 2,243,418 / 2,261,753 | 28.1% | 24.6% | 1.13 | 2,504,796 / 2,528,921 |
+| `synth:storm-apu` | 23,957,661 / 24,170,419 | 300.8% | 262.5% | 1.20 | 25,614,716 / 25,848,430 |
+| `synth:storm-spsw` | 14,791,973 / 14,934,687 | 185.8% | 162.2% | 1.74 | 15,353,951 / 15,500,482 |
+| `synth:storm-div` | 16,062,214 / 16,212,035 | 201.7% | 176.1% | 1.66 | 16,649,536 / 16,832,276 |
+| `synth:storm-gdma` | 2,882,474 / 2,919,847 | 36.3% | 31.7% | 1.23 | 3,193,040 / 3,234,018 |
+| `synth:storm-ppu` | 28,457,135 / 28,756,285 | 357.8% | 312.3% | 1.29 | 30,503,428 / 30,852,328 |
+
+So the dearest storm, `storm-ppu`, runs 3.6 frame times per frame on the
+dev board and an estimated 3.1 on the final chip (438% of a 392 MHz frame, inside the 392 MHz
+estimate's range above); `storm-spsw` and `storm-div` cost more cycles per
+Ir (1.66 to 1.74) than any workload of the bound (1.12 to 1.33), so their
+estimates were low. Recorded for context only: these are outside the bound
+by decision (human, 2026-11-23).
 
 So the most expensive input found costs **22.0 M Ir per frame, 5.5 times
 the 4.02 M line and 8.3 times `synth:worst-case`**: on the M7 an estimated

@@ -16,9 +16,10 @@ the first results were taken. The board is a cargo feature, `h753`
 "Boards" for what differs.
 
 **Status.** NUCLEO-H755ZI-Q, 2026-11-24: all three placements at both
-clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at both clocks
-(the 392 MHz runs after the human re-plugged the board, which had dropped
-off USB once). Every bench run reproduced the PC's hashes; see "Results". The
+clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at 64 and 392 MHz
+with the first five workloads (the 392 MHz runs after the human re-plugged
+the board, which had dropped off USB once), and all three placements at
+480 MHz with all fifteen. Every bench run reproduced the PC's hashes; see "Results". The
 selftest image is still the one to flash first on a board that has not run
 this before.
 
@@ -83,9 +84,21 @@ H755 images are 80 B larger). The ITCM image holds 102 gbc-core functions,
 | `bench-flash-dtcm` | 709,384 | - | 127,652 | 527,744 | 2,304 + 51,020 | 58,368 |
 | `bench-itcm-dtcm` | 710,464 | 64,024 | 64,712 | 527,744 | 2,304 + 51,020 | 58,368 |
 
+The 480 MHz images as built at 7d4b026 (`H7_BENCH_PLL480=1`; the clock
+code adds about 2.3 KB of `.text` and 20 B of `.bss`; the images without
+`pll480` then printed 708,736, 708,912 and 709,992 B):
+
+| Image | `.bin` | `.itcm` | `.text` (flash) | `.rodata` | DTCM (`.dtcm_rodata` + `.data` + `.bss`) | AXI SRAM |
+|---|---|---|---|---|---|---|
+| `selftest-pll480` | 12,152 | - | 9,972 | 1,516 | - | 20 |
+| `bench-flash-axi-pll480` | 711,264 | - | 129,772 | 529,808 | - | 51,016 + 24 + 58,368 |
+| `bench-flash-dtcm-pll480` | 711,632 | - | 130,140 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
+| `bench-itcm-dtcm-pll480` | 712,688 | 64,024 | 67,176 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
+
 `.rodata` is mostly the fifteen ROM images (fourteen of 32 KiB and cpu_instrs at 64 KiB: 512 KiB). The `.bin` is 34% of the H753's 2 MiB flash and 68% of the H755's 1 MiB bank 1, so both still fit. The stack starts at the
 top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
-use measured is 2,952 B (the `stack used=` line).
+use measured is 2,952 B with the first five workloads and 3,440 B with
+all fifteen (3,432 B in `flash-axi`; the `stack used=` line).
 
 **The ITCM set of `perf/itcm-sections.txt` does not fit 64 KiB**: its
 functions are 68,832 B in this build. The build therefore leaves the tier
@@ -254,6 +267,13 @@ h7bench v1 end pass=1
 must equal the line of the same workload in `expected-hashes.txt`: the hash
 folds every call's clocks, events and audio samples and every completed
 frame, so a match means the board computed exactly what the PC does.
+
+`end pass=N` is not a verdict: N counts the report's repeats (1 after the
+run, 2 three seconds later, and so on), each printing the same stored
+results, so `pass=2` or later is as good as `pass=1`. The verdict is the
+comparison with `expected-hashes.txt`, done on the PC. The ST-LINK's VCP
+drops or truncates lines sent while no program has the port open (the
+first report after a flash is often cut), so read a later repeat whole.
 
 **`expected-hashes.txt` regenerated 2026-11-25** (human approved) from
 `host/`'s `cargo run --release` at f34bfd0: it had been made at bcd881e, and
@@ -494,19 +514,10 @@ LDO supply (`cr3=0x42 supply=ldo actvosrdy=1`). Every run's `calls`,
 | event-storm | 2,109,015 / 2,135,121 | 2,097,801 / 2,113,684 | 2,025,842 / 2,039,744 |
 | cpu_instrs | 1,469,945 / 2,042,018 | 1,462,485 / 2,025,882 | 1,293,504 / 1,766,193 |
 
-The same cycles as % of a frame (mean / max), at 392 MHz (6,563,140
-cycles) and at 480 MHz (8,036,499 cycles; VOS0, which this board's LDO
-supply and rev V silicon allow, unlike the H755's SMPS; not run):
-
-| Workload | `flash-axi` 392 | `itcm-dtcm` 392 | `flash-axi` 480 | `itcm-dtcm` 480 |
-|---|---|---|---|---|
-| worst-case | 68.2% / 69.0% | 50.1% / 50.7% | 55.7% / 56.3% | 40.9% / 41.4% |
-| cgb-raster | 42.8% / 43.6% | 40.2% / 40.8% | 34.9% / 35.6% | 32.8% / 33.3% |
-| dmg-raster | 33.6% / 34.1% | 29.2% / 29.6% | 27.4% / 27.8% | 23.9% / 24.1% |
-| event-storm | 32.1% / 32.5% | 30.9% / 31.1% | 26.2% / 26.6% | 25.2% / 25.4% |
-| cpu_instrs | 22.4% / 31.1% | 19.7% / 26.9% | 18.3% / 25.4% | 16.1% / 22.0% |
-
-(`flash-dtcm` is within 0.4 points of `flash-axi` everywhere.)
+(A table here used to scale these 64 MHz cycles to % of a 392 and a
+480 MHz frame. Both clocks are now measured, below; the scaled 480 MHz
+figures were 55.7% / 56.3% for the worst case from flash, against 63.4% /
+64.2% measured, because flash costs more cycles at 480 MHz.)
 
 392 MHz PLL (`pll392`: VOS1, flash 2 wait states, AXI clock = CPU clock / 2),
 measured 2026-11-25. Cycles per frame, mean / max, then % of a 392 MHz
@@ -526,22 +537,132 @@ every second, `tcmprobe` equal). Right after `bench-flash-axi-pll` was
 first copied, the whole ST-LINK (drive, VCP, debug interface) dropped off
 USB for several minutes; after the human re-plugged it, that image was
 running and passing (`end pass=13`), so the image was not the cause. Cause
-of the drop unknown; see "Still not verified". The board is left running
-`bench-itcm-dtcm-pll`.
+of the drop unknown; see "Still not verified".
 
 - The worst case in `itcm-dtcm` is 3.29 M cycles, 6.3% more than the H755's
   3.09 M at bcd881e. The CPU core, the placements and the clock are the
   same and the hot set runs from ITCM, so the difference is most likely
   the core's code since bcd881e, not the board; it was not separated (the
   H755 is no longer here). Measured at 392 MHz: 50.1% of a frame on
-  average, 50.6% at most: at the 50% bar, no longer under it. At 480 MHz,
-  which this board can run, it would be about 41% (not run).
+  average, 50.6% at most: at the 50% bar, no longer under it. At 480 MHz
+  it measures 41.0% / 41.4% (below).
 - Unlike the 64 MHz runs, at 392 MHz the flash placements cost 3% more
   cycles on the worst case (AXI at half the CPU clock, flash wait states);
   ITCM is unchanged, 1.41x faster than flash there.
 - ITCM against flash: 1.36x on the worst case, 1.04x to 1.15x on the
   others; DTCM against AXI SRAM makes under 1%.
 - `stack used=2952` (itcm-dtcm), 2944 (the flash placements).
+
+### NUCLEO-H753ZI at 480 MHz, 2026-11-25
+
+`pll480` (VOS0 via ODEN, HSE bypass 8 MHz, flash 4 wait states, AXI
+240 MHz = CPU clock / 2, APB 120 MHz), images built at 7d4b026 with all
+fifteen workloads. In every placement all fifteen lines' `calls`,
+`frames`, `clocks` and `hash` equal `expected-hashes.txt` (checked by a
+diff of the lines without `min`/`mean`/`max`), so the six storms and the
+four `BENCHES` workloads added on 2026-11-25 ran on the board for the
+first time and matched the PC and QEMU. Banners: `clock=pll480
+cpu_hz=480000000`, `flash_acr=0x24`, `oden=1`, `syscfg_pwrcr=0x00000081`;
+`itcm_bytes=64024` in `itcm-dtcm`.
+
+Cycles per frame, mean / max, and % of a 480 MHz frame (8,036,499 cycles
+at 59.7275 Hz):
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` | % `flash-axi` | % `flash-dtcm` | % `itcm-dtcm` |
+|---|---|---|---|---|---|---|
+| worst-case | 5,096,080 / 5,159,618 | 5,079,014 / 5,142,534 | 3,291,153 / 3,328,005 | 63.4% / 64.2% | 63.2% / 64.0% | 41.0% / 41.4% |
+| cgb-raster | 2,959,943 / 3,013,762 | 2,894,227 / 2,942,521 | 2,607,183 / 2,646,327 | 36.8% / 37.5% | 36.0% / 36.6% | 32.4% / 32.9% |
+| dmg-raster | 2,338,765 / 2,372,186 | 2,335,260 / 2,367,324 | 1,927,981 / 1,950,733 | 29.1% / 29.5% | 29.1% / 29.5% | 24.0% / 24.3% |
+| event-storm | 2,117,855 / 2,144,660 | 2,127,321 / 2,143,998 | 2,014,882 / 2,028,825 | 26.4% / 26.7% | 26.5% / 26.7% | 25.1% / 25.2% |
+| cpu_instrs | 1,542,280 / 2,165,586 | 1,531,800 / 2,137,526 | 1,294,743 / 1,767,346 | 19.2% / 26.9% | 19.1% / 26.6% | 16.1% / 22.0% |
+| dma-storm | 3,275,046 / 3,283,766 | 3,211,272 / 3,219,188 | 3,033,551 / 3,039,197 | 40.8% / 40.9% | 40.0% / 40.1% | 37.7% / 37.8% |
+| halt-irq | 750,757 / 753,528 | 739,531 / 742,716 | 656,976 / 658,854 | 9.3% / 9.4% | 9.2% / 9.2% | 8.2% / 8.2% |
+| apu-writes | 1,140,966 / 1,165,990 | 1,137,090 / 1,163,168 | 897,762 / 919,997 | 14.2% / 14.5% | 14.1% / 14.5% | 11.2% / 11.4% |
+| oam-lines | 1,684,800 / 1,706,478 | 1,673,067 / 1,691,083 | 1,447,229 / 1,463,331 | 21.0% / 21.2% | 20.8% / 21.0% | 18.0% / 18.2% |
+| storm-control | 2,512,771 / 2,539,448 | 2,504,796 / 2,528,921 | 2,243,418 / 2,261,753 | 31.3% / 31.6% | 31.2% / 31.5% | 27.9% / 28.1% |
+| storm-apu | 25,641,531 / 25,919,538 | 25,614,716 / 25,848,430 | 23,957,661 / 24,170,419 | 319.1% / 322.5% | 318.7% / 321.6% | 298.1% / 300.8% |
+| storm-spsw | 15,472,765 / 15,681,128 | 15,353,951 / 15,500,482 | 14,791,973 / 14,934,687 | 192.5% / 195.1% | 191.1% / 192.9% | 184.1% / 185.8% |
+| storm-div | 17,117,331 / 17,322,872 | 16,649,536 / 16,832,276 | 16,062,214 / 16,212,035 | 213.0% / 215.6% | 207.2% / 209.4% | 199.9% / 201.7% |
+| storm-gdma | 3,247,102 / 3,287,728 | 3,193,040 / 3,234,018 | 2,882,474 / 2,919,847 | 40.4% / 40.9% | 39.7% / 40.2% | 35.9% / 36.3% |
+| storm-ppu | 31,032,565 / 31,384,376 | 30,503,428 / 30,852,328 | 28,457,135 / 28,756,285 | 386.1% / 390.5% | 379.6% / 383.9% | 354.1% / 357.8% |
+
+The `itcm-dtcm` report, verbatim (the second repeat; the first was cut
+by the VCP):
+
+```
+h7bench v1 banner board=NUCLEO-H753ZI image=bench placement=itcm-dtcm clock=pll480 cpu_hz=480000000 baud=115200
+h7bench v1 power cr3=0x00000042 csr1=0x0000e000 d3cr=0x0000e000 actvosrdy=1 supply=ldo
+h7bench v1 clock rcc_cr=0x0307c025 cfgr=0x0000001b d1cfgr=0x00000048 flash_acr=0x24 rsr=0x00fe0000
+h7bench v1 cpu cpuid=0x411fc271 idcode=0x20036450 icache=1 dcache=1 cyccnt=1 itcm_bytes=64024 dtcm_table_bytes=2304
+h7bench v1 tcm itcmcr=0x3b dtcmcr=0x43 at_init=0x3b,0x43 msp=0x2001fbd0
+h7bench v1 options optsr=0x1bc6aaf0
+h7bench v1 vos0 syscfg_pwrcr=0x00000081 oden=1 pwrcr_before=0x00000000 polls_to_drop=2 polls_low=6
+h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=785630 mean=3291153 max=3328005 hash=de590b88792b5778
+h7bench v1 cgb-raster calls=120 frames=118 clocks=8370434 min=471712 mean=2607183 max=2646327 hash=28517598fd7f8e17
+h7bench v1 dmg-raster calls=120 frames=118 clocks=8411052 min=785364 mean=1927981 max=1950733 hash=08ce100a696ecbd6
+h7bench v1 event-storm calls=120 frames=120 clocks=8426718 min=510009 mean=2014882 max=2028825 hash=b03f0faee1117987
+h7bench v1 cpu_instrs calls=600 frames=597 clocks=42131558 min=371132 mean=1294743 max=1767346 hash=d0e9954397cd56f4
+h7bench v1 dma-storm calls=120 frames=120 clocks=8426720 min=3026614 mean=3033551 max=3039197 hash=502bf87511d799cb
+h7bench v1 halt-irq calls=120 frames=120 clocks=8426716 min=645064 mean=656976 max=658854 hash=8a1f79e8e93d84ab
+h7bench v1 apu-writes calls=120 frames=120 clocks=8426716 min=895725 mean=897762 max=919997 hash=ad45a7bd9328fccb
+h7bench v1 oam-lines calls=120 frames=119 clocks=8396532 min=831633 mean=1447229 max=1463331 hash=39e08ed53ff29055
+h7bench v1 storm-control calls=120 frames=119 clocks=8420234 min=553498 mean=2243418 max=2261753 hash=f8e810318f7827c6
+h7bench v1 storm-apu calls=120 frames=119 clocks=8420234 min=1198471 mean=23957661 max=24170419 hash=9138ca07a7e124a2
+h7bench v1 storm-spsw calls=120 frames=119 clocks=8357218 min=116364 mean=14791973 max=14934687 hash=bbdfa57379371fa3
+h7bench v1 storm-div calls=120 frames=119 clocks=8420232 min=957871 mean=16062214 max=16212035 hash=7b2635c400f5d2fe
+h7bench v1 storm-gdma calls=120 frames=119 clocks=8420232 min=581567 mean=2882474 max=2919847 hash=6292eca8fdd0188a
+h7bench v1 storm-ppu calls=120 frames=119 clocks=8420234 min=1525407 mean=28457135 max=28756285 hash=31e4b880f2666ad4
+h7bench v1 stack used=3440 of=77728
+h7bench v1 end pass=2
+```
+
+The two flash placements printed the same fifteen `calls`/`frames`/
+`clocks`/`hash` fields; their cycle figures are the table's.
+
+**480 against 392 MHz**, cycles per frame (mean) at 480 over 392, for the
+five workloads both clocks ran:
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` |
+|---|---|---|---|
+| worst-case | 1.102 | 1.106 | 1.002 |
+| cgb-raster | 1.064 | 1.030 | 1.001 |
+| dmg-raster | 1.035 | 1.046 | 1.003 |
+| event-storm | 1.001 | 1.010 | 1.000 |
+| cpu_instrs | 1.047 | 1.041 | 1.001 |
+
+- The worst case in `itcm-dtcm`: 3,291,153 / 3,328,005 cycles, 41.0% /
+  41.4% of a real-time frame, 81.9% / 82.8% of the 50% bar (4,018,249).
+  From flash it is 63.4% / 64.2%: over the bar by 27% / 28%.
+- `itcm-dtcm` costs the same cycles as at 392 MHz (within 0.3%), as it
+  did between 64 and 392 MHz. The flash placements cost up to 10.6% more
+  cycles: a flash access is now 5 AXI clocks = 10 CPU cycles (4 wait
+  states) against 6 at 392 MHz. So ITCM is now 1.55x faster than flash on
+  the worst case (1.41x at 392 MHz) and 1.05x to 1.27x on the others.
+- DTCM against AXI SRAM: under 3% on everything (`flash-dtcm` against
+  `flash-axi`), as before.
+- No workload of the bound or of `BENCHES` comes near a real-time frame
+  (the highest is the worst case at 41.4% in `itcm-dtcm`). The storms,
+  outside the bound by decision, run at 1.8 to 3.6 frame times per frame
+  in `itcm-dtcm` (`storm-ppu` the dearest: 28.46 M / 28.76 M cycles,
+  357.8% at most); `storm-control` and `storm-gdma` are under 40%.
+- `stack used=3440` (`flash-dtcm`, `itcm-dtcm`), 3432 (`flash-axi`).
+- The raw serial logs are not committed (session scratch).
+
+**The clock, measured from the PC.** `selftest-pll480` prints a line each
+480,000,000 DWT cycles (the `cyccnt=` field). A PowerShell reader
+timestamped each line with .NET `Stopwatch` for 125 s; a least-squares fit
+of the cumulative `cyccnt` over the 125 lines that were not backlog gives
+**484.31 MHz**, largest residual 36 ms. The Windows clock itself was
+checked against an NTP server (`w32tm /stripchart`): 1 ms of drift in
+60 s. So the CPU runs about 0.9% fast, which puts the HSE input (the
+ST-LINK's MCO) at about 8.07 MHz rather than 8.000. That is inside the
+~1% the check allows, and cycle counts do not depend on it (the % of a
+frame above are against the nominal 480 MHz, so real time has 0.9% more
+margin than they show), but it means the core and the 240 MHz AXI/flash
+clock run about 0.9% above their DS12117/RM0433 maxima. Not explained
+here; see "Still not verified".
+
+The board is left running `bench-itcm-dtcm-pll480`.
 
 docs/perf.md "Measured on a Cortex-M7" relates these to the x86 instruction
 counts and to the final chip.
@@ -591,6 +712,10 @@ counts and to the final chip.
 - That the Cortex-M4 sitting in lockup has no effect (nothing suggests one:
   the cycle counts repeat exactly).
 - `m4-stub`: built, never flashed.
+- Why `pll480` measures 484.3 MHz from the PC (2026-11-25, "NUCLEO-H753ZI
+  at 480 MHz"): an ST-LINK MCO about 0.9% above 8 MHz is the obvious
+  suspect (not measured with an instrument). If it is, the 480 MHz images
+  run 0.9% over the CPU and AXI maxima; every hash still matched.
 - The 400 MHz limit itself: the board ran at 392 MHz from the HSI, whose
   exact frequency was not measured (the UART at 115200 baud works at both
   clocks, which bounds the error to a few percent).
