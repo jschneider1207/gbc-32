@@ -338,11 +338,11 @@ pub(crate) const LYC153_OLD_UNTIL: u32 = 24;
 /// [`LYC_DEFER_UNTIL_DS`] and the STAT phase-1 mode-2 window.
 pub(crate) const CMP_WALK: u32 = t(h(5));
 
-// --- Double speed: line 0's mode-2 pulse and line 153's comparison with 0 ---
+// --- Line 0's mode-2 pulse and line 153's comparison with 0 ---
 
 /// Line 0: the walk's first point (`Pt::Ly3`, comparison against 0):
 /// [`PT_LY`], double speed a dot later. In single speed the mode-1 source
-/// lasts to the mode-2 pulse (`Pt::Ly4`, [`ly0_pulse`]) and so blocks it
+/// lasts to the mode-2 pulse (`Pt::Ly4`, [`LY0_PULSE`]) and so blocks it
 /// when selected. In double speed the mode-1 source ends at `Ly3`, a dot
 /// before the pulse, unless mode 2 is selected: then it lasts to the pulse
 /// as in single speed, which models the select's block.
@@ -363,74 +363,70 @@ pub(crate) const CMP_WALK: u32 = t(h(5));
 /// LYC=0 match selected at 0:4 with mode 1 selected: interrupt; both fail
 /// with the mode-1 source to 5); the block: `m2enable/m2_late_m1disable_ly0_ds_2`
 /// (mode 1 cleared at 0:5: none; fails without it), `_ds_1` (at 0:3:
-/// interrupt). Single speed stays at 3 and 4: moving it as in double
-/// speed passed `lcd_offset/offset3_lyc99int_m2irq_count_1` but regressed
-/// 4 `m2enable/*ly0*` single-speed rows (their write views at line 0
-/// assume the old points).
+/// interrupt). Single speed keeps `Ly3` at 3 (the mode-1 source lasts to
+/// the pulse whatever the selects; the point changes nothing there): with
+/// the double-speed rule, 4 `m2enable/*ly0*` single-speed rows regressed.
 #[inline(always)]
 pub(crate) const fn ly0_pt(speed: Speed) -> u32 {
     PT_LY + speed.extra()
 }
 
-/// Line 0: the mode-2 pulse (`Pt::Ly4`), one dot after [`ly0_pt`]:
-/// [`CMP_ON`], double speed [`CMP_WALK`].
-#[inline(always)]
-pub(crate) const fn ly0_pulse(speed: Speed) -> u32 {
-    CMP_ON + speed.extra()
-}
+/// Line 0: the mode-2 pulse (`Pt::Ly4`), both speeds: gambatte's event
+/// (behaviour only, `video.cpp` `mode2_irq_line_cycle_ly0`, see
+/// [`ly0_pt`]), the dot of every other line's `Ly4` ([`CMP_WALK`]).
+/// SameBoy (`display.c`, line 0: `mode_for_interrupt = 2` one dot after
+/// the LY update) has it a dot earlier, our 4. CGB04C decides for 5:
+/// `lcd_offset/offset3_lyc99int_m2irq_count_1` (M-cycle boundaries at
+/// `t = 0 mod 4`, the one single-speed CPU phase with a boundary on 4:
+/// its IF read at 0:4 must not see the pulse; `_2`, at 0:8, does) and
+/// `lyc153int_m2irq/lyc153int_m2irq_ifw_1` (an IF write landing on 0:4
+/// doesn't clear it).
+///
+/// Single speed: a STAT or LYC write landing a dot before the pulse
+/// ([`LY0_PULSE_SEEN`]) no longer changes what the pulse sees (gambatte
+/// `mstat_irq.h` `statRegChange`, `lycRegChange`: its events see the
+/// selects and LYC as of the last write more than 2 cycles before them;
+/// behaviour only): the pulse is evaluated with the selects and LYC from
+/// before the write, its request reaches IF at the pulse's own dot, and
+/// the write then sees the mode-2 source over (`Ppu::early_cmp`). CGB04C,
+/// all with the access at 0:3, the second phase or the LYC write landing
+/// on 0:4: `m2enable/late_enable_ly0_1`, `disable_by_m1enable_ly0_1`,
+/// `lycEnable/lycwirq_trigger_ly00_stat50_2` (fail when the pulse runs
+/// after the write instead); `m2enable/late_enable_m1disable_ly0_2`,
+/// `late_m1disable_ly0_2`, `lyc0_late_m2enable_lycdisable_2` (fail when
+/// the walk's pulse then sees the mode 2 the write selected). Double
+/// speed has no such rule (its own: [`ly0_pt`], `Ppu::write_stat`).
+pub(crate) const LY0_PULSE: u32 = CMP_WALK;
+
+/// Single speed: STAT and LYC writes landing from here see line 0's
+/// mode-2 pulse done ([`LY0_PULSE`]).
+pub(crate) const LY0_PULSE_SEEN: u32 = CMP_ON;
 
 const _: () = assert!(CMP_ON == PT_LY + 1 && CMP_WALK == CMP_ON + 1);
 
-/// Single speed: the interrupt request of line 0's mode-2 pulse reaches
-/// IF this many dots after its walk point ([`ly0_pulse`], t = 4), at
-/// gambatte's event (behaviour only, `video.cpp`
-/// `mode2_irq_line_cycle_ly0`: our t = 5, where the double-speed walk has
-/// the pulse itself). The STAT and LYC write views at line 0 are
-/// calibrated on the walk's dot (moving the point regressed
-/// `m2enable/{late_m1disable,late_enable_m1disable,
-/// lyc0_late_m2enable_lycdisable}_ly0_2`-style rows and
-/// `lycEnable/lycwirq_trigger_ly00_stat50_2`; gambatte latches the selects
-/// its event sees, `mstat_irq.h` `statRegChange`), so the line changes at
-/// 4 and only IF follows a dot later: an IF read or interrupt check at an
-/// M-cycle boundary on the point doesn't see it, and an IF write landing
-/// on the point doesn't clear it. CGB04C
-/// `lcd_offset/offset3_lyc99int_m2irq_count_1` (M-cycle boundaries at
-/// `t = 0 mod 4`, the one CPU phase with a boundary on the point: its IF
-/// read at 0:4 must not see the pulse; `_2`, at 0:8, does) and
-/// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`. (Line 153's LYC=0 point is a
-/// dot early in the same way: [`L153_ZERO_IRQ`].)
-pub(crate) const LY0_PULSE_IRQ: u64 = 1;
-
-/// Single speed: the interrupt request of line 153's comparison against
-/// 0 reaches IF this many dots after its walk point ([`L153_ZERO`],
-/// t = 12), at gambatte's event (behaviour only, `lyc_irq.cpp`: the
-/// LYC = 0 interrupt is scheduled at line 153 cycle 6 in both speeds, our
-/// t = 13, where the double-speed walk has the point itself,
-/// [`l153_zero_walk`]; every other LYC interrupt at its line's cycle -2,
-/// our [`CMP_WALK`]). SameBoy compares at 12 (`display.c`, line 153:
-/// `ly_for_comparison = 0` after 2 + 4 + 2 + 4 dots), which is where the
-/// STAT line and the write views change here too; as for the pulse
-/// ([`LY0_PULSE_IRQ`]), only IF follows a dot later: an IF read or
-/// interrupt check at an M-cycle boundary on the point doesn't see the
-/// request, an IF write landing on the point doesn't clear it, and a
-/// dispatch whose acknowledge is on the point doesn't absorb it. CGB04C
+/// Line 153: the walk's comparison against 0 (`Pt::L153Zero`), both
+/// speeds, one dot after [`L153_ZERO`], from where the reads and the
+/// write views see it. gambatte (behaviour only, `lyc_irq.cpp`) schedules
+/// the LYC = 0 interrupt at line 153 cycle 6 in both speeds, our
+/// `t = 13`, as line 0's mode-2 interrupt ([`LY0_PULSE`]); every other
+/// LYC interrupt at its line's cycle -2, our [`CMP_WALK`]. SameBoy
+/// compares at our 12 (`display.c`, line 153: `ly_for_comparison = 0`
+/// after 2 + 4 + 2 + 4 dots). CGB04C decides for 13:
 /// `ly0/lycint152_lyc0irq_ifw_1` (IF written with the access at 153:11,
-/// landing on the point: the interrupt still comes; `_2`, 4 dots later:
-/// cleared) rules out IF having the request at 12. The default CPU phase
-/// (M-cycle boundaries at `t = 3 mod 4`) has no boundary on the point; no
-/// ROM we have reads IF or checks interrupts there at another phase.
-pub(crate) const L153_ZERO_IRQ: u64 = 1;
-
-/// Line 153: the walk's comparison against 0 (`Pt::L153Zero`), double
-/// speed one dot after [`L153_ZERO`] (the read and write views keep
-/// [`L153_ZERO`]). gambatte (behaviour only, `lyc_irq.cpp`) schedules the
-/// LYC=0 interrupt at line 153 cycle 6, our `t = 13`, as line 0's mode-2
-/// interrupt ([`ly0_pt`]). CGB04C `ly0/lycint152_lyc0irq_late_retrigger_ds_1`
-/// (the dispatch clears IF at 153:12, the LYC=0 request comes after it;
-/// `_ds_2` clears at 153:14). Single speed keeps 12 for the walk (the
-/// write views are calibrated on it) and delays the request
-/// ([`L153_ZERO_IRQ`]).
-#[inline(always)]
-pub(crate) const fn l153_zero_walk(speed: Speed) -> u32 {
-    L153_ZERO + speed.extra()
-}
+/// landing on 12: the interrupt still comes; `_2`, 4 dots later:
+/// cleared), `ly0/lycint152_lyc0irq_late_retrigger_ds_1` (the dispatch
+/// clears IF at 153:12, the LYC = 0 request comes after it; `_ds_2`
+/// clears at 153:14). So an IF read or interrupt check at an M-cycle
+/// boundary on 153:12 doesn't see the request. In single speed only a CPU
+/// phase with boundaries at `t = 0 mod 4` has one there; no ROM we have
+/// reads IF or checks interrupts at that phase.
+///
+/// Single speed: a STAT or LYC write landing on [`L153_ZERO`] no longer
+/// changes what the comparison sees (gambatte `lyc_irq.cpp` `regChange`:
+/// the event sees the selects and LYC as of the last write more than 2
+/// cycles before it; behaviour only): it is evaluated with the selects
+/// and LYC from before the write, and its request reaches IF at 13
+/// (`Ppu::early_cmp`). CGB04C `lycEnable/lyc0_ff4{1,5}_disable_2` (the
+/// LYC select cleared, LYC changed, landing on 153:12: the interrupt still
+/// comes).
+pub(crate) const L153_ZERO_WALK: u32 = L153_ZERO + 1;

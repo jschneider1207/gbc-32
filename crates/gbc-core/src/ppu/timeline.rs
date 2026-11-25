@@ -3,9 +3,9 @@
 //!
 //! A [`Row`] is one update point of a line [`Class`]: which point
 //! ([`Pt`]), where on the line (per speed), what the walk's STAT update
-//! there evaluates (mode source and comparison value), how late its
-//! interrupt request reaches IF, and from which dot the STAT reads and the
-//! STAT/LYC write views see its comparison ([`Row::seen`]). The positions
+//! there evaluates (mode source and comparison value), and from which dot
+//! the STAT reads and the STAT/LYC write views see its comparison
+//! ([`Row::seen`]). The positions
 //! themselves are [`edges`]' (with their sources); this table is where
 //! they are put in order and given their meaning.
 //!
@@ -107,9 +107,6 @@ pub(super) struct Row {
     pub(super) src: Src,
     /// Single, double speed.
     pub(super) cmp: [Cmp; 2],
-    /// Single speed: the row's interrupt request reaches IF this many dots
-    /// after the row ([`edges::LY0_PULSE_IRQ`], [`edges::L153_ZERO_IRQ`]).
-    pub(super) irq_late: u64,
     /// The dot from which the STAT reads and the STAT/LYC write views see
     /// the row's comparison value (`Ppu::cmp`; the walk: at the row).
     /// `None`: the row doesn't change the value.
@@ -122,7 +119,6 @@ const fn row_at(pt: Pt, t: [u32; 2], src: Src, cmp: Cmp) -> Row {
         pos: Pos::At(t),
         src,
         cmp: [cmp, cmp],
-        irq_late: 0,
         seen: None,
     }
 }
@@ -131,11 +127,6 @@ impl Row {
     /// The comparison value in double speed, where it differs.
     const fn double(mut self, cmp: Cmp) -> Self {
         self.cmp[1] = cmp;
-        self
-    }
-
-    const fn irq_late(mut self, dots: u64) -> Self {
-        self.irq_late = dots;
         self
     }
 
@@ -180,17 +171,9 @@ const ROWS_LINE0: [Row; 5] = [
         Src::Line0Mode1,
         Cmp::Val(0),
     ),
-    row_at(
-        Pt::Ly4,
-        [
-            edges::ly0_pulse(Speed::Normal),
-            edges::ly0_pulse(Speed::Double),
-        ],
-        Src::Pulse(2),
-        Cmp::Ly,
-    )
-    .irq_late(edges::LY0_PULSE_IRQ)
-    .seen(edges::CMP_ON),
+    // Single speed: the write views see the pulse done a dot before it
+    // (`edges::LY0_PULSE_SEEN`, `Ppu::early_cmp`).
+    row_at(Pt::Ly4, both(edges::LY0_PULSE), Src::Pulse(2), Cmp::Ly).seen(edges::CMP_ON),
     ROWS_MODE3[0],
     ROWS_MODE3[1],
     ROWS_MODE3[2],
@@ -247,18 +230,14 @@ const ROWS_L153: [Row; 4] = [
     row_at(Pt::L153Off, both(edges::L153_OFF), Src::Mode(1), Cmp::Off)
         .double(Cmp::Val(153))
         .seen(edges::L153_OFF),
-    // The walk is a dot later in double speed; the reads and write views
-    // are not ([`edges::l153_zero_walk`]).
+    // The reads and the write views see it a dot before the walk
+    // ([`edges::L153_ZERO_WALK`]; single speed: `Ppu::early_cmp`).
     row_at(
         Pt::L153Zero,
-        [
-            edges::l153_zero_walk(Speed::Normal),
-            edges::l153_zero_walk(Speed::Double),
-        ],
+        both(edges::L153_ZERO_WALK),
         Src::Mode(1),
         Cmp::Val(0),
     )
-    .irq_late(edges::L153_ZERO_IRQ)
     .seen(edges::L153_ZERO),
 ];
 
@@ -374,17 +353,16 @@ pub(super) const fn first(class: Class) -> (u32, Pt) {
 }
 
 /// From line 153's last row to the next frame's first: the dots between
-/// them (the same in both speeds: both rows are a dot later in double
-/// speed) and that row's point.
-pub(super) const fn frame_wrap() -> (u32, Pt) {
+/// them (single, double speed: line 0's first row is a dot later in
+/// double speed) and that row's point.
+pub(super) const fn frame_wrap() -> ([u32; 2], Pt) {
     let rows = Class::L153.rows();
     let Pos::At(last) = rows[rows.len() - 1].pos else {
         panic!("line 153 ends with a row at a fixed dot")
     };
     let (first, pt) = Class::Line0.first();
     let gap = [LINE + first[0] - last[0], LINE + first[1] - last[1]];
-    assert!(gap[0] == gap[1], "the distance depends on the speed");
-    (gap[0], pt)
+    (gap, pt)
 }
 
 /// The dot from which reads and write views see the comparison value of
@@ -396,10 +374,11 @@ pub(super) const fn seen(class: Class, pt: Pt) -> u32 {
     }
 }
 
-/// `speed.pick(v)` as arithmetic on the speed (no table load in the walk).
+/// `speed.pick(v)` as arithmetic on the speed (no table load in the walk;
+/// wrapping: the double-speed value may be the smaller one).
 #[inline(always)]
 pub(super) const fn by_speed(v: [u32; 2], speed: Speed) -> u32 {
-    v[0] + (v[1] - v[0]) * speed.extra()
+    v[0].wrapping_add(v[1].wrapping_sub(v[0]).wrapping_mul(speed.extra()))
 }
 
 /// The dot of `pt` on a line of `class` at `speed`.
@@ -440,9 +419,6 @@ pub(super) const CMP_OFF_SEEN: u32 = seen(Class::Visible, Pt::Ly3);
 /// [`edges::MODE2_SOURCE_END`]).
 pub(super) const CMP_SEEN: u32 = seen(Class::Visible, Pt::Ly4);
 
-/// Line 0, single speed: the mode-2 pulse (`Ly4`).
-pub(super) const LY0_PULSE_SS: u32 = at_speed(Class::Line0, Pt::Ly4, Speed::Normal);
-
 /// Line 144: the mode-2 interrupt quirk (`Quirk2`).
 pub(super) const QUIRK2: u32 = at(Class::L144, Pt::Quirk2);
 /// Line 144: mode 1, the VBlank interrupt, the frame (`VBlank`).
@@ -453,8 +429,6 @@ pub(super) const VBLANK: u32 = at(Class::L144, Pt::VBlank);
 pub(super) const L153_CMP_SEEN: u32 = seen(Class::L153, Pt::L153Cmp);
 pub(super) const L153_OFF_SEEN: u32 = seen(Class::L153, Pt::L153Off);
 pub(super) const L153_ZERO_SEEN: u32 = seen(Class::L153, Pt::L153Zero);
-/// Line 153, single speed: the walk compares against 0 (`L153Zero`).
-pub(super) const L153_ZERO_SS: u32 = at_speed(Class::L153, Pt::L153Zero, Speed::Normal);
 
 // What the code assumes of the table beyond the lookups it makes.
 const _: () = {
@@ -466,6 +440,15 @@ const _: () = {
     // Line 0 reads mode 2 where lines 1-143 do (`Ppu::mode`), and the
     // observers' own names for that dot are this row's.
     assert!(seen(Class::Line0, Pt::Ly4) == CMP_SEEN);
+    // The walk's `Ly4` is where lines 1-143 have it, and the write views
+    // see each a dot before it, as line 153's comparison against 0
+    // (`Ppu::early_cmp`: one distance for the three points).
+    assert!(at(Class::Line0, Pt::Ly4) == CMP_WALK);
+    // (`Ppu::step`'s `Ly3` arm: one successor for both classes.)
+    assert!(next_at(Class::Line0, Pt::Ly3).0 == next_at(Class::Visible, Pt::Ly3).0);
+    assert!(next_at(Class::Line0, Pt::Ly3).1 as u8 == next_at(Class::Visible, Pt::Ly3).1 as u8);
+    assert!(edges::LY0_PULSE_SEEN == CMP_SEEN && CMP_WALK == CMP_SEEN + 1);
+    assert!(at(Class::L153, Pt::L153Zero) == L153_ZERO_SEEN + 1);
     assert!(edges::MODE2 == CMP_SEEN && edges::MODE2_SOURCE_END == CMP_SEEN);
     // The single-speed STAT-write hold starts on a walk point on both
     // lines it applies to (`edges::MODE_HOLD_SS`).
@@ -807,6 +790,12 @@ mod tests {
             // Line 0, single speed: a STAT write on `Ly3` holds the mode
             // part (`edges::MODE_HOLD_SS`).
             Class::Line0 if stat_ss && t == edges::MODE_HOLD_SS => Some(MODE_HOLD),
+            // Line 0, single speed: every view sees the mode-1 source
+            // over and the pulse done a dot before the walk's `Ly4`, as
+            // lines 1-143's second phase and LYC write above
+            // (`edges::LY0_PULSE_SEEN`; `Ppu::early_cmp` runs the pulse
+            // for the write first).
+            Class::Line0 if !double && (CMP_SEEN..CMP_WALK).contains(&t) => Some(NO_MODE),
             // Line 144 from `Quirk2` to `VBlank`: single-speed STAT writes
             // hold the mode part; a double-speed first phase from the dot
             // after `Quirk2` (`edges::MODE_HOLD_SS`, `Ppu::mode_source`).
@@ -818,9 +807,10 @@ mod tests {
             }
             // Lines 145-153, single-speed STAT writes: the two dots before
             // the walk compares LY=LYC, mode 1 can't be cleared
-            // (`Ppu::mode_source`); line 153 also before `L153Zero`.
+            // (`Ppu::mode_source`); line 153 also before the views see the
+            // comparison against 0.
             Class::VBlank | Class::L153 if stat_ss && before(CMP_WALK) => Some(MODE_1_STICKY),
-            Class::L153 if stat_ss && before(L153_ZERO_SS) => Some(MODE_1_STICKY),
+            Class::L153 if stat_ss && before(L153_ZERO_SEEN) => Some(MODE_1_STICKY),
             _ => None,
         }
     }
@@ -861,24 +851,6 @@ mod tests {
                             "line {l} dot {t} first {first} {speed:?} {view:?} end {end} m2 {m2}"
                         );
                     }
-                }
-            }
-        }
-    }
-
-    /// `Ppu::irq_late`'s arms pick the rows that have a delay.
-    #[test]
-    fn irq_delay_is_the_point_s_row_s() {
-        for l in 0..154 {
-            for first in [false, true] {
-                for r in Class::of(l, first).rows() {
-                    assert_eq!(
-                        Ppu::irq_late(r.pt, l, Speed::Normal),
-                        r.irq_late,
-                        "{l} {:?}",
-                        r.pt
-                    );
-                    assert_eq!(Ppu::irq_late(r.pt, l, Speed::Double), 0, "{l} {:?}", r.pt);
                 }
             }
         }

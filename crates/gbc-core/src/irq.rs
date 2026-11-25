@@ -17,7 +17,8 @@ use crate::schedule::NEVER;
 
 /// Up to two timed requests, earliest first. Two is what the rules that
 /// use it can have waiting at once (the PPU: a LYC write's request, and
-/// that of line 0's mode-2 pulse or of line 153's comparison against 0).
+/// that of line 0's mode-2 pulse or of line 153's comparison against 0
+/// when a write lands a dot before it).
 #[derive(Clone, Copy)]
 pub(crate) struct PendingIrq {
     at: [u64; 2],

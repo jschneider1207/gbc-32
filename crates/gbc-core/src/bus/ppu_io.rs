@@ -96,10 +96,10 @@ impl Ctx<'_, '_> {
         self.reschedule();
     }
 
-    /// A speed switch (after `Hot::set_speed`): the walk's line-0 and
-    /// line-153 points differ per speed (`ppu::edges::ly0_pulse`), so the PPU
-    /// re-seeks its cursor and the deadline moves (to single speed they
-    /// come earlier).
+    /// A speed switch (after `Hot::set_speed`): the walk's first point of
+    /// line 0 differs per speed (`ppu::edges::ly0_pt`), so the PPU re-seeks
+    /// its cursor and the deadline moves (to single speed it comes
+    /// earlier).
     #[cold]
     #[inline(never)]
     pub(super) fn ppu_speed_changed(&mut self) {
@@ -169,11 +169,11 @@ impl Ctx<'_, '_> {
                 s.ppu
                     .write_stat(now, first, &mut s.iflags, speed, View::StatPhase1);
                 let at = now + edges::STAT_PHASE2.delay(speed);
-                // Single speed, phase 2 on line 0's mode-2 pulse: mode 1
-                // still holds the line there (gambatte's line 0 starts a dot
-                // later, `Ppu::on_ly0_pulse`), so a write that keeps it up
-                // requests nothing. The pulse itself runs first (a mode 2
-                // the write selects is past it). CGB04C
+                // Single speed, phase 2 a dot before line 0's mode-2 pulse:
+                // mode 1 still holds the line there (`Ppu::on_ly0_pulse`),
+                // so a write that keeps it up requests nothing. The pulse
+                // itself is evaluated first, inside the write (a mode 2 the
+                // write selects is past it, `Ppu::early_cmp`). CGB04C
                 // `miscmstatirq/lycstatwirq_trigger_ly00_10_50_1` (`10 ->
                 // 50`, LYC = 0: E0), `m2enable/late_enable_m1disable_ly0_2`.
                 // (Synced to `now`, the dot before, for phase 1.)
@@ -707,14 +707,13 @@ mod tests {
         });
     }
 
-    /// Single speed, line 0's mode-2 pulse (walk point t = 4): its
-    /// interrupt request reaches IF at t = 5 however the PPU was synced
-    /// before, also by a sync on the point itself, which leaves the PPU
-    /// deadline on the request's clock (gambatte's event is at our t = 5;
-    /// CGB04C `lcd_offset/offset3_lyc99int_m2irq_count_1`: an IF read at
-    /// 0:4 doesn't see it).
+    /// Single speed, line 0's mode-2 pulse (t = 5, `edges::LY0_PULSE`):
+    /// its interrupt request reaches IF at t = 5 however the PPU was
+    /// synced before, also by a sync a dot before it (gambatte's event is
+    /// at our t = 5; CGB04C `lcd_offset/offset3_lyc99int_m2irq_count_1`:
+    /// an IF read at 0:4 doesn't see it).
     #[test]
-    fn line_0_pulse_request_reaches_if_a_dot_after_its_point_however_synced() {
+    fn line_0_pulse_request_reaches_if_at_dot_5_however_synced() {
         const STAT: u8 = crate::ppu::INT_STAT;
         let line0 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 154 * 456;
         // Dots of line 0 the PPU is synced to before dot 5.
@@ -743,15 +742,15 @@ mod tests {
         }
     }
 
-    /// Single speed, line 153's comparison against 0 (walk point t = 12):
-    /// its interrupt request reaches IF at t = 13 however the PPU was
-    /// synced before, also by a sync on the point itself, which leaves the
-    /// PPU deadline on the request's clock (gambatte's LYC = 0 event is at
-    /// our t = 13, `edges::L153_ZERO_IRQ`). An IF read or interrupt check
-    /// at an M-cycle boundary on 153:12 so doesn't see it, and a dispatch
-    /// that acknowledges another interrupt there leaves it to come.
+    /// Single speed, line 153's comparison against 0 (t = 13,
+    /// `edges::L153_ZERO_WALK`): its interrupt request reaches IF at
+    /// t = 13 however the PPU was synced before, also by a sync a dot
+    /// before it (gambatte's LYC = 0 event is at our t = 13). An IF read
+    /// or interrupt check at an M-cycle boundary on 153:12 so doesn't see
+    /// it, and a dispatch that acknowledges another interrupt there leaves
+    /// it to come.
     #[test]
-    fn line_153_lyc_0_request_reaches_if_a_dot_after_its_point_however_synced() {
+    fn line_153_lyc_0_request_reaches_if_at_dot_13_however_synced() {
         const STAT: u8 = crate::ppu::INT_STAT;
         let line153 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 153 * 456;
         // Dots of line 153 the PPU is synced to before dot 13.
@@ -773,7 +772,6 @@ mod tests {
                 assert_eq!(ctx.sys.iflags & STAT, 0, "{syncs:?}: synced to dot {t}");
             }
             if syncs.last() == Some(&12) {
-                assert!(ctx.sys.ppu.stat_line_high());
                 assert_eq!(ctx.sys.sched.deadline(EventKind::Ppu), line153 + 13);
             }
             ctx.sync_ppu_to(line153 + 13);

@@ -100,3 +100,18 @@ and `ppu::tests::single_speed_line_153_lyc_0_request_is_a_dot_after_its_point`,
 seen failing without the delay. The fingerprint of all 4,020 runs is
 unchanged (no ROM has an M-cycle boundary on 153:12 that looks at IF).
 The decision above is unchanged.
+
+## Update (2026-11-24, review A2-02)
+The single-speed walk points themselves are now at gambatte's dots, line
+0's mode-2 pulse at 5 and line 153's comparison against 0 at 13, as in
+double speed, and request at once: the walk no longer makes timed
+requests (`timeline::Row::irq_late`, `edges::LY0_PULSE_IRQ` and
+`edges::L153_ZERO_IRQ` are gone, and the two tests named above are now
+`bus::ppu_io::tests::line_153_lyc_0_request_reaches_if_at_dot_13_however_synced`
+and `ppu::tests::line_153_lyc_0_point_is_at_dot_13`). What uses a timed
+request for these points is a STAT or LYC write landing a dot before one
+of them: the point is evaluated with the registers from before the write
+and its request reaches IF at the point's dot (`Ppu::point_before_write`;
+`docs/reference/stat-irq.md`, "a write a dot before either point"). The
+decision above (PPU-owned pending state, IF bits 0-4 only, the rules) is
+unchanged, and so is the two-request bound.

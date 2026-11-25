@@ -1521,15 +1521,15 @@ mod tests {
     #[test]
     fn dispatch_acknowledges_ppu_interrupts_half_way_into_its_last_mcycle() {
         // The mode-2 interrupt (STAT bit 5) of line 5 (t = 3) and of the
-        // next frame's line 0 (t = 4, double speed 5: `edges::ly0_pulse`): on
-        // the CPU's grid (M-cycles from clock 0 mod 4), the first is at an
-        // M-cycle boundary and the second one clock past it.
+        // next frame's line 0 (t = 5, `edges::LY0_PULSE`): on the CPU's
+        // grid (M-cycles from clock 0 mod 4), the first is at an M-cycle
+        // boundary and the second two clocks past it.
         let line5 = u64::from(FRAME_CLOCKS - crate::ppu::POST_BOOT_POS) + 5 * 456;
         let line0 = line5 + 149 * 456;
         // (M-cycle clocks, edge, last M-cycle start before it, absorbed)
         for (m, edge, before, absorbed) in [
             (4, line5 + 3, 4, false),
-            (4, line0 + 4, 1, true),
+            (4, line0 + 5, 2, true),
             (2, line5 + 3, 2, false),
             // `lyc153int_m2irq/lyc153int_m2irq_late_retrigger_ds_1`: cleared
             // at 0:4, before the edge; `_ds_2`: at 0:6, after it.
@@ -1563,10 +1563,10 @@ mod tests {
     /// An IF write lands one dot after its access (SameBoy
     /// `GB_CONFLICT_WRITE_CPU`): it clears a mode-0 interrupt requested
     /// up to that dot, not one after it (CGB04C
-    /// `m2int_m0irq/m2int_m0irq_scx3_ifw_*`). Single speed, the requests
-    /// of line 153's LYC=0 point and line 0's mode-2 pulse (one dot past
-    /// an M-cycle boundary here) reach IF a dot later: an IF write
-    /// accessed the dot before them doesn't clear them
+    /// `m2int_m0irq/m2int_m0irq_scx3_ifw_*`). Single speed, line 153's
+    /// LYC=0 point and line 0's mode-2 pulse are two dots past an M-cycle
+    /// boundary here (13 and 5): an IF write accessed at that boundary,
+    /// landing a dot before them, doesn't clear them
     /// (`ly0/lycint152_lyc0irq_ifw_1`,
     /// `lyc153int_m2irq/lyc153int_m2irq_ifw_1`).
     #[test]
@@ -1628,12 +1628,12 @@ mod tests {
             seen[usize::from(cleared)] = true;
         }
         assert_eq!(seen, [true, true]);
-        // (STAT, LYC, interrupt dot): line 153's LYC=0 at 12, line 0's
-        // mode-2 pulse at 4; the IF write accessed a dot before it.
+        // (STAT, LYC, interrupt dot): line 153's LYC=0 at 13, line 0's
+        // mode-2 pulse at 5; the IF write accessed two dots before it.
         let line0 = line1 + 153 * 456;
-        for (stat, lyc, edge) in [(0x40, 0, line0 - 456 + 12), (0x20, 0xFF, line0 + 4)] {
-            ctx_at!(ctx, fresh(0, stat, lyc), edge - 1);
-            assert_eq!(ctx.clock(), edge - 1);
+        for (stat, lyc, edge) in [(0x40, 0, line0 - 456 + 13), (0x20, 0xFF, line0 + 5)] {
+            ctx_at!(ctx, fresh(0, stat, lyc), edge - 2);
+            assert_eq!(ctx.clock(), edge - 2);
             ctx.sys.iflags = 0;
             crate::cpu::Bus::write(&mut ctx, 0xFF0F, 0);
             assert_ne!(ctx.sys.iflags & crate::ppu::INT_STAT, 0, "STAT {stat:02X}");

@@ -62,10 +62,10 @@
 //!
 //! Line 153 (states 19, 14, 15, 16, 29, 17): LY reads 153 from `t = 3`
 //! and 0 from `t = 7` (`t = 8` in double speed); the comparison is
-//! against 153 at `t = 5..8` and against 0 from `t = 12` (the walk: 13
-//! in double speed, [`edges::l153_zero_walk`]). Double speed, line 0: the
-//! mode-1 source ends at `t = 4` and the mode-2 pulse is at `t = 5`
-//! ([`edges::ly0_pt`]).
+//! against 153 at `t = 5..8` and against 0 from `t = 12` (the walk: 13,
+//! [`edges::L153_ZERO_WALK`]). Line 0: the mode-2 pulse is at `t = 5`
+//! ([`edges::LY0_PULSE`]); in double speed the mode-1 source ends at
+//! `t = 4` ([`edges::ly0_pt`]).
 //!
 //! The first line after the LCD is enabled has no OAM scan (GBCTR; SameBoy
 //! "Handle mode 2 on the very first line 0"): mode 0 until position 86,
@@ -210,8 +210,8 @@ enum Pt {
     /// the mode-1 source ends unless mode 2 is selected, [`edges::ly0_pt`]).
     Ly3,
     /// Lines 0-143: comparison against LY and the end of the mode-2
-    /// source; line 0 at `t = 4`, double speed 5 (with its mode-2 source,
-    /// [`edges::ly0_pulse`]), lines 1-143 at [`edges::CMP_WALK`] (`t = 5`).
+    /// source, at [`edges::CMP_WALK`] (`t = 5`); line 0: with its mode-2
+    /// source, the pulse ([`edges::LY0_PULSE`]).
     Ly4,
     /// The pixel pipeline starts: the line's mode-3 length is fixed
     /// ([`LineTiming`]).
@@ -234,7 +234,7 @@ enum Pt {
     L153Cmp,
     /// Line 153, `t = 8`: comparison off (single speed).
     L153Off,
-    /// Line 153, `t = 12`: comparison against 0.
+    /// Line 153, `t = 13`: comparison against 0 ([`edges::L153_ZERO_WALK`]).
     L153Zero,
 }
 
@@ -942,17 +942,14 @@ impl Ppu {
         if v & 3 == 2 { v & !3 } else { v }
     }
 
-    /// Single speed: clock `at` is on line 0's mode-2 pulse (its walk
-    /// point, t = 4). gambatte (behaviour only, `video.cpp`
-    /// `mode2_irq_line_cycle_ly0`) has that event a dot later, our t = 5,
-    /// as our double-speed walk ([`edges::ly0_pulse`]); the single-speed
-    /// walk keeps 4, which the STAT and LYC write views assume, and the
-    /// pulse's interrupt request reaches IF at gambatte's dot
-    /// ([`edges::LY0_PULSE_IRQ`]). A STAT write's phase 2 landing on the
-    /// pulse (one dot after its access) sees line 0's mode-1 source still
-    /// holding the line (`Ctx::write_ppu`).
+    /// Single speed: clock `at` is the dot before line 0's mode-2 pulse
+    /// ([`edges::LY0_PULSE_SEEN`], t = 4), where a STAT or LYC write
+    /// already sees the pulse done ([`Self::early_cmp`]). A STAT write's
+    /// phase 2 landing there (one dot after its access) still sees line
+    /// 0's mode-1 source holding the line, as the pulse itself did
+    /// (`Ctx::write_ppu`).
     pub(crate) fn on_ly0_pulse(&self, at: u64, speed: Speed) -> bool {
-        const PULSE: u32 = timeline::LY0_PULSE_SS;
+        const PULSE: u32 = edges::LY0_PULSE_SEEN;
         // As `at` (frame position; line 0 of the first frame has no pulse),
         // without its division.
         let mut p = at.wrapping_sub(self.frame_start) as u32;
@@ -1087,7 +1084,7 @@ impl Ppu {
             let near = |e: u32| (e - 2..e).contains(&t);
             if hold
                 && l != 144
-                && (near(timeline::CMP_WALK) || (l == 153 && near(timeline::L153_ZERO_SS)))
+                && (near(timeline::CMP_WALK) || (l == 153 && near(timeline::L153_ZERO_SEEN)))
             {
                 return MODE_1_STICKY;
             }
@@ -1227,9 +1224,9 @@ impl Ppu {
         c
     }
 
-    /// A speed switch: the walk's line-0 and line-153 points differ per
-    /// speed ([`edges::ly0_pt`], [`edges::l153_zero_walk`]), so the cursor
-    /// is re-sought at the new one. The caller has synced to the switch
+    /// A speed switch: the walk's first point of line 0 differs per speed
+    /// ([`edges::ly0_pt`]), so the cursor is re-sought at the new one. The
+    /// caller has synced to the switch
     /// clock with the old speed first (`Ctx::speed_switch`, step 1): a
     /// point runs with the speed of the sync that reaches it, so none from
     /// before the switch may be left for a later sync.
@@ -1315,15 +1312,13 @@ impl Ppu {
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
-            // Relative to `Ly3`, which is a dot later on line 0 in double
-            // speed ([`edges::ly0_pt`]), as its `Ly4` is.
+            // Line 0's `Ly3` is a dot later in double speed
+            // ([`edges::ly0_pt`]); its `Ly4` is not.
+            // `Ly4` is at one dot on lines 0 and 1-143, in both speeds
+            // (`timeline`'s assertion), whatever line 0's `Ly3` is at.
             Pt::Ly3 => {
-                let (d, pt) = if l == 0 {
-                    next!(Line0, Ly3)
-                } else {
-                    next!(Visible, Ly3)
-                };
-                (c.pos + d, l, pt)
+                let (t, pt) = at!(Visible, Ly3);
+                (base + t, l, pt)
             }
             Pt::Ly4 => {
                 let (t, pt) = at!(Visible, Ly4);
@@ -1381,15 +1376,14 @@ impl Ppu {
                 let (d, pt) = next!(L153, L153Cmp);
                 (c.pos + d, l, pt)
             }
-            // Double speed: `L153Zero` is a dot later.
             Pt::L153Off => {
-                let (d, pt) = const { timeline::next_by_speed(Class::L153, Pt::L153Off) };
-                (c.pos + timeline::by_speed(d, speed), l, pt)
+                let (d, pt) = next!(L153, L153Off);
+                (c.pos + d, l, pt)
             }
-            // Relative: double speed, a dot later as `L153Zero`.
+            // To line 0's `Ly3`, a dot later in double speed.
             Pt::L153Zero => {
                 let (d, pt) = const { timeline::frame_wrap() };
-                (c.pos + d, 0, pt)
+                (c.pos + timeline::by_speed(d, speed), 0, pt)
             }
         };
         Cursor {
@@ -1497,19 +1491,6 @@ impl Ppu {
         }
     }
 
-    /// Dots after update point `pt` on line `l` at which its interrupt
-    /// request reaches IF: its row's [`timeline::Row::irq_late`], single
-    /// speed only.
-    #[inline(always)]
-    fn irq_late(pt: Pt, l: u32, speed: Speed) -> u64 {
-        match pt {
-            _ if speed.is_double() => 0,
-            Pt::Ly4 if l == 0 => const { timeline::row(Class::Line0, Pt::Ly4).irq_late },
-            Pt::L153Zero => const { timeline::row(Class::L153, Pt::L153Zero).irq_late },
-            _ => 0,
-        }
-    }
-
     /// [`Self::point_irq`] as a call, for the look-ahead
     /// ([`Self::next_event`]). (Perf: inlined into that loop, the tests of
     /// the selects and LYC of every arm are hoisted out of it, about 70
@@ -1526,11 +1507,6 @@ impl Ppu {
     ///
     /// Also the clock of the earliest timed interrupt request, if before
     /// that ([`Self::request_irq`]): the sync at it posts the request.
-    /// (Single speed, line 0's mode-2 pulse and line 153's comparison
-    /// against 0 are such requests, made at their walk points for one dot
-    /// later, [`edges::LY0_PULSE_IRQ`] and [`edges::L153_ZERO_IRQ`]: the
-    /// deadline is the point, and a sync on it makes the next deadline the
-    /// request's clock.)
     pub(crate) fn next_event(&self, speed: Speed) -> u64 {
         self.next_walk_event(speed).min(self.irq.next())
     }
@@ -1672,15 +1648,7 @@ impl Ppu {
             if !QUIET && !matches!(c.pt, Pt::Latch | Pt::End) {
                 let mut line = self.line_irq;
                 if self.point_irq(&mut line, c.pt, l, speed) {
-                    // Single speed: the requests of line 0's mode-2 pulse
-                    // and of line 153's comparison against 0 reach IF a
-                    // dot after their walk points.
-                    let delay = Self::irq_late(c.pt, l, speed);
-                    if delay != 0 {
-                        self.irq.request(self.synced + delay, INT_STAT, iflags);
-                    } else {
-                        *iflags |= INT_STAT;
-                    }
+                    *iflags |= INT_STAT;
                 }
                 self.line_irq = line;
             }
@@ -3094,9 +3062,13 @@ impl Ppu {
         // point (`Ly4`, [`edges::CMP_WALK`]), past where this view sees it
         // end: the line stays up for it, with no interrupt, and `Ly4`
         // ends it.
-        if (1..LINES).contains(&a.line)
+        // Line 0 in single speed: the same for its pulse, which is past
+        // for this view (`Self::early_cmp`); a mode 2 the write selects
+        // is too late for it.
+        if a.line < LINES
             && (edges::MODE2_SOURCE_END..timeline::CMP_WALK).contains(&a.t)
             && self.stat_select & SEL_MODE2 != 0
+            && (a.line != 0 || !(speed.is_double() || a.first))
         {
             self.line_irq.bits = IrqLine::STAT | IrqLine::MODE;
         }
@@ -3112,6 +3084,12 @@ impl Ppu {
     /// walk's next point is that comparison (`Ly4` of lines 1-143, `V4`),
     /// at most `cmp - CMP_ON` dots ahead: no division. While no source is
     /// selected the walk skips it, and the line, low, can't rise.
+    ///
+    /// Single speed, line 0's mode-2 pulse and line 153's comparison
+    /// against 0 the same way: the write views see each a dot before the
+    /// walk's point ([`edges::LY0_PULSE_SEEN`], [`edges::L153_ZERO`]), so
+    /// a write landing on that dot has the point run first, with the
+    /// selects and LYC from before the write ([`Self::point_before_write`]).
     #[inline]
     fn early_cmp(&mut self, now: u64, iflags: &mut u8, speed: Speed, view: View) {
         let c = self.cursor;
@@ -3119,13 +3097,44 @@ impl Ppu {
             .frame_start
             .wrapping_add(u64::from(c.pos))
             .wrapping_sub(now);
-        if matches!(c.pt, Pt::Ly4 | Pt::V4)
-            && c.line != 0
-            && ahead <= u64::from(timeline::CMP_WALK - timeline::CMP_SEEN)
-            && self.lcd_enabled()
-        {
-            self.update_at(now, iflags, speed, view);
+        if ahead > u64::from(timeline::CMP_WALK - timeline::CMP_SEEN) || !self.lcd_enabled() {
+            return;
         }
+        match c.pt {
+            Pt::Ly4 | Pt::V4 if c.line != 0 => self.update_at(now, iflags, speed, view),
+            Pt::Ly4 | Pt::L153Zero if !speed.is_double() => {
+                self.point_before_write(c, now.wrapping_add(ahead), iflags, speed);
+            }
+            _ => {}
+        }
+    }
+
+    /// The walk's next point `c` (line 0's mode-2 pulse or line 153's
+    /// comparison against 0, single speed, at clock `at`), evaluated a
+    /// dot before it for a STAT or LYC write landing there: with the
+    /// selects and LYC from before the write, which so no longer changes
+    /// what the point sees. Its request reaches IF at the point's own
+    /// clock (a timed request, [`Self::request_irq`]); the line is as
+    /// after the point, and when the walk reaches the point it finds
+    /// nothing to do ([`Self::update_at`] keeps the line up for a mode 2
+    /// the write selected).
+    ///
+    /// gambatte (behaviour only, `mstat_irq.h` `statRegChange` and
+    /// `lycRegChange`, `lyc_irq.cpp` `regChange`): its mode-2 and LYC
+    /// events see the selects and LYC as of the last write more than 2
+    /// cycles before them. The dot before the event is the part of that
+    /// window this models (a first phase two dots before line 0's pulse:
+    /// `MODE_HOLD`; 2-3 dots before line 153's comparison:
+    /// `MODE_1_STICKY`). ROMs: [`edges::LY0_PULSE`],
+    /// [`edges::L153_ZERO_WALK`].
+    #[cold]
+    #[inline(never)]
+    fn point_before_write(&mut self, c: Cursor, at: u64, iflags: &mut u8, speed: Speed) {
+        let mut line = self.line_irq;
+        if self.point_irq_ahead(&mut line, c.pt, u32::from(c.line), speed) {
+            self.irq.request(at, INT_STAT, iflags);
+        }
+        self.line_irq = line;
     }
 
     /// One phase of a STAT write at clock `now`: the interrupt selects
@@ -3874,20 +3883,18 @@ mod tests {
         }
     }
 
-    /// Single speed: line 0's mode-2 pulse runs at its walk point (t = 4),
-    /// and its request reaches IF a dot later (`edges::LY0_PULSE_IRQ`,
-    /// `double_speed_line_0_points`), also when a sync stopped on the
-    /// point.
+    /// Line 0's mode-2 pulse is at t = 5 in both speeds
+    /// (`edges::LY0_PULSE`), also when a sync stopped a dot before it.
     #[test]
-    fn single_speed_line_0_pulse_runs_at_its_dot() {
+    fn line_0_pulse_runs_at_dot_5() {
         let on = 1000;
-        for stop_on_point in [false, true] {
+        for stop_before in [false, true] {
             let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
             let l0 = clock(on, 2, 0);
             r.irqs(l0 - 10);
             r.iflags = 0;
-            assert_eq!(r.ppu.next_event(Speed::Normal), l0 + 4);
-            if stop_on_point {
+            assert_eq!(r.ppu.next_event(Speed::Normal), l0 + 5);
+            if stop_before {
                 r.sync(l0 + 4);
                 assert_eq!(r.iflags, 0);
                 assert_eq!(r.ppu.next_event(Speed::Normal), l0 + 5);
@@ -3898,24 +3905,22 @@ mod tests {
         }
     }
 
-    /// Single speed: line 153's comparison against 0 runs at its walk
-    /// point (t = 12: the STAT line and the write views change there), and
-    /// its request reaches IF a dot later (`edges::L153_ZERO_IRQ`), also
-    /// when a sync stopped on the point. Double speed: the point is at 13
-    /// and requests at once.
+    /// Line 153's comparison against 0 is at t = 13 in both speeds
+    /// (`edges::L153_ZERO_WALK`), also when a sync stopped a dot before
+    /// it.
     #[test]
-    fn single_speed_line_153_lyc_0_request_is_a_dot_after_its_point() {
+    fn line_153_lyc_0_point_is_at_dot_13() {
         let on = 1000;
         let l153 = clock(on, 0, 153 * LINE);
-        for stop_on_point in [false, true] {
+        for stop_before in [false, true] {
             let mut r = Rig::on_at(on, SEL_LYC, 0);
             r.irqs(l153);
             r.iflags = 0;
-            assert_eq!(r.ppu.next_event(Speed::Normal), l153 + 12);
-            if stop_on_point {
+            assert_eq!(r.ppu.next_event(Speed::Normal), l153 + 13);
+            if stop_before {
                 r.sync(l153 + 12);
                 assert_eq!(r.iflags, 0);
-                assert!(r.ppu.stat_line_high());
+                assert!(!r.ppu.stat_line_high());
                 assert_eq!(r.ppu.next_event(Speed::Normal), l153 + 13);
             }
             r.sync(l153 + 13);
@@ -3929,6 +3934,88 @@ mod tests {
         assert_eq!(r.ppu.next_event(Speed::Double), l153 + 13);
         r.sync_at_speed(l153 + 13, Speed::Double);
         assert_eq!(r.iflags, INT_STAT);
+    }
+
+    /// Single speed: a STAT or LYC write landing a dot before line 0's
+    /// mode-2 pulse (0:4) or line 153's comparison against 0 (153:12) no
+    /// longer changes what that point sees: it is evaluated with the
+    /// selects and LYC from before the write, and its request reaches IF
+    /// at the point's own dot (`Ppu::point_before_write`; gambatte's
+    /// latch, behaviour only). The write then sees the point done: a mode
+    /// 2 selected at 0:4 is too late for the pulse.
+    #[test]
+    fn a_write_a_dot_before_the_line_0_and_line_153_points_is_too_late_for_them() {
+        let on = 1000;
+        let l0 = clock(on, 1, 0);
+        let l153 = clock(on, 0, 153 * LINE);
+        // (selects, LYC, the write's dot, the point's dot, STAT value
+        // written or `None` for LYC = 0x55, whether the point requests).
+        let pulse = (l0 + 4, l0 + 5);
+        let zero = (l153 + 12, l153 + 13);
+        for (select, lyc, (at, point), stat, irq) in [
+            // Mode 2 cleared, the pulse still comes.
+            (SEL_MODE2, 0xFF, pulse, Some(SEL_MODE0), true),
+            (SEL_MODE2, 0xFF, pulse, Some(0), true),
+            // Mode 2 selected: past the pulse.
+            (SEL_MODE0, 0xFF, pulse, Some(SEL_MODE0 | SEL_MODE2), false),
+            (0, 0xFF, pulse, Some(SEL_MODE2), false),
+            // Mode 1 cleared: the pulse stays blocked.
+            (SEL_MODE1 | SEL_MODE2, 0xFF, pulse, Some(SEL_MODE2), false),
+            // A LYC write changes nothing for the pulse.
+            (SEL_MODE2, 0xFF, pulse, None, true),
+            // The LYC select cleared, LYC changed: the LYC = 0 interrupt
+            // still comes.
+            (SEL_LYC, 0, zero, Some(SEL_MODE0), true),
+            (SEL_LYC, 0, zero, None, true),
+            // LYC selected there with LYC = 0: the write's own request, at
+            // once (the walk's point then finds the line up).
+            (SEL_MODE0, 0, zero, Some(SEL_MODE0 | SEL_LYC), true),
+        ] {
+            for view in [View::StatPhase1, View::StatPhase2] {
+                let mut r = Rig::on_at(on, select, lyc);
+                r.irqs(at);
+                r.iflags = 0;
+                let mut now = 0;
+                match stat {
+                    Some(v) => r.ppu.write_stat(at, v, &mut now, Speed::Normal, view),
+                    None => r.ppu.write_lyc(at, 0x55, &mut now, Speed::Normal),
+                }
+                let own = stat.is_some_and(|v| v & !select & SEL_LYC != 0);
+                assert_eq!(now != 0, own, "{select:02X} {stat:02X?}: at the write");
+                // The point's request: at its own dot, not before.
+                r.sync(point - 1);
+                assert_eq!(r.iflags, 0, "{select:02X} {stat:02X?}: before the point");
+                let irqs = r.irqs(point + 60);
+                let want = if irq && !own {
+                    vec![(point, INT_STAT)]
+                } else {
+                    vec![]
+                };
+                assert_eq!(irqs, want, "{select:02X} {stat:02X?} {view:?}");
+            }
+        }
+    }
+
+    /// A switch to single speed a dot before line 0's mode-2 pulse or
+    /// line 153's comparison against 0 doesn't lose the point: it is at
+    /// the same dot in both speeds. (While the single-speed walk had them
+    /// a dot earlier, a switch on that dot skipped the point: the pulse
+    /// was lost, and LYC = 0 only matched at line 0's first point.)
+    #[test]
+    fn a_speed_switch_before_the_line_0_and_line_153_points_keeps_them() {
+        let on = 1000;
+        let l0 = clock(on, 1, 0);
+        let l153 = clock(on, 0, 153 * LINE);
+        for (select, lyc, at) in [(SEL_MODE2, 0xFF, l0 + 4), (SEL_LYC, 0, l153 + 12)] {
+            let mut r = Rig::on_at(on, select, lyc);
+            r.ppu.speed_changed(Speed::Double);
+            r.irqs_at_speed(at, Speed::Double);
+            r.iflags = 0;
+            r.ppu.speed_changed(Speed::Normal);
+            assert_eq!(r.ppu.next_event(Speed::Normal), at + 1);
+            r.sync(at + 1);
+            assert_eq!(r.iflags, INT_STAT, "{select:02X}");
+        }
     }
 
     /// Design step 1 (docs/design/lcd-offset-phase.md 3.2): single speed,
@@ -4081,7 +4168,8 @@ mod tests {
             (153, 0)
         );
         // LYC = 0 matches from t = 12 of line 153, through line 0 (the
-        // request reaches IF a dot later, `edges::L153_ZERO_IRQ`).
+        // walk's point and the request: a dot later,
+        // `edges::L153_ZERO_WALK`).
         let mut r = Rig::on_at(on, SEL_LYC, 0);
         r.irqs(clock(on, 0, 100 * LINE));
         let irqs = r.irqs(clock(on, 1, 2 * LINE));
@@ -4091,12 +4179,10 @@ mod tests {
         assert_eq!(stat & 4, 4);
     }
 
-    /// Double speed: line 0's mode-2 pulse at `t = 5` (single speed 4),
-    /// blocked by the mode-1 select, whose source ends at `t = 4`; LYC = 0
-    /// matches for the walk from line 153's `t = 13` (single speed 12).
-    /// [`edges::ly0_pt`], [`edges::l153_zero_walk`]. The CPU sees the
-    /// single-speed pulse and LYC = 0 request a dot late, at 5 and 13 too
-    /// (`Ppu::next_event`).
+    /// Line 0's mode-2 pulse at `t = 5`, blocked by the mode-1 select
+    /// (whose source ends at `t = 4` in double speed); LYC = 0 matches
+    /// for the walk from line 153's `t = 13`. Both speeds:
+    /// [`edges::ly0_pt`], [`edges::LY0_PULSE`], [`edges::L153_ZERO_WALK`].
     #[test]
     fn double_speed_line_0_points() {
         let on = 1000;
@@ -4128,7 +4214,7 @@ mod tests {
         r.ppu.write_lyc(l0 + 4, 0, &mut r.iflags, Speed::Double);
         assert_eq!(r.iflags, INT_STAT);
         // A switch to double speed between line 0's single-speed `Ly3`
-        // and `Ly4` moves the pulse to 5.
+        // and `Ly4` leaves the pulse at 5.
         let mut r = Rig::on_at(on, SEL_MODE2, 0xFF);
         r.irqs(l0 + 3);
         r.ppu.speed_changed(Speed::Double);
