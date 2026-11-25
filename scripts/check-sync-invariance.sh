@@ -21,6 +21,9 @@
 # the `checked` profile (overflow checks and debug assertions on) in their
 # own target dir, target/invariance, so they neither thrash the main build
 # cache nor leave a feature-built `bench` where a measured one is expected.
+# Each build must have compiled gbc-core with exactly its features (none
+# for the product and long-run builds), as cargo reports them, or the
+# check fails before any run.
 # Test ROMs: $TEST_ROMS (default test-roms/). About 4.5 minutes; --long adds
 # about 1. Heavy (8 threads): run it alone.
 #
@@ -62,19 +65,47 @@ done
 
 [ -d "$ROMS_DIR" ] || { echo "check-sync-invariance: $ROMS_DIR missing (run scripts/fetch-test-roms.sh or set TEST_ROMS)" >&2; exit 2; }
 
-# Builds bench with the given cargo arguments and prints the path of the
-# binary cargo just built (never a hard-coded, possibly stale, path).
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+# build <tag> <cargo args...>: builds bench, keeps cargo's JSON messages in
+# $tmp/<tag>.json, checks the gbc-core features (expect_core_features) and
+# prints the path of the binary cargo just built (never a hard-coded,
+# possibly stale, path).
 build() {
-  local bin
-  bin=$(cargo build -p bench --quiet --message-format=json "$@" \
-    | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
+  local tag=$1 want=$2 bin
+  shift 2
+  cargo build -p bench --quiet --message-format=json "$@" > "$tmp/$tag.json" \
+    || { echo "check-sync-invariance: cargo build $* failed" >&2; exit 2; }
+  expect_core_features "$tag" "$want"
+  bin=$(sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' "$tmp/$tag.json" | tail -n 1)
   [ -n "$bin" ] && [ -x "$bin" ] || { echo "check-sync-invariance: cannot find the bench binary cargo built ($*)" >&2; exit 2; }
   echo "$bin"
 }
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-fail=0
+# expect_core_features <tag> <features>: fails unless the one gbc-core
+# library cargo compiled for build <tag> had exactly <features> on (a
+# space-separated list, "" for none). Read from cargo's compiler-artifact
+# message, i.e. what was linked into the binary: bench's own feature
+# (`cfg!` in bench) stays on even when its forwarding to gbc-core is
+# emptied, and then the "eager" build is a lazy one and the comparison of
+# two lazy builds proves nothing.
+expect_core_features() {
+  local tag=$1 want=$2 art got
+  art=$(grep '"reason":"compiler-artifact"' "$tmp/$tag.json" | grep '"name":"gbc_core"' || true)
+  if [ "$(printf '%s\n' "$art" | grep -c .)" -ne 1 ]; then
+    echo "FAIL: expected one gbc-core artifact in cargo's messages for the $tag build" >&2
+    exit 1
+  fi
+  got=$(printf '%s\n' "$art" | sed -n 's/.*"features":\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' '\n' | sort | tr '\n' ' ')
+  want=$(printf '%s\n' $want | sort | tr '\n' ' ')
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: the $tag build's gbc-core has features [${got% }], expected [${want% }] (tools/bench/Cargo.toml forwarding?)" >&2
+    exit 1
+  fi
+  echo "check-sync-invariance: $tag build: gbc-core features [${got% }]" >&2
+}
 
 # fingerprint <binary> <out> [bench --fingerprint args]: a run that dies
 # (a panic under the checked profile) or loads fewer ROMs fails the check.
@@ -136,11 +167,13 @@ compare() {
 
 if [ "$short" = 1 ]; then
   echo "check-sync-invariance: building (release; checked + eager-sync; checked + clock-offset)" >&2
-  ref=$(build --release)
+  ref=$(build product "" --release)
   # The two feature builds share a target dir, so each binary is copied
   # before the next build replaces it.
-  cp "$(build --profile checked --features eager-sync --target-dir "$TDIR")" "$tmp/bench-eager"
-  cp "$(build --profile checked --features clock-offset --target-dir "$TDIR")" "$tmp/bench-offset"
+  bin=$(build eager eager-sync --profile checked --features eager-sync --target-dir "$TDIR")
+  cp "$bin" "$tmp/bench-eager"
+  bin=$(build offset clock-offset --profile checked --features clock-offset --target-dir "$TDIR")
+  cp "$bin" "$tmp/bench-offset"
 
   AUDIO=(--audio-buffer 7 --hash-samples)
   fingerprint "$ref" "$tmp/ref.txt"
@@ -159,7 +192,7 @@ fi
 
 if [ "$long" = 1 ]; then
   echo "check-sync-invariance: long run (checked profile, no features)" >&2
-  bench=$(build --profile checked --target-dir "$TDIR")
+  bench=$(build long "" --profile checked --target-dir "$TDIR")
   if ! "$bench" --long --root "$ROMS_DIR"; then
     echo "FAIL  long run"
     fail=1
