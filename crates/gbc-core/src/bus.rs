@@ -1317,6 +1317,17 @@ impl Ctx<'_, '_> {
                 }
             }
         }
+        // A write in mode 3 may have moved the line's mode-0 start (an SCX
+        // write in the fine-scroll discard, a window start or cut:
+        // `Ppu::end_moved`), after the sync above scheduled the HBlank
+        // transfer's trigger from the old one: it moves too. Without
+        // this the trigger stayed where it was until the next PPU sync,
+        // and with none before it the block ran off the HBlank (the
+        // state depended on where the PPU was synced:
+        // `scripts/check-sync-invariance.sh`).
+        if self.sys.vdma.hblank {
+            self.vdma_arm(now, true);
+        }
         // The selects, LYC or LCDC may move the next deadline.
         self.schedule_ppu();
         // An LCDC, STAT or LYC write may have requested the STAT
@@ -5415,6 +5426,59 @@ mod dma_tests {
                 assert_eq!(ctx.sys.vdma.refetch, 0);
             });
         }
+    }
+
+    /// A register write in mode 3 that moves the line's mode-0 start (here
+    /// SCX's fine scroll, which lengthens mode 3) moves the HBlank
+    /// transfer's trigger with it: the trigger was scheduled from the
+    /// line's timing as it was before the write, and nothing else syncs
+    /// the PPU before it (found by `check-sync-invariance.sh` on
+    /// `synth:worst-case`: the block ran up to 5 clocks before mode 0).
+    #[test]
+    fn a_mode_3_write_that_moves_mode_0_moves_the_hblank_trigger() {
+        let mut moved = [0; 2];
+        // Accesses from line 2's mode 2 to the end of its mode 3, SCX
+        // going from 7 to 6 (in the discard: a shorter mode 3, or 7 dots
+        // longer once the discard has counted past 6) or to 4.
+        for (m, scx) in ((2 * 456 + 60) / 4..(2 * 456 + 260) / 4).flat_map(|m| [(m, 6), (m, 4)]) {
+            let emu = setup();
+            with_ctx(emu, |ctx| {
+                let e = ctx.clock();
+                ctx.write(0xFF43, 0x07);
+                ctx.write(0xFF40, 0x91);
+                idle_to(ctx, e, (2 * 456 + 20) / 4);
+                ctx.write(0xFF55, 0x87);
+                assert!(ctx.sys.vdma.hblank && !ctx.sys.vdma.pending);
+                idle_to(ctx, e, m);
+                // The line's timing as the write's own sync sees it.
+                ctx.run_ppu_to_call(ctx.clock());
+                let before = ctx.sys.ppu.mode0_start();
+                ctx.write(0xFF43, scx);
+                let start = ctx.sys.ppu.mode0_start().unwrap();
+                let trigger = start + hdma::HBLANK_DELAY;
+                if trigger <= ctx.clock() {
+                    // Line 2 isn't latched yet, or its trigger has passed.
+                    return;
+                }
+                let before = before.unwrap();
+                moved[0] += u32::from(start < before);
+                moved[1] += u32::from(start > before);
+                assert_eq!(
+                    ctx.sys.sched.deadline(EventKind::VramDma),
+                    trigger,
+                    "access at {m}, SCX {scx}"
+                );
+                // The block is requested in the M-cycle that reaches it.
+                while !ctx.sys.vdma.pending {
+                    ctx.idle();
+                }
+                assert!(
+                    (trigger..trigger + 4).contains(&ctx.clock()),
+                    "access at {m}, SCX {scx}"
+                );
+            });
+        }
+        assert!(moved[0] > 0 && moved[1] > 0, "mode 0 moved {moved:?}");
     }
 
     /// CGB B/C read STAT mode 0 at line 0 dot 3 in single speed, but an
