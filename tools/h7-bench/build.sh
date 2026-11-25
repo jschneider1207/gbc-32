@@ -2,7 +2,7 @@
 # Builds every h7-bench image into out/ (ELF and .bin), prints section sizes
 # and checks what can be checked without the board. README.md "Build".
 #
-#   ./build.sh            selftest, the three placements, the host
+#   ./build.sh            selftest, clockcheck, the three placements, the host
 #                         expected-hash test (and the M4 stub for h755)
 #   H7_BENCH_BOARD        h753 (default: NUCLEO-H753ZI) or h755
 #                         (NUCLEO-H755ZI-Q); images go to out/<board>/
@@ -143,12 +143,14 @@ itcm_check() {
 AXI_LO=0x24000000 AXI_HI=0x24080000 DTCM_LO=0x20000000 DTCM_HI=0x20020000
 
 image selftest selftest "$AXI_LO" "$AXI_HI"
+image clockcheck clockcheck "$AXI_LO" "$AXI_HI"
 image bench-flash-axi "" "$AXI_LO" "$AXI_HI"
 image bench-flash-dtcm dtcm "$DTCM_LO" "$DTCM_HI"
 image bench-itcm-dtcm itcm "$DTCM_LO" "$DTCM_HI"
 itcm_check bench-itcm-dtcm
 if [ -n "${H7_BENCH_PLL:-}" ]; then
   image selftest-pll selftest,pll "$AXI_LO" "$AXI_HI"
+  image clockcheck-pll clockcheck,pll "$AXI_LO" "$AXI_HI"
   image bench-flash-axi-pll pll "$AXI_LO" "$AXI_HI"
   image bench-flash-dtcm-pll dtcm,pll "$DTCM_LO" "$DTCM_HI"
   image bench-itcm-dtcm-pll itcm,pll "$DTCM_LO" "$DTCM_HI"
@@ -156,6 +158,7 @@ if [ -n "${H7_BENCH_PLL:-}" ]; then
 fi
 if [ -n "${H7_BENCH_PLL480:-}" ]; then
   image selftest-pll480 selftest,pll480 "$AXI_LO" "$AXI_HI"
+  image clockcheck-pll480 clockcheck,pll480 "$AXI_LO" "$AXI_HI"
   image bench-flash-axi-pll480 pll480 "$AXI_LO" "$AXI_HI"
   image bench-flash-dtcm-pll480 dtcm,pll480 "$DTCM_LO" "$DTCM_HI"
   image bench-itcm-dtcm-pll480 itcm,pll480 "$DTCM_LO" "$DTCM_HI"

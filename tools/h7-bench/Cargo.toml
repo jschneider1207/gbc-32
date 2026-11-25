@@ -39,6 +39,9 @@ pll = []
 pll480 = []
 # Board bring-up only: power, clock, UART, LEDs, cycle counter. No emulator.
 selftest = []
+# Bring-up, then the CPU clock measured against the 32.768 kHz LSE crystal
+# (TIM16 input capture; board.rs `clockcheck`). No emulator.
+clockcheck = ["selftest"]
 # QEMU mps2-an500 smoke run of the frame loop and hashes (semihosting
 # output, no board code). With `itcm` it also exercises the placement.
 qemu = ["dep:cortex-m-semihosting"]
