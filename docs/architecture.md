@@ -254,6 +254,7 @@ timer/      * DIV/TIMA/TMA/TAC, lazy (ADR 0011): u64 system counter from the clo
   reference.rs  (test only) the eager per-M-cycle model; differential.rs checks the lazy one against it
 ppu/        * Frame, mode timing (ADR 0014): LY/STAT/LYC, STAT and VBlank interrupts, mode-3 length, VRAM/OAM blocking windows
   objects.rs *   OAM scan (`LineObjects`: up to 10 per line) and DMG-style drawing priority
+  timeline.rs *  the line timeline: one row per update point of each line class (dot per speed, mode source, comparison value, where reads see it); the walk, its cursor search and the comparison reads derive from it
   stalls.rs  *   `Stalls`: one line's mode-3 pipeline stalls (objects, window starts), a bounded list and the one timed walk over it
   render.rs  *   scanline renderer (`Renderer`, spans of a line), resolved palettes (`Colors`, ADR 0013); CGB mode in M5
 apu/        * Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, register write entry, pure reads (`read_apu`), StereoSample, output constants
@@ -386,6 +387,13 @@ line's mode 3, which is the `EventKind::Ppu` deadline. With no STAT source
 selected the walk skips to `Latch`/`End`/`VBlank` only: the two walks are
 separate code (`step_work`; `step` + `point_irq`), each compiled into the
 sync (`run_points::<QUIET>`) and the look-ahead, chosen once per call.
+The sequence of points, what each evaluates and where reads and write
+views see it are one table, `ppu/timeline.rs` (review E3): `step`,
+`step_work` and `point_irq` take each arm's numbers from it by `const`
+lookup (same code as hand-written immediates), the cursor search
+(`seek_point`) is a line's first row plus `step`, and `Ppu::cmp` and the
+write views take their dots from it. Its tests interpret the table for
+every line, dot and speed and compare with that code.
 `Ppu::sync` and `walk_to` inline only the test for "no point to run"
 (most register and palette writes); the deadline's own sync
 (`Ppu::sync_due`) skips it.

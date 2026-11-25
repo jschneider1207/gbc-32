@@ -29,6 +29,12 @@
 //! below are in positions; LCD enable is at position 7 (`ON_POS`), so the
 //! first line's actions sit at SameBoy's nominal time + 8.
 //!
+//! The update points of every line, in order, with what each evaluates
+//! and where reads see it, are the rows of [`timeline`]: the walk, its
+//! cursor search and the comparison reads are derived from that table, so
+//! a timing change is made there (and in [`edges`], where the dots and
+//! their sources are). This section is the prose for it.
+//!
 //! Lines 0-143 (SameBoy states 35, 6, 7, 8, 10, 32, 21, 22):
 //! - `t = 0..3`: still the previous line: LY, coincidence against LY-1,
 //!   mode 0 (line 0: mode 1, except mode 0 at `t = 3` in single speed);
@@ -37,13 +43,16 @@
 //!   holds); the mode-2 interrupt source rises ("the OAM STAT interrupt
 //!   occurs 1 T-cycle before STAT actually changes, except on line 0");
 //! - `t = 4`: STAT mode 2, coincidence against LY; the mode-2 source is
-//!   a pulse, dropped right after it is evaluated;
+//!   a pulse, dropped right after it is evaluated (lines 1-143: the walk
+//!   compares and ends the source a dot later, [`edges::CMP_WALK`]);
 //! - `t = 84`: mode 3; `t = 89`: the pixel pipeline starts;
 //! - `t = end` (256 + SCX%8 + penalties, see [`LineTiming`]): mode 0;
 //!   `t = end + 1`: the HBlank interrupt source rises.
 //!
-//! Lines 144-152 (states 26, 12, 24, 13): `t = 0` comparison off; `t = 2`
-//! LY changes; `t = 4` comparison against LY. Line 144 also has the
+//! Lines 144-152 (states 26, 12, 24, 13): `t = 0` comparison off (reads
+//! keep the previous line's to `t = 3`, [`edges::VCMP_OFF`]); `t = 3` LY
+//! changes; `t = 4` the STAT bit compares LY, `t = 5` the walk
+//! ([`edges::CMP_WALK`]). Line 144 also has the
 //! mode-2 interrupt quirk at `t = 3` (STAT bit 5 requests an interrupt
 //! when entering VBlank, before VBlank on CGB: Mooneye
 //! `misc/ppu/vblank_stat_intr-C`; where gambatte has it, see
@@ -51,8 +60,8 @@
 //! `m1/m2m1irq_ifw_2` rules out), and at `t = 5` mode 1, the VBlank
 //! interrupt and the frame.
 //!
-//! Line 153 (states 19, 14, 15, 16, 29, 17): LY reads 153 from `t = 2`
-//! and 0 from `t = 6` (`t = 8` in double speed); the comparison is
+//! Line 153 (states 19, 14, 15, 16, 29, 17): LY reads 153 from `t = 3`
+//! and 0 from `t = 7` (`t = 8` in double speed); the comparison is
 //! against 153 at `t = 5..8` and against 0 from `t = 12` (the walk: 13
 //! in double speed, [`edges::l153_zero_walk`]). Double speed, line 0: the
 //! mode-1 source ends at `t = 4` and the mode-2 pulse is at `t = 5`
@@ -113,7 +122,7 @@ pub(crate) const ON_POS: u32 = 7;
 
 /// Frame position of the VBlank interrupt and `FRAME_READY`: line 144,
 /// dot 5 ([`Pt::VBlank`]).
-pub(crate) const VBLANK_POS: u32 = 144 * LINE + edges::VBLANK;
+pub(crate) const VBLANK_POS: u32 = 144 * LINE + timeline::VBLANK;
 
 /// Frame position at clock 0 after reset, where the CGB boot ROM hands
 /// over: LY = 144, 171 dots in.
@@ -232,8 +241,8 @@ enum Pt {
 /// The next update point after [`Ppu::synced`](Ppu): frame position (past
 /// `FRAME`: the next frame's), its line (0-153; 0 past `FRAME`) and kind.
 /// Advanced point by point ([`Ppu::step`]) instead of searching from a
-/// position with a division per point ([`Ppu::next_point`], only used
-/// to re-seek when the walk changes: LCD enable, STAT selects).
+/// position with a division ([`Ppu::seek_point`], only used to re-seek
+/// when the walk changes: LCD enable, STAT selects, a speed switch).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Cursor {
     pos: u32,
@@ -782,7 +791,7 @@ impl Ppu {
     fn m0_irq_at(&self, now: u64, a: At) -> u32 {
         let start = now.wrapping_sub(u64::from(a.t));
         self.latched_end(start)
-            .map_or(LINE, |e| e + edges::HBLANK_AFTER_END)
+            .map_or(LINE, |e| e + timeline::HBLANK_AFTER_END)
     }
 
     /// Whether a STAT or LYC write landing at `now`, `delay` dots after its
@@ -839,14 +848,10 @@ impl Ppu {
     fn cmp(a: At, speed: Speed) -> (Option<u8>, u8) {
         // The dots are the `timeline` rows' `seen` column, and the order
         // of the cases is checked against the rows by `timeline`'s tests.
-        // Lines 1-152 (lines 144-152 see as 1-143, `timeline`'s
-        // assertion): off at the row where LY changes, on at the next.
-        const OFF: u32 = timeline::seen(Class::Visible, Pt::Ly3);
-        const ON: u32 = timeline::seen(Class::Visible, Pt::Ly4);
-        // Line 153: off from its start.
-        const L153_CMP: u32 = timeline::seen(Class::L153, Pt::L153Cmp);
-        const L153_OFF: u32 = timeline::seen(Class::L153, Pt::L153Off);
-        const L153_ZERO: u32 = timeline::seen(Class::L153, Pt::L153Zero);
+        use timeline::{
+            CMP_OFF_SEEN as OFF, CMP_SEEN as ON, L153_CMP_SEEN as L153_CMP,
+            L153_OFF_SEEN as L153_OFF, L153_ZERO_SEEN as L153_ZERO,
+        };
         let (l, t) = (a.line, a.t);
         match l {
             0 => (Some(0), 0),
@@ -878,7 +883,11 @@ impl Ppu {
     fn mode(&self, now: u64, a: At, speed: Speed, quirk: bool) -> u8 {
         let (l, t) = (a.line, a.t);
         if l >= LINES {
-            return if l == 144 && t < edges::VBLANK { 0 } else { 1 };
+            return if l == 144 && t < timeline::VBLANK {
+                0
+            } else {
+                1
+            };
         }
         if a.first {
             return if t < edges::MODE3_FIRST || t >= self.mode3_end(now, a, speed, false) {
@@ -946,7 +955,7 @@ impl Ppu {
     /// pulse (one dot after its access) sees line 0's mode-1 source still
     /// holding the line (`Ctx::write_ppu`).
     pub(crate) fn on_ly0_pulse(&self, at: u64, speed: Speed) -> bool {
-        const PULSE: u32 = edges::ly0_pulse(Speed::Normal);
+        const PULSE: u32 = timeline::LY0_PULSE_SS;
         // As `at` (frame position; line 0 of the first frame has no pulse),
         // without its division.
         let mut p = at.wrapping_sub(self.frame_start) as u32;
@@ -1079,17 +1088,20 @@ impl Ppu {
             // LYC 0 and 145-153 by its mode-1 select; behaviour only).
             // CGB04C `lycEnable/lyc153_late_m1disable_2`, `lyc0_m1disable_2`.
             let near = |e: u32| (e - 2..e).contains(&t);
-            if hold && l != 144 && (near(edges::CMP_WALK) || (l == 153 && near(edges::L153_ZERO))) {
+            if hold
+                && l != 144
+                && (near(timeline::CMP_WALK) || (l == 153 && near(timeline::L153_ZERO_SS)))
+            {
                 return MODE_1_STICKY;
             }
             return match t {
-                _ if l != 144 || t >= edges::VBLANK => 1,
-                _ if t < edges::QUIRK2 => 0,
+                _ if l != 144 || t >= timeline::VBLANK => 1,
+                _ if t < timeline::QUIRK2 => 0,
                 _ if hold => MODE_HOLD,
                 // Double speed: from `T <= 6` half-dots (dot 4), as the
                 // single-speed `T <= 4`; phase 2 lands half a dot before
                 // its whole dot (`edges::STAT_PHASE2`).
-                _ if t > edges::QUIRK2 && view == View::StatPhase1 => MODE_HOLD,
+                _ if t > timeline::QUIRK2 && view == View::StatPhase1 => MODE_HOLD,
                 _ => MODE_0_2,
             };
         }
@@ -1102,8 +1114,16 @@ impl Ppu {
         // `statChangeTriggersM2IrqCgb`) triggers while `2 < T <= 4(1 + ds)`,
         // our t < 5 single speed, t < 6 double speed (T in half-dots).
         // CGB04C `m2enable/late_enable_ds_1`, `late_enable_m0disable_ds_1`.
+        //
+        // (Review E3, kept as found: line 0 in double speed, dot 4 with
+        // mode 2 selected. The walk's mode-1 source lasts to its pulse at
+        // dot 5 there (`timeline::Src::Line0Mode1`), but every view sees
+        // it end at 4. So a STAT write at 0:4 that leaves modes 1 and 2
+        // selected lowers the line, and the pulse then requests an
+        // interrupt that the walk alone blocks. Not checked against
+        // hardware or a reference.)
         let m2_end = match view {
-            View::StatPhase1 if l != 0 => edges::CMP_WALK + speed.extra(),
+            View::StatPhase1 if l != 0 => timeline::CMP_WALK + speed.extra(),
             _ => edges::MODE2_SOURCE_END,
         };
         if t < m2_end {
@@ -1120,7 +1140,7 @@ impl Ppu {
                 // `m0enable/late_enable_ds_lcdoffset1_1`, a mode-0 enable
                 // with phase 2 at t = 2.5: interrupt; `late_enable_ds_2`,
                 // t = 3.5: none).
-                _ if t < edges::PT_LY
+                _ if t < timeline::LY
                     + u32::from(speed.is_double() && view == View::StatPhase2) =>
                 {
                     0
@@ -1159,9 +1179,9 @@ impl Ppu {
             }
         } else if l < LINES {
             let latch = if first_line {
-                const { timeline::at(Class::First, Pt::Latch) }
+                timeline::PIPE_FIRST
             } else {
-                const { timeline::at(Class::Visible, Pt::Latch) }
+                timeline::PIPE
             };
             Cursor {
                 pos: l * LINE + latch,
@@ -1223,9 +1243,9 @@ impl Ppu {
     /// (`Latch`, `End`, `VBlank`), the other rows of [`timeline`] skipped.
     #[inline(always)]
     fn step_work(&self, c: Cursor, start: u64) -> Cursor {
-        // Lines 0-143 alike (`timeline`'s assertion); the first line after
-        // LCD enable is only ever sought ([`Self::seek_point`]).
-        const LATCH: u32 = timeline::at(Class::Visible, Pt::Latch);
+        // (The first line after LCD enable is only ever sought,
+        // [`Self::seek_point`].)
+        const LATCH: u32 = timeline::PIPE;
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
@@ -2365,9 +2385,9 @@ impl Ppu {
         let window = self.window_wx(mem);
         let tall = self.lcdc & 0x04 != 0;
         let start = self.synced.wrapping_sub(u64::from(if first {
-            edges::PIPE_FIRST
+            timeline::PIPE_FIRST
         } else {
-            edges::PIPE
+            timeline::PIPE
         }));
         // One OAM scan per line, for both the stalls and the pixels. On a
         // line OAM DMA touches (from the FF46 write to the transfer's end
@@ -3040,7 +3060,7 @@ impl Ppu {
         // a write at line 145 dot 3 selecting mode 1 instead requests it.
         if !speed.is_double()
             && view == View::StatPhase1
-            && a.t == edges::CMP_OFF
+            && a.t == timeline::CMP_OFF_SEEN
             && (1..=152).contains(&a.line)
         {
             self.line_irq.drop_lyc();
@@ -3053,7 +3073,7 @@ impl Ppu {
         // end: the line stays up for it, with no interrupt, and `Ly4`
         // ends it.
         if (1..LINES).contains(&a.line)
-            && (edges::MODE2_SOURCE_END..edges::CMP_WALK).contains(&a.t)
+            && (edges::MODE2_SOURCE_END..timeline::CMP_WALK).contains(&a.t)
             && self.stat_select & SEL_MODE2 != 0
         {
             self.line_irq.bits = IrqLine::STAT | IrqLine::MODE;
@@ -3079,7 +3099,7 @@ impl Ppu {
             .wrapping_sub(now);
         if matches!(c.pt, Pt::Ly4 | Pt::V4)
             && c.line != 0
-            && ahead <= u64::from(edges::CMP_WALK - edges::CMP_ON)
+            && ahead <= u64::from(timeline::CMP_WALK - timeline::CMP_SEEN)
             && self.lcd_enabled()
         {
             self.update_at(now, iflags, speed, view);
@@ -3208,7 +3228,7 @@ impl Ppu {
         // compares 0. CGB04C `lycEnable/lyc153_late_ff45_enable_3`,
         // `_lcdoffset1_1` (IRQ), `_2`, `_4` (none).
         if !speed.is_double() && l == 153 && t < edges::LYC153_SS_UNTIL {
-            if t >= edges::L153_CMP - 1 {
+            if t >= timeline::L153_CMP_SEEN - 1 {
                 self.line_irq.drop_lyc();
             }
             if self.line_irq.eval(self.stat_select, self.lyc, 1, Some(153)) {
@@ -3223,7 +3243,7 @@ impl Ppu {
         };
         let deferred = match l {
             0..=152 => t < defer_until && !a.first,
-            _ => (edges::L153_CMP..edges::L153_ZERO).contains(&t),
+            _ => (timeline::L153_CMP_SEEN..timeline::L153_ZERO_SEEN).contains(&t),
         };
         if deferred {
             return;
@@ -3239,7 +3259,7 @@ impl Ppu {
         {
             *iflags |= INT_STAT;
         }
-        if !(l == 153 && (edges::LYC153_OLD_FROM..edges::L153_CMP).contains(&t)) {
+        if !(l == 153 && (edges::LYC153_OLD_FROM..timeline::L153_CMP_SEEN).contains(&t)) {
             // Mode 0 selected: a write that ends LY=LYC at most
             // `edges::M0_LYC_LATCH` dots (from its access) before the
             // mode-0 interrupt doesn't lower the line; the mode-0 source

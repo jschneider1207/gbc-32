@@ -21,20 +21,28 @@
 //!   ([`Class::first`]), then `step` (it was a second, hand-written copy
 //!   of the sequence);
 //! - the comparison value as reads and writes see it, `Ppu::cmp`: its
-//!   positions are the rows' [`Row::seen`].
+//!   positions are the rows' [`Row::seen`];
+//! - the STAT/LYC write views (`Ppu::mode_source`, `Ppu::update_at`,
+//!   `Ppu::early_cmp`, `Ppu::write_lyc`) and the STAT mode read
+//!   (`Ppu::mode`), wherever they mean a walk point or the dot a point is
+//!   seen at: the named dots below ([`CMP_WALK`], [`CMP_SEEN`], ...).
 //!
 //! What stays written by hand in those functions is the *dispatch*: which
-//! class a `(Pt, line)` pair belongs to (`Pt::V0 if l == 144`, ...), and
-//! the order of `Ppu::cmp`'s comparisons. The tests below check both
-//! against a plain interpretation of the table for every line, position
-//! and speed, so a row edit that the dispatch doesn't follow fails there.
+//! class a `(Pt, line)` pair belongs to (`Pt::V0 if l == 144`, ...), the
+//! order of `Ppu::cmp`'s comparisons, and the shape of
+//! `Ppu::mode_source`. The tests below check all three against a plain
+//! interpretation of the table for every line, dot and speed, so a row
+//! edit that the code doesn't follow fails there. For the write views
+//! that means: their mode source is the walk's, except in the windows the
+//! test lists (`view_only`), which are those views' own calibrations.
 //!
-//! Not in the table: the STAT mode read (`Ppu::mode`), the LY read
-//! (`Ppu::ly`) and the write views' mode source (`Ppu::mode_source`),
-//! which see the same edges at their own, separately calibrated dots
-//! (`edges`; review A2-02 is about that calibration).
+//! Not in the table: edges that only an observer has. The LY read
+//! (`Ppu::ly`), the mode-3 STAT read and the CPU access windows, and the
+//! write views' own offsets stay in [`edges`]; "is this clock in mode 3
+//! of the latched line" stays with `LineTiming` (`Ppu::mode3_end` and
+//! its users).
 
-use super::{LINE, LINES, MODE_0_2, MODE_HOLD, Pt, VBLANK_POS, edges};
+use super::{LINE, LINES, MODE_0_2, MODE_HOLD, Pt, edges};
 use crate::speed::Speed;
 
 /// The kinds of line: lines of one class have the same rows.
@@ -162,11 +170,11 @@ const fn mode3_rows(pipe: u32) -> [Row; 3] {
     ]
 }
 
-const MODE3: [Row; 3] = mode3_rows(edges::PIPE);
+const ROWS_MODE3: [Row; 3] = mode3_rows(edges::PIPE);
 
-const FIRST: [Row; 3] = mode3_rows(edges::PIPE_FIRST);
+const ROWS_FIRST: [Row; 3] = mode3_rows(edges::PIPE_FIRST);
 
-const LINE0: [Row; 5] = [
+const ROWS_LINE0: [Row; 5] = [
     // The comparison is against 0 since line 153 (`L153Zero`).
     row_at(
         Pt::Ly3,
@@ -183,23 +191,24 @@ const LINE0: [Row; 5] = [
         Src::Pulse(2),
         Cmp::Ly,
     )
-    .irq_late(edges::LY0_PULSE_IRQ),
-    MODE3[0],
-    MODE3[1],
-    MODE3[2],
+    .irq_late(edges::LY0_PULSE_IRQ)
+    .seen(edges::CMP_ON),
+    ROWS_MODE3[0],
+    ROWS_MODE3[1],
+    ROWS_MODE3[2],
 ];
 
-const VISIBLE: [Row; 5] = [
+const ROWS_VISIBLE: [Row; 5] = [
     row_at(Pt::Ly3, both(edges::PT_LY), Src::Mode(2), Cmp::Off).seen(edges::CMP_OFF),
     // The mode-2 source ends. It was up since `Ly3`, so the pulse can't
     // raise the line here (line 0's can).
     row_at(Pt::Ly4, both(edges::CMP_WALK), Src::Pulse(2), Cmp::Ly).seen(edges::CMP_ON),
-    MODE3[0],
-    MODE3[1],
-    MODE3[2],
+    ROWS_MODE3[0],
+    ROWS_MODE3[1],
+    ROWS_MODE3[2],
 ];
 
-const L144: [Row; 4] = [
+const ROWS_L144: [Row; 4] = [
     row_at(Pt::V0, both(edges::VCMP_OFF), Src::Mode(0), Cmp::Off).seen(edges::CMP_OFF),
     row_at(
         Pt::Quirk2,
@@ -220,12 +229,12 @@ const L144: [Row; 4] = [
     row_at(Pt::VBlank, both(edges::VBLANK), Src::Mode(1), Cmp::Val(144)),
 ];
 
-const VBLANK: [Row; 2] = [
+const ROWS_VBLANK: [Row; 2] = [
     row_at(Pt::V0, both(edges::VCMP_OFF), Src::Mode(1), Cmp::Off).seen(edges::CMP_OFF),
     row_at(Pt::V4, both(edges::CMP_WALK), Src::Mode(1), Cmp::Ly).seen(edges::CMP_ON),
 ];
 
-const L153: [Row; 4] = [
+const ROWS_L153: [Row; 4] = [
     // Reads see the comparison off from the line start here, not from
     // `edges::CMP_OFF` as on lines 144-152 (`edges::VCMP_OFF`).
     row_at(Pt::V0, both(edges::VCMP_OFF), Src::Mode(1), Cmp::Off).seen(edges::VCMP_OFF),
@@ -272,12 +281,12 @@ impl Class {
     /// The class's rows, in walk order.
     pub(super) const fn rows(self) -> &'static [Row] {
         match self {
-            Self::First => &FIRST,
-            Self::Line0 => &LINE0,
-            Self::Visible => &VISIBLE,
-            Self::L144 => &L144,
-            Self::VBlank => &VBLANK,
-            Self::L153 => &L153,
+            Self::First => &ROWS_FIRST,
+            Self::Line0 => &ROWS_LINE0,
+            Self::Visible => &ROWS_VISIBLE,
+            Self::L144 => &ROWS_L144,
+            Self::VBlank => &ROWS_VBLANK,
+            Self::L153 => &ROWS_L153,
         }
     }
 
@@ -395,15 +404,81 @@ pub(super) const fn by_speed(v: [u32; 2], speed: Speed) -> u32 {
     v[0] + (v[1] - v[0]) * speed.extra()
 }
 
-// What the walk's code assumes of the table beyond the lookups it makes.
+/// The dot of `pt` on a line of `class` at `speed`.
+const fn at_speed(class: Class, pt: Pt, speed: Speed) -> u32 {
+    match row(class, pt).pos {
+        Pos::At(t) => speed.pick(t),
+        _ => panic!("the row is not at a fixed dot"),
+    }
+}
+
+// --- The rows' dots by name, for the reads and the write views ---
+//
+// A read or a write view that means "where the walk's point is" or "where
+// that point's comparison is seen" takes the dot from here, so it moves
+// with the row. Edges that only an observer has (the mode-3 STAT read,
+// the access windows, a view's own offsets) stay in `edges`.
+
+/// Lines 0-143: the pixel pipeline starts (`Latch`); the first line after
+/// LCD enable: [`PIPE_FIRST`].
+pub(super) const PIPE: u32 = at(Class::Visible, Pt::Latch);
+pub(super) const PIPE_FIRST: u32 = at(Class::First, Pt::Latch);
+
+/// The HBlank interrupt source rises this many dots after the mode-3 end.
+pub(super) const HBLANK_AFTER_END: u32 = next(Class::Visible, Pt::End).0;
+
+/// Lines 1-143: the walk's `Ly3` (LY changes, the mode-2 source rises).
+pub(super) const LY: u32 = at(Class::Visible, Pt::Ly3);
+
+/// Lines 1-152: the walk compares the new LY (`Ly4`, `V4`; line 153:
+/// `L153Cmp`), and on lines 1-143 its mode-2 source ends.
+pub(super) const CMP_WALK: u32 = at(Class::Visible, Pt::Ly4);
+
+/// Lines 1-152: reads and write views see the comparison off from here ...
+pub(super) const CMP_OFF_SEEN: u32 = seen(Class::Visible, Pt::Ly3);
+/// ... and against the new LY from here, [`CMP_WALK`]` - CMP_SEEN` dots
+/// before the walk (`Ppu::early_cmp`). Lines 0-143: STAT reads mode 2 and
+/// the write views' mode-2 source ends here too ([`edges::MODE2`],
+/// [`edges::MODE2_SOURCE_END`]).
+pub(super) const CMP_SEEN: u32 = seen(Class::Visible, Pt::Ly4);
+
+/// Line 0, single speed: the mode-2 pulse (`Ly4`).
+pub(super) const LY0_PULSE_SS: u32 = at_speed(Class::Line0, Pt::Ly4, Speed::Normal);
+
+/// Line 144: the mode-2 interrupt quirk (`Quirk2`).
+pub(super) const QUIRK2: u32 = at(Class::L144, Pt::Quirk2);
+/// Line 144: mode 1, the VBlank interrupt, the frame (`VBlank`).
+pub(super) const VBLANK: u32 = at(Class::L144, Pt::VBlank);
+
+/// Line 153: reads and write views see the comparison against 153 from
+/// here, off from here (single speed) and against 0 from here.
+pub(super) const L153_CMP_SEEN: u32 = seen(Class::L153, Pt::L153Cmp);
+pub(super) const L153_OFF_SEEN: u32 = seen(Class::L153, Pt::L153Off);
+pub(super) const L153_ZERO_SEEN: u32 = seen(Class::L153, Pt::L153Zero);
+/// Line 153, single speed: the walk compares against 0 (`L153Zero`).
+pub(super) const L153_ZERO_SS: u32 = at_speed(Class::L153, Pt::L153Zero, Speed::Normal);
+
+// What the code assumes of the table beyond the lookups it makes.
 const _: () = {
+    // `Ppu::mode_source`'s sticky window before the walk's comparison:
+    // one dot for lines 145-152 (`V4`) and 153 (`L153Cmp`).
+    assert!(at(Class::VBlank, Pt::V4) == CMP_WALK);
+    assert!(at(Class::L153, Pt::L153Cmp) == CMP_WALK);
+    assert!(at(Class::L144, Pt::V4) == CMP_WALK);
+    // Line 0 reads mode 2 where lines 1-143 do (`Ppu::mode`), and the
+    // observers' own names for that dot are this row's.
+    assert!(seen(Class::Line0, Pt::Ly4) == CMP_SEEN);
+    assert!(edges::MODE2 == CMP_SEEN && edges::MODE2_SOURCE_END == CMP_SEEN);
+    // The single-speed STAT-write hold starts on a walk point on both
+    // lines it applies to (`edges::MODE_HOLD_SS`).
+    assert!(edges::MODE_HOLD_SS == at_speed(Class::Line0, Pt::Ly3, Speed::Normal));
+    assert!(edges::MODE_HOLD_SS == QUIRK2);
     // `Ly4` to `Latch`, and `step_work`'s `Latch`: lines 0 and 1-143 alike.
     assert!(next_at(Class::Line0, Pt::Ly4).0 == next_at(Class::Visible, Pt::Ly4).0);
     assert!(at(Class::Line0, Pt::Latch) == at(Class::Visible, Pt::Latch));
     // The line after a VBlank line starts the same whether it is 153.
     assert!(first(Class::VBlank).0 == first(Class::L153).0);
     assert!(first(Class::VBlank).1 as u8 == first(Class::L153).1 as u8);
-    assert!(LINES * LINE + at(Class::L144, Pt::VBlank) == VBLANK_POS);
     // `Ppu::cmp`: lines 144-152 see the comparison go off and on where
     // lines 1-143 do, and line 153 sees it off from its start.
     assert!(seen(Class::L144, Pt::V0) == seen(Class::Visible, Pt::Ly3));
@@ -416,7 +491,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::super::{Cursor, FRAME, IrqLine, Ppu};
+    use super::super::{At, Cursor, FRAME, IrqLine, MODE_1_STICKY, NO_MODE, Ppu, View};
     use super::*;
     use std::vec::Vec;
 
@@ -661,11 +736,126 @@ mod tests {
             for t in 0..LINE {
                 for first in [false, true] {
                     for speed in [Speed::Normal, Speed::Double] {
-                        let a = super::super::At { line: l, t, first };
+                        let a = At { line: l, t, first };
                         assert_eq!(
                             Ppu::cmp(a, speed),
                             cmp_seen(l, t, first, speed),
                             "line {l} dot {t} first {first} {speed:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The walk's mode source at dot `t` of line `l`: the source of the
+    /// last row at or before `t` that has one (over the line start: the
+    /// previous line's last; the first line starts with none, as the LCD
+    /// enable leaves it). `end`: the line's mode-3 end. Line 0's `Ly3` in
+    /// double speed is taken with mode 2 not selected.
+    fn walk_src(l: u32, t: u32, first: bool, speed: Speed, end: u32) -> u8 {
+        let class = Class::of(l, first);
+        let mut src = match class {
+            Class::First => NO_MODE,
+            Class::Visible | Class::L144 => 0,
+            Class::Line0 | Class::VBlank | Class::L153 => 1,
+        };
+        for r in class.rows() {
+            let at = match r.pos {
+                Pos::At(t) => speed.pick(t),
+                Pos::End => end,
+                Pos::AfterEnd(d) => end + d,
+            };
+            if at <= t {
+                src = match r.src {
+                    Src::Idle => src,
+                    Src::Mode(m) => m,
+                    Src::Pulse(_) => NO_MODE,
+                    Src::Line0Mode1 if speed.is_double() => NO_MODE,
+                    Src::Line0Mode1 => 1,
+                };
+            }
+        }
+        src
+    }
+
+    /// Where a STAT or LYC write's view of the mode source
+    /// (`Ppu::mode_source`) is not the walk's ([`walk_src`]): the view's
+    /// value there. This is the whole list; each entry is a calibration of
+    /// that view against test ROMs (the sources are at the code named).
+    fn view_only(l: u32, t: u32, first: bool, speed: Speed, view: View, end: u32) -> Option<u8> {
+        let class = Class::of(l, first);
+        let double = speed.is_double();
+        // A single-speed STAT write (either phase).
+        let stat_ss = !double && view != View::LycWrite;
+        let before = |e: u32| (e - 2..e).contains(&t);
+        match class {
+            // Every visible line, single speed: the views see the mode-0
+            // source from the mode-3 end, a dot before the walk's `HBlank`
+            // (double speed: from `HBlank`; `Ppu::mode3_end`).
+            _ if l < LINES && !double && t == end => Some(0),
+            // Lines 1-143. A STAT write's second phase and a LYC write see
+            // the mode-2 source end where they see the comparison, before
+            // the walk's `Ly4` (`edges::MODE2_SOURCE_END`; `Ppu::update_at`
+            // keeps the line up for the walk).
+            Class::Visible if view != View::StatPhase1 && (CMP_SEEN..CMP_WALK).contains(&t) => {
+                Some(NO_MODE)
+            }
+            // Double speed: a first phase sees the mode-2 source a dot
+            // past `Ly4`, a second phase sees it start a dot after `Ly3`
+            // (`Ppu::mode_source`).
+            Class::Visible if double && view == View::StatPhase1 && t == CMP_WALK => Some(2),
+            Class::Visible if double && view == View::StatPhase2 && t == LY => Some(0),
+            // Line 0, single speed: a STAT write on `Ly3` holds the mode
+            // part (`edges::MODE_HOLD_SS`).
+            Class::Line0 if stat_ss && t == edges::MODE_HOLD_SS => Some(MODE_HOLD),
+            // Line 144 from `Quirk2` to `VBlank`: single-speed STAT writes
+            // hold the mode part; a double-speed first phase from the dot
+            // after `Quirk2` (`edges::MODE_HOLD_SS`, `Ppu::mode_source`).
+            Class::L144 if stat_ss && (QUIRK2..VBLANK).contains(&t) => Some(MODE_HOLD),
+            Class::L144
+                if double && view == View::StatPhase1 && (QUIRK2 + 1..VBLANK).contains(&t) =>
+            {
+                Some(MODE_HOLD)
+            }
+            // Lines 145-153, single-speed STAT writes: the two dots before
+            // the walk compares LY=LYC, mode 1 can't be cleared
+            // (`Ppu::mode_source`); line 153 also before `L153Zero`.
+            Class::VBlank | Class::L153 if stat_ss && before(CMP_WALK) => Some(MODE_1_STICKY),
+            Class::L153 if stat_ss && before(L153_ZERO_SS) => Some(MODE_1_STICKY),
+            _ => None,
+        }
+    }
+
+    /// The write views' mode source is the walk's, row for row, except in
+    /// the windows [`view_only`] lists.
+    #[test]
+    fn write_views_see_the_walk_s_mode_source() {
+        for (first, speed, end) in cases() {
+            let Some(end) = end else { continue };
+            let mut p = Latched::new(first, Some(end), 0x08);
+            for l in 0..154 {
+                let class = Class::of(l, first);
+                for t in 0..LINE {
+                    // Latched from the line's `Latch` on; before it, the
+                    // end is unknown and past `t`.
+                    p.on_line(l);
+                    if l >= LINES || t < at(class, Pt::Latch) {
+                        p.ppu.line.start = crate::schedule::NEVER;
+                    }
+                    let a = At {
+                        line: l,
+                        t,
+                        first: first && l == 0,
+                    };
+                    let now = u64::from(l * LINE + t);
+                    for view in [View::StatPhase1, View::StatPhase2, View::LycWrite] {
+                        let want = view_only(l, t, first, speed, view, end)
+                            .unwrap_or_else(|| walk_src(l, t, first, speed, end));
+                        assert_eq!(
+                            p.ppu.mode_source(now, a, speed, view),
+                            want,
+                            "line {l} dot {t} first {first} {speed:?} {view:?} end {end}"
                         );
                     }
                 }
