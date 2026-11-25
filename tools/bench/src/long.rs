@@ -88,7 +88,13 @@ const OVERSHOOT: i64 = 31;
 
 /// The tolerance of the check before this one (`|offset| <= 23` around
 /// the first frame, from a bound that missed the wake-up paths of
-/// [`OVERSHOOT`]). Kept so that no run that check rejected passes.
+/// [`OVERSHOOT`]). Kept so that no run that check rejected passes. It is
+/// tighter than the hardware model: by the derivation at [`OVERSHOOT`],
+/// offsets of 24 to 31 are legitimate (a STOP wake-up's idles and then a
+/// `CALL`, or HALT's wake-up and a `CALL`), yet a frame with one is
+/// rejected here. No current workload reaches them (seen: -4 to 16).
+/// Relaxing this cap to [`OVERSHOOT`] needs the human's sign-off
+/// (AGENTS.md: a check may not be loosened without it).
 const ANCHOR_TOLERANCE: i64 = 23;
 
 /// The latest clock the first frame may end its call at: within three
