@@ -34,8 +34,9 @@ itcm = ["dtcm"]
 # Phase B clock: PLL1 from HSI, 392 MHz CPU at VOS1. Off by default (phase
 # A: the 64 MHz HSI the chip resets to, no clock setup at all).
 pll = []
-# Phase C clock, H753 only: PLL1 from the 8 MHz HSE (ST-LINK MCO, bypass),
-# 480 MHz CPU at VOS0 (LDO overdrive, SYSCFG ODEN). Excludes `pll`.
+# Phase C clock, H753 only: PLL1 from HSI, 472 MHz CPU at VOS0 (LDO
+# overdrive, SYSCFG ODEN), under the 480 MHz maximum with the HSI's
+# worst-case tolerance (board.rs `CPU_HZ`). Excludes `pll`.
 pll480 = []
 # Board bring-up only: power, clock, UART, LEDs, cycle counter. No emulator.
 selftest = []

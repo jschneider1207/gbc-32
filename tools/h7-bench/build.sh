@@ -7,7 +7,7 @@
 #   H7_BENCH_BOARD        h753 (default: NUCLEO-H753ZI) or h755
 #                         (NUCLEO-H755ZI-Q); images go to out/<board>/
 #   H7_BENCH_PLL=1        also the phase B (PLL, 392 MHz) variants
-#   H7_BENCH_PLL480=1     also the phase C (HSE + PLL, 480 MHz, VOS0)
+#   H7_BENCH_PLL480=1     also the phase C (PLL, 472 MHz, VOS0)
 #                         variants, *-pll480; h753 only
 #   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
 #   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under

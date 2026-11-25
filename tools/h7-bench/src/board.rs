@@ -186,24 +186,40 @@ pub const CPU_HZ: u32 = 392_000_000;
 #[cfg(feature = "pll")]
 const CLOCK_NAME: &str = "pll392";
 
-/// Phase C (`--features pll480`, H753 only): 480 MHz at VOS0, the
-/// STM32H753's maximum. DS12117 Rev 10 Table 111 (rev V): VOS0 allows a
-/// 480 MHz CPU, a 240 MHz AHB/AXI clock and 120 MHz APB clocks; note 4:
-/// VOS0 only with the LDO on (this board); note 5 and Table 112: TJ at most
-/// 105 °C. ES0392 section 2.2.21: no VOS0 on revisions Y and W; this board
-/// is revision V (`idcode=0x20036450`).
+/// Phase C (`--features pll480`, H753 only): VOS0, nominally 472 MHz, so
+/// that the CPU never exceeds the STM32H753's 480 MHz maximum. DS12117
+/// Rev 10 Table 111 (rev V): VOS0 allows a 480 MHz CPU, a 240 MHz AHB/AXI
+/// clock and 120 MHz APB clocks; note 4: VOS0 only with the LDO on (this
+/// board); note 5 and Table 112: TJ at most 105 °C. ES0392 section 2.2.21:
+/// no VOS0 on revisions Y and W; this board is revision V
+/// (`idcode=0x20036450`). The feature keeps its name ("the VOS0 clock").
 ///
-/// Reference: HSE in bypass mode, 8 MHz from the ST-LINK's MCO on
-/// PH0-OSC_IN (UM2407 Rev 6 section 7.5.1: the default, SB45 on), exact
-/// where the HSI is only about 1% (plan stage-2 "Board facts").
-/// PLL1: 8 MHz / DIVM1 2 = 4 MHz reference (RM0433 section 8.7.12:
-/// PLL1RGE 0b10, 4 to 8 MHz; DS12117 Table 136: 2 to 16 MHz with the wide
-/// VCO), x DIVN1 240 = 960 MHz VCO (wide VCO, 192 to 960 MHz: RM0433
-/// section 8.7.13 and DS12117 Table 136), / DIVP1 2 = 480 MHz exactly.
+/// Reference: the HSI, not the ST-LINK's MCO. The first version ran PLL1
+/// from the HSE in bypass (8 MHz MCO, UM2407 section 7.5.1) at 8 / 2 x 240
+/// / 2 = 480 MHz; the `clockcheck-pll480` image measured that against the
+/// LSE crystal (2026-11-25) at 483.86 MHz (+0.80%, MCO 8.064 MHz, wandering
+/// by +-0.04% between 2 s windows), over the CPU and AXI maxima. The MCO
+/// has no stated tolerance (UM2407: "fixed at 8 MHz", changeable by an
+/// ST-LINK firmware upgrade) and behaves like an RC oscillator, so no
+/// margin on it is provable. The HSI has one: DS12117 Table 133 (rev V),
+/// 63.7 to 64.3 MHz at 3.3 V and TJ 30 °C (production tested), drift +1%
+/// at most for TJ -20 to 105 °C and +0.03% at most over VDD: at most
+/// 64.3 x 1.0103 = 64.96 MHz (+1.5%). The board's HSI measured
+/// 64.230 MHz (+0.36%).
+///
+/// PLL1: 64 MHz / DIVM1 4 = 16 MHz reference (RM0433 section 8.7.12:
+/// PLL1RGE 0b11, 8 to 16 MHz; DS12117 Table 136: 2 to 16 MHz), x DIVN1 59
+/// = 944 MHz VCO (wide VCO, 192 to 960 MHz), / DIVP1 2 = 472 MHz; AXI
+/// 236 MHz, APB 118 MHz. At the HSI's 64.96 MHz bound: CPU 479.1 MHz, AXI
+/// 239.6 MHz, both under the limits. The next step up, N 60, is the
+/// 480 MHz that leaves no margin at all. Flash wait states are unchanged:
+/// AXI in ]225; 240] MHz at VOS0 is 4 (RM0433 Table 17), and 4 stay valid
+/// (more than needed) down to the HSI's -2% bound, so cycle counts
+/// measured at 480 MHz still hold.
 #[cfg(feature = "pll480")]
-pub const CPU_HZ: u32 = 480_000_000;
+pub const CPU_HZ: u32 = 472_000_000;
 #[cfg(feature = "pll480")]
-const CLOCK_NAME: &str = "pll480";
+const CLOCK_NAME: &str = "pll472";
 
 const BAUD: u32 = 115_200;
 
@@ -313,7 +329,7 @@ static VOS0_DIAG: [core::sync::atomic::AtomicU32; 3] = [
 /// RCC_CFGR.SWS), and `init` panics with it once the UART is set up.
 ///
 /// Order: supply valid; VOS1 then VOS0 (voltage before frequency, RM0433
-/// section 6.8.6 VOS); HSE; PLL1; flash wait states up (before the faster
+/// section 6.8.6 VOS); PLL1; flash wait states up (before the faster
 /// clock, RM0433 section 4.3.8 "Adjusting system frequency"); prescalers;
 /// the switch.
 #[cfg(feature = "pll480")]
@@ -376,23 +392,16 @@ fn clock_up_480(
     // cycles; `asm::delay` takes at least that many), five times the ramp
     // of Figure 31, so the frequency never goes up on the flags alone.
     cortex_m::asm::delay(6_400);
-    // HSE bypass: HSEBYP may only be written while the HSE is off (RM0433
-    // section 8.7.2; it is off after reset), then HSEON; HSERDY says the
-    // clock is there (section 8.5.2 "External clock source (HSE bypass)").
-    rcc.cr.modify(|_, w| w.hsebyp().set_bit());
-    rcc.cr.modify(|_, w| w.hseon().set_bit());
-    if !wait_for(TRIES, || rcc.cr.read().hserdy().bit_is_set()) {
-        return Err("hse ready");
-    }
-    // PLL1 (off after reset): source HSE, DIVM1 = 2 (4 MHz reference).
-    // RM0433 section 8.7.11.
+    // PLL1 (off after reset): source HSI (64 MHz, HSIDIV /1 at reset),
+    // DIVM1 = 4 (16 MHz reference). RM0433 section 8.7.11. The HSE is not
+    // used (see `CPU_HZ`).
     rcc.pllckselr
-        .modify(|_, w| w.pllsrc().hse().divm1().bits(2));
-    // Reference range 4 to 8 MHz (PLL1RGE = 0b10), wide VCO, integer mode,
-    // only the P output. RM0433 section 8.7.12.
+        .modify(|_, w| w.pllsrc().hsi().divm1().bits(4));
+    // Reference range 8 to 16 MHz (PLL1RGE = 0b11), wide VCO, integer
+    // mode, only the P output. RM0433 section 8.7.12.
     rcc.pllcfgr.modify(|_, w| {
         w.pll1rge()
-            .range4()
+            .range8()
             .pll1vcosel()
             .wide_vco()
             .pll1fracen()
@@ -404,17 +413,17 @@ fn clock_up_480(
             .divr1en()
             .disabled()
     });
-    // DIVN1 field = N - 1 = 239 (x240: VCO 960 MHz), DIVP1 field = P - 1
-    // = 1 (/2: 480 MHz). RM0433 section 8.7.13.
+    // DIVN1 field = N - 1 = 58 (x59: VCO 944 MHz), DIVP1 field = P - 1
+    // = 1 (/2: 472 MHz). RM0433 section 8.7.13.
     // SAFETY: both are documented field values (DIVN1 4 to 512, DIVP1 /2).
     rcc.pll1divr
-        .modify(|_, w| unsafe { w.divn1().bits(239).divp1().bits(1) });
+        .modify(|_, w| unsafe { w.divn1().bits(58).divp1().bits(1) });
     rcc.cr.modify(|_, w| w.pll1on().set_bit());
     if !wait_for(TRIES, || rcc.cr.read().pll1rdy().bit_is_set()) {
         return Err("pll1 lock");
     }
-    // RM0433 Table 17: AXI clock in ]225; 240] MHz at VOS0 is 4 wait
-    // states with WRHIGHFREQ = 0b10 (FLASH_ACR 0x24). Section 4.3.8: set
+    // RM0433 Table 17: AXI clock in ]225; 240] MHz at VOS0 (236 MHz) is 4
+    // wait states with WRHIGHFREQ = 0b10 (FLASH_ACR 0x24). Section 4.3.8: set
     // and read back before the clock goes up; more wait states than needed
     // are harmless on the 64 MHz HSI meanwhile.
     // SAFETY: documented values of the LATENCY and WRHIGHFREQ fields.
@@ -427,8 +436,8 @@ fn clock_up_480(
     }) {
         return Err("flash latency");
     }
-    // CPU 480 MHz (D1CPRE /1); AXI/AHB 240 MHz (HPRE /2); every APB
-    // 120 MHz (D1PPRE, D2PPRE1/2, D3PPRE /2). DS12117 Table 111, VOS0.
+    // CPU 472 MHz (D1CPRE /1); AXI/AHB 236 MHz (HPRE /2); every APB
+    // 118 MHz (D1PPRE, D2PPRE1/2, D3PPRE /2). DS12117 Table 111, VOS0.
     // RM0433 sections 8.7.8 to 8.7.10.
     rcc.d1cfgr
         .modify(|_, w| w.d1cpre().div1().hpre().div2().d1ppre().div2());
@@ -511,9 +520,8 @@ fn uart_byte(b: u8) {
 
 /// rcc_pclk1 as the clock registers stand (only the values this firmware
 /// sets: HSI or PLL1 at `CPU_HZ`, HPRE and D2PPRE1 /1 or /2), so the fault
-/// path gets the baud rate right wherever the clock setup stopped. The
-/// system clock is never the HSE itself (`pll480` uses it only as PLL1's
-/// reference), so SWS is HSI or PLL1 in every image.
+/// path gets the baud rate right wherever the clock setup stopped. No
+/// image uses the HSE, so SWS is HSI or PLL1 in every image.
 fn pclk1_hz(rcc: &pac::rcc::RegisterBlock) -> u32 {
     let sys = if rcc.cfgr.read().sws().is_pll1() {
         CPU_HZ
@@ -625,11 +633,9 @@ pub mod clockcheck {
 
     /// The oscillator the system clock is derived from, and its nominal
     /// frequency: the measured CPU clock scaled by `REF.1 / CPU_HZ` is that
-    /// oscillator's real frequency (the PLL multiplies exactly).
-    #[cfg(not(feature = "pll480"))]
+    /// oscillator's real frequency (the PLL multiplies exactly). Every
+    /// image's system clock comes from the HSI.
     pub const REF: (&str, u32) = ("hsi", 64_000_000);
-    #[cfg(feature = "pll480")]
-    pub const REF: (&str, u32) = ("hse", 8_000_000);
 
     /// TIM16's kernel clock, nominal. RM0433 section 8.5.6, Table 57
     /// (TIMPRE = 0, its reset value): with D2PPRE2 /1 it is rcc_hclk1, with
