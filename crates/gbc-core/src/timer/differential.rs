@@ -40,7 +40,8 @@ mod tests {
     use crate::cpu::Bus;
     use crate::memory::Memory;
     use crate::schedule::{EventKind, NEVER};
-    use crate::serial::{INT_SERIAL, Serial};
+    use crate::serial::INT_SERIAL;
+    use crate::serial::eager::EagerSerial;
     use crate::testkit::Rng;
     use crate::timer::reference::Timer as Eager;
     use crate::{Events, Frame};
@@ -55,7 +56,7 @@ mod tests {
     #[derive(Clone)]
     struct Ref {
         timer: Eager,
-        serial: Serial,
+        serial: EagerSerial,
         iflags: u8,
         /// A serial byte completed since the last check.
         tx: bool,
@@ -541,7 +542,7 @@ mod tests {
             ctx,
             eager: Ref {
                 timer: Eager::new(),
-                serial: Serial::new(),
+                serial: EagerSerial::new(),
                 iflags: 0,
                 tx: false,
                 ie: 0,

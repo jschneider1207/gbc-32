@@ -23,7 +23,7 @@
 //! DIV reset set. The next shift is the next counter value at which that
 //! bit makes the flip-flop go 1 -> 0. The eager reference for the
 //! differential tests keeps the flip-flop as a plain bool instead
-//! (`clock`, `write_sc_eager`) and shifts a bit at a time (`shift`).
+//! and shifts a bit at a time (`eager::EagerSerial`, test builds only).
 //!
 //! # Lazy shifts (ADR 0011, 2026-11-24 serial amendment)
 //! Of a transfer's eight shifts only the last has an effect outside the
@@ -62,9 +62,6 @@ pub(crate) struct Serial {
     /// The counter value `sb`, `out` and `bits` are up to date with
     /// (module docs, "Lazy shifts"). The eager reference doesn't use it.
     synced: u64,
-    /// The eager reference's flip-flop (differential test only).
-    #[cfg(test)]
-    ff: bool,
 }
 
 /// The serial interrupt bit in IF.
@@ -81,8 +78,6 @@ impl Serial {
             bits: 0,
             out: 0,
             synced: 0,
-            #[cfg(test)]
-            ff: false,
         }
     }
 
@@ -257,50 +252,86 @@ impl Serial {
         self.bits = 0;
         true
     }
+}
 
-    /// The eager model's per-M-cycle hook, for the differential test's
-    /// reference (`timer::reference`): `fell` holds the counter bits that
-    /// went from 1 to 0 (an M-cycle's tick, or a DIV reset); a fall of the
-    /// clock bit toggles the flip-flop, and 1 -> 0 shifts one bit
-    /// (SameBoy `GB_serial_master_edge`).
-    #[cfg(test)]
-    pub(crate) fn clock(&mut self, fell: u64) -> bool {
-        if fell & self.clock_bit == 0 {
-            return false;
-        }
-        self.ff = !self.ff;
-        !self.ff && self.running() && self.shift()
+/// The eager reference for the differential tests (here and
+/// `timer::differential`): a port that keeps the flip-flop as a plain
+/// bool, is clocked every M-cycle and shifts a bit at a time. It wraps a
+/// [`Serial`] for the registers, so the production struct has one layout
+/// in every build (review D9).
+#[cfg(test)]
+pub(crate) mod eager {
+    use super::Serial;
+
+    #[derive(Clone)]
+    pub(crate) struct EagerSerial {
+        port: Serial,
+        /// The flip-flop.
+        pub(super) ff: bool,
     }
 
-    /// The eager model's SC write (SameBoy `GB_IO_SC`), with the
-    /// flip-flop kept as a bool.
-    #[cfg(test)]
-    pub(crate) fn write_sc_eager(&mut self, value: u8, cgb_mode: bool) {
-        self.bits = 0;
-        if self.ff {
-            self.ff = false;
-            if self.running() {
-                self.shift();
+    impl core::ops::Deref for EagerSerial {
+        type Target = Serial;
+        fn deref(&self) -> &Serial {
+            &self.port
+        }
+    }
+
+    impl core::ops::DerefMut for EagerSerial {
+        fn deref_mut(&mut self) -> &mut Serial {
+            &mut self.port
+        }
+    }
+
+    impl EagerSerial {
+        pub(crate) const fn new() -> Self {
+            Self {
+                port: Serial::new(),
+                ff: false,
             }
         }
-        self.set_sc(value, cgb_mode);
-    }
 
-    /// The eager model's shift: one bit clock edge of a running transfer.
-    /// Returns true when a byte completes: SC bit 7 is cleared, the
-    /// serial interrupt is requested, and `last_byte` holds the byte sent.
-    #[cfg(test)]
-    pub(crate) fn shift(&mut self) -> bool {
-        self.out = (self.out << 1) | (self.sb >> 7);
-        self.sb = (self.sb << 1) | 1;
-        self.bits += 1;
-        if self.bits < 8 {
-            return false;
+        /// The per-M-cycle hook: `fell` holds the counter bits that went
+        /// from 1 to 0 (an M-cycle's tick, or a DIV reset); a fall of the
+        /// clock bit toggles the flip-flop, and 1 -> 0 shifts one bit
+        /// (SameBoy `GB_serial_master_edge`).
+        pub(crate) fn clock(&mut self, fell: u64) -> bool {
+            if fell & self.port.clock_bit == 0 {
+                return false;
+            }
+            self.ff = !self.ff;
+            !self.ff && self.port.running() && self.shift()
         }
-        self.last_byte = self.out;
-        self.sc &= 0x7F;
-        self.bits = 0;
-        true
+
+        /// The SC write (SameBoy `GB_IO_SC`), with the flip-flop kept as
+        /// a bool.
+        pub(crate) fn write_sc_eager(&mut self, value: u8, cgb_mode: bool) {
+            self.port.bits = 0;
+            if self.ff {
+                self.ff = false;
+                if self.port.running() {
+                    self.shift();
+                }
+            }
+            self.port.set_sc(value, cgb_mode);
+        }
+
+        /// One bit clock edge of a running transfer. Returns true when a
+        /// byte completes: SC bit 7 is cleared, the serial interrupt is
+        /// requested, and `last_byte` holds the byte sent.
+        fn shift(&mut self) -> bool {
+            let p = &mut self.port;
+            p.out = (p.out << 1) | (p.sb >> 7);
+            p.sb = (p.sb << 1) | 1;
+            p.bits += 1;
+            if p.bits < 8 {
+                return false;
+            }
+            p.last_byte = p.out;
+            p.sc &= 0x7F;
+            p.bits = 0;
+            true
+        }
     }
 }
 
@@ -308,13 +339,14 @@ impl Serial {
 mod tests {
     extern crate std;
 
+    use super::eager::EagerSerial;
     use super::*;
     use crate::testkit::Rng;
 
     #[test]
     fn internal_clock_transfer_sends_the_byte() {
         // Eager model: 16 falls of bit 7 (two per flip-flop cycle) send 8 bits.
-        let mut s = Serial::new();
+        let mut s = EagerSerial::new();
         s.sb = b'P';
         s.write_sc_eager(0x81, false);
         for i in 0..16 {
@@ -330,7 +362,7 @@ mod tests {
 
     #[test]
     fn external_clock_never_completes() {
-        let mut s = Serial::new();
+        let mut s = EagerSerial::new();
         s.write_sc_eager(0x80, false);
         for _ in 0..100 {
             assert!(!s.clock(0xFFFF));
@@ -464,7 +496,7 @@ mod tests {
     /// counter, driven as the bus drives the lazy one.
     struct Pair<'a> {
         lazy: Serial,
-        eager: Serial,
+        eager: EagerSerial,
         /// The system counter.
         c: u64,
         cgb: bool,
@@ -563,7 +595,7 @@ mod tests {
         let cgb = rng.below(4) != 0;
         let mut p = Pair {
             lazy: Serial::new(),
-            eager: Serial::new(),
+            eager: EagerSerial::new(),
             // Both flip-flops 0 (counter bits 8 and 3 clear).
             c: (rng.below(1 << 20) << 9) + 0x10000,
             cgb,
