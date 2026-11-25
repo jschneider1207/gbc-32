@@ -81,7 +81,7 @@ report 135 <gbc_core::apu::square::Square>::advance
 # Other functions.
 report 735 <gbc_core::bus::Ctx>::write_timer_io
 report 380 <gbc_core::timer::Timer>::read
-report 615 gbc_core::bus::read_during_dma
+report 615 gbc_core::bus::oam_dma::read_during_dma
 report 860 <gbc_core::bus::Ctx>::write_during_dma
 report 540 <gbc_core::bus::Ctx>::div_reset
 report 720 <gbc_core::bus::Ctx as gbc_core::cpu::Bus>::speed_switch
