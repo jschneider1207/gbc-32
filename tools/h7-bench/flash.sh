@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Flashes one .bin onto the NUCLEO-H755ZI-Q by copying it to the ST-LINK
+# Flashes one .bin onto the NUCLEO-H755ZI-Q by copying it (with a native
+# Windows copy) to the ST-LINK
 # mass-storage drive, which programs it at 0x0800_0000 (the Cortex-M7's
 # flash bank). README.md "Flash".
 #
@@ -38,19 +39,31 @@ reset=$((16#$(word "$img" 1)))
 mountpoint -q "$DRIVE" || die "$DRIVE is not a mount point (mount the ST-LINK drive: sudo mount -t drvfs E: /mnt/e)"
 [ -e "$DRIVE/DETAILS.TXT" ] || [ -e "$DRIVE/MBED.HTM" ] ||
   die "$DRIVE has neither DETAILS.TXT nor MBED.HTM: not an ST-LINK drive"
-letter=$(findmnt -no SOURCE "$DRIVE" | tr -d '\\')        # "E:"
+letter=$(findmnt -no SOURCE "$DRIVE" | head -n 1 | tr -d '\\')        # "E:"
 case "$letter" in [A-Za-z]:) ;; *) die "cannot tell the Windows drive letter of $DRIVE (source: $letter)";; esac
-vol=$(cmd.exe /c vol "$letter" 2>/dev/null | tr -d '\r') || die "cannot read the volume label of $letter"
+# cmd.exe needs a Windows cwd; its exit status is unreliable here (a broken
+# AutoRun entry on this host makes it non-zero), so the label match decides.
+vol=$( (cd /mnt/c && cmd.exe /c vol "$letter" 2>/dev/null || true) | tr -d '\r')
 case "$vol" in *"$LABEL"*) ;; *) die "volume $letter is not labelled $LABEL: $vol";; esac
 [ ! -e "$DRIVE/FAIL.TXT" ] || echo "flash.sh: note: a FAIL.TXT from an earlier attempt is on the drive:" "$(tr -d '\r' < "$DRIVE/FAIL.TXT")" >&2
 
-echo "flash.sh: copying $img ($size bytes) to $DRIVE ($LABEL)"
-cp "$img" "$DRIVE/$(basename "$img")"
-sync
+# The copy is done by Windows itself: a `cp` through the WSL mount of the
+# drive proved unreliable for images of a few hundred KB (2026-11-24). The
+# image goes to the Windows temp directory first; cmd.exe needs a Windows
+# working directory, and its exit status is unreliable on this host (see
+# above), so its "1 file(s) copied" message decides.
+echo "flash.sh: copying $img ($size bytes) to $letter ($LABEL)"
+wintemp=$( (cd /mnt/c && cmd.exe /c "echo %TEMP%" 2>/dev/null || true) | tr -d '\r' | tail -n 1)
+[ -n "$wintemp" ] || die "cannot find the Windows temp directory"
+cp "$img" "$(wslpath "$wintemp")/h7bench.bin"
+out=$( (cd /mnt/c && cmd.exe /c "copy /b %TEMP%\\h7bench.bin $letter\\h7bench.bin" 2>/dev/null || true) | tr -d '\r')
+case "$out" in *"1 file(s) copied"*) ;; *) die "the copy to $letter failed: $out";; esac
 
-# The ST-LINK programs the file, then re-enumerates the drive; on an error
-# it leaves a FAIL.TXT with the reason. Give it time, then look.
-for _ in $(seq 1 20); do
+# The ST-LINK programs the file, resets the target and re-enumerates the
+# drive; on an error it leaves a FAIL.TXT with the reason. Give it time,
+# then look. Close any program that has the COM port open first: with the
+# port held open, one flash was accepted and never programmed.
+for _ in $(seq 1 25); do
   sleep 1
   if [ -e "$DRIVE/FAIL.TXT" ]; then
     echo "flash.sh: the ST-LINK reports a failure:" >&2
@@ -58,4 +71,5 @@ for _ in $(seq 1 20); do
     exit 1
   fi
 done
-echo "flash.sh: copied; no FAIL.TXT after 20 s. Check the board with ./read-serial.sh"
+echo "flash.sh: copied; no FAIL.TXT after 25 s. Check the board with ./read-serial.sh"
+echo "flash.sh: the first lines read may still be the previous image's (the VCP buffers them)"

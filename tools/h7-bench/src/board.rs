@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use cortex_m::peripheral::{DWT, SCB};
-use cortex_m_rt::{ExceptionFrame, exception};
+use cortex_m_rt::exception;
 use stm32h7::stm32h747cm7 as pac;
 
 // --- Supply --------------------------------------------------------------
@@ -84,8 +84,6 @@ const CR3_DIRECT_SMPS: u32 = 0x04;
 #[cfg(not(feature = "pll"))]
 pub const CPU_HZ: u32 = 64_000_000;
 #[cfg(not(feature = "pll"))]
-const PCLK1_HZ: u32 = 64_000_000;
-#[cfg(not(feature = "pll"))]
 const CLOCK_NAME: &str = "hsi64";
 
 /// Phase B (`--features pll`): PLL1 from HSI, 64 MHz / 4 * 49 / 2 =
@@ -98,9 +96,6 @@ const CLOCK_NAME: &str = "hsi64";
 /// limit.
 #[cfg(feature = "pll")]
 pub const CPU_HZ: u32 = 392_000_000;
-/// rcc_pclk1 = 392 / 2 (HPRE) / 2 (D2PPRE1).
-#[cfg(feature = "pll")]
-const PCLK1_HZ: u32 = 98_000_000;
 #[cfg(feature = "pll")]
 const CLOCK_NAME: &str = "pll392";
 
@@ -258,10 +253,90 @@ fn uart_byte(b: u8) {
     }
 }
 
+/// rcc_pclk1 as the clock registers stand (only the values this firmware
+/// sets: HSI or PLL1 at `CPU_HZ`, HPRE and D2PPRE1 /1 or /2), so the fault
+/// path gets the baud rate right wherever the clock setup stopped.
+fn pclk1_hz(rcc: &pac::rcc::RegisterBlock) -> u32 {
+    let sys = if rcc.cfgr.read().sws().is_pll1() {
+        CPU_HZ
+    } else {
+        64_000_000
+    };
+    let hpre = u32::from(rcc.d1cfgr.read().hpre().bits() & 0b1000 != 0);
+    let ppre = u32::from(rcc.d2cfgr.read().d2ppre1().bits() & 0b100 != 0);
+    sys >> hpre >> ppre
+}
+
+/// Sets USART3 up for transmission; safe to repeat. Returns false if the
+/// D2 domain's clocks did not come up.
+fn uart_init() -> bool {
+    // SAFETY: shared access to RCC, GPIOD and USART3; no interrupt and no
+    // second thread exists, so register accesses never overlap.
+    let (rcc, gpiod, usart) =
+        unsafe { (&*pac::RCC::ptr(), &*pac::GPIOD::ptr(), &*pac::USART3::ptr()) };
+    rcc.ahb4enr.modify(|_, w| w.gpioden().set_bit());
+    // USART3 is in the D2 domain, the Cortex-M4's. Enabling its clock from
+    // this CPU allocates it to CPU1, which keeps D2 clocked whatever the
+    // M4 does (RM0399 section 9.5.10 "Peripheral allocation"); D2CKRDY
+    // tells when the domain's clocks run.
+    rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
+    let d2_ok = wait_for(4_000_000, || rcc.cr.read().d2ckrdy().bit_is_set());
+    gpiod.afrh.modify(|_, w| w.afr8().af7());
+    gpiod.moder.modify(|_, w| w.moder8().alternate());
+    // Kernel clock: rcc_pclk1 (RCC_D2CCIP2R USART234578SEL resets to 0).
+    // Oversampling by 16: BRR = f / baud, rounded. BRR can only be written
+    // while the UART is disabled.
+    let brr = (pclk1_hz(rcc) + BAUD / 2) / BAUD;
+    usart.cr1.write(|w| w.ue().clear_bit());
+    // SAFETY: any 16-bit value of at least 16 is a valid BRR.
+    usart.brr.write(|w| unsafe { w.bits(brr) });
+    usart.cr1.write(|w| w.ue().set_bit().te().set_bit());
+    d2_ok
+}
+
 impl Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         s.bytes().for_each(uart_byte);
         Ok(())
+    }
+}
+
+// --- TCM control -------------------------------------------------------------
+
+/// ITCMCR and DTCMCR (Arm Cortex-M7 Devices Generic User Guide, DUI 0646,
+/// "Instruction and Data Tightly-Coupled Memory Control Registers"): bit 0
+/// EN, bit 1 RMW, bit 2 RETEN, bits 6:3 SZ.
+const ITCMCR: *mut u32 = 0xE000_EF90 as *mut u32;
+const DTCMCR: *mut u32 = 0xE000_EF94 as *mut u32;
+
+/// (ITCMCR, DTCMCR) as they are now.
+pub fn tcm_cr() -> (u32, u32) {
+    // SAFETY: reads of two system control registers of the Cortex-M7.
+    unsafe { (ITCMCR.read_volatile(), DTCMCR.read_volatile()) }
+}
+
+/// The pattern [`tcm_probe`] writes.
+#[cfg(feature = "selftest")]
+pub const PROBE: u32 = 0x5A17_C0DE;
+
+/// Selftest only: enables both TCMs, writes a pattern near the top of each
+/// and reads it back. Returns (ITCM word, DTCM word); both should be
+/// [`PROBE`].
+#[cfg(feature = "selftest")]
+pub fn tcm_probe() -> (u32, u32) {
+    const I: *mut u32 = 0x0000_FFF0 as *mut u32;
+    const D: *mut u32 = 0x2001_FFF0 as *mut u32;
+    // SAFETY: the selftest image keeps nothing in either TCM (its RAM is
+    // AXI SRAM), so enabling them and writing one word in each disturbs
+    // nothing; the addresses are inside the 64 KB ITCM and 128 KB DTCM.
+    unsafe {
+        ITCMCR.write_volatile(ITCMCR.read_volatile() | 1);
+        DTCMCR.write_volatile(DTCMCR.read_volatile() | 1);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+        I.write_volatile(PROBE);
+        D.write_volatile(!PROBE);
+        (I.read_volatile(), !D.read_volatile())
     }
 }
 
@@ -273,6 +348,8 @@ pub struct Board {
     cyccnt: bool,
     /// Bytes copied to ITCM and to the DTCM tables.
     placed: (usize, usize),
+    /// (ITCMCR, DTCMCR) as `init` found them.
+    tcm_boot: (u32, u32),
 }
 
 /// Brings the board up. Call once, first thing in `main` (the supply was
@@ -305,6 +382,7 @@ pub fn init() -> Board {
     dp.GPIOE.bsrr.write(|w| w.br1().set_bit());
     LED_ON.store(true, Ordering::Relaxed);
 
+    let tcm_boot = tcm_cr();
     let placed = crate::tcm::place();
 
     #[cfg(feature = "pll")]
@@ -312,20 +390,7 @@ pub fn init() -> Board {
     #[cfg(not(feature = "pll"))]
     let clock_ok = true;
 
-    // USART3 is in the D2 domain, the Cortex-M4's. Enabling its clock from
-    // this CPU allocates it to CPU1, which keeps D2 clocked whatever the
-    // M4 does (RM0399 section 9.5.10 "Peripheral allocation"); D2CKRDY
-    // tells when the domain's clocks run.
-    dp.RCC.apb1lenr.modify(|_, w| w.usart3en().set_bit());
-    let d2_ok = wait_for(4_000_000, || dp.RCC.cr.read().d2ckrdy().bit_is_set());
-    dp.GPIOD.afrh.modify(|_, w| w.afr8().af7());
-    dp.GPIOD.moder.modify(|_, w| w.moder8().alternate());
-    // Kernel clock: rcc_pclk1 (RCC_D2CCIP2R USART234578SEL resets to 0).
-    // Oversampling by 16: BRR = f / baud, rounded.
-    let brr = (PCLK1_HZ + BAUD / 2) / BAUD;
-    // SAFETY: any 16-bit value of at least 16 is a valid BRR.
-    dp.USART3.brr.write(|w| unsafe { w.bits(brr) });
-    dp.USART3.cr1.write(|w| w.ue().set_bit().te().set_bit());
+    let d2_ok = uart_init();
 
     // Caches (Cortex-M7: 16 KB each on this part). TCM accesses bypass
     // them.
@@ -348,6 +413,7 @@ pub fn init() -> Board {
         uart: Uart(()),
         cyccnt,
         placed,
+        tcm_boot,
     };
     // A failed clock setup leaves the UART at an unknown baud rate and a
     // dead counter makes every figure meaningless: stop with the fault
@@ -416,6 +482,14 @@ impl Board {
             self.placed.0,
             self.placed.1
         );
+        let (itcmcr, dtcmcr) = tcm_cr();
+        let _ = writeln!(
+            out,
+            "h7bench v1 tcm itcmcr={itcmcr:#x} dtcmcr={dtcmcr:#x} at_init={:#x},{:#x} msp={:#010x}\r",
+            self.tcm_boot.0,
+            self.tcm_boot.1,
+            cortex_m::register::msp::read()
+        );
         let _ = writeln!(
             out,
             "h7bench v1 dualcore optsr={:#010x} bcm7={} bcm4={} boot_c2={}\r",
@@ -431,11 +505,18 @@ impl Board {
 
 /// The fault pattern, forever: LD3 (red) blinking fast, about 8 Hz at
 /// 64 MHz, with LD1 in antiphase, and the reason on the UART about once a
-/// second. Uses only a delay loop: no counter, no state.
+/// second. It sets the LEDs and the UART up itself (a fault can come
+/// before `init` got there) and keeps no state in RAM.
 fn die(what: fmt::Arguments<'_>) -> ! {
-    // SAFETY: write-only BSRR accesses, as in `ld1`; nothing else runs
-    // any more.
-    let gpiob = unsafe { &*pac::GPIOB::ptr() };
+    // SAFETY: nothing else runs any more, so these are the only accesses
+    // to RCC and GPIOB.
+    let (rcc, gpiob) = unsafe { (&*pac::RCC::ptr(), &*pac::GPIOB::ptr()) };
+    rcc.ahb4enr.modify(|_, w| w.gpioben().set_bit());
+    let _ = rcc.ahb4enr.read();
+    gpiob
+        .moder
+        .modify(|_, w| w.moder0().output().moder14().output());
+    let _ = uart_init();
     let mut n = 0u32;
     loop {
         if n.is_multiple_of(16) {
@@ -458,17 +539,61 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     die(format_args!("panic {info}"))
 }
 
-#[exception]
-unsafe fn HardFault(frame: &ExceptionFrame) -> ! {
+// HardFault, straight from the vector table (this symbol replaces
+// cortex-m-rt's handler and its trampoline). The exception frame is at the
+// main stack pointer; no other stack is ever used.
+// The fault may be the stack itself (an overflow, RAM that does not
+// answer), so before any Rust runs the stack pointer moves to the top of
+// AXI SRAM (0x2408_0000; RM0399 section 2.3), which no placement uses: its
+// statics and buffers sit at the bottom of their regions and the handler
+// never returns.
+core::arch::global_asm!(
+    ".section .text.HardFault, \"ax\", %progbits",
+    ".global HardFault",
+    ".type HardFault, %function",
+    ".thumb_func",
+    "HardFault:",
+    "    mrs r0, msp", // the exception frame
+    "    mov r1, lr",  // EXC_RETURN
+    "    ldr r2, =0x24080000",
+    "    msr msp, r2",
+    "    b {handler}",
+    "    .ltorg",
+    ".size HardFault, . - HardFault",
+    handler = sym hard_fault,
+);
+
+/// Prints the fault status registers (Armv7-M: CFSR = UFSR:BFSR:MMFSR,
+/// HFSR, BFAR, MMFAR) and, if the exception frame is in RAM, the stacked
+/// PC and LR. `frame` is the stack pointer at the fault.
+extern "C" fn hard_fault(frame: *const u32, exc_return: u32) -> ! {
     // SAFETY: read-only accesses to the fault status registers.
-    let (cfsr, hfsr, bfar) = unsafe {
+    let (cfsr, hfsr, bfar, mmfar) = unsafe {
         let scb = &*SCB::PTR;
-        (scb.cfsr.read(), scb.hfsr.read(), scb.bfar.read())
+        (
+            scb.cfsr.read(),
+            scb.hfsr.read(),
+            scb.bfar.read(),
+            scb.mmfar.read(),
+        )
+    };
+    let at = frame as usize;
+    let in_ram = at.is_multiple_of(4)
+        && ((0x2000_0000..=0x2002_0000 - 32).contains(&at)
+            || (0x2400_0000..=0x2408_0000 - 32).contains(&at));
+    // The frame: r0-r3, r12, lr, pc, xpsr.
+    let (lr, pc) = if in_ram && cfsr & (1 << 12) == 0 {
+        // SAFETY: the eight words of the frame are inside DTCM or AXI SRAM
+        // (checked above) and the CPU did stack them (BFSR.STKERR, CFSR
+        // bit 12, is clear); a volatile read cannot disturb anything.
+        unsafe { (frame.add(5).read_volatile(), frame.add(6).read_volatile()) }
+    } else {
+        (0, 0)
     };
     die(format_args!(
-        "hardfault pc={:#010x} lr={:#010x} cfsr={cfsr:#010x} hfsr={hfsr:#010x} bfar={bfar:#010x}",
-        frame.pc(),
-        frame.lr()
+        "hardfault sp={at:#010x} exc_return={exc_return:#010x} frame={} pc={pc:#010x} \
+         lr={lr:#010x} cfsr={cfsr:#010x} hfsr={hfsr:#010x} bfar={bfar:#010x} mmfar={mmfar:#010x}",
+        if in_ram { "ok" } else { "none" }
     ))
 }
 

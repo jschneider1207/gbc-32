@@ -20,6 +20,7 @@ use stm32h7 as _;
 
 #[cfg(not(feature = "qemu"))]
 mod board;
+mod stack;
 mod tcm;
 #[cfg(not(feature = "selftest"))]
 mod workload;
@@ -154,9 +155,15 @@ fn run(mut b: bench::Buffers) -> ! {
         workload::report_line(&mut board.uart, i, &r);
         results[i] = Some(r);
     }
+    // Deepest stack use over the whole run (the report loop below is
+    // shallower than the workloads).
+    let (used, size) = stack::usage();
     // Repeat the whole report forever, so a port opened late still sees it.
     let mut pass = 1u32;
     loop {
+        if pass == 1 {
+            let _ = writeln!(board.uart, "h7bench v1 stack used={used} of={size}\r");
+        }
         let _ = writeln!(board.uart, "h7bench v1 end pass={pass}\r");
         // About 3 s, LD1 blinking at 2 Hz.
         for _ in 0..12 {
@@ -170,6 +177,7 @@ fn run(mut b: bench::Buffers) -> ! {
                 workload::report_line(&mut board.uart, i, r);
             }
         }
+        let _ = writeln!(board.uart, "h7bench v1 stack used={used} of={size}\r");
     }
 }
 
@@ -186,6 +194,12 @@ fn run(mut b: bench::Buffers) -> ! {
             let r = bench::run(i, &mut b, || 0, |_| ());
             workload::report_line(&mut out, i, &r);
         }
+    }
+    // On stderr: stdout is compared with expected-hashes.txt.
+    if let Ok(mut err) = hio::hstderr() {
+        use core::fmt::Write;
+        let (used, size) = stack::usage();
+        let _ = writeln!(err, "h7bench v1 stack used={used} of={size}");
     }
     debug::exit(debug::EXIT_SUCCESS);
     loop {
@@ -222,13 +236,22 @@ fn main() -> ! {
         // same on every line (no interrupt is enabled) and of the order of
         // DELAY: `asm::delay` runs DELAY/2 iterations of a two-instruction
         // loop, which the M7 executes in 1 to 3 cycles each.
+        if n == 1 {
+            let (i, d) = board::tcm_probe();
+            let _ = writeln!(
+                board.uart,
+                "h7bench v1 tcmprobe want={:#x} itcm={i:#x} dtcm={d:#x}\r",
+                board::PROBE
+            );
+        }
         let t0 = board::cycles();
         cortex_m::asm::delay(DELAY);
         let dt = board::cycles().wrapping_sub(t0);
         let _ = writeln!(
             board.uart,
-            "h7bench v1 selftest n={n} delay={DELAY} cycles={dt} cyccnt={}\r",
-            board::cycles()
+            "h7bench v1 selftest n={n} delay={DELAY} cycles={dt} cyccnt={} stack_used={}\r",
+            board::cycles(),
+            stack::usage().0
         );
         // One line and one LD1 toggle per CPU_HZ cycles: against a watch
         // this checks the counter's rate (and so the clock).

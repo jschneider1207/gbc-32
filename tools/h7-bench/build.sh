@@ -40,6 +40,9 @@ bad() { echo "FAIL: $*" >&2; fail=1; }
 # word <file> <index>: little-endian 32-bit word of a .bin, as 8 hex digits.
 word() { od -An -tx4 -j $(($2 * 4)) -N4 "$1" | tr -d ' \n'; }
 
+# sym <readelf -sW output> <name>: the symbol's value, 8 hex digits.
+sym() { awk -v n="$2" '$8 == n {print $2; exit}' <<< "$1"; }
+
 # in_range <hex> <lo> <hi>: lo <= value <= hi
 in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 
@@ -68,6 +71,19 @@ image() {
   local syms
   syms=$(readelf -sW "$OUT/$name.elf")
   grep -q ' FUNC .* __pre_init$' <<< "$syms" || bad "$name: no __pre_init function"
+  # What the startup code zeroes, copies and paints must be inside RAM and
+  # in order (a section inserted after .bss in another region broke this).
+  local sbss ebss send sstart sdata edata v
+  sbss=$(sym "$syms" __sbss); ebss=$(sym "$syms" __ebss)
+  sdata=$(sym "$syms" __sdata); edata=$(sym "$syms" __edata)
+  send=$(sym "$syms" _stack_end); sstart=$(sym "$syms" _stack_start)
+  echo "  .data $sdata..$edata  .bss $sbss..$ebss  stack $send..$sstart"
+  for v in "$sdata" "$edata" "$sbss" "$ebss" "$send" "$sstart"; do
+    in_range "$v" "$ram_lo" "$ram_hi" || bad "$name: startup symbol 0x$v outside RAM"
+  done
+  { [ $((16#$sdata)) -le $((16#$edata)) ] && [ $((16#$edata)) -le $((16#$sbss)) ] &&
+    [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
+    [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
 }
 
 # itcm_check <name>: every glob of perf/itcm-sections.txt must name at least

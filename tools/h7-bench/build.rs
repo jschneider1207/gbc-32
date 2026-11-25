@@ -54,13 +54,21 @@ const MEM_QEMU: &str = "\
 /// Frame, audio and cartridge RAM buffers (`.axisram`): in AXI SRAM, where
 /// the LCD and audio DMA will need them (docs/perf.md). Not loaded and not
 /// zeroed: `workload::run` fills them before use.
+///
+/// It goes after `.got`, the last section of cortex-m-rt's script, and
+/// must not go `AFTER .bss`: link.x sets `__ebss` (and `_stack_end`) from
+/// the location counter after that insertion point, so a section in
+/// another memory region there makes the startup code zero everything from
+/// `.bss` to AXI SRAM. With the statics in DTCM that ran off the end of
+/// DTCM into a bus fault on the board (2026-11-24); QEMU's RAM is
+/// contiguous and did not show it. build.sh now checks `__ebss`.
 const AXI_SECTION: &str = "
 SECTIONS {
   .axisram (NOLOAD) : ALIGN(32) {
     *(.axisram .axisram.*);
     . = ALIGN(32);
   } > AXI
-} INSERT AFTER .bss;
+} INSERT AFTER .got;
 ";
 
 fn feature(name: &str) -> bool {

@@ -36,7 +36,9 @@ qemu = ["dep:cortex-m-semihosting"]
 [dependencies]
 gbc-core = { path = "../../crates/gbc-core" }
 cortex-m = "0.7.7"
-cortex-m-rt = "0.7.5"
+# `paint-stack`: the startup code fills the unused stack with 0xCCCCCCCC, so
+# the report can say how deep it went (src/stack.rs).
+cortex-m-rt = { version = "0.7.5", features = ["paint-stack"] }
 # PAC only, no HAL. The H745/H755 share the H747 register description
 # (RM0399 covers all four).
 stm32h7 = { version = "0.15.1", features = ["stm32h747cm7"] }
