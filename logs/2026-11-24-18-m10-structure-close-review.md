@@ -1,7 +1,7 @@
 # 2026-11-24-18: m10-structure-close-review
 
 - Milestone: M10
-- Commits: 63ff596..(this commit)
+- Commits: 63ff596..b6b59e7 (tag `stage1-m10`), plus this log
 
 ## Done
 - Structure: `Speed` enum, line timeline table, `bus/` split (0 B, 0 Ir),
@@ -43,6 +43,9 @@
   rewrite (stricter per frame, but dmg-raster now passes: escalated first).
 
 ## Left open
-- `m10-storm` merge; full gate; baseline update; tag `stage1-m10`.
-- Commits after 2821437 (filter, latch fixes, object lines, gate edits)
-  were not covered by the close review.
+- Tagged `stage1-m10` at b6b59e7 after a full gate pass; declaring Stage 1
+  complete is the human's.
+- After 2821437: the filter and the gate-check edits each got their own
+  review (fixes 99f7d4f, d1759e7; one medium each: a weakened envelope
+  test, an unbounded first frame in `--long`). The latch and object-line
+  fixes were not re-reviewed (AGENTS.md: no re-review of fixes).

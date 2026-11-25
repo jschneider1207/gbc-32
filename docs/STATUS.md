@@ -4,8 +4,9 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 (portable core + desktop front end), see `docs/plan/stage-1.md`
-- **Milestone:** M10 (in-depth review), in progress. M9 is `stage1-m9`
-  (49c0756); M1-M8 tagged likewise.
+- **Milestone:** M10 (in-depth review) is closed: `stage1-m10` (b6b59e7),
+  gate exit 0 on that commit. M1-M9 tagged likewise. All Stage 1
+  milestones are tagged; declaring the stage complete is the human's.
 - **Last updated:** 2026-11-24, session 18 (log
   `logs/2026-11-24-18-m10-structure-close-review.md`; session 17:
   `logs/2026-11-24-17-m10-perf-bench.md`).
@@ -51,15 +52,19 @@ reviews and, at the end, the "Milestone-close review (session 18)" table
    first-frame cap + offset spread + gate refuses stray rustc-flag
    variables (d1759e7).
 2. DONE: plan box ticked, C-P2 row updated.
-3. Full `./scripts/gate-stage1.sh`, alone (not run since M10 started; it
-   now includes `--long`, which no per-merge check ran: that is how the
-   dmg-raster failure went unseen for a session).
-4. `romtest --update-baseline` (expect `spsw-interrupts-cgbBC` to end 18
-   clocks later, still passing), commit, tag `stage1-m10`. The human said
-   partly fixed mediums (A2-02 latch model, E4 `LAND`, D4/D6 rests) do not
-   block the tag: they are plan tasks.
-5. Declaring Stage 1 complete is the human's; the real-game checklist is
-   theirs too. Start a fresh session after the tag.
+3. DONE: full `./scripts/gate-stage1.sh` on b6b59e7: `GATE PASSED: stage
+   1` (must 86/86, should 40/40, stretch 3437/3461, audio 131/131; the
+   code-size and ITCM steps print their report-only WARNs: a stale
+   `Ctx::div_reset` line and the H753 hot set over by 11,072 B).
+4. DONE: `romtest --update-baseline` wrote an identical
+   `acceptance/results/stage1.json` (nothing to commit); tagged
+   `stage1-m10` at b6b59e7.
+5. **Next, the human's:** declare Stage 1 complete (or not); the
+   real-game checklist at the bottom of the plan; the open decisions
+   under "Needs human". For an agent with nothing else unblocked: the
+   open M10 plan tasks (lows), most useful first: the stale per-function
+   size report (C-P3), `acceptance/README.md` gate-step list (C-T7), the
+   close-review lows C-H1..C-H5. Start a fresh session.
 
 Agent-run check results were spot-checked by diff (comment-only filters,
 file lists), not re-run; the full gate in step 3 is the independent run.
