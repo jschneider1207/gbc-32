@@ -408,8 +408,10 @@ pub fn trace(root: &Path, secs: u64, opts: Opts, run: &str) -> std::process::Exi
 pub fn run(root: &Path, secs: u64, opts: Opts) -> std::process::ExitCode {
     let mut runs = Vec::new();
     if opts.hash_samples {
-        // The worst case one channel at a time too (`@<mask>`).
+        // The worst case one channel at a time too (`@<mask>`), and with
+        // the APU off (`@0`: no APU writes at all).
         let solo = [
+            "worst-case@0",
             "worst-case@1",
             "worst-case@2",
             "worst-case@4",

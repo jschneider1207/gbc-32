@@ -1440,10 +1440,10 @@ outputs with `diff`; it is a heavy step, so run it alone.
 
 `--hash-samples` (with `--audio-buffer`) also folds every sample the calls
 wrote into the hash and adds the synthetic programs (`synth:<name>` for
-every bench program, plus `worst-case@1/2/4/8`, all for N seconds), so an
+every bench program, plus `worst-case@0/1/2/4/8`, all for N seconds), so an
 exact APU optimization can be shown sample-identical: run it before and
 after, at two buffer sizes (e.g. 7 and 64; the hashes do not depend on the
-split), and `diff`. 3,832 runs, about 11 s wall. Without the flag the
+split), and `diff`. 3,833 runs, about 11 s wall. Without the flag the
 output is unchanged.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
