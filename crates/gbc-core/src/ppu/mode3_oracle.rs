@@ -509,43 +509,45 @@ mod tests {
         //    and an object on the line. The totals without objects agree
         //    (6 + 1 dots). An object's wait depends on where the window's
         //    tile grid lies (how many window pixels are cut off at the
-        //    left), and no hardware capture here shows that: three
-        //    references give three grids, and the core has two of them.
-        //    - 7 cut, whatever f is: the core's stalls
-        //      (`sorted_object_stalls`: `win_x = WX - 7`), 11 dots at
-        //      X = 1, 9, 17... Gambatte's model does the same (WX = 0
-        //      matches at its xpos 0, after the discard), but none of its
-        //      tests in the manifest has WX = 0, a fine scroll and an
-        //      object.
-        //    - 7 + f cut: the core's renderer (`Renderer::trigger_skip`),
-        //      from Pan Docs, Window: at WX = 0 the window "is switched
-        //      to before the initial fine scroll adjustment, causing it
-        //      to be shifted left by SCX % 8 pixels". 11 dots would be at
-        //      X = 1 - f (mod 8).
+        //    left), and no hardware capture here shows that. The
+        //    references give three grids:
+        //    - 7 cut, whatever f is: Gambatte's model (WX = 0 matches at
+        //      its xpos 0, after the discard; none of its tests in the
+        //      manifest has WX = 0, a fine scroll and an object). 11 dots
+        //      at X = 1 (mod 8). The core's stalls did this until
+        //      ADR 0034.
+        //    - 7 + f cut: the core, pixels (`Renderer::trigger_skip`) and
+        //      stalls (`sorted_object_stalls`) alike since ADR 0034, from
+        //      Pan Docs, Window: at WX = 0 the window "is switched to
+        //      before the initial fine scroll adjustment, causing it to
+        //      be shifted left by SCX % 8 pixels". 11 dots at X = 1 - f
+        //      (mod 8).
         //    - 8 + f cut for f = 1..=6, 14 at f = 7 (a pixel inserted at
-        //      position -7): SameBoy's loop, which the oracle follows.
-        //      11 dots at X = 8 - f (mod 8); at f = 7 at X = 1 and from
-        //      X = 10 on at X = 2 (mod 8).
-        //    So the core's stalls and its renderer contradict each other
-        //    here (in every reference the object waits for the tile its
-        //    pixel is shown in), and at least one of them is wrong; at
-        //    f = 7 from X = 10 on Pan Docs and SameBoy agree against the
-        //    stalls. Mealybug `m3_window_timing_wx_0` (SCX = LY, no
-        //    objects) cannot tell: its window is one solid tile, and it
-        //    passes with any of the three cuts in the renderer (tried).
-        //    No acceptance ROM has an object on such a line (probed: the
-        //    full manifest never builds stalls for one). E.g. SCX 3,
-        //    X = 5: core 273, oracle 277.
+        //      position -7): SameBoy's loop, which the oracle follows
+        //      (marked "TODO: Verify fetcher access timings in this
+        //      case" there). 11 dots at X = 8 - f (mod 8); at f = 7 at
+        //      X = 1 and from X = 10 on at X = 2 (mod 8).
+        //    What is left is the one pixel between 7 + f and 8 + f: an
+        //    object's wait is one dot longer in the core, or 6 against
+        //    11 where its pixel is the last of a core tile and the first
+        //    of an oracle tile; at f = 7 only objects at X = 1..=8
+        //    differ (14 = 7 + f there). E.g. SCX 3, X = 5: core 272,
+        //    oracle 277. The static sweep leaves out 1,348 lines for
+        //    this, 892 of them disagreeing (1,197 before ADR 0034).
+        //    Mealybug `m3_window_timing_wx_0` (SCX = LY, no objects)
+        //    cannot tell: its window is one solid tile, and it passes
+        //    with any of the three cuts in the renderer (tried). No
+        //    acceptance ROM has an object on such a line (probed: the
+        //    full manifest never builds stalls for one).
         //    What settles it, on a CGB: WX = 0, WY = 0, SCX % 8 = f for
         //    each f in 1..=7, the window's tile map showing a tile whose
         //    8 columns differ (and a different tile next to it). The
-        //    window pixel shown at screen x = 0 is its pixel 7 (the
-        //    stalls are right, the renderer wrong), 7 + f (the renderer
-        //    is right, the stalls wrong) or 8 + f, 14 at f = 7 (SameBoy
-        //    and the oracle are right, both wrong). An independent check
-        //    of the stalls alone: the length of mode 3 with one object
-        //    at each X in 9..=16 is longest (11 dots) at the X on the
-        //    grid: 9, 17 - f, or 16 - f (10 at f = 7).
+        //    window pixel shown at screen x = 0 is its pixel 7
+        //    (Gambatte's grid), 7 + f (the core is right) or 8 + f, 14
+        //    at f = 7 (SameBoy and the oracle are right). An independent
+        //    check of the stalls alone: the length of mode 3 with one
+        //    object at each X in 9..=16 is longest (11 dots) at the X on
+        //    the grid: 9, 17 - f, or 16 - f (10 at f = 7).
         if starts && l.wx == 0 && l.scx & 7 != 0 && on_screen && l.scx_write.is_none() {
             return Some("WX = 0 with SCX % 8 != 0 and an object");
         }

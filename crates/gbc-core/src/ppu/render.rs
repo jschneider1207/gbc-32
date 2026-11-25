@@ -51,9 +51,11 @@
 //!   `stat-mode-window`), which places the mid-line register writes of
 //!   `m3_window_timing_wx_0` right: it passes. That ROM's window is one
 //!   solid tile, so it does not show how many pixels are lost: no
-//!   capture does, the object stalls assume 7 at any SCX (`sorted_object_stalls`)
-//!   and SameBoy loses one more (`docs/reference/mode3-oracle.md`,
-//!   disagreement 1).
+//!   capture does. Gambatte's model loses 7 at any SCX and SameBoy one
+//!   more than here; the object stalls use this grid too
+//!   (`sorted_object_stalls`), so pixels and timing agree. A
+//!   single-source choice until a hardware capture: ADR 0034,
+//!   `docs/reference/mode3-oracle.md` disagreement 1.
 //! - Mid-line SCX writes keep the fine scroll once the discard is over
 //!   (Pan Docs; a write inside it moves it: `Ppu::hold_fetch`), but new
 //!   low bits still carry into the tile column ([`bg_column`]).
@@ -2044,6 +2046,67 @@ mod tests {
         let row = s.line(2);
         run(&row, 0, 159, 100);
         assert_eq!(row[159], 101);
+    }
+
+    /// ADR 0034: an object waits for the window tile its pixel is shown
+    /// in, so the stalls (`sorted_object_stalls`) must use the tile grid
+    /// drawn here, at WX = 0 with a fine scroll too. The grid is read off
+    /// the rendered line, not off the stall code.
+    #[test]
+    fn object_stalls_use_the_window_grid_the_renderer_draws() {
+        use crate::ppu::object_penalty;
+        let mut s = window_scene();
+        // Window row 0: tiles of color 1, 2, then 3 to the end.
+        s.vram[0x1C02..0x1C20].fill(3);
+        let mut checked = 0;
+        for wx in [0u8, 1, 3, 7, 8, 50] {
+            for scx in (0..8u8).chain([0x5B, 0xFF]) {
+                let f = scx & 7;
+                s.regs.wx = wx;
+                s.regs.scx = scx;
+                s.r.start_frame();
+                let row = s.line(0);
+                // Screen x where window tile 2 starts: the grid's phase.
+                let edge = (1..W)
+                    .find(|&x| row[x - 1] == 102 && row[x] == 103)
+                    .expect("window tiles 1 and 2 on screen") as i32;
+                let win_x = i32::from(wx) - 7;
+                // The cut: 7 - WX below WX = 7, and SCX & 7 more at
+                // WX = 0 (Pan Docs: Window).
+                let cut = (-win_x).max(0) + if wx == 0 { i32::from(f) } else { 0 };
+                assert_eq!(edge, win_x.max(0) + 16 - cut, "WX {wx} SCX {scx}");
+                let mut eleven = [false; 8];
+                for x in 1..168u8 {
+                    let px = i32::from(x) - 8;
+                    if px < win_x {
+                        continue; // The Pixel is in the BG.
+                    }
+                    // Pixels of its tile right of The Pixel (Pan Docs:
+                    // "OBJ penalty algorithm"), on the drawn grid.
+                    let right = 7 - (px - edge).rem_euclid(8);
+                    let dots = 6 + (right - 2).max(0) as u32;
+                    assert_eq!(
+                        object_penalty(&[x], scx, Some(wx)),
+                        dots,
+                        "WX {wx} SCX {scx} X {x}"
+                    );
+                    eleven[usize::from(x & 7)] |= dots == 11;
+                    checked += 1;
+                    // Nothing but WX = 0 with a fine scroll differs from
+                    // a grid starting at WX - 7.
+                    if wx != 0 || f == 0 {
+                        assert_eq!(right, 7 - ((px - win_x) & 7), "WX {wx} SCX {scx} X {x}");
+                    }
+                }
+                // The 11 dots are at one X (mod 8), at WX = 0: 1 - f.
+                let at: [bool; 8] = core::array::from_fn(|i| i as i32 == (edge & 7));
+                assert_eq!(eleven, at, "WX {wx} SCX {scx}");
+                if wx == 0 {
+                    assert!(eleven[usize::from(1u8.wrapping_sub(f) & 7)], "SCX {scx}");
+                }
+            }
+        }
+        assert!(checked > 9_000);
     }
 
     #[test]

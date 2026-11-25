@@ -3233,11 +3233,19 @@ fn sorted_object_stalls(
     let mut total = 0;
     // No window: a start no object reaches (one test per object, no
     // second copy of the loop).
-    // OPEN: at WX = 0 with SCX & 7 != 0 the renderer cuts SCX & 7 more
-    // window pixels (`Renderer::trigger_skip`), which this grid does not
-    // follow; no hardware capture says which is right
-    // (`docs/reference/mode3-oracle.md`, disagreement 1).
     let win_x = window.map_or(i32::MAX, |wx| i32::from(wx) - 7);
+    // The window's tile grid starts at `win_x`, except at WX = 0, where
+    // SCX & 7 more window pixels are cut off: the grid the renderer draws
+    // (`Renderer::trigger_skip`; Pan Docs, Window: "shifted left by
+    // SCX % 8 pixels"). The object waits for the tile its pixel is shown
+    // in, so the two must agree. A single-source choice, no hardware
+    // capture yet: ADR 0034. What is in the window is still decided by
+    // `win_x`: an object at X = 0 stays outside it, as at SCX & 7 = 0.
+    let win_grid = if window == Some(0) {
+        win_x - i32::from(scx & 7)
+    } else {
+        win_x
+    };
     // The tile The Pixel is in, as one number: BG tiles 0..=52 (X + SCX
     // < 423), window tiles 64 + 0..=20 (-1: none yet).
     let mut last_tile = -1;
@@ -3248,7 +3256,7 @@ fn sorted_object_stalls(
         }
         let px = i32::from(x) - 8;
         let (tile, right) = if px >= win_x {
-            (64 + ((px - win_x) >> 3), 7 - ((px - win_x) & 7))
+            (64 + ((px - win_grid) >> 3), 7 - ((px - win_grid) & 7))
         } else {
             let bx = px + i32::from(scx);
             ((bx + 8) >> 3, 7 - (bx & 7))
