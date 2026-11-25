@@ -21,6 +21,21 @@ excluded from host workspace builds.
 No generic `crates/gbc-stm32`. Firmware crates are per board:
 `crates/gbc-nucleo-h753` (Stage 2) and later a Stage 3 board crate
 (provisionally `gbc-handheld`). Chip-independent front-end logic goes in a
-host-tested `no_std` crate, `crates/gbc-platform`. All Cortex-M7 parts share
+host-tested `no_std` crate, `crates/gbc-firmware`. All Cortex-M7 parts share
 the `thumbv7em-none-eabihf` target; the PAC, memory map and peripherals
 differ per chip, hence the per-board split. See `docs/plan/stage-2.md`.
+
+Crates (human-approved 2026-11-25), each with one role:
+- `gbc-firmware`: board-independent firmware (main loop and pacing, video
+  conversion, audio conditioning, input, stats, ROM image header). `no_std`,
+  `forbid(unsafe_code)`, host-tested, depends on `gbc-core` only.
+- `gbc-link`: the serial protocol (framing and checksums for ROM load, save
+  load/dump, PC input, stats). `no_std`, no dependencies, no unsafe,
+  transport-agnostic. Stage 3 may reuse it over USB serial or skip it.
+- `tools/gbc-pc`: the PC companion, a native Windows `.exe` that speaks
+  `gbc-link` over a COM port.
+- `gbc-nucleo-h753` (lib + bin) depends on `gbc-firmware`, `gbc-core` and
+  `gbc-link`; `gbc-handheld` uses `gbc-link` only if Stage 3 picks USB serial.
+
+Rule: `gbc-firmware` does not depend on `gbc-link`. The board crate wires
+the two together.

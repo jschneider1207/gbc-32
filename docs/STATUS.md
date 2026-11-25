@@ -35,7 +35,7 @@ The Stage 2 plan is `docs/plan/stage-2.md`, approved by the human on
   from the PC over serial. Saves travel PC <-> board over serial (no QSPI
   saves).
 - Crates are per board: `gbc-nucleo-h753` (Stage 2), later `gbc-handheld`.
-  Shared logic lives in `gbc-platform` (ADR 0005 amendment).
+  Shared logic lives in `gbc-firmware`, the serial protocol in `gbc-link`, the PC side in `tools/gbc-pc` (ADR 0005 amendment).
 
 1. M0: bring h7-bench up at 480 MHz (VOS0 + ODEN) and measure every
    placement (see the plan).

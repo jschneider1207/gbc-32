@@ -16,14 +16,16 @@ rust-toolchain.toml        pinned stable toolchain + thumbv7em-none-eabihf
 crates/
   gbc-core/                #![no_std], no alloc. All emulation logic.
   gbc-desktop/             std front end (Stage 1 only): window, audio, input, saves
-  gbc-platform/            (Stage 2, not yet created) #![no_std] host-tested front-end logic shared by all boards: converter/scaler, pacing, serial protocol, player loop, input mapping
-  gbc-nucleo-h753/         (Stage 2, not yet created) firmware bin for the NUCLEO-H753ZI: PAC, clocks, drivers, memory.x; a Stage 3 board gets its own crate (gbc-handheld); see Targets
+  gbc-firmware/            (Stage 2, not yet created) #![no_std], forbid(unsafe), host-tested board-independent firmware: main loop and pacing, RGB555 converter/scaler, audio conditioning, input debounce/mapping, stats, ROM image header; boards plug in drivers via traits; depends on gbc-core only (not gbc-link)
+  gbc-link/                (Stage 2, not yet created) #![no_std], no deps, no unsafe, host-tested serial protocol (ROM load, save load/dump, PC input, stats); transport-agnostic
+  gbc-nucleo-h753/         (Stage 2, not yet created) lib + bin for the NUCLEO-H753ZI: PAC, clocks, drivers, memory.x; depends on gbc-firmware, gbc-core, gbc-link; wires gbc-link to the UART; a Stage 3 board gets its own crate (gbc-handheld); see Targets
 tools/
   romtest/                 acceptance runner (contract: acceptance/README.md)
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
   bench/                   headless runs for check-bench.sh (Ir), the behavior fingerprint, synthetic ROMs (docs/perf.md)
   fuzz/                    fuzz targets over the public API: no panic, no hang (scripts/check-fuzz.sh)
   h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H755ZI-Q (its README)
+  gbc-pc/                  (Stage 2, not yet created) PC companion, native Windows .exe (x86_64-pc-windows-gnu): sends ROM/.sav, pulls saves, forwards keys, prints stats; deps gbc-link + serial crate (plan D9)
 ```
 
 Workspace: edition 2024, resolver 3. The release profile keeps unwinding

@@ -61,32 +61,61 @@ that checks it.
 | Host link | VCP on USART3 PD8/PD9 through the STLINK-V3E. Reached from WSL only through PowerShell .NET `SerialPort` (`read-serial.sh`). Baud rates above 115200 are unverified | h7-bench README; UM2407 §7.6.5 |
 | FMC erratum | Unaligned **reads** from the FMC are unsupported (ES0392 §2.6.4). This only matters for LCD readback, which uses byte reads | ES0392 |
 
-## Crate layout (agent decision, ADR in M1)
+## Crate layout (human-approved 2026-11-25, ADR 0005 amendment; ADR in M1)
 
-- `crates/gbc-platform/`: `no_std`, `#![forbid(unsafe_code)]`, no
-  dependencies, a root-workspace member, host-tested. It holds
-  chip-agnostic front-end logic: the RGB555 to panel-format
-  converter/scaler, the audio DC blocker and sample ring, audio-driven
-  frame pacing, button debounce and input mapping, the ROM image header and
-  hash, the serial protocol (ROM load, save load/dump, PC input), the player
-  loop, and the per-frame statistics. **All of this carries over to
+```
+gbc-core ◄── gbc-firmware ◄── gbc-nucleo-h753 ──► gbc-link ◄── gbc-pc
+                          ◄── gbc-handheld ···► (gbc-link, if USB serial)
+```
+
+- `crates/gbc-core/` (exists): `no_std`, no alloc, no unsafe; all emulation.
+  No dependencies.
+- `crates/gbc-firmware/` (new): `no_std`, `#![forbid(unsafe_code)]`, a
+  root-workspace member, host-tested. The board-independent firmware: the
+  main loop and audio-driven pacing, video conversion/scaling (RGB555 to
+  panel format), audio conditioning (DC blocker, sample ring), button
+  debounce and input mapping, per-frame stats, and the ROM image header and
+  hash. Boards plug in their drivers through small traits. It exposes plain
+  hooks (load a ROM/save, take input, report stats). It depends on
+  `gbc-core` only and **not on `gbc-link`**. **All of this carries over to
   Stage 3.**
-- `crates/gbc-nucleo-h753/`: firmware, a bin crate and a separate workspace
+- `crates/gbc-link/` (new): `no_std`, no dependencies, no unsafe,
+  host-tested. The serial protocol: framing and checksums for ROM load, save
+  load/dump, PC input and stats. Transport-agnostic. A dev tool that might
+  be promoted: Stage 3 may reuse it over USB serial, or use USB mass
+  storage instead and skip it (a Stage 3 decision).
+- `crates/gbc-nucleo-h753/`: the Stage 2 firmware, a lib plus a bin (so
+  `tools/h7-bench` can reuse its bring-up code), and a separate workspace
   like `tools/h7-bench` (thumbv7em only, its own profile and rustflags).
   Everything chip- or board-specific lives here: PAC (`stm32h7`,
   `cortex-m`, `cortex-m-rt`, as h7-bench uses; no HAL, no async runtime),
   `memory.x`, clocks, power, MPU, FMC/ILI9341, QUADSPI, DAC, GPIO and UART.
+  It depends on `gbc-firmware`, `gbc-core`, `gbc-link`, `cortex-m`,
+  `cortex-m-rt` and `stm32h7`, and it wires `gbc-link` to the UART.
   Dependency rule: see decision D9.
-- The Stage 3 handheld gets its own crate later (`crates/gbc-handheld/`,
-  provisional name). Shared H7-specific code is extracted into a common
-  crate only once Stage 3 actually duplicates it.
+- `crates/gbc-handheld/` (Stage 3, later; provisional name): the same role
+  for the H735 board. It uses `gbc-link` only if Stage 3 chooses USB
+  serial. Shared H7-specific code is extracted into a common crate only
+  once Stage 3 actually duplicates it.
+- `tools/gbc-pc/` (new): the PC companion, a console program built as a
+  native Windows `.exe` (`x86_64-pc-windows-gnu`, cross-built like
+  `gbc-desktop`, run from WSL through the `scripts/run-windows.sh` interop
+  pattern) because WSL has poor COM-port access. It sends the ROM and
+  `.sav`, pulls saves back, forwards keyboard input and prints the board's
+  stats. It replaces the old PowerShell-script host side. Dependencies:
+  `gbc-link` and a serial-port crate (see D9: `serialport` is MPL-2.0).
+  It has no window, so the WSLg ban doesn't apply; keep runs from WSL
+  short, as with the other Windows runs.
 - All Cortex-M7 parts use the same Rust target (`thumbv7em-none-eabihf`).
   What differs per chip is the PAC, the memory map and the peripherals
   (e.g. QSPI on the H753 vs OCTOSPI on the H735), which is why the split is
   per board and there is no generic "stm32" crate.
-- `tools/h7-bench` stays the cycle-measurement tool. In M1 its board
-  bring-up code (power, clock, UART, fault handler, TCM copy) moves into
+- `tools/h7-bench` stays the cycle-measurement tool (`h7-bench/host` and
+  `h7-bench/m4-stub`, H755 only, are unchanged). In M1 its board bring-up
+  code (power, clock, UART, fault handler, TCM copy) moves into
   `gbc-nucleo-h753`, so the two can't drift. h7-bench then depends on it.
+  `romtest`, `bench`, `fuzz`, `sm83-tests` and `gbc-desktop` stay on
+  `gbc-core`.
 
 ---
 
@@ -114,9 +143,9 @@ of M3.
 
 ## M1: Firmware skeleton, link-time placement, host-side gate
 
-- [ ] ADR: crate layout as above (per-board firmware crates plus `gbc-platform`); PAC-only; one `memory.x` generated by `build.rs` from `perf/itcm-sections.txt` (ADR 0026 mechanism); board module boundary
+- [ ] ADR: crate layout as above (per-board firmware crates plus `gbc-firmware` and `gbc-link`); PAC-only; one `memory.x` generated by `build.rs` from `perf/itcm-sections.txt` (ADR 0026 mechanism); board module boundary
 - [ ] `gbc-nucleo-h753` boots at 480 MHz (shared bring-up), MPU set up (see M2/M3 for the regions), I/D-cache on (write-back; ES0392 §2.1.1 rules out write-through), fault handler on its own stack with UART report (h7-bench pattern)
-- [ ] `headless` image: core in the M6-target placement (ITCM set + DTCM data), a ROM from internal flash, a scripted input list, prints one hash per frame plus an audio-stream hash over UART; host counterpart in `gbc-platform`/`tools/` prints the same lines for the same ROM + inputs
+- [ ] `headless` image: core in the M6-target placement (ITCM set + DTCM data), a ROM from internal flash, a scripted input list, prints one hash per frame plus an audio-stream hash over UART; host counterpart in `tools/` prints the same lines for the same ROM + inputs
 - [ ] `scripts/check-itcm-elf.sh` (the Stage 1 M8 "post-link check", left for Stage 2): every demangled name in `perf/itcm-sections.txt` that the link kept is in `[0, 0x1_0000)`; dropped tiers listed; `.itcm` size vs 64 KiB; veneer count. Mutation-check: a glob moved to flash fails, a renamed function fails
 - [ ] Settle the provisional size gate on the firmware link (Stage 1 C-P5): measure gbc-core's share of the linked ELF (compiler_builtins, panic code, padding) and report against the H735 total; **changing the 122,880 B figure needs the human**
 - [ ] Name or glob the ~1.7 KB anonymous `.rodata` the `.dtcm_rodata` rules miss (Stage 1 C-P7)
@@ -134,8 +163,8 @@ for byte.
 - [ ] QUADSPI driver: JEDEC ID read (record the part, its max clock, quad-enable bit, DTR support in `docs/reference/`), sector erase, page program (no dummy cycles in indirect write: ES0392 §2.7.1), status polling; memory-mapped quad read (`0xEB` or the part's equivalent), FSIZE for 8 MiB, prefetch/timeout settings
 - [ ] MPU: QSPI window 0x9000_0000 as Normal, cacheable, sized exactly to the device; the rest of the 256 MB QSPI region no-access, so speculative M7 fetches cannot reach unmapped space (standard ST guidance for the M7; cite the app note once checked: unverified)
 - [ ] On-board test: unaligned u16/u32 loads at odd addresses from the QSPI window return the right bytes (the core relies on this, `docs/architecture.md` "ROM")
-- [ ] ROM image format in `gbc-platform`: header (magic, length, SHA-256 or 64-bit hash, title) at a fixed QSPI offset, ROM data 256-byte aligned; the firmware refuses a bad hash
-- [ ] Loader (decision D5): firmware `loader` mode receives a ROM over the VCP, programs it, verifies the hash, reports; host side is a script around PowerShell `SerialPort` writes (as `read-serial.sh`) plus an Elixir/bash framing helper; skip when the stored hash already matches. The frame format in `gbc-platform` has room for an optional save section sent with the ROM (used in M5) and for later PC-to-board and board-to-PC frames (input, save dump). Measure the VCP's highest reliable baud rate (unverified) and record it
+- [ ] ROM image format in `gbc-firmware`: header (magic, length, SHA-256 or 64-bit hash, title) at a fixed QSPI offset, ROM data 256-byte aligned; the firmware refuses a bad hash
+- [ ] Loader (decision D5): firmware `loader` mode receives a ROM over the VCP, programs it, verifies the hash, reports; host side is `tools/gbc-pc` (native Windows `.exe`, see Crate layout; it replaces the PowerShell-script idea); skip when the stored hash already matches. The frame format lives in `gbc-link` (host-tested, started here together with `tools/gbc-pc`) and has room for an optional save section sent with the ROM (used in M5) and for later PC-to-board and board-to-PC frames (input, save dump). Measure the VCP's highest reliable baud rate (unverified) and record it
 - [ ] Bench placement `itcm-dtcm-qspi`: the bench workloads with their ROMs in QSPI instead of internal flash; record cycles vs `itcm-dtcm` at 480 MHz (the "QSPI as a conservative proxy for HyperRAM" figure Stage 3 needs)
 
 **Acceptance:** a load → verify round trip passes for a 4 MiB test image
@@ -155,7 +184,7 @@ over (Stage 3 loads from eMMC).
 
 - [ ] FMC bank 1 as SRAM/8-bit/write-enabled, asynchronous mode A; ADDSET/DATAST from twc 66 ns, twrl/twrh 15 ns at a 240 MHz HCLK (and a slower fallback); MPU region for the LCD as Device (no speculative reads, no write merging) or FMC BMAP remap; GPIO AF12 on the pins above (check each AF against DS12117)
 - [ ] ILI9341V init (reset timing §15.4, sleep out, COLMOD 16-bit, MADCTL for the chosen orientation; the BGR bit lets the core's R-low RGB555 order go out without a channel swap), window set (CASET/PASET), RAMWR
-- [ ] Converter/scaler in `gbc-platform` (decision D3: 1.5x to 240x216 recommended): RGB555 → byte-swapped RGB565, nearest-neighbour 2→3; host unit tests against a naive reference over random frames; cycles per frame measured on the board
+- [ ] Converter/scaler in `gbc-firmware` (decision D3: 1.5x to 240x216 recommended): RGB555 → byte-swapped RGB565, nearest-neighbour 2→3; host unit tests against a naive reference over random frames; cycles per frame measured on the board
 - [ ] `Frame` in DTCM (Stage 1 B10/C5): after `FRAME_READY` the CPU converts it into an AXI SRAM output buffer (MPU non-cacheable, so the 100 KB of writes do not evict the ROM's D-cache lines), then MDMA streams the buffer to the FMC data address; no double-buffered `Frame` is needed (the core is not running while the conversion runs)
 - [ ] Tearing: TE (PE13) via EXTI; start the transfer on TE with rows written in the panel's native scan order (portrait 240-wide rows, so the write front stays ahead of the scan: 31.7 µs per 1.5x row vs ~44.6 µs per scanned row at 70 Hz); try FRMCTR1 near 59.7 Hz to remove 70-vs-59.73 Hz judder. ADR with what was measured
 - [ ] Readback self-test: after a frame, read a GRAM window back (RAMRD, byte reads, 18-bit format per ILI9341V) and compare with what was sent; mismatch count over UART
@@ -175,7 +204,7 @@ repo).
 ## M4: Audio out
 
 - [ ] Output path per decision D4 (recommended: DAC1 stereo on PA4/PA5, 12-bit, buffer on, line level): TIM6/TIM7 trigger at 32,768 Hz from the 240 MHz timer clock (÷7324 = 32,768.9 Hz, +27 ppm; agent check of the timer clock tree), DMA1 circular double buffer in AXI SRAM (DMA1 cannot reach DTCM), half/full-transfer ISR
-- [ ] `gbc-platform`: DC blocker (integer one-pole high-pass, ADR 0035 leaves it to the platform), i16 → 12-bit, sample ring with underrun/overrun counters; host unit tests (step response, no overflow at ±full scale)
+- [ ] `gbc-firmware`: DC blocker (integer one-pole high-pass, ADR 0035 leaves it to the platform), i16 → 12-bit, sample ring with underrun/overrun counters; host unit tests (step response, no overflow at ±full scale)
 - [ ] Audio-driven pacing (as desktop ADR 0024): the main loop runs the core while the ring has room for a frame's samples (≤ 550), else `WFI`. Statistics: underruns, ring-fill min/max, emulated clocks vs elapsed DWT cycles
 - [ ] The sample stream the DAC is fed (after DC blocking) hashes equal to the host's for the same ROM and inputs
 
@@ -191,9 +220,9 @@ b, an SAI/I2S driver partly would).
 
 ## M5: Input and the player loop
 
-- [ ] Buttons per decision D2 (no buttons wired, nothing bought): the shield joystick is the D-pad (LEFT/RIGHT/UP/DOWN; CENTER is spare), B1 (PC13) may map to one button if convenient (e.g. Start), and **PC input over the serial link carries all 8 buttons**, so PC input alone can play. Debounce, mapping and the PC input frame (button-state bitmap, sent on change) live in `gbc-platform` (host-tested); the host side is a small script or tool on the Windows side that turns key state into those frames. Joystick and PC state are OR-ed, sampled once per frame and applied with `set_buttons_at` at the frame's start clock
+- [ ] Buttons per decision D2 (no buttons wired, nothing bought): the shield joystick is the D-pad (LEFT/RIGHT/UP/DOWN; CENTER is spare), B1 (PC13) may map to one button if convenient (e.g. Start), and **PC input over the serial link carries all 8 buttons**, so PC input alone can play. Debounce and mapping live in `gbc-firmware` and the PC input frame (button-state bitmap, sent on change) in `gbc-link` (both host-tested); the host side is `tools/gbc-pc`, which turns key state into those frames (extending the M2 protocol and tool). Joystick and PC state are OR-ed, sampled once per frame and applied with `set_buttons_at` at the frame's start clock
 - [ ] Scripted input mode: the firmware takes an input script (the `acceptance/*.toml` `input` schema, converted to clocks exactly as romtest does) instead of GPIO or serial, so replays are deterministic
-- [ ] Saves over the serial link (decision D6; replaces the old QSPI save milestone). The PC loader sends the `.sav` (cart RAM plus the RTC footer, the same format as the desktop front end, ADR 0023) with the ROM at load time. The firmware keeps cart RAM and RTC state in RAM (AXI SRAM) and loads it into the core. The board dumps the current save back to the PC on request (a serial command) or on a button combo (joystick CENTER held with B1, or an equivalent PC input chord). The save frame format and size/format checks live in `gbc-platform` (host-tested; a malformed or wrong-size save is refused, never half-applied). No flash save area and no flush policy
+- [ ] Saves over the serial link (decision D6; replaces the old QSPI save milestone). `tools/gbc-pc` sends the `.sav` (cart RAM plus the RTC footer, the same format as the desktop front end, ADR 0023) with the ROM at load time. The firmware keeps cart RAM and RTC state in RAM (AXI SRAM) and loads it into the core. The board dumps the current save back to the PC on request (a serial command) or on a button combo (joystick CENTER held with B1, or an equivalent PC input chord). The save frame format and size/format checks live in `gbc-link` (host-tested; `gbc-firmware` exposes the load-save/take-save hooks; a malformed or wrong-size save is refused, never half-applied). No flash save area and no flush policy
 - [ ] `player` image: ROM from QSPI, display, audio and input all running, per-frame statistics over UART every N s (core cycles min/mean/max/p99 per frame, front-end cycles, slack, frames over budget, underruns, display skips)
 - [ ] An "input test" screen or UART echo of button state for the human's button check
 - [ ] DMG-mode games: one default compatibility palette (romtest's common palette); per-title palettes are not needed on the dev board
@@ -269,7 +298,7 @@ Host steps (heavy, run alone per AGENTS.md machine rules):
 - **H1.** The Stage 1 preconditions (refused RUSTFLAGS variants, unset
   overrides), plus `H7_*` overrides unset except the port and drive.
 - **H2.** `scripts/gate-stage1.sh` unchanged and in full: fmt, clippy,
-  rustdoc, `cargo test` (now including `gbc-platform`), no-alloc and hard
+  rustdoc, `cargo test` (now including `gbc-firmware` and `gbc-link`), no-alloc and hard
   rules, the thumbv7em build, code size (H735 total), the ITCM set before
   linking, the Ir benchmark (±3%), fuzz, invariance `--long`, the desktop
   headless run, and romtest must plus regressions. **This is how Stage 1
@@ -283,7 +312,7 @@ Host steps (heavy, run alone per AGENTS.md machine rules):
   set's host hash lists are regenerated and equal the committed lists.
 - **H6.** The QEMU smoke run of the `headless` loop, plus the ITCM
   stand-in run, prints exactly the expected lines.
-- **H7.** Host unit tests for the converter, DC blocker, debounce,
+- **H7.** Host unit tests (`gbc-firmware`, `gbc-link`, `tools/gbc-pc` host logic) for the converter, DC blocker, debounce,
   serial framing (ROM, save, input) and image header (inside H2's `cargo test`; named
   explicitly so deleting them fails the gate).
 - **H8.** Firmware size report: `.itcm`, DTCM and AXI use, and stack
@@ -378,10 +407,10 @@ shown. D8 is a note.
 | D3 | Display scaling and orientation | (a) 1x, centred, 3.0 ms per frame on the bus; (b) **1.5x, 240x216**, 6.8 ms; (c) 1.667x, 266x240, uneven pixels, 8.4 ms; plus portrait (tear-free with TE, image fills the width) or landscape (likely tearing, since writes run across the panel's scan) | **Accepted: (b) in portrait** if the physical orientation is acceptable. Otherwise (b) in landscape, accepting some tearing. The look is the human's call |
 | D4 | Audio output path | (a) **internal DAC1, PA4/PA5**, 12-bit, line level (no purchase; needs powered speakers or headphones through an amp); (b) an I2S DAC breakout (e.g. PCM5102A) on I2S2 (PB12/13/15, PC6) or SAI on non-Zio pins (pin plan unverified): costs money, closer to Stage 3's SAI → DAC; (c) PWM | **Accepted: (a).** It meets the stage goal with no purchase. The ring, DC blocker and pacing carry over whichever is chosen |
 | D5 | Getting ROMs into QSPI | (a) **our own UART loader** over the VCP, scriptable from WSL; (b) STM32CubeProgrammer with an external loader for the shield's flash (the human's tool; availability unverified); (c) a ROM embedded in the firmware image, copied to QSPI at boot (≤ ~1.5 MiB) | **Accepted: (a)**, with (b) as the human's fallback. Agents need (a) for the on-board gate |
-| D6 | Saves on the dev board | (a) none persistent; (b) QSPI save area; (c) internal flash bank 2; (d) over the PC serial link | **Decided (human, 2026-11-25): (d), not QSPI.** The PC loader sends the `.sav` (cart RAM plus the RTC footer, the desktop format, ADR 0023) with the ROM, and the board dumps it back on request or a button combo. Folded into M5; the old M7 is gone. Acceptance: a save round-trips byte-identically, PC → board → PC (B5) |
+| D6 | Saves on the dev board | (a) none persistent; (b) QSPI save area; (c) internal flash bank 2; (d) over the PC serial link | **Decided (human, 2026-11-25): (d), not QSPI.** `tools/gbc-pc` sends the `.sav` (cart RAM plus the RTC footer, the desktop format, ADR 0023) with the ROM, and the board dumps it back on request or a button combo. Folded into M5; the old M7 is gone. Acceptance: a save round-trips byte-identically, PC → board → PC (B5) |
 | D7 | Full-speed sign-off workloads | `synth:worst-case` (bench, ROM in QSPI, 480 MHz) plus real games for the human: Shantae and Alone in the Dark (heavy HDMA), Wario Land 3, LADX, and Pokémon Crystal (RTC) | **Accepted.** Gated: each finishes its frames inside real time (< 1/59.7275 s). `synth:worst-case` vs 50% and the real-game core cycles from the `player` statistics are reported, not gated. They become gated replays if the human records inputs (Stage 1 M10 E6) |
 | D8 | Cortex-M4 | — | **Note: not applicable**: the H753ZI is single-core (the dual-core H755 is retired), and the Stage 3 H735 is single-core too |
-| D9 | Dependencies for the new crates | AGENTS.md lets agents decide dependencies for `gbc-desktop` and `tools/*` only | **Accepted:** extend that to `gbc-nucleo-h753` (MIT/Apache crates: `cortex-m`, `cortex-m-rt`, `stm32h7`, as h7-bench already uses) and keep `gbc-platform` dependency-free; `gbc-handheld`: decide when it exists |
+| D9 | Dependencies for the new crates | AGENTS.md lets agents decide dependencies for `gbc-desktop` and `tools/*` only | **Accepted:** extend that to `gbc-nucleo-h753` (MIT/Apache crates: `cortex-m`, `cortex-m-rt`, `stm32h7`, as h7-bench already uses) and keep `gbc-firmware` (only `gbc-core`) and `gbc-link` (none) dependency-free; `tools/gbc-pc`: `gbc-link` plus a serial-port crate, chosen by the agent under the `tools/*` rule. **`serialport` is MPL-2.0 (crates.io), not MIT/Apache/BSD/Zlib-style, so using it is a human decision.** Licence-clean alternative: direct Win32 COM through `windows-sys` (MIT/Apache-2.0); `gbc-pc` starts with that unless the human approves `serialport`; `gbc-handheld`: decide when it exists |
 | D10 | `acceptance/stage2.toml` | the proposal above | **Accepted:** the human creates it (or edits the proposal). Agents won't create it |
 
 ## Risks
