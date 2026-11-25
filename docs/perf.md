@@ -1548,8 +1548,22 @@ past 2^32 (17 min 4 s), in frame-sized calls with an audio buffer. The
 script builds it with the `checked` profile and no feature (the product's
 code with overflow checks and debug assertions). It fails on a panic, a
 call that makes no progress, a sample count other than one per 128 clocks,
-or (for the workloads that keep the LCD on) a frame count more than one off
-one per 70,224 clocks. 60.5 s wall for the ten before dmg-raster in
+or (for the workloads that keep the LCD on from their first frame to the
+end) a frame that is not where one per 70,224 clocks puts it. That frame
+check counts from the first completed frame, so setup with the LCD off
+(`synth:dmg-raster`: first frame at clock 194,844) costs nothing: frame k
+must end its run call at `first + k * 70,224`, checked as each frame
+arrives (the failure names the frame, its clock, the due clock and the
+previous frame's clock), so a lost, extra or late frame fails at once and
+nothing can drift. The tolerance is 23 clocks either way, because the core
+does not report the boundary's own clock: the `FRAME_READY` call ends after
+the step in progress, up to 3 clocks of M-cycle rounding plus 5 M-cycles of
+the longest step (`FRAME_JITTER` in `tools/bench/src/long.rs`; seen: 0 to
+16). At the end the count must equal `1 + (last - first + 23) / 70,224`,
+the run must not end past the next frame's due clock (frames that stop
+fail), and a workload with no frame fails. Before 2026-11-24 the check was
+a count within one of `clocks / 70,224`, which failed dmg-raster's setup
+(two short) and hid a lost frame elsewhere. 60.5 s wall for the ten before dmg-raster in
 parallel (2026-11-24, 8 threads; the slowest, `synth:worst-case`,
 alone). It complements the
 offset check: that one covers the whole corpus near four boundaries, this
