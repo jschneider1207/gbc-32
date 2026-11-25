@@ -1,12 +1,55 @@
-//! The output pipeline: the window integrator and the NR50/NR51 mixer
-//! (ADR 0021 sections 8-9).
+//! The output pipeline: the window integrator, the NR50/NR51 mixer and
+//! the decimation filter (ADR 0021 sections 8-9, ADR 0035).
 //!
-//! Each output sample is the exact average of the mixed signal over its
-//! `SAMPLE_PERIOD`-clock window (a box filter). The channel outputs are
-//! piecewise constant between syncs, so a window is a sum of
-//! `level * duration` segments, integer only.
+//! Two stages take the mixed signal from the clock rate to the output
+//! rate. The first is the exact sum of the mixed signal over each
+//! `WINDOW`-clock window (a box filter to 65,536 Hz): the channel outputs
+//! are piecewise constant between syncs, so a window is a sum of
+//! `level * duration` segments, integer only. The second is an 8-tap FIR
+//! over the window sums that keeps every other result (`FIR`): one output
+//! sample per two windows.
 
-use super::{Apu, SAMPLE_PERIOD, SAMPLE_PERIOD_LOG2, StereoSample};
+use super::{Apu, SAMPLE_PERIOD, StereoSample, WINDOW, WINDOW_LOG2};
+
+/// The second stage: a low-pass over the last 8 window sums, evaluated
+/// once per two windows (2:1 decimation, 65,536 to 32,768 Hz). The taps
+/// are symmetric (linear phase), so half of them are stored: tap `i` and
+/// tap `7 - i` are `FIR[i]`. A Kaiser-windowed sinc (beta 3) with its
+/// -6 dB point at 16,384 Hz, scaled to a sum of 1,024 and rounded (the
+/// rounded taps add up to exactly that): the DC gain is 1 after the
+/// shift by `FIR_SHIFT`, and a constant input comes out exact.
+/// Measured: `docs/reference/audio-aliasing.md`.
+///
+/// It delays the stream by 1.5 samples against the plain average it
+/// replaced: an output sample is centred 256 clocks before the end of its
+/// last window (the kernel covers 512 clocks), where the 128-clock
+/// average was centred 64 before.
+pub(crate) const FIR: [i32; 4] = [-22, -56, 131, 459];
+
+/// `log2` of the sum of all 8 taps.
+const FIR_SHIFT: u32 = 10;
+const _: () = assert!(2 * (FIR[0] + FIR[1] + FIR[2] + FIR[3]) == 1 << FIR_SHIFT);
+
+/// A window sum's largest magnitude: the mix's extreme (4 channels x 15 x
+/// volume 8 = 480) over a whole window, 30,720. `Output::hist` holds the
+/// sums as `i16`, and the scale needs no shift: a window sum is the
+/// average level times 64, which is the sample scale.
+const WINDOW_MAX: i32 = 480 * WINDOW as i32;
+const _: () = assert!(WINDOW_MAX <= i16::MAX as i32 && WINDOW_LOG2 == 6);
+
+/// The sum of the 8 taps' magnitudes: 1,336.
+const FIR_ABS: i32 = 2 * (-FIR[0] - FIR[1] + FIR[2] + FIR[3]);
+// The filter's sum cannot overflow `i32`: at most 1,336 x 30,720 =
+// 41,041,920, whatever the inputs' signs (2% of the range).
+const _: () = assert!(FIR_ABS as i64 * WINDOW_MAX as i64 <= (i32::MAX / 50) as i64);
+// The result can leave `i16`, though: the negative taps overshoot, up to
+// 30,720 x 1,336 / 1,024 = 40,080 for window sums that alternate between
+// the extremes in step with the taps' signs. `fir` saturates.
+const _: () = assert!((WINDOW_MAX * FIR_ABS) >> FIR_SHIFT > i16::MAX as i32);
+
+/// `Output::half` when the next window sum is the stream's first: it then
+/// fills the whole history. Even, as for any first window of a sample.
+const PRIME: u8 = 2;
 
 /// The output stream's position: kept across APU power cycles.
 #[repr(C)]
@@ -21,10 +64,19 @@ pub(crate) struct Output {
     /// The current window's mixed sums so far (left, right), without the
     /// listed spans.
     pub(crate) acc: [i32; 2],
-    /// Clocks into the current window at `synced` (`< SAMPLE_PERIOD`).
+    /// The sums (left, right) of the 8 windows the next sample is made
+    /// of, oldest first: the 6 before the sample's own two, then its
+    /// first (once complete) and its second. Each is at most 30,720 in
+    /// magnitude (`WINDOW_MAX`).
+    pub(crate) hist: [[i16; 2]; 8],
+    /// Clocks into the current window at `synced` (`< WINDOW`).
     pub(crate) pos: u8,
+    /// 0 in the first window of an output sample, 1 in its second, or
+    /// `PRIME`.
+    pub(crate) half: u8,
     /// The last sync integrated. Once an advance-only stretch (empty
-    /// buffer) ends, the window grid restarts at `synced` with `acc = 0`.
+    /// buffer) ends, the window grid restarts at `synced` with `acc = 0`
+    /// and no history (`PRIME`).
     pub(crate) live: bool,
 }
 
@@ -33,7 +85,9 @@ impl Output {
         Self {
             synced: 0,
             acc: [0; 2],
+            hist: [[0; 2]; 8],
             pos: 0,
+            half: PRIME,
             live: false,
         }
     }
@@ -44,18 +98,18 @@ impl Output {
 /// 16 spans: 128 B of level sums on `Apu::flush`'s stack, cleared per
 /// batch (9 x86 instructions; with the lanes in `Apu` instead the clear
 /// would go, for under 0.1% of any bench). `i16`: a lane is one channel's
-/// level times clocks over one span, at most 15 x `SAMPLE_PERIOD` = 1,920
-/// in magnitude.
+/// level times clocks over one span, at most 15 x `WINDOW` = 960 in
+/// magnitude.
 pub(crate) const BATCH: usize = 16;
-const _: () = assert!(15 * SAMPLE_PERIOD <= i16::MAX as u64);
+const _: () = assert!(15 * WINDOW <= i16::MAX as u64);
 // `Spans::ends` and `Spans::set` have a bit per span.
 const _: () = assert!(BATCH <= 16);
 // `Spans::clocks` counts a full list.
-const _: () = assert!(BATCH as u64 * SAMPLE_PERIOD <= u16::MAX as u64);
+const _: () = assert!(BATCH as u64 * WINDOW <= u16::MAX as u64);
 
 /// The spans listed for the next batch: the stretch of the output from
-/// the last clock mixed to `Output::synced`, cut at every sample window's
-/// end and wherever NR50 or NR51 was written. Listing is all a mixer
+/// the last clock mixed to `Output::synced`, cut at every window's end
+/// and wherever NR50 or NR51 was written. Listing is all a mixer
 /// write needs: the channels' waveforms do not depend on the mixer, so
 /// they integrate the whole list in one go later (`Apu::flush`), and the
 /// weights are applied per span there. Empty between run calls, and
@@ -64,14 +118,14 @@ const _: () = assert!(BATCH as u64 * SAMPLE_PERIOD <= u16::MAX as u64);
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct Spans {
-    /// Each listed span's clocks (1 to `SAMPLE_PERIOD`).
+    /// Each listed span's clocks (1 to `WINDOW`).
     segs: [u8; BATCH],
     /// NR50 and NR51 from span `i` on, where `set` has bit `i` (and for
     /// span 0).
     vol: [[u8; 2]; BATCH],
     /// Bit `i`: NR50 or NR51 was written just before span `i`.
     set: u16,
-    /// Bit `i`: span `i` ends its sample window.
+    /// Bit `i`: span `i` ends its window.
     ends: u16,
     /// Spans listed, at most `BATCH`.
     len: u8,
@@ -149,28 +203,33 @@ pub(crate) fn mix(levels: [i32; 4], w: &[[i32; 4]; 2]) -> [i32; 2] {
     [side(&w[0]), side(&w[1])]
 }
 
-/// A completed window's sum as a sample: the average level times 64, so
-/// the extreme (4 channels x 15 x volume 8 = 480) maps to 30,720, within
-/// `i16` without clamping.
+/// One side (0 left, 1 right) of an output sample: the `FIR` over the 8
+/// window sums in `hist`, oldest first. A window sum is the
+/// average level times 64 and the taps add up to `1 << FIR_SHIFT`, so a
+/// steady extreme (480) maps to 30,720, exactly. The sum fits `i32` and
+/// the result is saturated to `i16` (see the bounds at `FIR`): only a mix
+/// that swings over more than 81% of the full scale (32,767 / 40,080)
+/// can get there, e.g. all four channels at master volume 7 stepping
+/// from one extreme to the other at once (30,720 + 7.6% of 61,440).
 #[inline]
-pub(crate) fn sample(acc: i32) -> i16 {
-    // `(acc << 6) >> SAMPLE_PERIOD_LOG2` as one shift: |acc| <= 480 *
-    // SAMPLE_PERIOD, far from overflowing either way.
-    if SAMPLE_PERIOD_LOG2 >= 6 {
-        (acc >> (SAMPLE_PERIOD_LOG2 - 6)) as i16
-    } else {
-        (acc << (6 - SAMPLE_PERIOD_LOG2)) as i16
-    }
+pub(crate) fn fir(hist: &[[i16; 2]; 8], side: usize) -> i16 {
+    let x = |i: usize| i32::from(hist[i][side]);
+    let sum = FIR[0] * (x(0) + x(7))
+        + FIR[1] * (x(1) + x(6))
+        + FIR[2] * (x(2) + x(5))
+        + FIR[3] * (x(3) + x(4));
+    (sum >> FIR_SHIFT).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 impl Apu {
     /// Brings the state from `out.synced` to `now`. With a buffer
     /// (`audio` non-empty: the run call started with room), the span is
-    /// integrated and one sample is written at `audio[*len]` per completed
-    /// window while slots remain. A window completing with none left would
-    /// be dropped, but none does: `AUDIO_BUFFER_FULL` ends the call within
-    /// one window of the last slot's end (the rest of an instruction, or
-    /// at once inside a VRAM DMA stall: `Ctx::vdma_stall`).
+    /// integrated and one sample is written at `audio[*len]` per two
+    /// completed windows while slots remain. A sample completing with
+    /// none left would be dropped, but none does: `AUDIO_BUFFER_FULL` ends
+    /// the call within one window of the last slot's end (the rest of an
+    /// instruction, or at once inside a VRAM DMA stall:
+    /// `Ctx::vdma_stall`).
     /// With an empty buffer, the channels only advance (ADR 0021 section
     /// 9). `io` is `Memory::io`, for wave RAM and for NR50/NR51 (their
     /// writes come through `sync_write`).
@@ -249,23 +308,23 @@ impl Apu {
             let k = usize::from(sp.len);
             if k == 0 {
                 // A new list: whole windows until a span says otherwise.
-                sp.segs = [SAMPLE_PERIOD as u8; BATCH];
+                sp.segs = [WINDOW as u8; BATCH];
                 sp.vol[0] = [io[0x24], io[0x25]];
             }
             // As many whole windows as are left and fit, or the rest of
             // the current window, or of the time.
-            let (n, seg) = if pos == 0 && dt >= SAMPLE_PERIOD {
-                let n = (dt >> SAMPLE_PERIOD_LOG2).min((BATCH - k) as u64);
-                (n as usize, SAMPLE_PERIOD)
+            let (n, seg) = if pos == 0 && dt >= WINDOW {
+                let n = (dt >> WINDOW_LOG2).min((BATCH - k) as u64);
+                (n as usize, WINDOW)
             } else {
-                let seg = dt.min(SAMPLE_PERIOD - pos);
+                let seg = dt.min(WINDOW - pos);
                 if let Some(s) = sp.segs.get_mut(k) {
                     *s = seg as u8;
                 }
                 (1, seg)
             };
             dt -= n as u64 * seg;
-            pos = (pos + seg) % SAMPLE_PERIOD;
+            pos = (pos + seg) % WINDOW;
             if pos == 0 {
                 sp.ends |= (((1u32 << n) - 1) << k) as u16;
             }
@@ -276,10 +335,12 @@ impl Apu {
     }
 
     /// Integrates the listed spans in every channel and mixes them into
-    /// the output, each with the NR50/NR51 weights in force over it: a
-    /// sample is written at `audio[*len]` for every span that ends its
-    /// window. The list is empty afterwards and the channels are at
-    /// `out.synced`.
+    /// the output, each with the NR50/NR51 weights in force over it. A
+    /// span that ends its window puts the window's sum in the history,
+    /// and every second one writes a sample at `audio[*len]` (`fir`). The
+    /// history is state like `acc`: the samples do not depend on where
+    /// the batches, the syncs or the caller's buffers end. The list is
+    /// empty afterwards and the channels are at `out.synced`.
     #[inline]
     fn flush(&mut self, io: &[u8; 0x80], audio: &mut [StereoSample], len: &mut usize) {
         let sp = self.spans;
@@ -302,8 +363,11 @@ impl Apu {
             }
             from = to;
         }
-        // Into the windows: a sample where a span ends one.
-        let [mut acc_l, mut acc_r] = self.out.acc;
+        // Into the windows: where a span ends one, its sum joins the
+        // history, and the second window of a sample filters it.
+        let out = &mut self.out;
+        let [mut acc_l, mut acc_r] = out.acc;
+        let mut half = out.half;
         let mut n = *len;
         let mut ends = sp.ends;
         for m in &mixed[..k] {
@@ -314,16 +378,36 @@ impl Apu {
             if !end {
                 continue;
             }
+            // `as i16`: at most `WINDOW_MAX`.
+            let sum = [acc_l as i16, acc_r as i16];
+            (acc_l, acc_r) = (0, 0);
+            if half != 1 {
+                if half == PRIME {
+                    // The stream's first window: as if the signal had
+                    // always been at this level, so a steady level is
+                    // steady from the first sample on (romtest judges
+                    // silence by "all samples equal", ADR 0021 section
+                    // 10).
+                    out.hist = [sum; 8];
+                }
+                out.hist[6] = sum;
+                half = 1;
+                continue;
+            }
+            out.hist[7] = sum;
+            half = 0;
             if let Some(slot) = audio.get_mut(n) {
                 *slot = StereoSample {
-                    left: sample(acc_l),
-                    right: sample(acc_r),
+                    left: fir(&out.hist, 0),
+                    right: fir(&out.hist, 1),
                 };
                 n += 1;
             }
-            (acc_l, acc_r) = (0, 0);
+            // The next sample's 6 earlier windows.
+            out.hist.copy_within(2.., 0);
         }
-        self.out.acc = [acc_l, acc_r];
+        out.acc = [acc_l, acc_r];
+        out.half = half;
         *len = n;
         self.spans.len = 0;
         self.spans.clocks = 0;
@@ -332,22 +416,25 @@ impl Apu {
     }
 
     /// Starts integrating: after an advance-only stretch, the window grid
-    /// restarts at `synced` with nothing accumulated.
+    /// restarts at `synced` with nothing accumulated and no history.
     #[inline]
     fn start_output(&mut self) {
         if !self.out.live {
             self.out.live = true;
             self.out.pos = 0;
             self.out.acc = [0; 2];
+            self.out.half = PRIME;
         }
     }
 
     /// At the start of a run call with `room` free slots (> 0), synced to
-    /// the call's start: the clock where the last slot's window ends (the
-    /// `AudioBuffer` deadline).
+    /// the call's start: the clock where the last slot's second window
+    /// ends (the `AudioBuffer` deadline).
     pub(crate) fn buffer_deadline(&mut self, room: usize) -> u64 {
         self.start_output();
-        let first = SAMPLE_PERIOD - u64::from(self.out.pos);
+        // Into the current sample: its first window may be done.
+        let pos = u64::from(self.out.half & 1) * WINDOW + u64::from(self.out.pos);
+        let first = SAMPLE_PERIOD - pos;
         let rest = (room as u64 - 1).saturating_mul(SAMPLE_PERIOD);
         self.out.synced.saturating_add(first).saturating_add(rest)
     }
@@ -369,11 +456,46 @@ mod tests {
     }
 
     #[test]
-    fn a_window_sum_maps_to_the_average_level_times_64() {
-        let p = SAMPLE_PERIOD as i32;
-        assert_eq!(sample(480 * p), 30_720);
-        assert_eq!(sample(-480 * p), -30_720);
-        assert_eq!(sample(p), 64);
-        assert_eq!(sample(0), 0);
+    fn steady_window_sums_map_to_the_average_level_times_64() {
+        let p = WINDOW as i16;
+        for (level, want) in [(480, 30_720), (-480, -30_720), (1, 64), (0, 0)] {
+            let hist = [[level * p, -level * p]; 8];
+            assert_eq!(fir(&hist, 0), want);
+            assert_eq!(fir(&hist, 1), -want);
+        }
+    }
+
+    /// The taps as the filter applies them, oldest window first.
+    const TAPS: [i32; 8] = [-22, -56, 131, 459, 459, 131, -56, -22];
+
+    #[test]
+    fn the_filter_weighs_each_window_by_its_tap() {
+        // One window at 1,024 and the rest at 0: its tap.
+        for (i, tap) in TAPS.iter().enumerate() {
+            let mut hist = [[0i16; 2]; 8];
+            hist[i] = [1024, -2048];
+            assert_eq!(fir(&hist, 0), *tap as i16, "window {i}");
+            assert_eq!(fir(&hist, 1), -2 * *tap as i16, "window {i}");
+        }
+    }
+
+    #[test]
+    fn the_filter_saturates_where_the_overshoot_leaves_i16() {
+        let m = WINDOW_MAX as i16;
+        // A full-scale step, three windows after it: the two negative
+        // taps still see the old level. 30,720 + 61,440 x 78 / 1,024.
+        let mut hist = [[m, -m]; 8];
+        hist[0] = [-m, m];
+        hist[1] = [-m, m];
+        assert_eq!(30_720 + 61_440 * 78 / 1024, 35_400);
+        assert_eq!(fir(&hist, 0), i16::MAX);
+        assert_eq!(fir(&hist, 1), i16::MIN);
+        // Three channels' extreme (360 of 480) never does, even in step
+        // with the taps' signs: 23,040 x 1,336 / 1,024 = 30,060.
+        let m = m / 4 * 3;
+        let hist: [[i16; 2]; 8] =
+            core::array::from_fn(|i| if TAPS[i] < 0 { [-m, m] } else { [m, -m] });
+        assert_eq!(fir(&hist, 0), 30_060);
+        assert_eq!(fir(&hist, 1), -30_060);
     }
 }

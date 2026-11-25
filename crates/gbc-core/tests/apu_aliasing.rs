@@ -1,12 +1,15 @@
 //! Aliasing of the audio output, measured (M10 review A3-1).
 //!
-//! The core decimates the 4,194,304 Hz mixed signal to 32,768 Hz with a
-//! 128-clock box filter (ADR 0021 section 8). Its gain is
-//! `|sinc(f / 32768)|`: harmonics between 16 and 30 kHz fold back into the
-//! audible band with little attenuation. These tests put numbers on that,
-//! guard them (a ratchet: any change of the output filter moves them), and
-//! `candidates` prototypes replacement filters on a clock-rate model of
-//! the same signals. Results and method: `docs/reference/audio-aliasing.md`.
+//! The core decimates the 4,194,304 Hz mixed signal to 32,768 Hz in two
+//! stages: the sum over each 64-clock window, then an 8-tap FIR that keeps
+//! every other result (ADR 0035; `FIR` here is the same kernel). Until
+//! then it was a 128-clock box filter (ADR 0021 section 8), whose gain is
+//! `|sinc(f / 32768)|`: harmonics between 16 and 30 kHz folded back into
+//! the audible band with little attenuation. These tests put numbers on
+//! what folds back, guard them (a ratchet: any change of the output filter
+//! moves them), and `candidates` compares filters on a clock-rate model
+//! of the same signals. Results and method:
+//! `docs/reference/audio-aliasing.md`.
 //!
 //! Method. Each case plays one channel alone, through register writes run
 //! by the public API (as `apu_output.rs` does), with a waveform period
@@ -103,7 +106,7 @@ impl Case {
     /// above Nyquist fold onto multiples of `r` modulo `n`; with
     /// `gcd(r, n) = 1` and `r > 1` those coincide with a true harmonic
     /// only for harmonics a multiple of `r * 32768` Hz away, where the
-    /// box filter has its nulls (and `r >= 2`). So "bin not a multiple of
+    /// 64-clock box has its nulls (and `r >= 2`). So "bin not a multiple of
     /// `r` below Nyquist" is "alias". A period that divides the sample
     /// grid (`r = 1`, e.g. a square with `2048 - f` a multiple of 4) folds
     /// every alias onto a harmonic instead: the same energy, heard as a
@@ -398,25 +401,41 @@ fn levels(samples: &[i32]) -> Vec<f64> {
     samples.iter().map(|&s| f64::from(s) / 512.0).collect()
 }
 
-/// Checks that the core's samples are the model through a 128-clock box
-/// filter, exactly (with master volume 7 a sample is 4 times the window's
-/// level sum), and returns the phase: where in the model's period the
-/// first window starts. A few levels depend on it by a fraction of a dB: a
+/// The core's second stage (ADR 0035): the taps over the last 8 window
+/// sums, oldest first, one output per two windows. They add up to 1,024.
+const FIR: [i32; 8] = [-22, -56, 131, 459, 459, 131, -56, -22];
+/// Clocks per window of the first stage.
+const WINDOW: usize = 64;
+
+/// The core's whole filter as a kernel, a tap per clock: 512 clocks.
+fn core_kernel() -> Kernel {
+    cascade(&boxcar(WINDOW), &FIR.map(f64::from), WINDOW)
+}
+
+/// Checks that the core's samples are the model through the core's
+/// filter, exactly: the sums of 8 consecutive 64-clock windows (with
+/// master volume 7, 8 times the window's level sum, which is on the
+/// sample scale), weighted by `FIR`, divided by 1,024 and rounded down.
+/// Returns the phase: where in the model's period the first sample's
+/// 512 clocks start. A few levels depend on it by a fraction of a dB: a
 /// harmonic and its mirror image, `r * 32768` Hz minus it, share a bin.
 fn phase(case: &Case, got: &[i32]) -> usize {
     let (n, _) = case.grid();
     let x = case.clocks();
-    let mut prefix = vec![0i32; x.len() + W + 1];
-    for t in 0..x.len() + W {
+    let span = FIR.len() * WINDOW;
+    let mut prefix = vec![0i32; x.len() + span + 1];
+    for t in 0..x.len() + span {
         prefix[t + 1] = prefix[t] + i32::from(x[t % x.len()]);
     }
-    let window = |t: usize| {
+    let sample = |t: usize| {
         let t = t % x.len();
-        4 * (prefix[t + W] - prefix[t])
+        let window = |k: usize| 8 * (prefix[t + (k + 1) * WINDOW] - prefix[t + k * WINDOW]);
+        let sum: i32 = (0..FIR.len()).map(|k| FIR[k] * window(k)).sum();
+        sum >> 10
     };
-    let phase = (0..case.period()).find(|&o| (0..n).all(|i| window(o + i * W) == got[i]));
+    let phase = (0..case.period()).find(|&o| (0..n).all(|i| sample(o + i * W) == got[i]));
     let Some(phase) = phase else {
-        panic!("{}: the output is not the box-filtered model", case.name)
+        panic!("{}: the output is not the filtered model", case.name)
     };
     phase
 }
@@ -473,48 +492,48 @@ fn row(name: &str, f0: f64, a: &Alias) -> String {
 const INF: f64 = f64::INFINITY;
 const CURRENT: [(f64, f64); 39] = [
     // Square, 50% duty, `SQUARE_PERIODS` in order.
-    (-34.43, -28.91),
-    (-28.86, -25.73),
-    (-26.90, -24.75),
-    (-24.37, -23.30),
-    (-22.73, -22.21),
-    (-21.04, -20.91),
-    (-13.84, -13.63),
-    (-22.14, -20.83),
-    (-31.19, -28.01),
-    (-23.48, -23.20),
-    (-5.29, INF),
-    (-12.71, INF),
-    (-13.61, INF),
+    (-37.64, -34.64),
+    (-32.57, -31.48),
+    (-31.31, -30.87),
+    (-30.45, -30.27),
+    (-30.16, -29.84),
+    (-31.86, -30.46),
+    (-17.66, -17.54),
+    (-37.07, -33.63),
+    (-33.65, -32.54),
+    (-34.75, -32.39),
+    (-11.36, INF),
+    (-28.90, INF),
+    (-26.28, INF),
     (INF, INF),
     // Square, 12.5% duty.
-    (-27.68, -25.28),
-    (-23.48, -22.53),
-    (-19.48, -22.16),
-    (-21.85, -21.67),
-    (-14.53, -18.62),
-    (-8.12, -10.84),
-    (-6.43, -8.10),
-    (-5.47, -4.90),
-    (-10.32, -9.38),
-    (-17.80, -15.45),
-    (-5.64, INF),
-    (-12.66, INF),
-    (-11.82, INF),
+    (-32.25, -31.30),
+    (-29.66, -29.47),
+    (-23.89, -27.94),
+    (-30.80, -32.37),
+    (-17.92, -22.54),
+    (-11.72, -15.40),
+    (-10.25, -12.85),
+    (-9.77, -9.68),
+    (-22.57, -20.93),
+    (-29.58, -26.80),
+    (-11.72, INF),
+    (-14.94, INF),
+    (-24.48, INF),
     (INF, INF),
     // Wave.
-    (-22.26, -20.49),
-    (-16.57, -16.42),
-    (-16.49, -16.25),
-    (-5.61, INF),
-    (-22.08, -22.23),
+    (-25.86, -26.28),
+    (-20.86, -22.00),
+    (-20.09, -21.10),
+    (-11.69, INF),
+    (-34.75, -34.43),
     (INF, INF),
     // Noise: 7-bit at 524, 262, 131 and 65 kHz, then 15-bit.
-    (-4.02, -4.85),
-    (-4.10, -6.62),
-    (-4.46, -8.52),
-    (-3.06, -6.92),
-    (INF, -7.06),
+    (-7.17, -9.34),
+    (-7.25, -11.85),
+    (-7.61, -14.88),
+    (-6.21, -14.15),
+    (INF, -12.27),
 ];
 
 const TOLERANCE_DB: f64 = 0.05;
@@ -528,7 +547,7 @@ fn close(got: f64, want: f64) -> bool {
 }
 
 #[test]
-fn box_filter_alias_levels() {
+fn box64_fir8_alias_levels() {
     let cases = cases();
     assert_eq!(cases.len(), CURRENT.len());
     println!(
@@ -553,7 +572,8 @@ fn box_filter_alias_levels() {
 fn kernels() -> Vec<(&'static str, Kernel)> {
     let b32 = boxcar(32);
     vec![
-        ("box128 (current)", boxcar(128)),
+        ("box128 (until ADR 0035)", boxcar(128)),
+        ("box64 + 8-tap, 10-bit taps (the core)", core_kernel()),
         (
             "box64 + [1,2,1]",
             cascade(&boxcar(64), &[1.0, 2.0, 1.0], 64),
@@ -597,8 +617,9 @@ fn kernels() -> Vec<(&'static str, Kernel)> {
 }
 
 /// Prints the candidate comparison (`cargo test -p gbc-core --release
-/// --test apu_aliasing -- --ignored --nocapture`). Not a check: the
-/// candidates are prototypes, nothing in the core implements them.
+/// --test apu_aliasing -- --ignored --nocapture`). Not a check: but for
+/// the core's own row, the candidates are prototypes that nothing in the
+/// core implements.
 #[test]
 #[ignore = "report only; slow without --release"]
 fn candidates() {
@@ -664,11 +685,15 @@ fn candidates() {
 }
 
 /// The model reproduces the core: every case's samples are the model's
-/// through the 128-clock box, exactly (`phase`), and `filter` with that
-/// box measures the same. So the candidates' numbers, which come from the
-/// model, are comparable with the measured ones.
+/// through the core's filter in integers, exactly (`phase`), and `filter`
+/// with the same kernel in floats gives those samples but for the
+/// fraction the core's rounding down drops (under one unit of the sample
+/// scale), and measures the same. So the candidates' numbers, which come
+/// from the model, are comparable with the measured ones.
 #[test]
 fn model_matches_the_core() {
+    let kernel = core_kernel();
+    assert_eq!(kernel.len(), 512);
     for case in cases() {
         let got = core_samples(&case);
         let phase = phase(&case, &got);
@@ -676,15 +701,34 @@ fn model_matches_the_core() {
         if case.steps.len() > 1000 {
             continue;
         }
+        let exact = filter(&case, &kernel, phase);
+        for (i, (&g, &e)) in got.iter().zip(&exact).enumerate() {
+            let dropped = e * 512.0 - f64::from(g);
+            assert!(
+                (-1e-6..1.0).contains(&dropped),
+                "{} sample {i}: {g} vs {}",
+                case.name,
+                e * 512.0
+            );
+        }
         let core = measure(&case, &levels(&got));
-        let model = measure(&case, &filter(&case, &boxcar(128), phase));
-        for (a, b) in [
-            (core.worst, model.worst),
-            (core.worst_mid, model.worst_mid),
-            (core.energy, model.energy),
-            (core.droop, model.droop),
-        ] {
-            assert!((a - b).abs() < 1e-6 || a == b, "{}: {a} vs {b}", case.name);
+        let model = measure(&case, &exact);
+        // The dropped fractions are a signal of their own, under one unit
+        // of the sample scale (1 / 512 of a level) at every sample, so
+        // under twice that in any DFT bin. A bin at `a` dBc can differ
+        // from the model's by that much and no more.
+        let fund = case.ideal(1);
+        for (a, b) in [(core.worst, model.worst), (core.worst_mid, model.worst_mid)] {
+            let bins = |x: f64| fund * 10f64.powf(x / 20.0);
+            assert!(
+                (bins(a) - bins(b)).abs() < 2.0 / 512.0 || a == b,
+                "{}: {a} vs {b}",
+                case.name
+            );
+        }
+        // Sums over all bins, and a harmonic against the ideal one.
+        for (a, b) in [(core.energy, model.energy), (core.droop, model.droop)] {
+            assert!((a - b).abs() < 0.01 || a == b, "{}: {a} vs {b}", case.name);
         }
     }
 }

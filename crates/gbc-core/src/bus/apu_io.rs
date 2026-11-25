@@ -556,16 +556,24 @@ mod tests {
             left: 5760,
             right: 5760,
         };
-        // f = 2044: one duty period per 128-clock window, every window.
-        assert!(ch2_tone(2044, 2, 20).iter().all(|&s| s == want));
-        // f = 2047: four whole periods per window (the closed-form path).
-        assert!(ch2_tone(2047, 2, 20).iter().all(|&s| s == want));
-        // f = 2016: one step per window; eight windows are one period.
+        // The output filter spans 4 samples (512 clocks): 2 samples for
+        // the writes and the trigger, 4 more until it holds the tone only.
+        // f = 2044: one duty period per sample (128 clocks), every sample.
+        // The period is two 64-clock windows, whose sums differ, but the
+        // filter's taps at the even and at the odd windows add up to the
+        // same (512 each): the average, exactly.
+        assert!(ch2_tone(2044, 6, 20).iter().all(|&s| s == want));
+        // f = 2047: two whole periods per window (the closed-form path).
+        assert!(ch2_tone(2047, 6, 20).iter().all(|&s| s == want));
+        // f = 2016: one step per sample; eight samples are one period.
+        // The filter's gain is 1 at DC, so a period still averages 5760:
+        // its sum is 8 x 5760 less the fractions each sample's rounding
+        // down drops (under 1 each).
         let tone = ch2_tone(2016, 10, 32);
         assert!(tone.iter().any(|&s| s != want));
         for period in tone.chunks(8) {
             let sum: i32 = period.iter().map(|s| i32::from(s.left)).sum();
-            assert_eq!(sum, 8 * 5760);
+            assert!((8 * 5760 - 7..=8 * 5760).contains(&sum), "{sum}");
         }
     }
 

@@ -9,17 +9,23 @@
 //! the `StereoSample` stream, and compares it with what Pan Docs says the
 //! hardware produces. No expectation here comes from the implementation;
 //! the only core facts used are the public contract of `StereoSample`
-//! (rate 32,768 Hz = one sample per 128 clocks, box-filtered; 64 per unit
-//! of mixed level; DC kept).
+//! (rate 32,768 Hz = one sample per 128 clocks; a low-pass filter over
+//! the 512 clocks that end with the sample, with a gain of 1 at DC; 64
+//! per unit of mixed level; DC kept; saturation at the ends of `i16`).
 //!
 //! Pan Docs sources: "Audio Registers" (FF10-FF26, FF30-FF3F) and "Audio
 //! details" (DACs, mixer, frame sequencer, LFSR).
 //!
-//! Exactness: a sample is the exact average over its window times 64. With
-//! NR50 = 0x77 the per-side factor is 8, so every window sum is even and
-//! the samples are exact integers: most checks below are equalities. The
-//! box filter only blurs the one or two samples that contain an edge;
-//! where a check counts samples, its tolerance is those edge samples.
+//! Exactness: a sample depends on the 512 clocks (`FILTER` = 4 samples)
+//! that end with it and on nothing else. Where the signal holds one level
+//! that long, the sample is that level times 64, exactly: the checks of
+//! levels below are equalities on such samples (`held`). The up to 4
+//! samples whose 512 clocks contain an edge ring around it: they
+//! overshoot the levels on both sides (by up to 7.6% of the step) and
+//! each is rounded down, by less than 1. So `extremes` of a stream with
+//! edges are not its levels, a sum over whole periods is exact but for
+//! what the rounding drops (the gain is 1 at DC), and where a check
+//! counts samples, its tolerance is those edge samples.
 
 use gbc_core::{
     AUDIO_SAMPLE_CLOCKS, AUDIO_SAMPLE_RATE, CLOCK_HZ, Config, Emulator, Frame, Memory,
@@ -38,6 +44,10 @@ const TOP: i32 = 15 * UNIT;
 /// period after a trigger differs (Pan Docs: a square starts at digital 0,
 /// the wave channel replays its old sample buffer).
 const SETTLE: usize = 1024;
+
+/// The output filter's length in samples: a sample depends on the 512
+/// clocks that end with it (`StereoSample`).
+const FILTER: usize = 4;
 
 type Prog = Vec<(u8, u8)>;
 
@@ -70,8 +80,10 @@ fn render(prog: &[(u8, u8)], n: usize) -> Vec<StereoSample> {
             .is_none()
     );
     let mut frame: Box<Frame> = Box::new([WHITE; 160 * 144]);
-    // JP (16 clocks) and the writes, rounded up to whole samples, plus one.
-    let skip = (16 + 20 * (prog.len() + 2)).div_ceil(AUDIO_SAMPLE_CLOCKS as usize) + 1;
+    // JP (16 clocks) and the writes, rounded up to whole samples, plus one
+    // and the filter's memory: the samples returned depend on nothing
+    // before the last write.
+    let skip = (16 + 20 * (prog.len() + 2)).div_ceil(AUDIO_SAMPLE_CLOCKS as usize) + FILTER;
     let mut out = Vec::with_capacity(skip + n + 4096);
     let mut buf = vec![StereoSample::default(); 4096];
     while out.len() < skip + n {
@@ -157,7 +169,7 @@ fn min_period(s: &[i32], max: usize) -> Option<usize> {
 }
 
 /// Upward crossings of the midpoint between the extremes: one per cycle
-/// of a two-level wave, however the box filter blurs the edges.
+/// of a two-level wave, however the filter blurs the edges.
 fn cycles(s: &[i32]) -> usize {
     let (lo, hi) = (s.iter().min().unwrap(), s.iter().max().unwrap());
     let mid = (lo + hi) / 2;
@@ -166,6 +178,24 @@ fn cycles(s: &[i32]) -> usize {
 
 fn extremes(s: &[i32]) -> (i32, i32) {
     (*s.iter().min().unwrap(), *s.iter().max().unwrap())
+}
+
+/// The levels the stream holds, in order: the value of every maximal run
+/// of `FILTER` or more equal samples. A level held for 8 samples or more
+/// always shows as such a run (at least 4 of them have their 512 clocks
+/// inside it); the samples around an edge ring and do not repeat.
+fn plateaus(s: &[i32]) -> Vec<i32> {
+    s.chunk_by(|a, b| a == b)
+        .filter(|run| run.len() >= FILTER)
+        .map(|run| run[0])
+        .collect()
+}
+
+/// The lowest and the highest level the stream holds (`plateaus`).
+fn held(s: &[i32]) -> (i32, i32) {
+    let p = plateaus(s);
+    assert!(!p.is_empty(), "no level is held");
+    extremes(&p)
 }
 
 #[test]
@@ -212,18 +242,25 @@ fn square_duty_is_the_fraction_of_the_cycle_at_the_high_input() {
             let pan = if ch == 1 { 0x11 } else { 0x22 };
             let prog = cat(&[master(pan), square(ch, duty, 0xF0, 1024)]);
             let s = mono(&render(&prog, SETTLE + 16 * CYCLE))[SETTLE..].to_vec();
-            assert_eq!(extremes(&s), (-TOP, TOP));
-            // An edge inside a sample window blurs that one sample; two
-            // edges per cycle, so the count is within 2 samples per cycle
-            // (0.8%, against 12.5% between neighbouring duties).
+            assert_eq!(held(&s), (-TOP, TOP));
+            // The filter passes through the midpoint once per edge, in
+            // one sample; two edges per cycle, so the count is within 2
+            // samples per cycle (0.8%, against 12.5% between neighbouring
+            // duties).
             let low = s.iter().filter(|&&x| x < 0).count();
             let want = 16 * CYCLE * eighths / 8;
             assert!(low.abs_diff(want) <= 2 * 16, "CH{ch} duty {duty}: {low}");
-            // The box filter is an exact average, so over whole cycles the
-            // mean has no such error: `+15 - 30 * duty` units.
+            // The filter's gain is 1 at DC, so over whole cycles the mean
+            // has no such error: `+15 - 30 * duty` units, less what the
+            // rounding down drops, under 1 in each of the up to 4 samples
+            // around each of the 32 edges.
             let sum: i32 = s.iter().sum();
             let want = (16 * CYCLE) as i32 * UNIT * (15 * 8 - 30 * eighths as i32) / 8;
-            assert_eq!(sum, want, "CH{ch} duty {duty}");
+            let dropped = want - sum;
+            assert!(
+                (0..(4 * 32)).contains(&dropped),
+                "CH{ch} duty {duty}: {sum}"
+            );
         }
     }
 }
@@ -238,19 +275,22 @@ fn square_amplitude_is_proportional_to_the_volume() {
             let prog = cat(&[master(pan), square(ch, 2, vol << 4, 1792)]);
             let s = mono(&render(&prog, SETTLE + 512))[SETTLE..].to_vec();
             let want = (TOP - 2 * i32::from(vol) * UNIT, TOP);
-            assert_eq!(extremes(&s), want, "CH{ch} volume {vol}");
+            assert_eq!(held(&s), want, "CH{ch} volume {vol}");
         }
     }
 }
 
-/// The volume a square at f = 2016 (8 samples per cycle) shows in each
-/// cycle: the low extreme is `15 - 2 * v` units.
+/// The volume a square at f = 1792 (64 samples per cycle) shows in each
+/// cycle: the low level held is `15 - 2 * v` units. (Half a cycle is 32
+/// samples, of which the 28 clear of the edges are exact: enough for a
+/// run of `FILTER` wherever the 64 samples start and wherever the volume
+/// steps.)
 fn volumes(s: &[i32]) -> Vec<i32> {
-    s.as_chunks::<8>()
+    s.as_chunks::<64>()
         .0
         .iter()
         .map(|c| {
-            let (lo, hi) = extremes(c);
+            let (lo, hi) = held(c);
             assert!(hi == TOP, "digital 0 in every cycle");
             assert_eq!((TOP - lo) % (2 * UNIT), 0);
             (TOP - lo) / (2 * UNIT)
@@ -267,10 +307,10 @@ fn the_envelope_steps_once_per_pace_64ths_of_a_second() {
         let (start, up) = (i32::from(nrx2 >> 4), nrx2 & 8 != 0);
         let steps = if up { 15 - start } else { start } as usize;
         let pan = if ch == 1 { 0x11 } else { 0x22 };
-        let prog = cat(&[master(pan), square(ch, 2, nrx2, 2016)]);
+        let prog = cat(&[master(pan), square(ch, 2, nrx2, 1792)]);
         let s = mono(&render(&prog, (steps + 3) * pace * TICK));
         let v = volumes(&s);
-        // Where the volume changes, in cycles (8 samples).
+        // Where the volume changes, in cycles (64 samples).
         let changes: Vec<usize> = (1..v.len()).filter(|&i| v[i] != v[i - 1]).collect();
         assert_eq!(changes.len(), steps, "NRx2={nrx2:#04x}: stops at the end");
         for (k, &i) in changes.iter().enumerate() {
@@ -278,11 +318,12 @@ fn the_envelope_steps_once_per_pace_64ths_of_a_second() {
             assert_eq!(v[i], start + step * (k as i32 + 1), "NRx2={nrx2:#04x}");
         }
         // The first step is at most one pace after the trigger; the rest
-        // are exactly one pace apart, to the 8-sample cycle.
-        assert!(changes[0] * 8 <= pace * TICK + 8, "NRx2={nrx2:#04x}");
+        // are exactly one pace apart, to the 64-sample cycle (an eighth
+        // of the shortest pace).
+        assert!(changes[0] * 64 <= pace * TICK + 64, "NRx2={nrx2:#04x}");
         for w in changes.windows(2) {
-            let gap = (w[1] - w[0]) * 8;
-            assert!(gap.abs_diff(pace * TICK) <= 8, "NRx2={nrx2:#04x}: {gap}");
+            let gap = (w[1] - w[0]) * 64;
+            assert!(gap.abs_diff(pace * TICK) <= 64, "NRx2={nrx2:#04x}: {gap}");
         }
     }
 }
@@ -292,7 +333,7 @@ fn each_channel() -> [Prog; 4] {
     [
         square(1, 2, 0xF0, 1792),
         square(2, 1, 0xF0, 1923),
-        wave(&RAMP, 1, 1792),
+        wave(&RAMP, 1, 1536),
         noise(0xF0, 0x31),
     ]
 }
@@ -304,12 +345,12 @@ fn nr51_routes_each_channel_to_its_side_only() {
     for (i, ch) in each_channel().iter().enumerate() {
         let s = render(&cat(&[master(0x10 << i), ch.clone()]), SETTLE + 512);
         let (l, r) = (left(&s[SETTLE..]), right(&s[SETTLE..]));
-        assert_eq!(extremes(&l), (-TOP, TOP), "CH{} plays on the left", i + 1);
+        assert_eq!(held(&l), (-TOP, TOP), "CH{} plays on the left", i + 1);
         assert_eq!(extremes(&r), (0, 0), "CH{} silent on the right", i + 1);
         let s = render(&cat(&[master(0x01 << i), ch.clone()]), SETTLE + 512);
         let (l, r) = (left(&s[SETTLE..]), right(&s[SETTLE..]));
         assert_eq!(extremes(&l), (0, 0), "CH{} silent on the left", i + 1);
-        assert_eq!(extremes(&r), (-TOP, TOP), "CH{} plays on the right", i + 1);
+        assert_eq!(held(&r), (-TOP, TOP), "CH{} plays on the right", i + 1);
     }
 }
 
@@ -325,8 +366,8 @@ fn nr50_scales_each_side_by_its_volume_plus_one() {
             let s = render(&prog, SETTLE + 512);
             let (l, r) = (i32::from(l), i32::from(r));
             let want = |v: i32| (-15 * 64 * (v + 1), 15 * 64 * (v + 1));
-            assert_eq!(extremes(&left(&s[SETTLE..])), want(l), "NR50={nr50:#04x}");
-            assert_eq!(extremes(&right(&s[SETTLE..])), want(r), "NR50={nr50:#04x}");
+            assert_eq!(held(&left(&s[SETTLE..])), want(l), "NR50={nr50:#04x}");
+            assert_eq!(held(&right(&s[SETTLE..])), want(r), "NR50={nr50:#04x}");
         }
     }
 }
@@ -337,29 +378,26 @@ fn nr50_scales_each_side_by_its_volume_plus_one() {
 /// a falling analog one (DAC slope).
 #[test]
 fn a_wave_ram_ramp_plays_as_a_falling_ramp_at_65536_over_2048_minus_f() {
-    // f = 1792: 4 output samples per wave sample, 128 per waveform; the
-    // ramp repeats twice in wave RAM, so the stream repeats every 64.
+    // f = 1536: 8 output samples per wave sample, 256 per waveform; the
+    // ramp repeats twice in wave RAM, so the stream repeats every 128.
     let s = mono(&render(
-        &cat(&[master(0x44), wave(&RAMP, 1, 1792)]),
+        &cat(&[master(0x44), wave(&RAMP, 1, 1536)]),
         SETTLE + 4096,
     ));
     let s = &s[SETTLE..];
-    assert_eq!(min_period(s, 256), Some(64));
-    assert_eq!(extremes(s), (-TOP, TOP));
-    // Every level of the ramp is held for a whole sample.
-    for d in 0..16 {
-        assert!(s.contains(&(TOP - 2 * d * UNIT)), "digital {d}");
+    assert_eq!(min_period(s, 512), Some(128));
+    // Every level of the ramp is held (8 samples, at least 4 of them
+    // clear of the steps), and it falls: each level is one digital step
+    // (2 units) below the one before, down to digital 15, from where it
+    // jumps back up to digital 0.
+    let levels = plateaus(s);
+    assert_eq!(extremes(&levels), (-TOP, TOP));
+    for w in levels.windows(2) {
+        let wraps = w == [-TOP, TOP];
+        assert!(w[1] == w[0] - 2 * UNIT || wraps, "{} then {}", w[0], w[1]);
     }
-    // It falls: 15 steps down per 64 samples and one jump back up. An edge
-    // inside a window splits a step over two samples.
-    let up = s.windows(2).filter(|w| w[1] > w[0]).count();
-    let down = s.windows(2).filter(|w| w[1] < w[0]).count();
-    let ramps = s.len() / 64;
-    assert!((ramps - 1..=2 * ramps).contains(&up), "{up} rises");
-    assert!(
-        (15 * (ramps - 1)..=30 * ramps).contains(&down),
-        "{down} falls"
-    );
+    let ramps = s.len() / 128;
+    assert!((16 * (ramps - 1)..=16 * ramps).contains(&levels.len()));
     // The frequency, with a 32-sample ramp so the waveform is one cycle:
     // f = 1792 is 128 samples, f = 1798 (262.144 Hz) is 125, f = 1984 is 32.
     for (f, period) in [(1792, 128), (1798, 125), (1984, 32)] {
@@ -382,13 +420,15 @@ fn a_wave_ram_ramp_plays_as_a_falling_ramp_at_65536_over_2048_minus_f() {
 #[test]
 fn nr32_shifts_the_wave_samples() {
     for (code, top_digital) in [(0, 0), (1, 15), (2, 7), (3, 3)] {
-        let prog = cat(&[master(0x44), wave(&RAMP, code, 1792)]);
+        // f = 1536: 8 output samples per wave sample.
+        let prog = cat(&[master(0x44), wave(&RAMP, code, 1536)]);
         let s = mono(&render(&prog, SETTLE + 512))[SETTLE..].to_vec();
         let want = (TOP - 2 * top_digital * UNIT, TOP);
-        assert_eq!(extremes(&s), want, "NR32 code {code}");
-        // The shifted ramp has `top + 1` levels, each held a whole sample.
+        assert_eq!(held(&s), want, "NR32 code {code}");
+        // The shifted ramp has `top + 1` levels, each of them held.
+        let levels = plateaus(&s);
         for d in 0..=top_digital {
-            assert!(s.contains(&(TOP - 2 * d * UNIT)), "code {code}: {d}");
+            assert!(levels.contains(&(TOP - 2 * d * UNIT)), "code {code}: {d}");
         }
     }
 }
@@ -403,8 +443,8 @@ fn noise_repeats_every_127_or_32767_lfsr_steps() {
     // r = 1, s = 3: 128 clocks per step, one output sample.
     let s = mono(&render(&cat(&[master(0x88), noise(0xF0, 0x39)]), 4 * 127));
     assert_eq!(min_period(&s, 2 * 127), Some(127), "7-bit");
-    assert_eq!(extremes(&s), (-TOP, TOP));
-    // r = 1, s = 4 and r = 2, s = 3: 256 clocks per step.
+    // r = 1, s = 4 and r = 2, s = 3: 256 clocks per step. Both levels are
+    // held: the sequence has runs of 6 and 7 equal bits (12, 14 samples).
     for nr43 in [0x49, 0x3A] {
         let s = mono(&render(&cat(&[master(0x88), noise(0xF0, nr43)]), 4 * 254));
         assert_eq!(
@@ -412,6 +452,7 @@ fn noise_repeats_every_127_or_32767_lfsr_steps() {
             Some(254),
             "7-bit, NR43={nr43:#04x}"
         );
+        assert_eq!(held(&s), (-TOP, TOP), "7-bit, NR43={nr43:#04x}");
     }
     // 15-bit: 32,767 = 7 * 31 * 151 samples and no divisor of it.
     let s = mono(&render(
@@ -422,7 +463,7 @@ fn noise_repeats_every_127_or_32767_lfsr_steps() {
     for p in [32_767 / 7, 32_767 / 31, 32_767 / 151] {
         assert!(s[p..] != s[..s.len() - p], "15-bit: repeats every {p}");
     }
-    assert_eq!(extremes(&s), (-TOP, TOP));
+    assert_eq!(held(&s), (-TOP, TOP));
 }
 
 /// Pan Docs: the channel's DAC input is the volume while LFSR bit 0 is
@@ -430,12 +471,14 @@ fn noise_repeats_every_127_or_32767_lfsr_steps() {
 /// so bit 0 is set in 63 of them and clear in 64: over one period the
 /// output averages `(64 * 15 + 63 * (15 - 30)) / 127` units, slightly
 /// positive. (The inverted bit sense would give the same magnitude,
-/// negative.)
+/// negative.) The filter's gain is 1 at DC, so the samples of a period
+/// add up to that, less what rounding each of them down drops (under 1).
 #[test]
 fn noise_output_is_high_while_lfsr_bit_0_is_set() {
     let s = mono(&render(&cat(&[master(0x88), noise(0xF0, 0x39)]), 4 * 127));
     for period in s.as_chunks::<127>().0 {
-        assert_eq!(period.iter().sum::<i32>(), 15 * UNIT);
+        let dropped = 15 * UNIT - period.iter().sum::<i32>();
+        assert!((0..127).contains(&dropped), "{dropped}");
     }
 }
 
@@ -453,13 +496,15 @@ fn polarity_a_high_dac_input_is_negative_and_an_idle_dac_is_positive_dc() {
     // (digital 15) 1/8 of it.
     let prog = cat(&[master(0x22), square(2, 0, 0xF0, 1024)]);
     let s = mono(&render(&prog, SETTLE + 4096))[SETTLE..].to_vec();
+    // 16 cycles: 32 edges, each in the 512 clocks of at most 4 samples.
     let at = |level: i32| s.iter().filter(|&&x| x == level).count();
-    assert!(at(TOP) >= 4096 * 7 / 8 - 32, "{} at the top", at(TOP));
+    assert!(at(TOP) >= 4096 * 7 / 8 - 4 * 32, "{} at the top", at(TOP));
     assert!(
-        (4096 / 8 - 32..=4096 / 8).contains(&at(-TOP)),
+        (4096 / 8 - 4 * 32..=4096 / 8).contains(&at(-TOP)),
         "{}",
         at(-TOP)
     );
+    assert!(at(TOP) + at(-TOP) >= 4096 - 4 * 32);
     // The wave channel's DAC (NR30 bit 7) likewise.
     let s = mono(&render(&cat(&[master(0x44), vec![(0x1A, 0x80)]]), 256));
     assert_eq!(extremes(&s), (TOP, TOP), "idle wave DAC");
@@ -481,7 +526,11 @@ fn polarity_a_high_dac_input_is_negative_and_an_idle_dac_is_positive_dc() {
 /// Pan Docs "Mixer": each side is the sum of the DAC outputs routed to
 /// it. Four programs that each play one channel (the other three DACs
 /// off) and one that plays all four have the same timing, so the last
-/// stream is the sample-by-sample sum of the others.
+/// stream is the sample-by-sample sum of the others: the output filter is
+/// linear, but for the rounding down of each sample (the sum of `n`
+/// rounded samples is up to `n - 1` below the rounded sum) and the
+/// saturation at the ends of `i16`, which the ringing of four channels
+/// at full volume can reach.
 #[test]
 fn the_mixer_adds_the_channels() {
     let all = each_channel();
@@ -508,15 +557,21 @@ fn the_mixer_adds_the_channels() {
         .map(|i| run(core::array::from_fn(|j| j == i)))
         .collect();
     for (i, s) in solo.iter().enumerate() {
-        assert_eq!(extremes(&s[SETTLE..]), (-TOP, TOP), "CH{} alone", i + 1);
+        assert_eq!(held(&s[SETTLE..]), (-TOP, TOP), "CH{} alone", i + 1);
     }
     let pair = run([true, true, false, false]);
     let mix = run([true; 4]);
+    let sat = |x: i32| x.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+    let mut exact = 0;
     for k in 0..n {
-        assert_eq!(pair[k], solo[0][k] + solo[1][k], "sample {k}");
+        let sum = solo[0][k] + solo[1][k];
+        assert!((sum..=sum + 1).contains(&pair[k]), "sample {k}");
         let sum: i32 = solo.iter().map(|s| s[k]).sum();
-        assert_eq!(mix[k], sum, "sample {k}");
+        assert!((sat(sum)..=sat(sum + 3)).contains(&mix[k]), "sample {k}");
+        exact += usize::from(mix[k] == sum);
     }
+    // Most samples are clear of every channel's edges: exact sums.
+    assert!(exact > n / 4, "{exact} exact");
     // Four idle DACs at full master volume are the documented full scale.
     let idle = [(0x12, 0xF0), (0x17, 0xF0), (0x1A, 0x80), (0x21, 0xF0)];
     let s = mono(&render(&cat(&[master(0xFF), idle.to_vec()]), 64));
@@ -563,9 +618,16 @@ fn after_a_dc_blocker_the_signal_reaches_twice_full_scale() {
     prog.extend(parts.iter().map(|part| part[part.len() - 1]));
     let s = mono(&render(&prog, 110));
     let full = 4 * TOP;
-    assert_eq!(extremes(&s), (-full, full), "both ends of the scale");
-    assert!(s[..56].iter().all(|&x| x == full), "+full scale first");
-    assert!(s[64..].iter().all(|&x| x == -full), "then -full scale");
+    assert_eq!(held(&s), (-full, full), "both ends of the scale");
+    // `render` drops 3 more samples than a filter without memory needs,
+    // so everything is 3 samples earlier in `s`; the filter makes the
+    // drop 3 samples longer.
+    assert!(s[..53].iter().all(|&x| x == full), "+full scale first");
+    assert!(s[64..107].iter().all(|&x| x == -full), "then -full scale");
+    // The core's filter rings around the drop, past the steady full
+    // scale on both sides.
+    let (lo, hi) = extremes(&s);
+    assert!(lo < -full && hi > full, "{lo}, {hi}");
     let charge = 0.998943_f64.powi(AUDIO_SAMPLE_CLOCKS as i32);
     let mut cap = 0.0;
     let low = s
@@ -577,6 +639,6 @@ fn after_a_dc_blocker_the_signal_reaches_twice_full_scale() {
         })
         .fold(0.0, f64::min);
     assert!(low < -50_000.0, "{low}");
-    assert!(low >= -2.0 * f64::from(full), "{low}");
+    assert!(low >= f64::from(lo - hi), "{low}");
     assert!(low < f64::from(i16::MIN), "does not fit in i16");
 }

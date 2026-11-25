@@ -223,15 +223,15 @@ pub const CLOCK_HZ: u32 = 4_194_304;
 pub const FRAME_CLOCKS: u32 = 70_224;
 
 /// Audio output rate: 32,768 Hz stereo, in both CPU speeds (ADR 0021).
-/// Each sample is the average of the mixed signal over its
-/// [`AUDIO_SAMPLE_CLOCKS`]-clock window, with DC kept: resampling to a
-/// device rate and the DC-blocking high-pass filter are the front end's
-/// job. A run call of `n` clocks completes at most `n / 128 + 2` samples
-/// (the partial window carried in from the last call and the overshoot
-/// past the target can each complete one more), so a buffer that size
-/// never fills; [`run_frame`](Emulator::run_frame) needs 550. Sample scale
-/// and the headroom the high-pass filter needs (its output reaches
-/// ±61,440, beyond `i16`): see [`StereoSample`].
+/// One sample per [`AUDIO_SAMPLE_CLOCKS`] clocks: the mixed signal
+/// low-pass filtered (ADR 0035), with DC kept: resampling to a device
+/// rate and the DC-blocking high-pass filter are the front end's job. A
+/// run call of `n` clocks completes at most `n / 128 + 2` samples (the
+/// partial sample carried in from the last call and the overshoot past
+/// the target can each complete one more), so a buffer that size never
+/// fills; [`run_frame`](Emulator::run_frame) needs 550. Sample scale, the
+/// filter and the headroom the high-pass filter needs (its output
+/// reaches ±65,535, beyond `i16`): see [`StereoSample`].
 pub const AUDIO_SAMPLE_RATE: u32 = CLOCK_HZ >> apu::SAMPLE_PERIOD_LOG2;
 
 /// Base clocks per audio sample (128).

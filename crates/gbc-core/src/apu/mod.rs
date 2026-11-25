@@ -32,34 +32,45 @@ use square::{Square, Sweep};
 use wave::Wave;
 
 /// One stereo output sample, written by the core into the caller's audio
-/// buffer at [`AUDIO_SAMPLE_RATE`](crate::AUDIO_SAMPLE_RATE): the average
-/// of the mixed signal over its
-/// [`AUDIO_SAMPLE_CLOCKS`](crate::AUDIO_SAMPLE_CLOCKS)-clock window (a box
-/// filter).
+/// buffer at [`AUDIO_SAMPLE_RATE`](crate::AUDIO_SAMPLE_RATE), one per
+/// [`AUDIO_SAMPLE_CLOCKS`](crate::AUDIO_SAMPLE_CLOCKS) clocks: the mixed
+/// signal low-pass filtered and decimated. The filter (ADR 0035) is the
+/// sum over each 64-clock window followed by an 8-tap FIR at 65,536 Hz,
+/// 512 clocks in all, ending where the sample's 128 clocks end: 0 dB at
+/// DC, -0.3 dB at 8.7 kHz, -4.5 dB at 14.6 kHz, linear phase.
 ///
 /// Scale: 64 per unit of mixed level, the sum of the panned channels'
-/// analog levels (each -15..=15) times the side's NR50 volume plus 1. Full
-/// scale is therefore ±30,720 (4 channels x 15 x 8 x 64), with no
-/// clamping. DC is kept (a silent but powered DAC is a constant, not 0):
-/// the DC-blocking high-pass filter and resampling to the device rate are
-/// the front end's job.
+/// analog levels (each -15..=15) times the side's NR50 volume plus 1. A
+/// steady level is exact, so the steady full scale is ±30,720 (4
+/// channels x 15 x 8 x 64). DC is kept (a silent but powered DAC is a
+/// constant, not 0): the DC-blocking high-pass filter and resampling to
+/// the device rate are the front end's job.
 ///
 /// # Headroom
 ///
-/// Each side lies in `-M..=M` with `M = 960 * n * (v + 1)`, for `n`
-/// channels panned to it with their DACs on and NR50 volume `v`: at most
-/// 30,720. Both ends are reached, and not symmetrically in time: four
+/// The mixed level of a side lies in `-M..=M` with `M = 960 * n * (v +
+/// 1)`, for `n` channels panned to it with their DACs on and NR50 volume
+/// `v`: at most 30,720. The filter rings around an edge: a step
+/// overshoots by up to 7.6% of its height on both sides (2.1% before
+/// it), and the samples can reach 1.30 `M` for a signal that alternates
+/// in step with the filter's taps. Above 81% of the full scale that would
+/// leave `i16`: the samples saturate at -32,768 and 32,767 (four channels
+/// at master volume 7 stepping between the extremes; three channels
+/// cannot get there).
+///
+/// Both ends are reached, and not symmetrically in time: four
 /// idle DACs are a constant +30,720 and four channels at digital 15 are
 /// -30,720. A DC-blocking high-pass outputs the input less a weighted
 /// average of earlier inputs, so its output is bounded by the input's
-/// whole range, `2 * M`: **up to ±61,440, twice the core's full scale**,
-/// approached whenever the mix sits at one end and then swings to the
-/// other (`tests/apu_output.rs`,
+/// whole range: **up to ±65,535, twice the `i16` range** (±61,440 between
+/// the steady extremes, the rest is the ringing), approached whenever
+/// the mix sits at one end and then swings to the other
+/// (`tests/apu_output.rs`,
 /// `after_a_dc_blocker_the_signal_reaches_twice_full_scale`). That does
 /// not fit in `i16` (±32,767). Run the filter in a wider type (`i32`, or
-/// floats) and then halve (61,440 / 2 = 30,720) or saturate; filtering in
-/// `i16` wraps. A resampling filter with negative coefficients can
-/// overshoot beyond that and needs its own margin.
+/// floats) and then halve or saturate; filtering in `i16` wraps. A
+/// resampling filter with negative coefficients can overshoot beyond
+/// that and needs its own margin.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StereoSample {
@@ -67,13 +78,20 @@ pub struct StereoSample {
     pub right: i16,
 }
 
-/// Output samples are averages over windows of `1 << SAMPLE_PERIOD_LOG2`
-/// base clocks: 128, i.e. 32,768 Hz in both CPU speeds (ADR 0021 section
-/// 8). The one knob for a later rate change.
+/// One output sample per `1 << SAMPLE_PERIOD_LOG2` base clocks: 128, i.e.
+/// 32,768 Hz in both CPU speeds (ADR 0021 section 8).
 pub(crate) const SAMPLE_PERIOD_LOG2: u32 = 7;
 
-/// Base clocks per output sample window.
+/// Base clocks per output sample.
 pub(crate) const SAMPLE_PERIOD: u64 = 1 << SAMPLE_PERIOD_LOG2;
+
+/// The mixed signal is summed over windows of `1 << WINDOW_LOG2` base
+/// clocks, two per output sample (64 clocks: 65,536 Hz), and an 8-tap FIR
+/// over the window sums makes the samples (`mix::FIR`, ADR 0035).
+pub(crate) const WINDOW_LOG2: u32 = SAMPLE_PERIOD_LOG2 - 1;
+
+/// Base clocks per window: the longest span a channel integrates at once.
+pub(crate) const WINDOW: u64 = 1 << WINDOW_LOG2;
 
 /// `x mod m` for a channel advance over 2^32 clocks or more
 /// (`Square`/`Wave::advance`). Normal spans are far shorter (DIV-APU syncs
@@ -921,8 +939,13 @@ mod noise_tests {
         mem.apu.sync(64 * SAMPLE_PERIOD, &io, &mut buf, &mut len);
         quiet.sync(64 * SAMPLE_PERIOD, &io, &mut [], &mut 0);
         assert_eq!(mem.apu.noise, quiet.noise, "same state without a buffer");
-        // Bit 0 is 0 for the first 124 clocks (+15), then 1 (-15) for 4.
-        assert_eq!(buf[0].left, (124 - 4) * 15 * 8 / 2, "x 64 / 128");
+        // Bit 0 is 0 for the first 124 clocks (+15), then 1 (-15) for 4:
+        // the first window's sum is 64 x 15 x 8 = 7,680 and the second's
+        // (60 - 4) x 15 x 8 = 6,720. The first one stands for the seven
+        // before it too (`mix::Output::at`), so the sample is 7,680 plus
+        // the newest tap's share of the difference: -22 x -960 / 1,024 =
+        // 20.6, rounded down.
+        assert_eq!(buf[0].left, 7680 + 20);
         assert!(buf.iter().any(|s| s.right < 15 * 8 * 64));
     }
 }
@@ -997,9 +1020,13 @@ mod wave_tests {
         let mut buf = [StereoSample::default(); 64];
         let mut len = 0;
         mem.apu.sync(64 * SAMPLE_PERIOD, &io, &mut buf, &mut len);
-        // Until 518: old buffer 0 -> analog +15; then nibble 1 -> +13.
+        // Until 518: old buffer 0 -> analog +15; then nibble 1 -> +13,
+        // until 1030. Sample 7 is the filter over clocks 512 to 1024: all
+        // at +13 (64 x 13 x 8 = 6,656 per window) but for 6 clocks of the
+        // oldest window, 6 x 2 x 8 = 96 more, at the tap -22: 6,656 -
+        // 96 x 22 / 1,024 = 6,653.9, rounded down.
         assert_eq!(buf[0].left, 15 * 8 * 64);
-        assert_eq!(buf[5].right, 13 * 8 * 64);
+        assert_eq!(buf[7].right, 6653);
         write_wave(&mut mem, 0x1B, 0xFF); // length 1
         write_wave(&mut mem, 0x1E, 0x47);
         mem.apu.edge(); // step 1: length
