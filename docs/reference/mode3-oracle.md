@@ -72,27 +72,46 @@ if a listed class stops disagreeing.
 1. **WX = 0, `SCX & 7 != 0` (= f), window starting, an object at X
    1..=167.** Without objects both give 6 + 1 dots. With one, its wait
    depends on where the window's tile grid lies, that is, on how many
-   window pixels are cut off at the left. Three references give three
-   answers, and the core holds two of them:
+   window pixels are cut off at the left. The references give three
+   answers:
 
    | cut | who | 11-dot object X (mod 8) |
    |---|---|---|
-   | 7 | the core's stalls (`sorted_object_stalls`, `win_x = WX - 7`); Gambatte's model | 1 |
-   | 7 + f | the core's renderer (`Renderer::trigger_skip`); Pan Docs, Window: "switched to before the initial fine scroll adjustment, causing it to be shifted left by SCX % 8 pixels" | 1 - f |
+   | 7 | Gambatte's model (and the core's stalls until ADR 0034) | 1 |
+   | 7 + f | the core since ADR 0034: renderer (`Renderer::trigger_skip`) and stalls (`sorted_object_stalls`); Pan Docs, Window: "switched to before the initial fine scroll adjustment, causing it to be shifted left by SCX % 8 pixels" | 1 - f |
    | 8 + f, 14 at f = 7 | SameBoy's loop (the oracle) | 8 - f; at f = 7: X = 1, then 2 from X = 10 |
 
-   Measured (one object, dots it adds, core/oracle, X = 1..=8, the
-   pattern repeating every 8 except at f = 7): f = 1: 11/9 10/8 9/7 8/6
-   7/6 6/6 6/11 6/10; f = 3: 11/7 10/6 9/6 8/6 7/11 6/10 6/9 6/8; f = 7:
-   equal at X = 1..=8, then 11/6 10/11 9/10 8/9 7/8 6/7 6/6 6/6. Example:
-   SCX 3, X = 5: core 273, oracle 277.
+   Until ADR 0034 (2026-11-24) the core held two of them: its renderer
+   cut 7 + f and its stalls assumed 7, although every reference makes
+   the object wait for the tile its pixel is shown in. The stalls now use
+   the renderer's grid (decision and reasons: ADR 0034). What is left is
+   the one pixel between 7 + f and 8 + f.
 
-   The core's stalls and renderer contradict each other (every reference
-   makes the object wait for the tile its pixel is shown in), so at least
-   one is wrong; at f = 7 from X = 10 on, Pan Docs and SameBoy agree
-   against the stalls. Nothing available here says which:
+   Measured (one object, dots it adds, core/oracle, X = 1..=8, the
+   pattern repeating every 8 except at f = 7):
+
+   | f | now (7 + f) | before ADR 0034 (7) |
+   |---|---|---|
+   | 1 | 10/9 9/8 8/7 7/6 6/6 6/6 6/11 11/10 | 11/9 10/8 9/7 8/6 7/6 6/6 6/11 6/10 |
+   | 2 | 9/8 8/7 7/6 6/6 6/6 6/11 11/10 10/9 | 11/8 10/7 9/6 8/6 7/6 6/11 6/10 6/9 |
+   | 3 | 8/7 7/6 6/6 6/6 6/11 11/10 10/9 9/8 | 11/7 10/6 9/6 8/6 7/11 6/10 6/9 6/8 |
+   | 4 | 7/6 6/6 6/6 6/11 11/10 10/9 9/8 8/7 | 11/6 10/6 9/6 8/11 7/10 6/9 6/8 6/7 |
+   | 5 | 6/6 6/6 6/11 11/10 10/9 9/8 8/7 7/6 | 11/6 10/6 9/11 8/10 7/9 6/8 6/7 6/6 |
+   | 6 | 6/6 6/11 11/10 10/9 9/8 8/7 7/6 6/6 | 11/6 10/11 9/10 8/9 7/8 6/7 6/6 6/6 |
+   | 7, X = 1..=8 | 6/11 11/10 10/9 9/8 8/7 7/6 6/6 6/6 | equal (11 10 9 8 7 6 6 6) |
+   | 7, X >= 9 | equal (6 11 10 9 8 7 6 6) | 11/6 10/11 9/10 8/9 7/8 6/7 6/6 6/6 |
+
+   Now the core's wait is one dot longer than the oracle's, or 6 against
+   11 where the object's pixel is the last of a core tile and the first
+   of an oracle tile; at f = 7 only X = 1..=8 differ (SameBoy's 14 is
+   7 + f). Example: SCX 3, X = 5: core 272 (273 before), oracle 277. The
+   static sweep leaves out 1,348 lines for this class; 892 disagree
+   (1,197 before).
+
+   Nothing available here says which grid is right:
    - No ROM in the manifest reaches the class (probed 2026-11-24: a
-     counter in `set_stalls` over the full manifest). WX = 0 with a fine
+     counter in `set_stalls` over the full manifest; the fingerprint of
+     the whole corpus is unchanged by ADR 0034). WX = 0 with a fine
      scroll and no object: AGE `stat-mode-window` (3 ROMs), Mealybug
      `m3_window_timing_wx_0`, Gambatte
      `window/arg/late_scx_late_wy_FFto4_ly4_wx00_*`. WX = 0 with objects
@@ -107,11 +126,12 @@ if a listed class stops disagreeing.
      test, and marks the place "TODO: Verify fetcher access timings in
      this case".
 
-   Verdict: undecided; no behaviour changed. What settles it on a CGB:
-   WX = 0, WY = 0, each f in 1..=7, a window tile map whose first tiles
-   and their columns can be told apart. The window pixel at screen x = 0
-   is 7 (stalls right, renderer wrong), 7 + f (renderer right, stalls
-   wrong) or 8 + f with 14 at f = 7 (SameBoy right, both wrong). The
+   Verdict: the core is consistent (7 + f for pixels and stalls, a
+   best-evidence choice from one source, ADR 0034); 7 + f against 8 + f
+   is open. What settles it on a CGB: WX = 0, WY = 0, each f in 1..=7, a
+   window tile map whose first tiles and their columns can be told
+   apart. The window pixel at screen x = 0 is 7 (Gambatte's grid), 7 + f
+   (the core is right) or 8 + f with 14 at f = 7 (SameBoy is right). The
    stalls alone: mode 3 with one object at each X in 9..=16 is longest
    at X = 9, 17 - f, or 16 - f (10 at f = 7).
 2. **An SCX write during the discard on a line with an object at X = 0**

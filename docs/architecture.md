@@ -398,7 +398,9 @@ requests".
 
 Mode 3 of a visible line is latched at its pipeline start: 172 dots plus
 `SCX % 8`, 6 for the window and 6-11 per object (`object_stalls`, Pan Docs
-"OBJ penalty algorithm"), as `LineTiming` with the per-pixel stalls so
+"OBJ penalty algorithm"; an object in the window waits on the tile grid
+the renderer draws, at WX = 0 with a fine scroll too: ADR 0034), as
+`LineTiming` with the per-pixel stalls so
 `Ppu::mode3_pixel(now)` can say which pixel is being drawn. The stalls
 are a `Stalls` list (`ppu/stalls.rs`: at most 11, the window's as an
 `Option`), and everything that needs a stall's place in the line walks
