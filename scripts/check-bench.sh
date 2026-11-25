@@ -32,6 +32,7 @@ BENCHES=(
   "synth:cgb-raster 2"
   "synth:apu-writes 2"
   "synth:dmg-raster 2"
+  "synth:oam-lines 2"
 )
 
 update=0
