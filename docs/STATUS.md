@@ -105,15 +105,22 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    measurement (A3-1) is still open under item 7.
    `.text` 116,358 B (margin 6,522 B); baseline 0270845 (latest core is
    up to +0.72% on dmg-raster over it: re-record at the next perf merge).
-   **First real M7 numbers** (NUCLEO-H755ZI-Q, all code in flash, caches
-   on, HSI 64 MHz, hashes match the host): cycles/frame mean/max:
-   worst-case 4.35 M / 4.40 M, cgb-raster 2.93 / 2.99, dmg-raster
-   2.22 / 2.26, event-storm 2.22 / 2.25, cpu_instrs 1.44 / 2.05. About
-   1.8 cycles per x86 Ir on worst-case; 4.40 M is ~55% of a frame at
-   480 MHz, ~48% at 550 MHz (extrapolated). DTCM-stack and ITCM images
-   fault on the board (agent debugging on `m10-h7-spike`; results go to
-   docs/perf.md). Flash large images with a native Windows copy
-   (`cmd.exe copy` to E:), not `cp` to /mnt/e (silently fails).
+   **Real M7 numbers** (session 17; `tools/h7-bench`, outside the
+   workspace and the gate; results in docs/perf.md "Measured on a
+   Cortex-M7 (NUCLEO-H755ZI-Q)" and the crate README; all hashes match
+   the host). Worst case, cycles/frame mean/max: flash + caches
+   4.27 M / 4.32 M (HSI 64 MHz), 4.44 M / 4.50 M (PLL 392 MHz); hot set
+   in ITCM + DTCM 3.09 M / 3.13 M and 3.10 M / 3.14 M. ITCM is 1.38-1.41x
+   faster on the worst case, 1.11-1.18x on the rest. Worst case in ITCM =
+   47.8% of a frame at 392 MHz (measured; this board's limit with direct
+   SMPS), 39.0% at 480 MHz and 34.1% at 550 MHz (extrapolated). Cycles
+   per x86 Ir: 1.12-1.33 in ITCM, 1.24-1.81 from flash. The ITCM hot set
+   is 68.8 KB linked vs this chip's 64 KiB (plain tile path left in
+   flash; no room for ISRs); the H735 (128 KiB+) takes the whole core.
+   Board notes: flash with `tools/h7-bench/flash.sh` (native Windows
+   copy; never while COM3 is open); the first serial lines after a flash
+   can be the old image's. Unverified: supply write across a USB power
+   cycle (needs the human to replug), the M4 stub.
 5. Structure: line timeline as one table (E3), `bus.rs` split along
    D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
    experiment (A1-06).
@@ -203,7 +210,8 @@ Open (M10, session 17):
   bytes BCM7+BCM4 enabled (not to be changed). Standing permission to
   flash it and read the serial port without asking; CubeProgrammer is
   the human's recovery tool (connect under reset). Firmware:
-  `tools/h7-bench` on branch `m10-h7-spike` (agent, build only).
+  `tools/h7-bench` (merged, session 17). Board left running
+  `bench-itcm-dtcm-pll`.
   `qemu-system-arm` 8.2.2 is installed (mps2-an500).
 - Item 3 leftovers as plan tasks: inventory L7; `Ctx::write_high` and
   `Apu::write_rest` unpin never measured; romtest worker `eprintln!`
