@@ -2613,9 +2613,7 @@ impl Ppu {
             match view {
                 PpuView::Off => {
                     for e in i..=last {
-                        self.scan
-                            .objs
-                            .consider_cold(e, read(e, 0), read(e, 1), ly, tall);
+                        self.scan.objs.consider(e, read(e, 0), read(e, 1), ly, tall);
                     }
                     self.bus = [read(last, 0), read(last, 1)];
                     self.bus_live = true;
@@ -2631,7 +2629,7 @@ impl Ppu {
                     let [y, x] = self.bus;
                     if LineObjects::covers(y, ly, tall) {
                         for e in i..=last {
-                            self.scan.objs.consider_cold(e, y, x, ly, tall);
+                            self.scan.objs.consider(e, y, x, ly, tall);
                         }
                     }
                 }

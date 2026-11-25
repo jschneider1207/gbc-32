@@ -91,14 +91,6 @@ impl LineObjects {
         }
     }
 
-    /// [`Self::consider`] out of line, for the cold incremental scan
-    /// (`Ppu::scan_to`): a call in its loops keeps LLVM from unrolling them
-    /// (code size).
-    #[inline(never)]
-    pub(crate) fn consider_cold(&mut self, index: u8, y: u8, x: u8, ly: u8, tall: bool) {
-        self.consider(index, y, x, ly, tall);
-    }
-
     #[inline]
     pub(crate) const fn len(&self) -> usize {
         self.len as usize
