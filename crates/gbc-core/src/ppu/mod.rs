@@ -81,11 +81,13 @@ use render::{
     Colors, Held, Mixed, Planes, Regs, Renderer, SetLatch, Sources, pair_table, set_pair_color,
 };
 use stalls::{StallKind, Stalls};
+use timeline::Class;
 
 pub(crate) mod edges;
 mod objects;
 mod render;
 mod stalls;
+mod timeline;
 
 /// Test-only: the dot-stepped mode-3 oracle and its differential test.
 #[cfg(test)]
@@ -835,16 +837,26 @@ impl Ppu {
     /// value to [`edges::CMP_OFF`] as lines 1-143 do; the walk drops it at
     /// [`edges::VCMP_OFF`] there.
     fn cmp(a: At, speed: Speed) -> (Option<u8>, u8) {
+        // The dots are the `timeline` rows' `seen` column, and the order
+        // of the cases is checked against the rows by `timeline`'s tests.
+        // Lines 1-152 (lines 144-152 see as 1-143, `timeline`'s
+        // assertion): off at the row where LY changes, on at the next.
+        const OFF: u32 = timeline::seen(Class::Visible, Pt::Ly3);
+        const ON: u32 = timeline::seen(Class::Visible, Pt::Ly4);
+        // Line 153: off from its start.
+        const L153_CMP: u32 = timeline::seen(Class::L153, Pt::L153Cmp);
+        const L153_OFF: u32 = timeline::seen(Class::L153, Pt::L153Off);
+        const L153_ZERO: u32 = timeline::seen(Class::L153, Pt::L153Zero);
         let (l, t) = (a.line, a.t);
         match l {
             0 => (Some(0), 0),
-            1..=152 if t < edges::CMP_OFF => (Some((l - 1) as u8), 0),
-            1..=152 if t < edges::CMP_ON => (None, (l - 1) as u8),
+            1..=152 if t < OFF => (Some((l - 1) as u8), 0),
+            1..=152 if t < ON => (None, (l - 1) as u8),
             1..=152 => (Some(l as u8), 0),
-            _ if t < edges::L153_CMP => (None, 152),
-            _ if t < edges::L153_OFF => (Some(153), 0),
-            _ if t < edges::L153_ZERO && !speed.is_double() => (None, 153),
-            _ if t < edges::L153_ZERO => (Some(153), 0),
+            _ if t < L153_CMP => (None, 152),
+            _ if t < L153_OFF => (Some(153), 0),
+            _ if t < L153_ZERO && !speed.is_double() => (None, 153),
+            _ if t < L153_ZERO => (Some(153), 0),
             _ => (Some(0), 0),
         }
     }
@@ -1124,106 +1136,53 @@ impl Ppu {
 
     // --- The update-point walk ---
 
-    /// The first update point after frame position `after` (`< FRAME`),
-    /// with `start` the clock of frame position 0. A position past the
-    /// frame belongs to the next one. A visible line's `End` is at its
-    /// latched end, or at the earliest possible end if not latched yet.
-    fn next_point(&self, after: u32, first: bool, start: u64, speed: Speed) -> (u32, Pt) {
-        let (l, t) = (after / LINE, after % LINE);
-        let base = l * LINE;
-        if l < LINES {
-            let first_line = first && l == 0;
-            let pipe = if first_line {
-                edges::PIPE_FIRST
+    /// The cursor for the current state: the first update point after
+    /// `synced` (`< frame_start + FRAME`, as between syncs), by search:
+    /// from the first point of `synced`'s line ([`timeline`]), stepped as
+    /// the walk steps. A visible line's `End` is at its latched end, or at
+    /// the earliest possible end if not latched yet; a point past the
+    /// frame belongs to the next one. While no STAT interrupt source is
+    /// selected ([`Self::quiet`]), the walk of [`Self::step_work`]: its
+    /// first point on a visible line is `Latch`, and from line 144 on
+    /// `VBlank`.
+    fn seek_point(&self, speed: Speed) -> Cursor {
+        let after = self.synced.wrapping_sub(self.frame_start) as u32;
+        let l = after / LINE;
+        let first_line = self.first_frame && l == 0;
+        let quiet = self.quiet();
+        let mut c = if !quiet {
+            let (t, pt) = Class::of(l, first_line).first();
+            Cursor {
+                pos: l * LINE + speed.pick(t),
+                line: l as u8,
+                pt,
+            }
+        } else if l < LINES {
+            let latch = if first_line {
+                const { timeline::at(Class::First, Pt::Latch) }
             } else {
-                edges::PIPE
+                const { timeline::at(Class::Visible, Pt::Latch) }
             };
-            if !first_line {
-                // Line 0, double speed: both points a dot later.
-                let (ly, cmp) = match l {
-                    0 => (edges::ly0_pt(speed), edges::ly0_pulse(speed)),
-                    _ => (edges::PT_LY, edges::CMP_WALK),
-                };
-                if t < ly {
-                    return (base + ly, Pt::Ly3);
-                }
-                if t < cmp {
-                    return (base + cmp, Pt::Ly4);
-                }
+            Cursor {
+                pos: l * LINE + latch,
+                line: l as u8,
+                pt: Pt::Latch,
             }
-            if t < pipe {
-                return (base + pipe, Pt::Latch);
+        } else {
+            Cursor {
+                pos: VBLANK_POS,
+                line: LINES as u8,
+                pt: Pt::VBlank,
             }
-            match self.latched_end(start.wrapping_add(u64::from(base))) {
-                // The earliest end: 167 dots after the pipeline start.
-                None => return (base + pipe + edges::MIN_MODE3, Pt::End),
-                Some(e) if t < e => return (base + e, Pt::End),
-                Some(e) if t <= e => return (base + e + edges::HBLANK_AFTER_END, Pt::HBlank),
-                Some(_) => {}
-            }
-            return if l < LINES - 1 {
-                (base + LINE + edges::PT_LY, Pt::Ly3)
-            } else {
-                (base + LINE + edges::VCMP_OFF, Pt::V0)
-            };
-        }
-        // VBlank: walk the line from its first point (`V0`, at or before
-        // `after`), as `step` does.
-        let mut c = Cursor {
-            pos: base + edges::VCMP_OFF,
-            line: l as u8,
-            pt: Pt::V0,
         };
         while c.pos <= after {
-            c = self.step(c, start, speed);
-        }
-        (c.pos, c.pt)
-    }
-
-    /// [`Self::next_point`] while no STAT interrupt source is selected
-    /// (`quiet`): only the points that do work regardless (`Latch`, `End`,
-    /// `VBlank`). The STAT line stays low, and the LY=LYC part of it is
-    /// recomputed when a source is selected again ([`Self::write_stat`]).
-    fn next_work_point(&self, after: u32, first: bool, start: u64) -> (u32, Pt) {
-        let (l, t) = (after / LINE, after % LINE);
-        let base = l * LINE;
-        if l < LINES {
-            let pipe = if first && l == 0 {
-                edges::PIPE_FIRST
+            c = if quiet {
+                self.step_work(c, self.frame_start)
             } else {
-                edges::PIPE
-            };
-            if t < pipe {
-                return (base + pipe, Pt::Latch);
-            }
-            match self.latched_end(start.wrapping_add(u64::from(base))) {
-                None => return (base + pipe + edges::MIN_MODE3, Pt::End),
-                Some(e) if t < e => return (base + e, Pt::End),
-                Some(_) => {}
-            }
-            return if l < LINES - 1 {
-                (base + LINE + edges::PIPE, Pt::Latch)
-            } else {
-                (VBLANK_POS, Pt::VBlank)
+                self.step(c, self.frame_start, speed)
             };
         }
-        if after < VBLANK_POS {
-            return (VBLANK_POS, Pt::VBlank);
-        }
-        (FRAME + edges::PIPE, Pt::Latch)
-    }
-
-    /// The cursor for the current state: the first update point after
-    /// `synced` (`< frame_start + FRAME`, as between syncs), by search.
-    fn seek_point(&self, speed: Speed) -> Cursor {
-        let pos = self.synced.wrapping_sub(self.frame_start) as u32;
-        let (pos, pt) = if self.quiet() {
-            self.next_work_point(pos, self.first_frame, self.frame_start)
-        } else {
-            self.next_point(pos, self.first_frame, self.frame_start, speed)
-        };
-        let line = if pos >= FRAME { 0 } else { (pos / LINE) as u8 };
-        Cursor { pos, line, pt }
+        c
     }
 
     /// A speed switch: the walk's line-0 and line-153 points differ per
@@ -1261,10 +1220,12 @@ impl Ppu {
 
     /// [`Self::step`] while no STAT interrupt source is selected
     /// ([`Self::quiet`]): the walk of the points that do work regardless
-    /// (`Latch`, `End`, `VBlank`); what [`Self::next_work_point`] returns
-    /// for `c.pos`, without dividing.
+    /// (`Latch`, `End`, `VBlank`), the other rows of [`timeline`] skipped.
     #[inline(always)]
     fn step_work(&self, c: Cursor, start: u64) -> Cursor {
+        // Lines 0-143 alike (`timeline`'s assertion); the first line after
+        // LCD enable is only ever sought ([`Self::seek_point`]).
+        const LATCH: u32 = timeline::at(Class::Visible, Pt::Latch);
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
@@ -1272,10 +1233,10 @@ impl Ppu {
                 let line_start = start.wrapping_add(u64::from(base));
                 (self.end_after(c.pos, base, line_start), l, Pt::End)
             }
-            Pt::End if l < LINES - 1 => (base + LINE + edges::PIPE, l + 1, Pt::Latch),
+            Pt::End if l < LINES - 1 => (base + LINE + LATCH, l + 1, Pt::Latch),
             Pt::End => (VBLANK_POS, LINES, Pt::VBlank),
             // `VBlank` (the other points are not on this walk).
-            _ => (FRAME + edges::PIPE, 0, Pt::Latch),
+            _ => (FRAME + LATCH, 0, Pt::Latch),
         };
         Cursor {
             pos,
@@ -1286,56 +1247,108 @@ impl Ppu {
 
     /// The update point after `c` with a STAT interrupt source selected
     /// (`c` is at or before the next frame's first point; `start` is the
-    /// clock of `c`'s frame position 0): what [`Self::next_point`] returns
-    /// for `c.pos`, without dividing.
+    /// clock of `c`'s frame position 0). The sequence is [`timeline`]'s:
+    /// every distance and successor here is a `const` lookup of the row
+    /// after `c.pt` in its line class (`next!`: dots from `c`; `at!`: a
+    /// line position; `first!`: the next line's first row), and only the
+    /// choice of class by line is written here (checked against the table
+    /// by `timeline`'s tests).
     #[inline(always)]
     fn step(&self, c: Cursor, start: u64, speed: Speed) -> Cursor {
+        macro_rules! next {
+            ($class:ident, $pt:ident) => {
+                const { timeline::next(Class::$class, Pt::$pt) }
+            };
+        }
+        macro_rules! at {
+            ($class:ident, $pt:ident) => {
+                const { timeline::next_at(Class::$class, Pt::$pt) }
+            };
+        }
+        macro_rules! first {
+            ($class:ident) => {
+                const { timeline::first(Class::$class) }
+            };
+        }
         let l = u32::from(c.line);
         let base = l * LINE;
         let (pos, line, pt) = match c.pt {
             // Relative to `Ly3`, which is a dot later on line 0 in double
-            // speed ([`edges::ly0_pt`]): line 0 compares one dot after it
-            // (`t = 4`, double speed 5; design step 5), lines 1-143 at
-            // `CMP_WALK`.
-            Pt::Ly3 => (
-                c.pos
-                    + if l == 0 {
-                        edges::CMP_ON - edges::PT_LY
-                    } else {
-                        edges::CMP_WALK - edges::PT_LY
-                    },
-                l,
-                Pt::Ly4,
-            ),
-            Pt::Ly4 => (base + edges::PIPE, l, Pt::Latch),
+            // speed ([`edges::ly0_pt`]), as its `Ly4` is.
+            Pt::Ly3 => {
+                let (d, pt) = if l == 0 {
+                    next!(Line0, Ly3)
+                } else {
+                    next!(Visible, Ly3)
+                };
+                (c.pos + d, l, pt)
+            }
+            Pt::Ly4 => {
+                let (t, pt) = at!(Visible, Ly4);
+                (base + t, l, pt)
+            }
+            // The mode-3 end is the line's own (`timeline::Pos::End`).
             Pt::Latch => {
                 let line_start = start.wrapping_add(u64::from(base));
                 (self.end_after(c.pos, base, line_start), l, Pt::End)
             }
-            Pt::End => (c.pos + edges::HBLANK_AFTER_END, l, Pt::HBlank),
-            Pt::HBlank if l < LINES - 1 => (base + LINE + edges::PT_LY, l + 1, Pt::Ly3),
-            Pt::HBlank => (base + LINE + edges::VCMP_OFF, LINES, Pt::V0),
+            Pt::End => {
+                let (d, pt) = next!(Visible, End);
+                (c.pos + d, l, pt)
+            }
+            Pt::HBlank if l < LINES - 1 => {
+                let (t, pt) = first!(Visible);
+                (base + LINE + t, l + 1, pt)
+            }
+            Pt::HBlank => {
+                let (t, pt) = first!(L144);
+                (base + LINE + t, LINES, pt)
+            }
             Pt::V0 => match l {
-                144 => (c.pos + (edges::QUIRK2 - edges::VCMP_OFF), l, Pt::Quirk2),
-                153 => (c.pos + (edges::L153_CMP - edges::VCMP_OFF), l, Pt::L153Cmp),
-                _ => (base + edges::CMP_WALK, l, Pt::V4),
+                144 => {
+                    let (d, pt) = next!(L144, V0);
+                    (c.pos + d, l, pt)
+                }
+                153 => {
+                    let (d, pt) = next!(L153, V0);
+                    (c.pos + d, l, pt)
+                }
+                _ => {
+                    let (t, pt) = at!(VBlank, V0);
+                    (base + t, l, pt)
+                }
             },
-            Pt::Quirk2 => (base + edges::CMP_WALK, l, Pt::V4),
-            Pt::V4 if l == LINES => (VBLANK_POS, l, Pt::VBlank),
-            Pt::V4 => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
-            Pt::VBlank => (base + LINE + edges::VCMP_OFF, l + 1, Pt::V0),
-            Pt::L153Cmp => (c.pos + (edges::L153_OFF - edges::L153_CMP), l, Pt::L153Off),
-            Pt::L153Off => (
-                c.pos + (edges::l153_zero_walk(speed) - edges::L153_OFF),
-                l,
-                Pt::L153Zero,
-            ),
+            Pt::Quirk2 => {
+                let (t, pt) = at!(L144, Quirk2);
+                (base + t, l, pt)
+            }
+            Pt::V4 if l == LINES => {
+                let (t, pt) = at!(L144, V4);
+                (LINES * LINE + t, l, pt)
+            }
+            // Lines 145-152 and 153 start alike (`timeline`'s assertion).
+            Pt::V4 => {
+                let (t, pt) = first!(VBlank);
+                (base + LINE + t, l + 1, pt)
+            }
+            Pt::VBlank => {
+                let (t, pt) = first!(VBlank);
+                (base + LINE + t, l + 1, pt)
+            }
+            Pt::L153Cmp => {
+                let (d, pt) = next!(L153, L153Cmp);
+                (c.pos + d, l, pt)
+            }
+            // Double speed: `L153Zero` is a dot later.
+            Pt::L153Off => {
+                let (d, pt) = const { timeline::next_by_speed(Class::L153, Pt::L153Off) };
+                (c.pos + timeline::by_speed(d, speed), l, pt)
+            }
             // Relative: double speed, a dot later as `L153Zero`.
-            Pt::L153Zero => (
-                c.pos + (FRAME + edges::PT_LY - (153 * LINE + edges::L153_ZERO)),
-                0,
-                Pt::Ly3,
-            ),
+            Pt::L153Zero => {
+                let (d, pt) = const { timeline::frame_wrap() };
+                (c.pos + d, 0, pt)
+            }
         };
         Cursor {
             pos,
@@ -1351,48 +1364,107 @@ impl Ppu {
     }
 
     /// Applies the STAT-line part of update point `pt` on line `l` to
-    /// `line`. Returns whether it requests the STAT interrupt. Each point
-    /// has `eval` specialized to its mode source and comparison (perf: one
-    /// shared `eval` for all cost ~7 Ir per point, 1% on cgb-acid2), and
-    /// the walk inlines it (as a call: cgb-acid2 +1.2%).
+    /// `line`. Returns whether it requests the STAT interrupt. What each
+    /// point evaluates is its row of [`timeline`]; the arms here only pick
+    /// the row's line class (checked against the table by `timeline`'s
+    /// tests). Each has `eval` specialized to its row's mode source and
+    /// comparison, constants here (perf: one shared `eval` for all cost
+    /// ~7 Ir per point, 1% on cgb-acid2), and the walk inlines it (as a
+    /// call: cgb-acid2 +1.2%).
     #[inline(always)]
     fn point_irq(&self, line: &mut IrqLine, pt: Pt, l: u32, speed: Speed) -> bool {
-        let (sel, lyc) = (self.stat_select, self.lyc);
-        let ly = l as u8;
+        macro_rules! row {
+            ($class:ident, $pt:ident) => {
+                self.row_irq(
+                    line,
+                    const { timeline::row(Class::$class, Pt::$pt) },
+                    l as u8,
+                    speed,
+                )
+            };
+        }
         match pt {
+            Pt::Ly3 if l == 0 => row!(Line0, Ly3),
+            Pt::Ly3 => row!(Visible, Ly3),
+            Pt::Ly4 => row!(Visible, Ly4),
+            Pt::Latch | Pt::End => false,
+            Pt::HBlank => row!(Visible, HBlank),
+            Pt::V0 if l == 144 => row!(L144, V0),
+            Pt::V0 => row!(VBlank, V0),
+            Pt::Quirk2 => row!(L144, Quirk2),
+            Pt::V4 if l == 144 => row!(L144, V4),
+            Pt::V4 => row!(VBlank, V4),
+            Pt::VBlank => row!(L144, VBlank),
+            Pt::L153Cmp => row!(L153, L153Cmp),
+            Pt::L153Off => row!(L153, L153Off),
+            Pt::L153Zero => row!(L153, L153Zero),
+        }
+    }
+
+    /// The STAT update of a [`timeline`] row on line `ly`: its mode source
+    /// and comparison value into `line`. Returns whether the line rose.
+    /// With a constant `row` (as [`Self::point_irq`] calls it) every match
+    /// here folds away.
+    #[inline(always)]
+    fn row_irq(&self, line: &mut IrqLine, row: timeline::Row, ly: u8, speed: Speed) -> bool {
+        // One comparison value, or one per speed (line 153's `L153Off`).
+        let [single, fast] = row.cmp;
+        if single == fast || !speed.is_double() {
+            self.src_irq(line, row.src, single, ly, speed)
+        } else {
+            self.src_irq(line, row.src, fast, ly, speed)
+        }
+    }
+
+    /// [`Self::row_irq`] with the row's comparison value for the speed.
+    #[inline(always)]
+    fn src_irq(
+        &self,
+        line: &mut IrqLine,
+        src: timeline::Src,
+        cmp: timeline::Cmp,
+        ly: u8,
+        speed: Speed,
+    ) -> bool {
+        use timeline::{Cmp, Src};
+        let (sel, lyc) = (self.stat_select, self.lyc);
+        let cmp = match cmp {
+            Cmp::Off => None,
+            Cmp::Ly => Some(ly),
+            Cmp::Val(v) => Some(v),
+        };
+        match src {
+            Src::Idle => false,
+            Src::Mode(m) => line.eval_inline(sel, lyc, m, cmp),
+            // The source ends right after it is evaluated.
+            Src::Pulse(m) => {
+                let a = line.eval_inline(sel, lyc, m, cmp);
+                a | line.eval_inline(sel, lyc, NO_MODE, cmp)
+            }
             // Line 0, double speed: the mode-1 source ends here, a dot
             // before the mode-2 pulse (`Ly4`), unless mode 2 is selected:
             // then it lasts to the pulse, which a selected mode 1 so
             // blocks, as in single speed ([`edges::ly0_pt`]).
-            Pt::Ly3 if l == 0 => {
+            Src::Line0Mode1 => {
                 if speed.is_double() && sel & SEL_MODE2 == 0 {
-                    line.eval_inline(sel, lyc, NO_MODE, Some(0))
+                    line.eval_inline(sel, lyc, NO_MODE, cmp)
                 } else {
-                    line.eval_inline(sel, lyc, 1, Some(0))
+                    line.eval_inline(sel, lyc, 1, cmp)
                 }
             }
-            Pt::Ly3 => line.eval_inline(sel, lyc, 2, None),
-            // The mode-2 source ends (line 0: a pulse). Lines 1-143 had it
-            // from `Ly3`, and a write since kept the line up for it
-            // ([`Self::update_at`]), so only line 0 can rise for it here.
-            Pt::Ly4 => {
-                let a = line.eval_inline(sel, lyc, 2, Some(ly));
-                a | line.eval_inline(sel, lyc, NO_MODE, Some(ly))
-            }
-            Pt::Latch | Pt::End => false,
-            Pt::HBlank => line.eval_inline(sel, lyc, 0, Some(ly)),
-            Pt::V0 if l == 144 => line.eval_inline(sel, lyc, 0, None),
-            Pt::V0 => line.eval_inline(sel, lyc, 1, None),
-            Pt::Quirk2 => line.eval_inline(sel, lyc, MODE_0_2, None),
-            // Line 144: the mode part holds from `Quirk2` (the selects as
-            // of there block the mode-1 interrupt, `edges::QUIRK2`).
-            Pt::V4 if l == 144 => line.eval_inline(sel, lyc, MODE_HOLD, Some(144)),
-            Pt::V4 => line.eval_inline(sel, lyc, 1, Some(ly)),
-            Pt::VBlank => line.eval_inline(sel, lyc, 1, Some(144)),
-            Pt::L153Cmp => line.eval_inline(sel, lyc, 1, Some(153)),
-            Pt::L153Off if speed.is_double() => line.eval_inline(sel, lyc, 1, Some(153)),
-            Pt::L153Off => line.eval_inline(sel, lyc, 1, None),
-            Pt::L153Zero => line.eval_inline(sel, lyc, 1, Some(0)),
+        }
+    }
+
+    /// Dots after update point `pt` on line `l` at which its interrupt
+    /// request reaches IF: its row's [`timeline::Row::irq_late`], single
+    /// speed only.
+    #[inline(always)]
+    fn irq_late(pt: Pt, l: u32, speed: Speed) -> u64 {
+        match pt {
+            _ if speed.is_double() => 0,
+            Pt::Ly4 if l == 0 => const { timeline::row(Class::Line0, Pt::Ly4).irq_late },
+            Pt::L153Zero => const { timeline::row(Class::L153, Pt::L153Zero).irq_late },
+            _ => 0,
         }
     }
 
@@ -1561,12 +1633,7 @@ impl Ppu {
                     // Single speed: the requests of line 0's mode-2 pulse
                     // and of line 153's comparison against 0 reach IF a
                     // dot after their walk points.
-                    let delay = match c.pt {
-                        _ if speed.is_double() => 0,
-                        Pt::Ly4 if l == 0 => edges::LY0_PULSE_IRQ,
-                        Pt::L153Zero => edges::L153_ZERO_IRQ,
-                        _ => 0,
-                    };
+                    let delay = Self::irq_late(c.pt, l, speed);
                     if delay != 0 {
                         self.irq.request(self.synced + delay, INT_STAT, iflags);
                     } else {
