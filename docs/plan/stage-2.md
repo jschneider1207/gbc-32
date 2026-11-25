@@ -103,7 +103,7 @@ gbc-core ◄── gbc-firmware ◄── gbc-nucleo-h753 ──► gbc-link ◄
   pattern) because WSL has poor COM-port access. It sends the ROM and
   `.sav`, pulls saves back, forwards keyboard input and prints the board's
   stats. It replaces the old PowerShell-script host side. Dependencies:
-  `gbc-link` and a serial-port crate (see D9: `serialport` is MPL-2.0).
+  `gbc-link` and `windows-sys` (direct Win32 COM; see D9).
   It has no window, so the WSLg ban doesn't apply; keep runs from WSL
   short, as with the other Windows runs.
 - All Cortex-M7 parts use the same Rust target (`thumbv7em-none-eabihf`).
@@ -410,7 +410,7 @@ shown. D8 is a note.
 | D6 | Saves on the dev board | (a) none persistent; (b) QSPI save area; (c) internal flash bank 2; (d) over the PC serial link | **Decided (human, 2026-11-25): (d), not QSPI.** `tools/gbc-pc` sends the `.sav` (cart RAM plus the RTC footer, the desktop format, ADR 0023) with the ROM, and the board dumps it back on request or a button combo. Folded into M5; the old M7 is gone. Acceptance: a save round-trips byte-identically, PC → board → PC (B5) |
 | D7 | Full-speed sign-off workloads | `synth:worst-case` (bench, ROM in QSPI, 480 MHz) plus real games for the human: Shantae and Alone in the Dark (heavy HDMA), Wario Land 3, LADX, and Pokémon Crystal (RTC) | **Accepted.** Gated: each finishes its frames inside real time (< 1/59.7275 s). `synth:worst-case` vs 50% and the real-game core cycles from the `player` statistics are reported, not gated. They become gated replays if the human records inputs (Stage 1 M10 E6) |
 | D8 | Cortex-M4 | — | **Note: not applicable**: the H753ZI is single-core (the dual-core H755 is retired), and the Stage 3 H735 is single-core too |
-| D9 | Dependencies for the new crates | AGENTS.md lets agents decide dependencies for `gbc-desktop` and `tools/*` only | **Accepted:** extend that to `gbc-nucleo-h753` (MIT/Apache crates: `cortex-m`, `cortex-m-rt`, `stm32h7`, as h7-bench already uses) and keep `gbc-firmware` (only `gbc-core`) and `gbc-link` (none) dependency-free; `tools/gbc-pc`: `gbc-link` plus a serial-port crate, chosen by the agent under the `tools/*` rule. **`serialport` is MPL-2.0 (crates.io), not MIT/Apache/BSD/Zlib-style, so using it is a human decision.** Licence-clean alternative: direct Win32 COM through `windows-sys` (MIT/Apache-2.0); `gbc-pc` starts with that unless the human approves `serialport`; `gbc-handheld`: decide when it exists |
+| D9 | Dependencies for the new crates | AGENTS.md lets agents decide dependencies for `gbc-desktop` and `tools/*` only | **Accepted:** extend that to `gbc-nucleo-h753` (MIT/Apache crates: `cortex-m`, `cortex-m-rt`, `stm32h7`, as h7-bench already uses) and keep `gbc-firmware` (only `gbc-core`) and `gbc-link` (none) dependency-free; `tools/gbc-pc`: `gbc-link` plus a serial-port crate, chosen by the agent under the `tools/*` rule. **Decided (human, 2026-11-25): no `serialport` (MPL-2.0); `gbc-pc` talks to the COM port directly through `windows-sys` (MIT/Apache-2.0).** `gbc-handheld`: decide when it exists |
 | D10 | `acceptance/stage2.toml` | the proposal above | **Accepted:** the human creates it (or edits the proposal). Agents won't create it |
 
 ## Risks
