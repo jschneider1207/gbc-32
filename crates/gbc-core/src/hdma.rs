@@ -44,12 +44,15 @@ pub(crate) const HBLANK_DELAY: u64 = 2;
 /// `hdma_late_enable_{,ds_}{1,2}`).
 pub(crate) const HBLANK_UNTIL: u64 = 4;
 
-/// [`VramDma::refetch`]: a block requested at HALT or STOP waits for the
-/// wake-up.
-pub(crate) const REQUESTED: u8 = 1;
-/// [`VramDma::refetch`]: that block ran; triggers before `switch_end` are
-/// lost.
-pub(crate) const RAN: u8 = 2;
+/// [`VramDma::refetch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refetch {
+    None,
+    /// A block requested at HALT or STOP waits for the wake-up.
+    Requested,
+    /// That block ran; triggers before [`VramDma::stall_end`] are lost.
+    Ran,
+}
 
 /// The FF51-FF55 state.
 #[derive(Clone, Copy)]
@@ -82,29 +85,23 @@ pub(crate) struct VramDma {
     pub(crate) wake_ok: bool,
     /// A block requested in HALT's M-cycle or a speed-switch STOP's first
     /// (gambatte `Memory::halt`/`stop`: `prefetched = hdmaReqFlagged`):
-    /// [`REQUESTED`] until that block runs at the wake-up (to double
+    /// [`Refetch::Requested`] until that block runs at the wake-up (to double
     /// speed the switch runs it at once). Its stall is then one M-cycle
     /// shorter, but triggers until its full length are still lost
     /// (gambatte: `cc -= 4` after a DMA in the `hdma_requested` halt
-    /// state, acknowledged at the transfer's end): [`RAN`], with the end
-    /// in `switch_end`, until the next trigger. 0 otherwise. Fits this
-    /// struct's padding.
-    pub(crate) refetch: u8,
+    /// state, acknowledged at the transfer's end): [`Refetch::Ran`], with
+    /// the end in `stall_end`, until the next trigger.
+    pub(crate) refetch: Refetch,
     /// M-cycles left of the current transfer step's CPU stall
     /// ([`stall_mcycles`]; at most 2,049). A run call can end inside the
     /// stall (a stop event or its target); the next call resumes it
     /// before the CPU runs (ADR 0021, GDMA stall amendment).
     pub(crate) stall: u16,
-    /// Not only VRAM DMA state: during the CGB speed-switch halt
-    /// (`Ctx::speed_switch`), the clock at which its last M-cycle (the
-    /// wake-up) starts. After a [`RAN`] block, the end of its full stall.
-    /// Stale otherwise. A full clock, not its low 32 bits: `RAN` can stay
-    /// set for any length of time (until the next trigger or HALT), and
-    /// a wrapped compare then dropped a block (review finding A1-04).
-    /// The two uses cannot collide: the speed switch that sets this is
-    /// followed by `hdma_refetch`, which clears a `RAN` left over. The
-    /// speed-switch use belongs in `Sys`.
-    pub(crate) switch_end: u64,
+    /// After a [`Refetch::Ran`] block, the end of its full stall. Stale
+    /// otherwise. A full clock, not its low 32 bits: `Ran` can stay set
+    /// for any length of time (until the next trigger or HALT), and a
+    /// wrapped compare then dropped a block (review finding A1-04).
+    pub(crate) stall_end: u64,
     /// The mode-0 start clock of the last line whose HBlank trigger was
     /// scheduled or passed, so each line starts at most one block.
     pub(crate) line: u64,
@@ -121,9 +118,9 @@ impl VramDma {
             single: false,
             halted: false,
             wake_ok: false,
-            refetch: 0,
+            refetch: Refetch::None,
             stall: 0,
-            switch_end: 0,
+            stall_end: 0,
             line: crate::schedule::NEVER,
         }
     }
@@ -742,7 +739,7 @@ mod tests {
     fn end_switch_halt(emu: &mut Emulator, at: impl Fn(&Emulator) -> Option<u64>) {
         for _ in 0..200_000 {
             if let Some(w) = at(emu) {
-                emu.hw.sys.vdma.switch_end = w;
+                emu.hw.sys.switch_halt_end = w;
                 return;
             }
             step(emu);

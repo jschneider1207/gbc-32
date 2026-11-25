@@ -133,19 +133,6 @@ pub(crate) struct Timer {
     overflow_at: u64,
     /// The clock of the last reload: cycle B's access. `NEVER` before one.
     reloaded_at: u64,
-    /// The frame sequencer runs one double-speed M-cycle (2 clocks) behind
-    /// the DIV-APU edge in double speed (`set_div_apu_deadline`). Each
-    /// switch to double speed with the APU on toggles it: the 1st and 3rd
-    /// delay, the 2nd doesn't. The square channels' 1 MHz phase in a
-    /// double-speed trigger follows it (`Apu::trigger_delay`). NR52 power
-    /// on/off clears it (AGE
-    /// `spsw-ch2-lc-delay`, verified on CGB B/C/E; AGE emulator
-    /// `gb_sound::after_speed_change`, `m_current_ds_delay`). Single speed
-    /// ignores it but keeps it for the next switch. Toggled here even with
-    /// the APU off, where it is unused until power-on clears it. Placed
-    /// here, not in `Sys`, in this struct's padding while `Hw` had a size
-    /// cap (dropped 2026-11-24).
-    pub(crate) apu_ds_delay: bool,
     /// STOP mode froze the counter in cycle A ([`Self::freeze`]): the
     /// reload is held with it and ends one M-cycle after the wake-up.
     held: bool,
@@ -164,7 +151,6 @@ impl Timer {
             tima_bit: 0,
             overflow_at: NEVER,
             reloaded_at: NEVER,
-            apu_ds_delay: false,
             held: false,
         }
     }
@@ -523,7 +509,6 @@ impl Timer {
         let from = now + pause - u64::from(short);
         self.base = self.sc(now);
         self.shift ^= 1;
-        self.apu_ds_delay ^= self.shift != 0;
         self.base_clock = from;
         if self.in_cycle_a(now) {
             self.overflow_at = if short { now - 1 } else { from.max(now) };

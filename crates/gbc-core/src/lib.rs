@@ -2326,7 +2326,7 @@ mod tests {
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
         assert!(cpu::Bus::speed_switch(&mut ctx, false, false));
         let end = ctx.clock() + 0x8000 * 2;
-        ctx.sys.vdma.switch_end += 1;
+        ctx.sys.switch_halt_end += 1;
         let mut calls = 0;
         while !ctx.speed_switch_over() {
             ctx.idle_speed_switch();

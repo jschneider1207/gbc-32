@@ -22,7 +22,7 @@ use crate::cart::Cart;
 use crate::config::Config;
 use crate::cpu::{Bus, INT_MASK, StopKind};
 use crate::dma::{self, Conflict, OamDma, ReadClears};
-use crate::hdma::{self, VramDma};
+use crate::hdma::{self, Refetch, VramDma};
 use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{self, Frame, Ppu, View, edges};
@@ -57,6 +57,9 @@ pub(crate) struct Sys<'a> {
     pub(crate) svbk: u8,
     /// KEY1 bit 0 (speed switch armed).
     pub(crate) key1: u8,
+    /// During the CGB speed-switch halt (`Ctx::speed_switch`), the clock
+    /// at which its last M-cycle (the wake-up) starts. Stale otherwise.
+    pub(crate) switch_halt_end: u64,
     /// P1/JOYP select bits (4-5) as written.
     pub(crate) joyp_select: u8,
     pub(crate) buttons: Buttons,
@@ -113,6 +116,7 @@ impl Sys<'_> {
             vram_off: 0,
             wram_off: 0x1000,
             key1: 0,
+            switch_halt_end: 0,
         }
     }
 
@@ -136,14 +140,15 @@ impl Sys<'_> {
     /// Sets the `DivApu` deadline at clock `now`: the next falling edge of
     /// the system counter's DIV-APU bit while the APU is `powered`, else
     /// [`NEVER`] (ADR 0021 section 4). Called wherever the counter is
-    /// rebased or the APU powers on. The caller reschedules. Out of line:
+    /// rebased or the APU powers on, with the APU's frame-sequencer state
+    /// `fs`. The caller reschedules. Out of line:
     /// off `speed_switch` and the event handlers (code-size budgets).
     #[inline(never)]
-    pub(crate) fn set_div_apu_deadline(&mut self, powered: bool, now: u64) {
-        let at = if powered {
+    pub(crate) fn set_div_apu_deadline(&mut self, fs: apu::Fs, now: u64) {
+        let at = if fs.power {
             let k = self.timer.div_apu_bit() + 1;
             // Bit 13 (double speed) with the delay armed: 2 clocks late.
-            let late = (u64::from(self.timer.apu_ds_delay) & u64::from(k - 13)) << 1;
+            let late = (u64::from(fs.ds_delay) & u64::from(k - 13)) << 1;
             self.timer.clock_at(((self.timer.sc(now) >> k) + 1) << k) + late
         } else {
             NEVER
@@ -189,7 +194,7 @@ impl Sys<'_> {
         boot_logo(&mut mem.vram, self.cart.rom);
         // NR52 = F1 is APU state (ADR 0021 section 7).
         mem.apu.post_boot();
-        self.set_div_apu_deadline(true, 0);
+        self.set_div_apu_deadline(mem.apu.fs, 0);
         // CGB mode: the boot ROM fades all 8 BG palettes to white (7FFF)
         // before starting the game (SameBoy BootROMs/cgb_boot.asm,
         // `Preboot`: 32 brightening steps over hBgPalettes, all 64 bytes).
@@ -802,7 +807,7 @@ impl Ctx<'_, '_> {
         if apu.sweep.due {
             self.sys.sched.set(EventKind::DivApu, now + apu::SWEEP_LAG);
         } else {
-            self.sys.set_div_apu_deadline(apu.powered(), now);
+            self.sys.set_div_apu_deadline(apu.fs, now);
         }
     }
 
@@ -888,10 +893,8 @@ impl Ctx<'_, '_> {
             0x10..=0x25 => {
                 self.mem.io[reg] = value;
                 let edge = self.sys.sched.deadline(EventKind::DivApu);
-                // The M-cycle length (bit 1: double speed), plus 1 with the
-                // APU's delay after a switch to double speed (`Apu::write`).
-                let ds = self.hot.mcycle as u8 | u8::from(self.sys.timer.apu_ds_delay);
-                self.mem.apu.write(reg, value, now, ds, edge);
+                let double = self.hot.mcycle == 2;
+                self.mem.apu.write(reg, value, now, double, edge);
             }
             // FF27-FF2F: unused, stored.
             _ => self.mem.io[reg] = value,
@@ -920,14 +923,13 @@ impl Ctx<'_, '_> {
             self.mem.apu.power_off();
             self.mem.io[0x10..=0x25].fill(0);
         }
-        self.sys.timer.apu_ds_delay = false;
         // The first edge is the next one after the end of the write's
         // M-cycle, consistent with the skip test above: an edge at that
         // end falls while the APU is still off (SameBoy `cycle_write` runs
         // the pending cycles, then `GB_apu_init`). One M-cycle is
         // 4 counter ticks in either speed. Power-off ignores it.
         self.sys
-            .set_div_apu_deadline(on, now + self.hot.mcycle as u64);
+            .set_div_apu_deadline(self.mem.apu.fs, now + self.hot.mcycle as u64);
         self.reschedule();
     }
 
@@ -1938,12 +1940,13 @@ impl Ctx<'_, '_> {
         let short = i64::from(m == 4 && !pending);
         // T-cycles to clocks at the new speed.
         self.sys.timer.speed_switch(now, freeze * m / 4, short != 0);
+        self.mem.apu.fs.ds_delay ^= m == 2;
         if !pending && self.sys.vdma.hblank {
             self.vdma_stop();
         }
         // Step 3. The DIV-APU bit changes (12 <-> 13) with the counter
         // speed, and a switch to double speed toggles the frame
-        // sequencer's delay (`Timer::apu_ds_delay`). The M-cycle length
+        // sequencer's delay (`apu::Fs::ds_delay`, above). The M-cycle length
         // changes, and with it the boundary a scheduled button change
         // rounds down to (ADR 0012). The timer and the serial clock follow
         // the rebased counter, which already accounts for the grid moving
@@ -1955,7 +1958,7 @@ impl Ctx<'_, '_> {
         self.schedule_timer();
         self.schedule_serial();
         if short != 0 {
-            // Step 4. The halt's odd clocks (`switch_end` below), idled
+            // Step 4. The halt's odd clocks (`switch_halt_end` below), idled
             // first (the CPU halts at `now`, so after `vdma_stop`): the
             // CPU's M-cycle grid moves by 3 (-1) clocks. What is due in
             // them runs at their end, the first boundary of the new grid.
@@ -1970,11 +1973,11 @@ impl Ctx<'_, '_> {
             // M-cycles and the wake-up), so the CPU's M-cycle grid moves by
             // a clock against the PPU's, as on hardware (gambatte
             // `lcd_offset` tests, offsets 1 and 3).
-            self.sys.vdma.switch_end = now + 0x8000 * m - short as u64;
+            self.sys.switch_halt_end = now + 0x8000 * m - short as u64;
             // The halt is whole M-cycles from here (the odd clocks are
             // idled): `idle_speed_switch` ends exactly on its end.
             debug_assert!(
-                (self.sys.vdma.switch_end)
+                (self.sys.switch_halt_end)
                     .wrapping_sub(self.clock())
                     .is_multiple_of(m)
             );
@@ -1990,7 +1993,7 @@ impl Ctx<'_, '_> {
     /// Whether the speed-switch halt has run its length.
     #[inline]
     pub(crate) fn speed_switch_over(&self) -> bool {
-        self.clock() >= self.sys.vdma.switch_end
+        self.clock() >= self.sys.switch_halt_end
     }
 
     /// As [`Bus::halt_end`], except (gambatte CGB C
@@ -2027,7 +2030,7 @@ impl Ctx<'_, '_> {
         // The halt is 0x20000 clocks at most: the difference fits.
         #[cfg(feature = "eager-sync")]
         self.eager_sync();
-        let left = self.sys.vdma.switch_end.wrapping_sub(self.clock()) as u32 / m;
+        let left = self.sys.switch_halt_end.wrapping_sub(self.clock()) as u32 / m;
         let n = self.mcycles_to_deadline().min(left).max(1);
         self.hot.t_minus += n as i32;
         if self.hot.t_minus >= 0 {
@@ -2147,9 +2150,9 @@ impl Ctx<'_, '_> {
     /// `dma/hdma_transition_{,ei_}halt_late_unhalt_scx1_{1,2}`).
     fn vdma_hblank(&mut self) {
         let v = &mut self.sys.vdma;
-        if v.refetch == hdma::RAN {
-            v.refetch = 0;
-            if self.hot.clock() < v.switch_end {
+        if v.refetch == Refetch::Ran {
+            v.refetch = Refetch::None;
+            if self.hot.clock() < v.stall_end {
                 return;
             }
         }
@@ -2174,7 +2177,7 @@ impl Ctx<'_, '_> {
         v.wake_ok = !in_hblank;
         // A block requested in HALT's M-cycle (gambatte `Memory::halt`).
         if v.pending {
-            v.refetch = hdma::REQUESTED;
+            v.refetch = Refetch::Requested;
         }
     }
 
@@ -2209,7 +2212,7 @@ impl Ctx<'_, '_> {
                 v.blocks = blocks;
                 v.hblank = false;
             }
-            self.sys.vdma.refetch = hdma::REQUESTED;
+            self.sys.vdma.refetch = Refetch::Requested;
         }
         self.vdma_halt();
     }
@@ -2282,12 +2285,12 @@ impl Ctx<'_, '_> {
         let m = self.hot.mcycle as u32;
         let full = hdma::stall_mcycles(blocks, m);
         v.stall = full as u16;
-        v.refetch = if v.refetch == hdma::REQUESTED {
+        v.refetch = if v.refetch == Refetch::Requested {
             v.stall -= 1;
-            v.switch_end = now + u64::from(full * m);
-            hdma::RAN
+            v.stall_end = now + u64::from(full * m);
+            Refetch::Ran
         } else {
-            0
+            Refetch::None
         };
         self.sys.vdma = v;
         if self.hot.dma != 0 && running {
@@ -2588,18 +2591,18 @@ impl Bus for Ctx<'_, '_> {
         read::<true>(self.mem, self.sys, &self.hot, addr)
     }
 
-    /// `VramDma::refetch` is `REQUESTED`: kept while the block is still
+    /// `VramDma::refetch` is `Requested`: kept while the block is still
     /// `pending` (it runs at the wake-up), cleared otherwise (a switch to
     /// double speed ran it at once).
     fn hdma_refetch(&mut self) -> bool {
         let v = &mut self.sys.vdma;
         // The common case first: nothing to clear (perf: every HALT).
-        if v.refetch == 0 {
+        if v.refetch == Refetch::None {
             return false;
         }
-        let r = v.refetch == hdma::REQUESTED;
+        let r = v.refetch == Refetch::Requested;
         if !v.pending {
-            v.refetch = 0;
+            v.refetch = Refetch::None;
         }
         r
     }
@@ -5244,7 +5247,7 @@ mod dma_tests {
     }
 
     /// A switch to double speed with the APU on delays the APU by one
-    /// 2 MHz tick (`Timer::apu_ds_delay`): a CH1 trigger in double speed
+    /// 2 MHz tick (`apu::Fs::ds_delay`): a CH1 trigger in double speed
     /// then takes the other of its two delays than the power-on phase
     /// gives (gambatte cgb04c
     /// `speedchange_ch1_nr4init_duty0_pos6_to_pos7_timing_1`/`_2`). A
@@ -5278,11 +5281,11 @@ mod dma_tests {
                 ctx.idle_speed_switch();
             }
             ctx.speed_switch_end();
-            assert!(ctx.sys.timer.apu_ds_delay);
+            assert!(ctx.mem.apu.fs.ds_delay);
             check(ctx, 1);
             ctx.write(0xFF26, 0x00);
             ctx.write(0xFF26, 0x80);
-            assert!(!ctx.sys.timer.apu_ds_delay);
+            assert!(!ctx.mem.apu.fs.ds_delay);
             check(ctx, 0);
         });
     }
@@ -5381,7 +5384,7 @@ mod dma_tests {
     }
 
     /// The lost-trigger window after a block that a HALT's latched opcode
-    /// waited for (`hdma::RAN`) ends at that block's full stall, however
+    /// waited for (`Refetch::Ran`) ends at that block's full stall, however
     /// long the flag then stays set: nothing clears it until the next
     /// trigger or HALT, which can be more than 2^31 clocks (8.5 minutes)
     /// away (review finding A1-04: a 32-bit end made such a trigger look
@@ -5399,8 +5402,8 @@ mod dma_tests {
                 ctx.write(0xFF26, 0x00); // APU off: no frame-sequencer events
                 // As `vram_dma` leaves it after such a block (1 + 8
                 // M-cycles) at this clock.
-                ctx.sys.vdma.refetch = hdma::RAN;
-                ctx.sys.vdma.switch_end = ctx.clock() + 36;
+                ctx.sys.vdma.refetch = Refetch::Ran;
+                ctx.sys.vdma.stall_end = ctx.clock() + 36;
                 // `later` clocks pass (LCD off, nothing else scheduled).
                 ctx.hot.deadline += later;
                 ctx.write(0xFF40, 0x91);
@@ -5412,7 +5415,7 @@ mod dma_tests {
                 ctx.idle();
                 assert_eq!(ctx.clock(), now + 8);
                 assert_eq!(ctx.sys.vdma.pending, kept, "{later} clocks later");
-                assert_eq!(ctx.sys.vdma.refetch, 0);
+                assert_eq!(ctx.sys.vdma.refetch, Refetch::None);
             });
         }
     }
