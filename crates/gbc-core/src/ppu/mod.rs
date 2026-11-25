@@ -390,6 +390,12 @@ const LCDC_TILES_LATE: i32 = 1;
 /// 10-12 -> 4-1 / 0.
 const DISCARD_LEAD: i32 = 8;
 
+/// The stall of a window at WX = 0 that starts before the fine-scroll
+/// discard (`SCX & 7` not 0 at the line's start): one dot more than a
+/// window start's 6 ([`Ppu::set_stalls`]). Only that start has it, which
+/// is how [`Ppu::hold_fetch`] tells it.
+const WX0_EARLY: u8 = 7;
+
 /// Dots before the window's stall would begin at which its start is
 /// decided: a WX, WY or LCDC.5 write after that doesn't move it
 /// ([`Ppu::window_write`]). Approximations, calibrated over the full
@@ -1768,17 +1774,29 @@ impl Ppu {
         // its match flip-flop PUXA are clocked from CLKPIPE). The stalls
         // stay listed at pixel 0, after the discard: the totals are the
         // same, only the compares' dots differ.
+        //
+        // So is a window at WX = 0 on a line with a fine scroll: it starts
+        // before the discard ([`Self::set_stalls`]), the pixels discarded
+        // are its own, and none can be until its first tile is fetched: 7
+        // dots (`WX0_EARLY`). SameBoy display.c (MIT): the window
+        // activates at `position_in_line` -16 when `SCX & 7` is not 0, and
+        // `render_pixel_if_possible` returns while the FIFO is empty. Pan
+        // Docs, Window: at WX = 0 it "is switched to before the initial
+        // fine scroll adjustment". The DMG netlist (GateBoy, MIT): the
+        // window hit stops CLKPIPE too (SOCY_WIN_HITn in TYFA_CLKPIPE).
         // Looked up only where it can matter: on a line with stalls, while
-        // 10 objects at X = 0 (5 + 6 * 10 dots) could still be holding the
-        // discard. Measured: `synth:dmg-raster` +0.53% with the lookup on
-        // every SCX write, +0.41% with this.
-        const MAX_HELD: i32 = 5 + 6 * objects::MAX_PER_LINE as i32;
+        // that window and 10 objects at X = 0 (5 + 6 * 10 dots) could
+        // still be holding the discard. Measured: `synth:dmg-raster`
+        // +0.53% with the lookup on every SCX write, +0.41% with this.
+        const MAX_HELD: i32 = WX0_EARLY as i32 + 5 + 6 * objects::MAX_PER_LINE as i32;
         let early = t + DISCARD_LEAD - MAX_HELD <= first_pixel;
-        let held = if reg == 0x43 && early && !lt.stalls.is_empty() {
-            self.x0_fetch_dots()
+        let (at0, win0) = if reg == 0x43 && early && !lt.stalls.is_empty() {
+            let win0 = lt.stalls.window().is_some_and(|w| w.1 == WX0_EARLY);
+            (self.x0_fetch_dots(), win0)
         } else {
-            0
+            (0, false)
         };
+        let held = at0 + i32::from(win0) * i32::from(WX0_EARLY);
         if reg == 0x43 && t + DISCARD_LEAD - held <= first_pixel {
             let start = i32::from(lt.mode3) + 12;
             let w = (t - start + DISCARD_LEAD - held).max(0);
@@ -1791,9 +1809,25 @@ impl Ppu {
             // The objects' stalls follow the new tile alignment (`n & 7`).
             if !lt.stalls.is_empty() {
                 self.set_stalls(n as u8, self.renderer.window_wx());
-                if held != 0 && n >= 8 {
-                    // `held` is 5 + 6 per object at X = 0.
-                    self.unshare_junk_tile(n as u8, held as usize / 6);
+                if at0 != 0 && n >= 8 {
+                    // `at0` is 5 + 6 per object at X = 0.
+                    self.unshare_junk_tile(n as u8, at0 as usize / 6);
+                }
+                // The early window's stall keeps the 7 dots it ran for
+                // when the write leaves a discard of 0 or 8 pixels: the
+                // extra dot is that start's (SameBoy display.c, MIT:
+                // `cgb_wx_glitch` holds the push of a window tile fetched
+                // at `position_in_line` -16..-8, whatever SCX is by
+                // then). At pixel 0, so mode 3's end moves with it.
+                // Approximation: a later window write on the line
+                // rebuilds the stalls without it.
+                let lt = &mut self.line;
+                if win0
+                    && n & 7 == 0
+                    && let Some(w) = lt.stalls.window_mut()
+                {
+                    w.1 = WX0_EARLY;
+                    lt.end += 1;
                 }
             }
             self.end_moved();
@@ -2411,8 +2445,8 @@ impl Ppu {
             // SameBoy display.c has the extra dot, `cycles_for_line += 1`,
             // for DMG only). It goes before the first object at or after
             // it (`Stalls::insert_window`).
-            let fine = u8::from(scx & 7 != 0);
-            let w = (wx.saturating_sub(7), 6 + fine * u8::from(wx == 0));
+            let early = wx == 0 && scx & 7 != 0;
+            let w = (wx.saturating_sub(7), if early { WX0_EARLY } else { 6 });
             t.stalls.insert_window(w);
             total += u16::from(w.1);
         }
@@ -5232,6 +5266,57 @@ mod tests {
         // Two objects: 6 dots more.
         assert_eq!(end(2, 0, (105, 1)), 256 + 17 + 1);
         assert_eq!(end(2, 0, (106, 1)), 256 + 17);
+    }
+
+    /// A window at WX = 0 on a line with a fine scroll starts before the
+    /// fine-scroll discard, whose compares wait for its first tile (7
+    /// dots; SameBoy, Pan Docs, the DMG netlist): an SCX write in those
+    /// dots is seen by every compare, and the stall keeps its 7 dots.
+    #[test]
+    fn window_at_wx_0_starts_before_the_discard() {
+        use super::mode3_oracle::{Line, mode0_start};
+        // Line 5 with the window at WX = 0 and SCX `scx` at its start;
+        // `write`: (dot, SCX). -> mode 3's end, which the dot-stepped
+        // oracle gives too.
+        let end = |scx: u8, write: (u32, u8)| {
+            let on = 1000;
+            let mut r = fetch_rig(on);
+            r.ppu.lcdc |= 0x20;
+            r.mem.io[0x4A] = 0;
+            r.mem.io[0x4B] = 0;
+            r.mem.io[0x43] = scx;
+            let l5 = clock(on, 0, 5 * LINE);
+            write_fetch_reg(&mut r, l5 + u64::from(write.0), 0x43, write.1);
+            r.sync(l5 + 455);
+            let end = (84..LINE).find(|&t| r.stat(l5 + u64::from(t)) & 3 == 0);
+            let oracle = mode0_start(&Line {
+                scx,
+                wx: 0,
+                window_on: true,
+                wy_triggered: true,
+                xs: [0; 10],
+                n: 0,
+                scx_write: Some(write),
+            });
+            assert_eq!(end, Some(oracle), "SCX {scx}, write {write:?}");
+            oracle
+        };
+        // The window's tile is fetched in dots 89-95, compare 0 runs at
+        // 96: a 0 written up to 95 matches there, and the stall keeps the
+        // early start's 7th dot.
+        assert_eq!(end(1, (89, 0)), 256 + 7);
+        assert_eq!(end(1, (95, 0)), 256 + 7);
+        // Seen at compare 1 (dot 97), a 0 wraps to 8; from dot 97 compare
+        // 1 has matched.
+        assert_eq!(end(1, (96, 0)), 256 + 7 + 8);
+        assert_eq!(end(1, (97, 0)), 256 + 7 + 1);
+        // Line-start 3: a 5 is seen by compare 3 (dot 99) when written
+        // up to 98.
+        assert_eq!(end(3, (98, 5)), 256 + 7 + 5);
+        assert_eq!(end(3, (99, 5)), 256 + 7 + 3);
+        // No fine scroll at the line's start: the discard is over at dot
+        // 89 and the window starts after it, 6 dots.
+        assert_eq!(end(0, (89, 1)), 256 + 6);
     }
 
     /// Once an SCX write has moved the discard past the 8 junk pixels, an

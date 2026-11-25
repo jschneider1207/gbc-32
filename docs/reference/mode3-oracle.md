@@ -49,11 +49,12 @@ makes a STAT read at the loop's last position see mode 0).
   and evenly spaced; 6,000 fixed-seed pseudo-random lines (0..=10
   objects spread, clustered or at the left edge, any OAM slots, LCDC.1
   on or off); a sample again with the WY condition not met.
-- `core_mode3_length_with_an_scx_write_matches_the_oracle`: about 40,000
+- `core_mode3_length_with_an_scx_write_matches_the_oracle`: about 54,000
   lines with one SCX write at every position 80..=124 and some later,
   every pair of fine scrolls, with objects (at X = 0 too: one, two, and
   one beside an object at X = 4, that also behind a window at WX 3 and
-  7) and windows.
+  7) and windows, the one at WX = 0 too (alone, with one or two objects
+  at X = 0, with one at X = 4 or 12).
 - `..._exhaustive` (`#[ignore]`): the same with 1,000,000 and 500,000
   pseudo-random lines (about 45 s unoptimized).
 
@@ -109,6 +110,18 @@ a listed class stops disagreeing.
    7 + f). Example: SCX 3, X = 5: core 272 (273 before), oracle 277. The
    static sweep leaves out 1,348 lines for this class; 892 disagree
    (1,197 before).
+
+   With an SCX write on the line it is the same dispute, listed apart
+   (`excluded()`): the SCX-write sweep leaves out 4,900 lines (the window
+   at WX = 0 starting before the discard, an object at X = 4 or 12),
+   3,181 disagreeing, all by the same +1 or 6 against 11. SameBoy's
+   extra pixel belongs to the early start, whatever the discard comes to
+   after the write (8 + n cut for a discard of n pixels, the core
+   7 + n % 8). Tried (2026-11-24): with the core's grid one pixel further
+   left, 6,104 of 6,615 such lines (X = 4, 8, 12) agree; the rest are a
+   discard of 0 or 8 pixels, which the trial grid did not cover (231),
+   and X = 12 at a discard of 7 (280, SameBoy's 14). Without an on-screen
+   object these lines are asserted (the third class below).
 
    Nothing available here says which grid is right:
    - No ROM in the manifest reaches the class (probed 2026-11-24: a
@@ -175,6 +188,77 @@ No other ROM of the manifest writes SCX at 85..=125 on such a line
 at X = 0, SCX 0 at the line start, SCX = 1 written at positions 89..=99,
 and the dot at which STAT reads mode 0 (268 against 267) or the image
 shifted by one pixel.
+
+A third class was the core's too and is fixed (2026-11-24): **an SCX
+write during the discard on a line whose window at WX = 0 started
+before it** (`SCX & 7` not 0 as the pipeline starts, position 89; the
+write at positions 89..=102). 427 of the 2,520 lines without an object
+(every pair of fine scrolls, positions 80..=124) disagreed by -7..=+8
+dots, and 1,050 more of 5,040 with one or two objects at X = 0. None of
+it is disagreement 1: without an on-screen object the static totals
+agree. Two things, with f the fine scroll at the line's start, f' the
+written one, and n the discard an SCX write seen at compare w gives (the
+next n >= w with n % 8 = f'; f if compare f had matched):
+
+| | core before | oracle, core now |
+|---|---|---|
+| compare k of the discard runs at | 89 + k | 96 + k: after the window's first tile, 7 dots |
+| a write at position t is seen from compare | t - 88 | t - 95 (0 up to t = 95) |
+| the window's stall | 7 dots if n % 8 != 0, else 6 | 7 dots: the early start's, whatever is written |
+| mode 0 at | 262 + n + (n % 8 != 0) | 263 + n |
+
+Measured, no objects (core before / oracle; equal at the other
+positions, and at every position when f = 0: the discard is over at 89
+and the window starts after it, 262):
+
+| f -> f' | 89 | 90, 91 | 92..=95 | 96 | 97, 98 | from 99 |
+|---|---|---|---|---|---|---|
+| 1 -> 0 | 270/263 | 264/263 | 264/263 | 264/271 | 264 | 264 |
+| 3 -> 0 | 270/263 | 270/263 | 266/263 | 266/271 | 266/271 | 266 |
+| 3 -> 5 | 268 | 268 | 266/268 | 266/268 | 266/268 | 266 |
+
+The core compared from position 89 whatever the window (`hold_fetch`)
+and rebuilt the window's stall from the new discard (`set_stalls`), so
+it held two orders at once: its renderer and its object stalls cut the
+window by 7 + f pixels (ADR 0034), which is the window starting before
+the discard, and its discard ran before the window's fetch. Now the
+compares wait for that fetch and the stall keeps its 7 dots
+(`Ppu::hold_fetch`; a later window write on
+such a line rebuilds the stalls without it). Evidence, none of it a
+capture of this case:
+
+- SameBoy, mode-3 loop: at WX = 0 the window activates at
+  `position_in_line` -16 when `SCX & 7` is not 0, the FIFO is cleared,
+  and `render_pixel_if_possible`, which holds the fine-scroll compare,
+  returns while the FIFO is empty. The extra dot is `cgb_wx_glitch`
+  holding the push of a window tile fetched at positions -16..-8; SCX
+  is not in it. SameBoy marks the activation "TODO: Verify fetcher
+  access timings in this case" and names no test.
+- The DMG netlist (GateBoy, `GateBoy.cpp`): `TYFA_CLKPIPE = and3(SOCY_
+  WIN_HITn, POKY_PRELOAD_LATCHp, VYBO_CLKPIPE)`: a window hit stops
+  CLKPIPE until its fetch is done, and the discard's match flip-flop
+  `PUXA_SCX_FINE_MATCH` is clocked from CLKPIPE (`ROXO`), comparing the
+  live SCX bits (`SUHA`/`SYBY`/`SOZU`). The WX compare needs no finished
+  discard: the pixel counter is 0 until then, which is WX = 0's match.
+  DMG, not CGB.
+- Pan Docs, Window: at WX = 0 the window "is switched to before the
+  initial fine scroll adjustment".
+- AGE `stat-mode-window` (verified on CGB B/C/E) has the 7th dot of the
+  static line, which the early start explains: Gambatte's model, the one
+  reference with the window after the discard (no special case for
+  WX = 0), has no such dot.
+
+No ROM here reaches it (probed 2026-11-24 with a counter in
+`hold_fetch` over the full manifest: 311 ROMs change SCX in mode 3,
+none with WX = 0 and LCDC.5 set; Gambatte
+`late_scx_late_wy_FFto4_ly4_wx00_*` changes SCX in no line's mode 3; the
+fingerprint of the whole corpus is unchanged by the fix). A capture
+that would pin it, on a CGB: WX = 0, WY = 0, SCX 1 at the line start,
+SCX = 0 written at positions 89..=97, and the dot at which STAT reads
+mode 0: 263 up to 95, then 271, then 264 (the core before: 270 at 89,
+then 264). Not modelled: the pixels of such a line when the discard
+wraps (n >= 8: the renderer still cuts 7 + n % 8 window pixels, not
+7 + n).
 
 One disagreement was the oracle's and is fixed: SCX writes were first
 applied to the loop's step at the write's own position; they come after

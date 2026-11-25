@@ -293,7 +293,7 @@ mod tests {
     extern crate std;
 
     use super::super::*;
-    use super::{Line, mode0_start};
+    use super::{LOOP_START, Line, mode0_start};
     use std::boxed::Box;
     use std::format;
     use std::string::String;
@@ -548,8 +548,30 @@ mod tests {
         //    check of the stalls alone: the length of mode 3 with one
         //    object at each X in 9..=16 is longest (11 dots) at the X on
         //    the grid: 9, 17 - f, or 16 - f (10 at f = 7).
-        if starts && l.wx == 0 && l.scx & 7 != 0 && on_screen && l.scx_write.is_none() {
-            return Some("WX = 0 with SCX % 8 != 0 and an object");
+        //    With an SCX write it is the same dispute, counted apart. The
+        //    window starts before the discard when SCX % 8 is not 0 as
+        //    the pipeline starts (position 89: a write before that is
+        //    in), and SameBoy's extra pixel belongs to that early start,
+        //    whatever the discard then comes to: the cut is 8 + n for a
+        //    discard of n pixels (0..=14) against the core's 7 + n % 8.
+        //    Without an on-screen object those lines are asserted (the
+        //    discard's compares wait for the window's tile and the stall
+        //    keeps its 7 dots: `Ppu::hold_fetch`). With one, the same +1
+        //    or 6-against-11. Tried: with the core's grid one pixel
+        //    further left, 6,104 of these 6,615 lines (objects at X = 4,
+        //    8 or 12, every write) agree, and the rest are a discard of 0
+        //    or 8 pixels, which that trial grid did not cover (231), and
+        //    X = 12 at a discard of 7 (280: SameBoy's 14, above).
+        let early_scx = match l.scx_write {
+            Some((at, v)) if at < LOOP_START => v,
+            _ => l.scx,
+        };
+        if starts && l.wx == 0 && early_scx & 7 != 0 && on_screen {
+            return Some(if l.scx_write.is_none() {
+                "WX = 0 with SCX % 8 != 0 and an object"
+            } else {
+                "WX = 0 with SCX % 8 != 0 and an object, with an SCX write"
+            });
         }
         None
     }
@@ -786,6 +808,14 @@ mod tests {
                     }
                     for wx in [7u8, 20] {
                         let mut l = with_window(line(from), wx);
+                        l.scx_write = Some((t, to));
+                        out.push(case(l));
+                    }
+                    // The window at WX = 0: with a fine scroll at the
+                    // line's start it begins before the discard.
+                    let at_wx0: [&[u8]; 5] = [&[], &[0], &[0, 0], &[4], &[12]];
+                    for xs in at_wx0 {
+                        let mut l = with_objects(with_window(line(from), 0), xs);
                         l.scx_write = Some((t, to));
                         out.push(case(l));
                     }
