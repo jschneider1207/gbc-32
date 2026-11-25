@@ -486,7 +486,6 @@ impl LineTiming {
 
     /// `edge` and `end` from the stalls, `total` dots in all (shared tail
     /// of [`Ppu::set_stalls`] and [`Ppu::set_stalls_retriggered`]).
-    #[inline(never)]
     fn finish(&mut self, total: u16) {
         // The stalls at pixel 159 (the trailing ones) don't delay the
         // HBlank interrupt (`LineTiming::edge`); rare, out of line.
@@ -777,7 +776,6 @@ impl Ppu {
     /// access, has its access at most `latch` dots (single, double speed)
     /// before the line's mode-0 interrupt point and lands before or at it
     /// ([`edges::M0_STAT_LATCH`]).
-    #[inline(never)]
     fn m0_latched(&self, now: u64, double: bool, delay: u32, latch: [u32; 2]) -> bool {
         let a = self.at(now);
         let irq = self.m0_irq_at(now, a) + delay;
@@ -1000,7 +998,6 @@ impl Ppu {
     /// `cgbpal_m3/*` and `enable_display/ly{0,1}_late_cgbp*` (CGB04C)
     /// pass with these edges; DMG compatibility mode never gets here
     /// (BCPD/OCPD are closed there).
-    #[inline(never)]
     pub(crate) fn palette_blocked(&self, now: u64, double: bool) -> bool {
         let (from, extra) = if double {
             (edges::PALETTE_FROM_DS, edges::PALETTE_EXTRA_DS)
@@ -1663,9 +1660,8 @@ impl Ppu {
     }
 
     /// Draws line `ly` from the last pixel drawn up to pixel `x` with the
-    /// current registers. Out of line: the pixel loop is the PPU's bulk
+    /// current registers. The pixel loop is the PPU's bulk
     /// and runs once or a few times per line.
-    #[inline(never)]
     fn draw(&mut self, ly: u8, x: u8, mem: &mut Memory, frame: &mut Frame) {
         let from = self.drawn;
         if x <= from {
@@ -2028,7 +2024,6 @@ impl Ppu {
     /// the pixels before the write come out the same, in one span with the
     /// held part instead of two. Not on a line OAM DMA touches (`flush`
     /// fixes the objects' fetches first).
-    #[inline(never)]
     pub(crate) fn scroll_write(
         &mut self,
         now: u64,
@@ -2311,7 +2306,6 @@ impl Ppu {
     /// The pipeline stalls of the current line (`line.stalls`, and
     /// `end` from `first_pixel`): the renderer's objects in fetch order
     /// and the window start at WX `window`.
-    #[inline(never)]
     fn set_stalls(&mut self, scx: u8, window: Option<u8>) {
         if self.line.prev_wx != 0 {
             return self.set_stalls_retriggered(scx, window);
@@ -2832,7 +2826,6 @@ impl Ppu {
     /// A STAT update at clock `now` (a STAT or LYC write): re-evaluates the
     /// interrupt line with the mode source and comparison of that
     /// position.
-    #[inline(never)]
     fn update_at(&mut self, now: u64, iflags: &mut u8, double: bool, view: View) {
         let a = self.at(now);
         let mode = self.mode_source(now, a, double, view);
@@ -2909,7 +2902,6 @@ impl Ppu {
     /// write bug on CGB). The bus writes in two phases (SameBoy
     /// `GB_CONFLICT_STAT_CGB`: the LYC select keeps its old value for the
     /// first dot; double speed: the mode-0 select).
-    #[inline(never)]
     pub(crate) fn write_stat(
         &mut self,
         now: u64,
@@ -3009,7 +3001,6 @@ impl Ppu {
     /// the PPU's own next one while LY is changing (SameBoy states 35, 26,
     /// 15 and 16), and in two windows of line 153 the new value is first
     /// compared with 153 (SameBoy's states 14 and 29 "hacks", measured).
-    #[inline(never)]
     pub(crate) fn write_lyc(&mut self, now: u64, value: u8, iflags: &mut u8, double: bool) {
         self.early_cmp(now, iflags, double, View::LycWrite);
         self.lyc = value;

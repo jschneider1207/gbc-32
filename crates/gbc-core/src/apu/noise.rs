@@ -346,7 +346,6 @@ impl Noise {
     }
 
     /// The digital output `dt` clocks after the state (PCM34), from a copy.
-    #[inline(never)]
     pub(crate) fn digital_at(&self, dt: u64) -> u8 {
         let mut ch = *self;
         ch.advance(dt);
@@ -356,7 +355,6 @@ impl Noise {
     /// Advances by `dt` clocks without integrating (ADR 0021 section 9).
     /// The LFSR takes the same steps as in `integrate`, so its state does
     /// not depend on whether a buffer was passed.
-    #[inline(never)]
     pub(crate) fn advance(&mut self, dt: u64) {
         if !self.on {
             return;
@@ -386,7 +384,6 @@ impl Noise {
     /// most 17 steps) and advances over them: `15 - 2 * digital` while the
     /// DAC is on (Pan Docs DAC), nothing while it is off. A batch per call:
     /// NR43 and the volume are constant over a sync span.
-    #[inline(never)]
     pub(crate) fn integrate(&mut self, segs: &[u8], out: &mut [i16]) {
         if !self.env.dac() {
             return;

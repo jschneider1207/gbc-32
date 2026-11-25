@@ -65,7 +65,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3apu3mix*3Apu4list*                          # Apu::list
 .text._R*8gbc_core3apu3mix*3Apu5flush*                         # Apu::flush
 .text._R*8gbc_core3apu*3Apu4step*                              # Apu::step
-.text._R*8gbc_core3apu*3Apu5write*                             # Apu::write
 .text._R*8gbc_core3apu*9integrate*                             # Square/Wave/Noise::integrate (3)
 .text._R*8gbc_core3apu*7advance*                               # Square/Wave/Noise::advance (3)
 .text._R*8gbc_core3apu6square*5Sweep5clock*                    # Sweep::clock
@@ -79,7 +78,6 @@ ITCM_BUDGET_BYTES=57344
 .text._R*8gbc_core3ppu*3Ppu10run_points*                       # Ppu::run_points (Ppu::walk_to with points to run; its callers inline the test for none)
 .text._R*8gbc_core3ppu*3Ppu10next_event*                       # Ppu::next_event
 .text._R*8gbc_core3ppu*3Ppu15point_irq_ahead*                  # Ppu::point_irq_ahead (next_event; the walk inlines point_irq)
-.text._R*8gbc_core3ppu*3Ppu4draw*                              # Ppu::draw
 .text._R*8gbc_core3ppu*3Ppu5flush*                             # Ppu::flush
 .text._R*8gbc_core3ppu*3Ppu4stat*                              # Ppu::stat
 .text._R*8gbc_core3ppu*3Ppu2ly*                                # Ppu::ly
@@ -93,7 +91,6 @@ ITCM_BUDGET_BYTES=57344
 # plain tile path)
 .text._R*8gbc_core3ppu*3Ppu5latch*                             # Ppu::latch
 .text._R*8gbc_core3ppu*3Ppu10set_stalls*                       # Ppu::set_stalls
-.text._R*8gbc_core3ppu*10LineTiming6finish*                    # LineTiming::finish (from set_stalls)
 .text._R*8gbc_core3ppu6render*8Renderer13fetch_objects*        # Renderer::fetch_objects
 #
 # FLASH_OK: warm functions the set calls that stay in flash, behind the

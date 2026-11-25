@@ -110,7 +110,6 @@ impl Wave {
     }
 
     /// The digital output `dt` clocks after the state (PCM34), from a copy.
-    #[inline(never)]
     pub(crate) fn digital_at(&self, dt: u64, io: &[u8; 0x80]) -> u8 {
         let mut w = *self;
         w.advance(dt, io);
@@ -132,7 +131,6 @@ impl Wave {
 
     /// Wave RAM offset `i` as read `dt` clocks after the state, from a copy
     /// (pure, ADR 0021 section 3).
-    #[inline(never)]
     pub(crate) fn read_ram_at(&self, dt: u64, io: &[u8; 0x80], i: usize) -> u8 {
         let mut w = *self;
         w.advance(dt, io);
@@ -172,7 +170,6 @@ impl Wave {
     /// in closed form: the index only matters mod 32, and the buffer is
     /// the byte at the final index (wave RAM is constant over a sync span:
     /// its writes sync first).
-    #[inline(never)]
     pub(crate) fn advance(&mut self, dt: u64, io: &[u8; 0x80]) {
         if !self.on {
             return;
@@ -204,7 +201,6 @@ impl Wave {
     /// cached sum, and the last partial period is the nibble at the final
     /// index. Exact: the same state and integral as stepping
     /// (`integrate_matches_a_clock_by_clock_reference_and_advance`).
-    #[inline(never)]
     pub(crate) fn integrate(&mut self, segs: &[u8], io: &[u8; 0x80], out: &mut [i16]) {
         if !self.dac {
             return;

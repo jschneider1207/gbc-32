@@ -54,17 +54,13 @@ report 2162 gbc_core::ppu::render::fill_tiles::<true, true>
 report 1264 gbc_core::ppu::render::fill_tiles::<false, false>
 report 1852 gbc_core::ppu::render::fill_tiles::<true, false>
 report 1796 <gbc_core::ppu::Ppu>::latch
-report 154 <gbc_core::ppu::Ppu>::draw
 report 355 <gbc_core::ppu::Ppu>::flush
 report 782 <gbc_core::ppu::render::Renderer>::fetch_objects
 report 546 <gbc_core::Emulator>::run
 report 771 <gbc_core::apu::Apu>::sync
-report 1191 <gbc_core::apu::noise::Noise>::integrate
-report 675 <gbc_core::apu::wave::Wave>::integrate
 report 395 <gbc_core::apu::square::Square>::integrate
 report 93 gbc_core::apu::mix::constant
 report 160 <gbc_core::apu::Apu>::step
-report 322 <gbc_core::apu::Apu>::write
 report 508 <gbc_core::bus::Ctx>::write_apu
 report 82 <gbc_core::bus::Ctx>::div_apu_event
 report 59 <gbc_core::bus::Ctx>::set_apu_deadline
@@ -79,7 +75,6 @@ report 196 <gbc_core::ppu::Ppu>::cpu_blocked
 report 194 <gbc_core::apu::square::Sweep>::clock
 report 173 <gbc_core::ppu::Ppu>::ly
 report 150 <gbc_core::bus::Ctx>::run_ppu_to_call
-report 143 <gbc_core::apu::wave::Wave>::advance
 report 139 <gbc_core::ppu::Ppu>::check_wy_at
 report 135 <gbc_core::apu::square::Square>::advance
 #

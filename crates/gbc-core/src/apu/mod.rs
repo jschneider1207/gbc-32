@@ -275,7 +275,6 @@ impl Apu {
     /// skip (`Fs::skip`). Pan Docs "Audio details", DIV-APU; SameBoy
     /// `GB_apu_div_event`. A sweep step that ends the sweep timer comes
     /// `SWEEP_LAG` clocks later (`Sweep::step`).
-    #[inline(never)]
     pub(crate) fn step(&mut self) {
         let fs = &mut self.fs;
         if fs.skip != 0 {
@@ -363,7 +362,6 @@ impl Apu {
     /// at clock `now`, after a sync, with the APU on and the next `DivApu`
     /// event at clock `edge`. `double`: the CPU runs at double speed. The
     /// byte is already stored in `Memory::io`.
-    #[inline(never)]
     pub(crate) fn write(&mut self, reg: usize, value: u8, now: u64, double: bool, edge: u64) {
         // Under 2^14 while powered (`DivApu` is an edge or the sweep lag).
         let dist = edge.wrapping_sub(now) as u32;
