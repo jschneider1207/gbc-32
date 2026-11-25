@@ -27,12 +27,13 @@ use crate::joypad::{InputQueue, p1_interrupt, p1_lines};
 use crate::memory::Memory;
 use crate::ppu::{self, Frame, Ppu, View, edges};
 use crate::schedule::{EventKind, NEVER, Schedule};
-use crate::serial::{INT_SERIAL, Serial};
+use crate::serial::Serial;
 use crate::speed::Speed;
 use crate::timer::{INT_TIMER, Timer};
 use crate::{Buttons, Emulator, Events, RunResult};
 
 mod reset;
+mod timer_io;
 
 /// Everything the bus reaches except the RAM arrays (in [`Memory`]) and the
 /// CPU itself. Lives in `Hw`.
@@ -407,79 +408,6 @@ impl Ctx<'_, '_> {
         self.boundary();
     }
 
-    /// A serial byte completed (`done`): the serial interrupt.
-    fn serial_done(&mut self, done: bool) {
-        if done {
-            self.sys.iflags |= INT_SERIAL;
-            self.irq_attention();
-            self.raise(Events::SERIAL_TX);
-        }
-    }
-
-    /// Brings the serial port's shift register up to the clock `now`
-    /// ([`Serial::catch_up`]): the shifts of a running transfer are no
-    /// events, only its completion is (`serial` module docs, "Lazy
-    /// shifts"). The completion's event runs before any access on its
-    /// clock, so no catch-up but the event's completes a byte.
-    fn serial_catch_up(&mut self, now: u64) {
-        let c = self.sys.timer.sc(now);
-        let done = self.sys.serial.catch_up(c);
-        self.serial_done(done);
-    }
-
-    /// The Serial deadline: the clock at which the running transfer
-    /// completes (its eighth shift, the bit clock's 1 -> 0 edge that many
-    /// periods on), else [`NEVER`]. It needs no catch-up
-    /// ([`Serial::completion`] is the same before and after one), but a
-    /// counter that runs (not in STOP mode).
-    #[inline(always)]
-    fn serial_deadline(&self) -> u64 {
-        let s = &*self.sys;
-        match s.serial.completion() {
-            None => NEVER,
-            Some(v) => s.timer.clock_at(v),
-        }
-    }
-
-    /// Sets the Serial deadline ([`Self::serial_deadline`]) and
-    /// reschedules: after a change to the transfer, the counter or its
-    /// rate.
-    // Out of line, measured (docs/perf.md, "Scheduler and attribute
-    // pass"): inlined into the register-write paths it is +1,450 B and
-    // slower. `Schedule::set` is inlined here, also measured.
-    #[inline(never)]
-    fn schedule_serial(&mut self) {
-        let at = self.serial_deadline();
-        self.sys.sched.set_inline(EventKind::Serial, at);
-        self.reschedule();
-    }
-
-    /// Sets the Timer deadline and reschedules: after a change to the
-    /// timer, or to bit 2 of IF or IE.
-    ///
-    /// The Timer event's work for the rest of the machine is to set IF
-    /// bit 2 at a reload. While the bit is set and IE bit 2 is clear, a
-    /// reload has nothing to request and the dispatch can't clear the
-    /// bit, so there is no deadline: the timer is caught up
-    /// ([`Timer::catch_up`]) at its next access, and here, when one of
-    /// the two bits changes (the reloads up to the clock requested the
-    /// interrupt that was pending). With IE bit 2 set the deadline stays
-    /// on, so the dispatch's acknowledge has nothing to do (ADR 0011,
-    /// 2026-11-24 amendment).
-    #[inline(never)] // See `schedule_serial`.
-    fn schedule_timer(&mut self) {
-        let now = self.clock();
-        let s = &mut *self.sys;
-        s.timer.catch_up(now);
-        let at = if s.iflags & !s.ie & INT_TIMER != 0 {
-            NEVER
-        } else {
-            s.timer.deadline()
-        };
-        s.sched.set_inline(EventKind::Timer, at);
-        self.reschedule();
-    }
-
     /// An IE write (FFFF): bit 2 turns the Timer deadline on or off
     /// while the timer interrupt is requested ([`Self::schedule_timer`]).
     #[inline(never)]
@@ -490,52 +418,6 @@ impl Ctx<'_, '_> {
             self.schedule_timer();
         }
         self.irq_attention();
-    }
-
-    /// Writes to SB, SC, DIV, TIMA, TMA and TAC (by the low 7 address
-    /// bits): they need the system counter, and all but SB move the Timer
-    /// or the Serial deadline. Out of line so the register logic stays
-    /// off `write_mapped` (ADR 0011).
-    #[inline(never)]
-    fn write_timer_io(&mut self, reg: usize, value: u8) {
-        let now = self.clock();
-        let s = &mut *self.sys;
-        match reg {
-            // The shifts before the write took the old SB's bits. The
-            // edges don't move: the deadline stays.
-            0x01 => {
-                let done = s.serial.write_sb(value, s.timer.sc(now));
-                return self.serial_done(done);
-            }
-            0x02 => {
-                let c = s.timer.sc(now);
-                let done = s.serial.write_sc(value, s.cgb_mode, c);
-                self.serial_done(done);
-                self.schedule_serial();
-                return;
-            }
-            0x04 => return self.div_reset(),
-            0x05 => s.timer.write_tima(now, value),
-            0x06 => s.timer.write_tma(now, value),
-            _ => s.timer.write_tac(now, value),
-        }
-        self.schedule_timer();
-    }
-
-    /// A DIV write or STOP: every set counter bit falls (the TIMA glitch
-    /// in [`Timer::write_div`], a serial flip-flop toggle in
-    /// [`Serial::div_reset`], after the shifts up to the old counter
-    /// value; Pan Docs FF04), then both deadlines move with the rebased
-    /// counter.
-    fn div_reset(&mut self) {
-        let now = self.clock();
-        let old = self.sys.timer.write_div(now);
-        let new = self.sys.timer.sc(now);
-        let done = self.sys.serial.div_reset(old, new);
-        self.serial_done(done);
-        self.apu_div_reset(old);
-        self.schedule_timer();
-        self.schedule_serial();
     }
 
     /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
@@ -926,22 +808,6 @@ impl Ctx<'_, '_> {
                 }
             }
         }
-    }
-
-    /// A serial transfer completes at `now` (`EventKind::Serial`): the
-    /// catch-up applies the shifts since the last access, the eighth
-    /// among them. Once a transfer; `boundary` reschedules after the
-    /// event loop.
-    // Out of line, measured (docs/perf.md, "Scheduler and attribute
-    // pass"): inlined into `boundary` it slows the PPU event's path.
-    // Not `#[cold]`: a running transfer has one every eight bits.
-    #[inline(never)]
-    fn serial_event(&mut self, now: u64) {
-        self.serial_catch_up(now);
-        debug_assert!(!self.sys.serial.running());
-        // `NEVER`, the transfer being over.
-        let at = self.serial_deadline();
-        self.sys.sched.rearm(EventKind::Serial, at);
     }
 
     /// Applies the scheduled button changes due at the M-cycle boundary
