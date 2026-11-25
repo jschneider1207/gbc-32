@@ -310,6 +310,20 @@ Open (earlier sessions):
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
 
+Decided in session 18 (2026-11-24), human ("Go with your recommendation
+for each", to the three questions put to them):
+- Speed switch on one model (A1-06): the ADR 0020 change is approved.
+  Land `m10-spsw-div-code` (AGE model for two-byte STOPs: DIV resets
+  after STOP's last byte; `Timer::stop_edge` and the IME-off 4 T hold
+  go), re-applied onto the `bus/` layout, and amend ADR 0020.
+- Audio aliasing (A3-1): implement box 64 + 8-tap FIR (about -41 dBc in
+  1-8 kHz for about +10% worst-case Ir, +250 B, +24 B RAM, estimated);
+  the bench baseline is re-recorded with it.
+- Partly fixed mediums (A2-02 latch as one register copy, E4 `LAND`
+  table, D4 and D6 rests): carried over as plan tasks; they do not block
+  `stage1-m10`. (The agent's recommendation, which the question left
+  open; say if these should be finished first.)
+
 Decided in session 16 (2026-11-24, M10 review), human:
 - `stage1-m9` tagged at 49c0756 on the human's instruction ("Tag m9"); the
   M10 whole-tree review stands in for the M9 milestone review. Open M9
