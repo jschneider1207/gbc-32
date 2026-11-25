@@ -48,24 +48,28 @@ enum Lcd {
     /// [`FRAME_CLOCKS`] + [`OVERSHOOT`] clocks after the previous one (or
     /// after power-on: the first) is an LCD-off gap; at a gap the check
     /// restarts from that frame, which must end its call at or before
-    /// `until` (this replaces [`FIRST_FRAME_LIMIT`]). Every other frame,
-    /// before the deadline too, and every frame after it, is checked as
-    /// for [`Lcd::OnFromStart`]; a gap after `until`, or no frame by it,
-    /// fails.
-    SetupGaps { until: u64 },
+    /// `until` (inclusive; this replaces [`FIRST_FRAME_LIMIT`]). Every other
+    /// frame, before the deadline too, and every frame after it, is checked
+    /// as for [`Lcd::OnFromStart`]; a gap after `until`, or no frame by it,
+    /// fails, and so does a run with a number of gaps other than `gaps`
+    /// (the first frame is not counted: the core is deterministic, and the
+    /// count is what was measured). `until` is the measured re-anchor clock
+    /// + [`FRAME_CLOCKS`] / 2, so no further frame is due before it.
+    SetupGaps { until: u64, gaps: u32 },
 }
 
 /// `synth:<name>` or a path under the test-ROM root, and how its frames
 /// are checked.
 ///
-/// The setup deadlines are the clock of the first frame after the last
-/// LCD-off gap, measured over 30 minutes (2026-11-25, `checked` profile;
-/// after it, offsets cgb-acid2 0..0, cpu_instrs -10..11, cgb_sound -4..16,
-/// rtc3test 0..0), with about 25-30% headroom: cgb-acid2 no gap, first
-/// frame at 959,452 (it sets up with the LCD off from power-on);
-/// cpu_instrs one gap (278,224 clocks), frame at 348,288; cgb_sound one
-/// (278,212), at 348,276; rtc3test two (299,672, then 99,424), at
-/// 469,156.
+/// The setup gaps and deadlines: measured over 30 minutes (2026-11-25,
+/// `checked` profile; offsets after the last gap: cgb-acid2 0..0, cpu_instrs
+/// -10..11, cgb_sound -4..16, rtc3test 0..0). `gaps` is the exact count of
+/// LCD-off gaps, `until` the clock of the first frame after the last one
+/// plus FRAME_CLOCKS / 2 (35,112), so no further frame is due before it:
+/// cgb-acid2 no gap (it sets up with the LCD off from power-on), first
+/// frame at 959,452, until 994,564; cpu_instrs one gap (278,224 clocks), at
+/// 348,288, until 383,400; cgb_sound one (278,212), at 348,276, until
+/// 383,388; rtc3test two (299,672, then 99,424), at 469,156, until 504,268.
 const WORKLOADS: &[(&str, Lcd)] = &[
     ("synth:event-storm", Lcd::OnFromStart),
     ("synth:dma-storm", Lcd::OnFromStart),
@@ -77,17 +81,32 @@ const WORKLOADS: &[(&str, Lcd)] = &[
     ("synth:oam-lines", Lcd::OnFromStart),
     (
         "cgb-acid2/cgb-acid2.gbc",
-        Lcd::SetupGaps { until: 1_200_000 },
+        Lcd::SetupGaps {
+            until: 994_564,
+            gaps: 0,
+        },
     ),
     (
         "blargg/cpu_instrs/cpu_instrs.gb",
-        Lcd::SetupGaps { until: 450_000 },
+        Lcd::SetupGaps {
+            until: 383_400,
+            gaps: 1,
+        },
     ),
     (
         "blargg/cgb_sound/cgb_sound.gb",
-        Lcd::SetupGaps { until: 450_000 },
+        Lcd::SetupGaps {
+            until: 383_388,
+            gaps: 1,
+        },
     ),
-    ("rtc3test/rtc3test.gb", Lcd::SetupGaps { until: 600_000 }),
+    (
+        "rtc3test/rtc3test.gb",
+        Lcd::SetupGaps {
+            until: 504_268,
+            gaps: 2,
+        },
+    ),
 ];
 
 struct Outcome {
@@ -189,7 +208,7 @@ impl FrameCheck {
 
     /// The call that ended at `clock` reported `FRAME_READY`.
     fn frame(&mut self, clock: u64) -> Result<(), String> {
-        if let Lcd::SetupGaps { until } = self.lcd {
+        if let Lcd::SetupGaps { until, .. } = self.lcd {
             // A frame later than any in-phase one can be (the previous
             // one's call ended at or after its boundary, this one's ends
             // at most OVERSHOOT after its own): frames stopped, the LCD
@@ -197,12 +216,18 @@ impl FrameCheck {
             let gap = clock - self.last > u64::from(FRAME_CLOCKS) + OVERSHOOT as u64;
             if self.first.is_none() || gap {
                 if clock > until {
+                    let after = match self.first {
+                        Some(_) => format!(
+                            "{} clocks after the previous at {}",
+                            clock - self.last,
+                            self.last
+                        ),
+                        None => "with no frame before it".to_string(),
+                    };
                     return Err(format!(
-                        "frame at clock {clock}, {} clocks after the previous \
-                         at {}: an LCD-off gap (or the first frame) after \
-                         the setup deadline {until} ({} gaps before)",
-                        clock - self.last,
-                        self.last,
+                        "frame at clock {clock}, {after}: an LCD-off gap (or the \
+                         first frame) after the setup deadline {until} ({} gaps \
+                         before)",
                         self.gaps
                     ));
                 }
@@ -249,12 +274,20 @@ impl FrameCheck {
         let Some(first) = self.first else {
             return Err(format!("no frame in {clock} clocks"));
         };
-        if let Lcd::SetupGaps { until } = self.lcd {
+        if let Lcd::SetupGaps { until, gaps } = self.lcd {
             // `frame` restarts only at or before `until`; stated as the
             // end-of-run invariant.
             if first > until {
                 return Err(format!(
                     "frame 0 at clock {first}, after the setup deadline {until}"
+                ));
+            }
+            // The core is deterministic: a dropped or shifted frame in the
+            // setup (or an extra LCD-off gap) shows as a different count.
+            if self.gaps != gaps {
+                return Err(format!(
+                    "{} LCD-off gaps, expected {gaps} (frame 0 at clock {first})",
+                    self.gaps
                 ));
             }
         }
@@ -472,7 +505,10 @@ mod tests {
 
     #[test]
     fn setup_gaps_restart_before_the_deadline() {
-        let lcd = Lcd::SetupGaps { until: 450_000 };
+        let lcd = Lcd::SetupGaps {
+            until: 450_000,
+            gaps: 1,
+        };
         // The first frame may be past FIRST_FRAME_LIMIT; one gap, then in
         // phase from the frame after it.
         let mut seq = vec![70_064];
@@ -480,14 +516,22 @@ mod tests {
         let end = 348_288 + 20 * F - 1;
         let r = run(lcd, &seq, end).unwrap();
         assert_eq!((r.first, r.lo, r.hi, r.gaps), (348_288, 0, 21, 1));
-        let r = run(Lcd::SetupGaps { until: 1_200_000 }, &[959_452], 959_452 + 1).unwrap();
+        let r = run(
+            Lcd::SetupGaps {
+                until: 1_200_000,
+                gaps: 0,
+            },
+            &[959_452],
+            959_452 + 1,
+        )
+        .unwrap();
         assert_eq!((r.first, r.gaps), (959_452, 0));
     }
 
     #[test]
     fn setup_gaps_fail_after_the_deadline() {
         let until = 450_000;
-        let lcd = Lcd::SetupGaps { until };
+        let lcd = Lcd::SetupGaps { until, gaps: 1 };
         // The last re-anchor past the deadline.
         let mut seq = vec![70_064];
         seq.extend(frames(until + 4, 5, |_| 0));
@@ -507,7 +551,10 @@ mod tests {
 
     #[test]
     fn setup_gaps_keep_the_standard_rules_between_gaps() {
-        let lcd = Lcd::SetupGaps { until: 450_000 };
+        let lcd = Lcd::SetupGaps {
+            until: 450_000,
+            gaps: 0,
+        };
         let anchor = 348_288;
         // A frame 24 late (past ANCHOR_TOLERANCE) is no gap: it fails,
         // before the deadline too.
@@ -527,5 +574,83 @@ mod tests {
         // Frames that stop at the end.
         let seq = frames(anchor, 20, |_| 0);
         fails(run(lcd, &seq, anchor + 20 * F), "frames stopped");
+    }
+
+    #[test]
+    fn setup_deadline_is_inclusive() {
+        let until = 450_000;
+        let lcd = Lcd::SetupGaps { until, gaps: 0 };
+        // The first frame at `until` passes; one clock later fails.
+        let r = run(lcd, &[until], until + 1).unwrap();
+        assert_eq!(r.first, until);
+        fails(run(lcd, &[until + 1], until + 2), "setup deadline");
+        // The same for a re-anchor after a gap.
+        let lcd = Lcd::SetupGaps { until, gaps: 1 };
+        let at = |a: u64| {
+            let mut seq = vec![70_064];
+            seq.extend(frames(a, 3, |_| 0));
+            run(lcd, &seq, a + 3 * F - 1)
+        };
+        assert_eq!(at(until).unwrap().first, until);
+        fails(at(until + 1), "setup deadline");
+    }
+
+    #[test]
+    fn gap_threshold_is_the_overshoot_bound() {
+        let lcd = Lcd::SetupGaps {
+            until: 450_000,
+            gaps: 0,
+        };
+        let anchor = 348_288;
+        // Frame 1 8 early, frame 2 at offset 16: 24 after frame 1, past
+        // F + 23 yet at most F + OVERSHOOT. Offsets -8..16 are within
+        // tolerance and spread: checked, not an LCD-off gap.
+        let seq = [anchor, anchor + F - 8, anchor + 2 * F + 16];
+        let r = run(lcd, &seq, anchor + 3 * F - 1).unwrap();
+        assert_eq!((r.first, r.lo, r.hi, r.gaps), (anchor, -8, 16, 0));
+        // F + OVERSHOOT is the largest still no gap; one more is.
+        let seq = [anchor, anchor + F - 15, anchor + 2 * F + 16];
+        let r = run(lcd, &seq, anchor + 3 * F - 1).unwrap();
+        assert_eq!((r.first, r.lo, r.hi, r.gaps), (anchor, -15, 16, 0));
+        let lcd = Lcd::SetupGaps {
+            until: 600_000,
+            gaps: 1,
+        };
+        let seq = [anchor, anchor + F - 16, anchor + 2 * F + 16];
+        let r = run(lcd, &seq, anchor + 3 * F - 1).unwrap();
+        assert_eq!((r.first, r.gaps), (anchor + 2 * F + 16, 1));
+    }
+
+    #[test]
+    fn setup_gap_count_must_match() {
+        let anchor = 348_288;
+        let mut seq = vec![70_064];
+        seq.extend(frames(anchor, 5, |_| 0));
+        let end = anchor + 5 * F - 1;
+        let with = |gaps| {
+            run(
+                Lcd::SetupGaps {
+                    until: 450_000,
+                    gaps,
+                },
+                &seq,
+                end,
+            )
+        };
+        assert_eq!(with(1).unwrap().gaps, 1);
+        fails(with(0), "1 LCD-off gaps, expected 0");
+        fails(with(2), "1 LCD-off gaps, expected 2");
+        // A message for a first frame past the deadline names no previous.
+        fails(
+            run(
+                Lcd::SetupGaps {
+                    until: 100,
+                    gaps: 0,
+                },
+                &[200],
+                201,
+            ),
+            "no frame before it",
+        );
     }
 }

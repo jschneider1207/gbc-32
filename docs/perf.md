@@ -1681,17 +1681,21 @@ that nothing it rejected passes) each must be within 23 of 0. Seen: spread
 
 The four ROM workloads that turn the LCD off while they set up
 (`Lcd::SetupGaps`; checked since 2026-11-25, unchecked from fe99394 until
-then) may have LCD-off gaps only before a per-workload setup deadline: a
-frame whose call ends more than 70,224 + 31 clocks after the previous one
-(or the first frame) restarts the check from that frame, and must end its
-call by the deadline, which replaces the three-frame first-frame limit for
-them. Every other frame, before the deadline too, and every frame after
-it, is checked by the rules above; a gap after the deadline, or no frame by
-it, fails. Measured (30 minutes, `checked`): cgb-acid2 no gap, first frame
-at 959,452 (deadline 1,200,000); cpu_instrs one gap of 278,224 clocks,
-re-anchored at 348,288 (deadline 450,000); cgb_sound one of 278,212, at
-348,276 (450,000); rtc3test two, 299,672 then 99,424, at 469,156
-(600,000). Offsets after: 0..0, -10..11, -4..16, 0..0.
+then) may have LCD-off gaps only before a per-workload setup deadline, and exactly
+a per-workload number of them: a frame whose call ends more than 70,224 +
+31 clocks after the previous one (or the first frame) restarts the check
+from that frame, and must end its call by the deadline (inclusive), which
+replaces the three-frame first-frame limit for them. Every other frame,
+before the deadline too, and every frame after it, is checked by the rules
+above; a gap after the deadline, no frame by it, or a gap count other than
+the expected one (the first frame is not counted) fails. The deadline is
+the measured re-anchor clock + 35,112 (half a frame), so no further frame
+is due before it and a frame lost or shifted in the setup shows as a
+different count, not as another gap. Measured (30 minutes, `checked`): cgb-acid2 0 gaps,
+first frame at 959,452 (deadline 994,564); cpu_instrs 1 gap of 278,224
+clocks, re-anchored at 348,288 (383,400); cgb_sound 1 of 278,212, at
+348,276 (383,388); rtc3test 2, 299,672 then 99,424, at 469,156 (504,268).
+Offsets after: 0..0, -10..11, -4..16, 0..0.
 Before 2026-11-24 the check was a count within one of `clocks / 70,224`,
 which failed dmg-raster's setup (two short) and hid a lost frame
 elsewhere.
