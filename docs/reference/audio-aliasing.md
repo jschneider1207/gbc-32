@@ -1,8 +1,9 @@
-# Audio aliasing of the 128-clock box filter
+# Audio aliasing of the output filter
 
-Measurement for M10 review finding A3-1 (`docs/reviews/stage1-m10/A3-apu.md`).
-Nothing in the core changed; this is the number the finding asked for, and
-the cost of the candidate fixes. Measured 2026-11-24 at 63ff596.
+Measurement for M10 review finding A3-1 (`docs/reviews/stage1-m10/A3-apu.md`):
+the number the finding asked for, the cost of the candidate fixes
+(measured 2026-11-24 at 63ff596, with the 128-clock box filter the core
+had then), and what the fix that landed measures.
 
 **Result: the finding is confirmed.** For notes from about 1 kHz up, the
 box filter leaves inharmonic tones at -39 to -22 dBc inside 1-8 kHz, and
@@ -10,6 +11,11 @@ at -29 to -8 dBc anywhere below 16 kHz. Only low notes (around 500 Hz,
 50% duty) stay under -40 dBc in 1-8 kHz. Whether that is *heard* was not
 tested: no listening was done, and "-40 dBc in 1-8 kHz" is a plausibility
 line, not a measured threshold.
+
+**What landed (ADR 0035, human decision of 2026-11-24):** the candidate
+"box 64 + 8-tap FIR". Notes up to 4.4 kHz now have their worst alias
+within 1-8 kHz at -40.9 dBc (from -22.1), the 7-bit noise at -17.9 (from
+-8.5). Measured on the core: "The filter now" below.
 
 ## Method
 
@@ -32,18 +38,92 @@ line, not a measured threshold.
   **Alias/signal**: all alias energy below Nyquist over the ideal signal's
   energy below Nyquist. **Droop**: the highest harmonic below Nyquist
   against the ideal one.
-- Tests: `box_filter_alias_levels` asserts every row's worst alias and
-  alias/signal within 0.05 dB (a ratchet: update it and this file together
-  when the filter changes). `model_matches_the_core` checks that the core's
-  samples equal, integer for integer, a clock-rate model of each signal
-  through a 128-clock box; the candidates below run on that model.
-  `candidates` (ignored; `cargo test -p gbc-core --release --test
-  apu_aliasing -- --ignored --nocapture`) prints the candidate tables.
-- Mutation check: with a 64-clock window (`SAMPLE_PERIOD_LOG2 = 6`) both
-  tests fail; with a leaky window (`acc / 4` carried instead of 0) both
-  fail, the ratchet on every tonal row (first: -36.36 against -34.43).
+- Tests: `box64_fir8_alias_levels` (`box_filter_alias_levels` until ADR
+  0035) asserts every row's worst alias and alias/signal within 0.05 dB
+  (a ratchet: update it and this file together when the filter changes).
+  `model_matches_the_core` checks that the core's samples equal, integer
+  for integer, a clock-rate model of each signal through the core's
+  filter (64-clock sums, the 8 taps, the shift), and that the same
+  kernel in floats differs from them by the dropped fraction only; the
+  candidates below run on that model. `candidates` (ignored; `cargo test
+  -p gbc-core --release --test apu_aliasing -- --ignored --nocapture`)
+  prints the candidate tables.
+- Mutation checks. With the box filter (63ff596): a 64-clock window
+  (`SAMPLE_PERIOD_LOG2 = 6`) failed both tests; so did a leaky window
+  (`acc / 4` carried instead of 0), the ratchet on every tonal row. With
+  the FIR (ADR 0035): taps 131 and 459 changed to 151 and 439, or to 132
+  and 458, fail both tests (first row -38.70 and -37.69 against -37.64);
+  a leaky window fails both (-37.94); a history that is not shifted
+  fails both (-56.01).
 
-## The current filter (measured on the core)
+## The filter now (measured on the core, ADR 0035)
+
+64-clock window sums, then the taps [-22, -56, 131, 459, 459, 131, -56,
+-22] / 1024 at 65,536 Hz, every other result kept. Columns as below.
+
+| signal | f0 | worst alias dBc | at | worst 1-8 kHz dBc | alias/signal | droop |
+|---|---|---|---|---|---|---|
+| square 50% p=261 | 502 | -37.6 | 16196 | -59.2 | -34.6 | -5.74 |
+| square 50% p=131 | 1001 | -32.6 | 15759 | -54.3 | -31.5 | -4.95 |
+| square 50% p=97 | 1351 | -31.3 | 15202 | -51.0 | -30.9 | -4.80 |
+| square 50% p=63 | 2081 | -30.4 | 14043 | -50.2 | -30.3 | -4.40 |
+| square 50% p=47 | 2789 | -30.2 | 13247 | -44.7 | -29.8 | -3.69 |
+| square 50% p=31 | 4228 | -31.9 | 11627 | -45.3 | -30.5 | -2.48 |
+| square 50% p=23 | 5699 | -17.7 | 15672 | -47.4 | -17.5 | 0.15 |
+| square 50% p=15 | 8738 | -37.1 | 13107 | -39.5 | -33.6 | -0.30 |
+| square 50% p=11 | 11916 | -33.6 | 5958 | -33.6 | -32.5 | -1.88 |
+| square 50% p=9 | 14564 | -34.7 | 7282 | -34.7 | -32.4 | -4.43 |
+| square 50% p=7 | 18725 | -11.4 | 14043 | -62.5 | | |
+| square 50% p=5 | 26214 | -28.9 | 13107 | -49.2 | | |
+| square 50% p=3 | 43691 | -26.3 | 10923 | none | | |
+| square 50% p=1 | 131072 | none | | none | | |
+| square 12.5% p=261 | 502 | -32.2 | 15191 | -50.7 | -31.3 | -5.66 |
+| square 12.5% p=131 | 1001 | -29.7 | 14758 | -46.4 | -29.5 | -5.08 |
+| square 12.5% p=97 | 1351 | -23.9 | 15202 | -49.2 | -27.9 | -6.89 |
+| square 12.5% p=63 | 2081 | -30.8 | 14043 | -44.1 | -32.4 | -4.53 |
+| square 12.5% p=47 | 2789 | -17.9 | 16035 | -42.1 | -22.5 | -3.84 |
+| square 12.5% p=31 | 4228 | -11.7 | 15855 | -40.9 | -15.4 | -2.61 |
+| square 12.5% p=23 | 5699 | -10.2 | 15672 | -45.9 | -12.8 | -1.63 |
+| square 12.5% p=15 | 8738 | -9.8 | 15292 | -41.1 | -9.7 | -0.36 |
+| square 12.5% p=11 | 11916 | -22.6 | 14895 | -28.0 | -20.9 | -1.88 |
+| square 12.5% p=9 | 14564 | -29.6 | 7282 | -29.6 | -26.8 | -4.54 |
+| square 12.5% p=7 | 18725 | -11.7 | 14043 | -43.8 | | |
+| square 12.5% p=5 | 26214 | -14.9 | 13107 | -49.2 | | |
+| square 12.5% p=3 | 43691 | -24.5 | 10923 | none | | |
+| square 12.5% p=1 | 131072 | none | | none | | |
+| wave, 32-step saw, p=31 | 2114 | -25.9 | 15855 | -60.9 | -26.3 | -4.69 |
+| wave, 32-step saw, p=15 | 4369 | -20.9 | 15292 | -57.5 | -22.0 | -2.86 |
+| wave, 16-step saw, p=31 | 4228 | -20.1 | 15855 | -50.5 | -21.1 | -2.62 |
+| wave, 16-step saw, p=7 | 18725 | -11.7 | 14043 | -49.0 | | |
+| wave, 32-step square, p=15 | 4369 | -34.8 | 10923 | -60.0 | -34.4 | -3.00 |
+| wave, 32-step saw, p=1 | 65536 | none | | none | | |
+| noise 7-bit, 524 kHz clock | 4128 | -7.2 | 16255 | -17.9 | -9.3 | -2.25 |
+| noise 7-bit, 262 kHz | 2064 | -7.3 | 16255 | -19.1 | -11.8 | -4.31 |
+| noise 7-bit, 131 kHz | 1032 | -7.6 | 16255 | -29.2 | -14.9 | -5.80 |
+| noise 7-bit, 65 kHz | 516 | -6.2 | 16255 | -34.9 | -14.2 | -4.60 |
+| noise 15-bit, 524 kHz clock | 16 | (bins not searched) | | | -12.3 | -6.92 |
+
+Against the box filter's table below:
+
+- Within 1-8 kHz every note up to 4.4 kHz is at -40.9 dBc or better (the
+  worst is the 12.5% square at 4.2 kHz); at 50% duty they are at -44.7
+  or better. The squares at 11.9 and 14.6 kHz, whose only audible
+  harmonic is the fundamental, keep an alias at -28 to -35 dBc there.
+- The strongest alias of a note up to 4.4 kHz is still above 10 kHz
+  (most at 14-16 kHz, the filter's transition band), 3 to 13 dB lower.
+  Only a longer kernel or less treble removes those.
+- Ultrasonic tones used as DC: p=5 at 50% duty leaves -28.9 dBc at
+  13.1 kHz (was -12.7 at 6.6 kHz), at 12.5% -14.9 dBc; p=7 still -11.4
+  dBc at 14.0 kHz (was -5.3); periods that divide 128 clocks stay clean.
+- The 7-bit noise's aliases are 3 dB lower overall and 7 to 26 dB lower
+  within 1-8 kHz.
+- Droop: the highest harmonic below Nyquist is now at -2.5 to -6.9 dB
+  for the low notes (it sits near 16 kHz, where the filter is at -6 dB),
+  but harmonics up to 9 kHz are within 0.3 dB (the box: -1.0 dB).
+
+Cost as measured: ADR 0035 and docs/perf.md ("Output filter").
+
+## The 128-clock box filter (measured on the core at 63ff596)
 
 `p = 2048 - f`. Frequencies in Hz, levels in dB.
 
@@ -108,6 +188,11 @@ Reading it:
   -3.9 dB at 16 kHz).
 
 ## Candidates
+
+Costed before the decision; "current" in the tables is the 128-clock box
+of the time. The row that landed is "box 64, then 8-tap FIR", with taps
+scaled to a sum of 1,024 (10 bits) instead of the prototype's 8 bits: the
+`candidates` test prints both, and they measure the same to 0.1 dB.
 
 All are linear, integer and exact, so the sync invariant (the stream does
 not depend on where syncs fall) and determinism hold for each. Alias
@@ -202,7 +287,9 @@ How the estimates were made (none is measured):
 
 ## Recommendation
 
-For the human to decide (it is a perf-budget and audio-contract question):
+As written for the human before the decision (option 1 was chosen, ADR
+0035; its estimate of +35k Ir/frame for the FIR stage and +250 B is
+compared with the measured cost there):
 
 1. **Box 64 + 8-tap FIR** is the best value: about -41 dBc in 1-8 kHz for
    notes (19 dB better than now, 10 dB better than the review's [1,2,1]

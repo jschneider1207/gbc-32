@@ -634,3 +634,12 @@ Exact: a window's sum is linear in its spans and the channels' closed
 forms do not depend on where the spans are cut (the section 3
 invariant); `bench --fingerprint --audio-buffer {7,64} --hash-samples`
 is identical to before. Numbers in `docs/perf.md`, "APU cost".
+
+### 2026-11-24: the output filter is ADR 0035 (M10 review A3-1)
+Section 8's "Filter" (the 128-clock box) and its sample formula are
+replaced by ADR 0035 (human, 2026-11-24): 64-clock window sums and an
+8-tap FIR at half rate, saturated to `i16`. So is the headroom
+amendment's bound: the samples can ring past ±30,720, and a DC blocker's
+output reaches up to ±65,535. The rate, the buffer contract, DC kept,
+sections 9 and 10 (the restart keeps "silence = constant samples"; the
+blind spot for periods that divide 128 clocks is the same) stand.

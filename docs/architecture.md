@@ -175,9 +175,12 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   the core writes from index 0 and reports the count (ADR 0021 sections
   8-9). The rate is fixed at 32,768 Hz in both CPU speeds
   (`AUDIO_SAMPLE_RATE`; `AUDIO_SAMPLE_CLOCKS` = 128 base clocks per
-  sample). Each sample is the box-filtered average of the mixed signal
-  over its window, 64 per unit of mixed level: full scale ±30,720, no
-  clamping, DC kept (`StereoSample` rustdoc, `apu/mix.rs` `sample`).
+  sample). Each sample is the mixed signal low-pass filtered over the
+  512 clocks that end with it (64-clock sums, then an 8-tap FIR at
+  65,536 Hz: ADR 0035), 64 per unit of mixed level, DC kept: a steady
+  full scale is ±30,720, the filter rings past it around edges, and
+  the sample saturates at the ends of `i16` (`StereoSample` rustdoc,
+  `apu/mix.rs` `fir`).
   When the last slot's window completes, `AUDIO_BUFFER_FULL` ends the
   call at the next instruction boundary, or at once inside a VRAM DMA
   stall (the next call resumes the stall), so no sample is dropped and a
@@ -185,7 +188,8 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   state are independent of how the caller splits calls and buffers. A
   call of `n` clocks completes at most `n / 128 + 2` samples (550 for
   `run_frame`). An empty buffer discards audio: the APU only advances,
-  and the next call with a buffer restarts the window grid at its start.
+  and the next call with a buffer restarts the window grid at its start,
+  the filter's history being its first window's level.
   Resampling to the device rate and DC blocking (the high-pass filter)
   are the platform's job.
 - **Input:** `set_buttons(Buttons)` (now) and `set_buttons_at(clock, Buttons)`
@@ -319,7 +323,7 @@ apu/          mod.rs: Apu (ADR 0021): power, frame sequencer (`Fs`), `sync`, reg
   square.rs     Square (CH1 and CH2) and Sweep (CH1)
   wave.rs       Wave (CH3)
   noise.rs      Noise (CH4): the LFSR as its output sequence, stepped a word at a time
-  mix.rs        Output: spans, the window integrator, NR50/NR51 weights, the buffer deadline
+  mix.rs        Output: spans, the window integrator, NR50/NR51 weights, the decimation FIR, the buffer deadline
 dma.rs        OAM DMA state (`OamDma`), the CGB C conflict table, what the PPU sees (`ppu_at`), `ReadClears`
 hdma.rs       VRAM DMA state (`VramDma`): registers, the HBlank period constants, stall length (ADR 0017)
 cart/         mod.rs: header, `cart_info`, ROM bank windows, MBC1/1M/2/3/5, HuC1, HuC3, save-dirty tracking
@@ -435,10 +439,19 @@ the register writes only, never of where syncs happened or whether a
 buffer was passed (unit tests split calls randomly; `bench --fingerprint
 --audio-buffer` checks the whole machine).
 
-Output: one stereo sample per 128 base clocks (32,768 Hz), the exact
-average of the mixed signal over the window; the core keeps DC and does no
-filtering. Hardware rules and the SameBoy count conversions are in
-`docs/reference/apu.md`; cost in `docs/perf.md` ("APU cost").
+Output: one stereo sample per 128 base clocks (32,768 Hz), in two exact
+integer stages (`apu/mix.rs`, ADR 0035). The mixed signal is summed over
+64-clock windows (`WINDOW`), the spans of a sync being cut at the window
+ends and at NR50/NR51 writes; at the end of every second window an 8-tap
+symmetric FIR over the last 8 window sums (`mix::FIR`, sum 1,024, DC
+gain 1) makes the sample, saturated to `i16`. The window history lives in
+`Output` beside the open window's sums, so the stream does not depend on
+where syncs, batches or buffers end. The filter delays the stream by 2
+samples against the clock (1.5 more than a plain 128-clock average). The
+core keeps DC and does no high-pass filtering. Alias levels and the
+alternatives are in `docs/reference/audio-aliasing.md`; hardware rules
+and the SameBoy count conversions in `docs/reference/apu.md`; cost in
+`docs/perf.md` ("APU cost", "Output filter").
 
 ### PPU timing (ADR 0014)
 

@@ -155,6 +155,48 @@ write (884.6 at 117461b, `synth:apu-writes` minus its `@hram` control).
 The overall bar, `synth:worst-case` <= 4.02 M Ir/frame (now with ~146
 NR50 writes/frame, APU share ~353k), stays the real guard.
 
+**Output filter (ADR 0035, 2026-11-24).** The output is now 64-clock
+window sums and an 8-tap FIR at half rate instead of 128-clock averages
+(`apu/mix.rs`; alias levels in `docs/reference/audio-aliasing.md`). The
+human approved its cost beforehand (about +10% on the worst case) and a
+re-recorded baseline, so budget (a) above no longer describes the APU;
+a new figure is the human's to set. Measured against main at 2821437
+(`check-bench.sh`):
+
+| bench | before, Ir | after, Ir | delta | per frame |
+|---|---|---|---|---|
+| cpu_instrs | 1,264,344,219 | 1,327,813,432 | +5.02% | +53.1k |
+| cgb_sound | 890,523,560 | 973,851,265 | +9.36% | +69.8k |
+| cgb-acid2 | 649,967,201 | 726,390,252 | +11.76% | +64.0k |
+| synth:event-storm | 175,300,349 | 182,973,533 | +4.38% | +64.2k |
+| synth:dma-storm | 381,935,612 | 393,398,153 | +3.00% | +64.0k |
+| synth:halt-irq | 263,308,262 | 301,522,527 | +14.51% | +64.0k |
+| synth:worst-case | 286,911,384 | 314,276,521 | +9.54% | +229.1k |
+| synth:cgb-raster | 267,388,360 | 275,061,275 | +2.87% | +64.2k |
+| synth:apu-writes | 77,400,848 | 103,388,853 | +33.58% | +217.6k |
+| synth:dmg-raster | 185,765,867 | 193,438,927 | +4.13% | +64.2k |
+
+`synth:worst-case` is 2.63 M Ir/frame (2.40 M before), 65% of the 4.02 M
+line. thumbv7em `.text` 115,692 -> 115,940 B (+248); `size_of::<Memory>()`
+50,984 -> 51,016 B (+32: the 8-window history). Where it goes:
+
+- The first stage, twice the windows (each one a span to list, four
+  integrator calls and a mix): measured alone before the decision, by a
+  scratch `SAMPLE_PERIOD_LOG2 = 6`, at +201k Ir/frame on worst-case, +44k
+  on cgb_sound and +191k on apu-writes. With every channel silent it is
+  what the benches without sound pay: about 64k Ir/frame with the FIR.
+- The FIR and its history: the remaining 26-28k Ir/frame, about 50 Ir
+  per output sample (two sides: 16 loads, 8 multiplies, the shift and
+  the saturation, and moving 24 bytes of history).
+- The history as a ring read through `(at + i) & 7` was measured first:
+  317,069,901 Ir on worst-case and 134 B more than the version that
+  landed (314,276,564 at the same base), which moves the history down by
+  two entries per sample and reads it at fixed offsets.
+- Not measured on the Cortex-M7. By the Ir ratio of "Measured on a
+  Cortex-M7" (1.12-1.33 cycles per x86 Ir in ITCM), +229k Ir is roughly
+  +0.26-0.30 M cycles a frame on the worst case, 4 to 5 points of a
+  frame at 392 MHz: an estimate.
+
 The rest of this section is how it got there (the table's earlier columns
 and the 270k statement are history). `synth:worst-case`
 (2 s, 119.455 frames), all with buffers; channel cost = Ir over `@0`
