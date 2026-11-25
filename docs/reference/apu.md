@@ -200,7 +200,7 @@ instead was measured and rejected: it also costs SameSuite
 
 **A switch to double speed with the APU on flips `lf_div`.** While the
 frame sequencer runs 2 clocks late after such a switch
-(`Timer::apu_ds_delay`, below: AGE's `m_current_ds_delay`, hardware
+(`apu::Fs::ds_delay`, below: AGE's `m_current_ds_delay`, hardware
 verified by AGE `spsw-ch2-lc-delay` on CGB B/C/E; it toggles at each
 switch to double speed and NR52 power on/off clears it), a double-speed
 trigger takes the other delay: one period plus `6 + 2 * (lf_div ^ 1)`

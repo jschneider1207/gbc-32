@@ -70,7 +70,7 @@ behaviour change for an IF read or interrupt check on 153:12 with no ROM
 ## Consequences
 - The three A2-04 hazards and the LCD-off one can't happen; each has a
   unit test, seen failing on the old code
-  (`bus::tests::lyc_write_request_*`, `lcd_off_cancels_a_lyc_write_request`).
+  (`bus::ppu_io::tests::lyc_write_request_*`, `lcd_off_cancels_a_lyc_write_request`).
   Three are behaviour fixes outside the corpus (the fingerprint of all
   4,020 runs is unchanged, with and without `--audio-buffer 7
   --hash-samples`); the fourth (the raw accessor exposing bits 5-6) had
@@ -95,7 +95,7 @@ Line 153's LYC=0 point uses the same request now (review L5): walked at
 `docs/reference/stat-irq.md`). `Ppu::early_point`'s IF-write case and
 its branch in `Ctx::write_if` are gone; what is left of it is
 `Ppu::on_ly0_pulse`, for a STAT write's phase 2 on the pulse. Unit tests
-`bus::tests::line_153_lyc_0_request_reaches_if_a_dot_after_its_point_however_synced`
+`bus::ppu_io::tests::line_153_lyc_0_request_reaches_if_a_dot_after_its_point_however_synced`
 and `ppu::tests::single_speed_line_153_lyc_0_request_is_a_dot_after_its_point`,
 seen failing without the delay. The fingerprint of all 4,020 runs is
 unchanged (no ROM has an M-cycle boundary on 153:12 that looks at IF).

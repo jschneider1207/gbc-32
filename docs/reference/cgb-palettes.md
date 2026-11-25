@@ -1,7 +1,7 @@
 # CGB palette RAM (BCPS/BCPD, OCPS/OCPD)
 
-Implemented in `crates/gbc-core/src/bus.rs` (`palette_index_step`,
-`write_palette_data`, `read_io_other`, `Sys::reset`) and `ppu/mod.rs` (`Ppu::write_bcpd`,
+Implemented in `crates/gbc-core/src/bus/` (`ppu_io.rs`: `palette_index_step`,
+`write_palette_data`; `mod.rs`: `read_io_other`; `reset.rs`: `Sys::reset`) and `ppu/mod.rs` (`Ppu::write_bcpd`,
 `resolve_palettes`). The only model is CGB C (ADR 0003).
 
 ## Layout

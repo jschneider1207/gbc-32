@@ -1,7 +1,7 @@
 # CGB speed switch: where each piece of the timing comes from
 
-Implemented in `crates/gbc-core/src/bus.rs` (`Ctx::speed_switch`,
-`Bus::stop_begin`), `crates/gbc-core/src/timer/mod.rs`
+Implemented in `crates/gbc-core/src/bus/stop.rs` (`Ctx::speed_switch`)
+and `bus/mod.rs` (`Bus::stop_begin`), `crates/gbc-core/src/timer/mod.rs`
 (`Timer::speed_switch`, `Timer::stop_edge`) and `Cpu::stop`. The decisions
 are in ADR 0020; this note records which reference each piece follows,
 which ROMs pin it, and what the M10 review's A1-06 experiment measured.

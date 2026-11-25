@@ -25,7 +25,7 @@ INT $48 STAT: https://gbdev.io/pandocs/Interrupt_Sources.html
   (`libgambatte/src/video.cpp`) compares the old and new selects as one
   step and never triggers while an old select's source is active
   (behavior only; gambatte is GPL).
-- Our rule (`bus.rs`, FF41): SameBoy's two phases, but when the write sets
+- Our rule (`bus/ppu_io.rs`, FF41): SameBoy's two phases, but when the write sets
   the delayed select, the first phase also keeps the selects being
   cleared. They are cleared in the second phase, together with the
   delayed select's arrival. Writes that don't set the delayed select keep

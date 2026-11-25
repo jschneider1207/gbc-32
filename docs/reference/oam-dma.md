@@ -1,7 +1,7 @@
 # OAM DMA (FF46): timing and CGB C bus conflicts
 
 Implemented in `crates/gbc-core/src/dma.rs` (state, conflict table) and
-`crates/gbc-core/src/bus.rs` (`Ctx::oam_dma`, `dma_sync`,
+`crates/gbc-core/src/bus/oam_dma.rs` (`Ctx::oam_dma`, `dma_sync`,
 `read_during_dma`, `write_during_dma`). The only model is CGB C (ADR 0003),
 in both CGB and DMG-compatibility mode: the conflicts follow the hardware,
 not the cartridge mode. HDMA/GDMA (FF51-FF55) is separate; only its

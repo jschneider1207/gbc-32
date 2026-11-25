@@ -16,7 +16,7 @@ Implemented in commit 17db555.
 - Objects are still fetched in X order. `order` stays the X sort, so stall
   timing, `fix_attrs` and fetches are unchanged.
 - The OAM-index rule is applied where a fetched object merges into the line
-  buffer. A per-pixel rank buffer, `Memory::obj_rank`, holds the object's
+  buffer. A per-pixel rank buffer, `Memory::obj_buf.rank`, holds the object's
   OAM slot in CGB mode and 0 in compatibility mode. A later-fetched object
   with a lower OAM index replaces opaque pixels that have not been output
   yet.

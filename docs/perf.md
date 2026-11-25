@@ -220,7 +220,8 @@ Mitigation, exact (`--fingerprint` plain and `--audio-buffer {7,64}
 (x86's vector memset hides most of it); worst-case 3.908 M Ir/frame,
 apu-writes 713.0k; `.text` 94,808 -> 94,754 B. Not done: removing the
 clear altogether needs the lanes in `Apu` (store semantics; the `Apu`
-size test caps it at 128 B) or uninitialized memory (`unsafe`); the
+size test capped it at 128 B then, a cap dropped on 2026-11-24) or
+uninitialized memory (`unsafe`); the
 noise and wave setup are already one pass per batch and the noise
 channel steps in every span at r = 0, so laziness would not help the
 worst case. Caching the weights would not help PCM through NR50 (every
@@ -375,7 +376,8 @@ from `render`, `fill_mixed`).
 **PPU timing cuts (ADR 0014 "Further cuts").** The walk over update
 points keeps a cursor (`Ppu::cursor`: the next point after the last sync,
 with its line) and advances it point by point (`Ppu::step`, no
-division); the division-based search (`next_point`) only re-seeks after
+division); the division-based search (`next_point`; since 2026-11-24
+`Ppu::seek_point`, from the timeline table) only re-seeks after
 LCD enable, reset or a STAT write that changes whether any source is
 selected (`Ppu::seek`, cold). Sync no longer searches once more to find
 that it is done. Also: `Latch` and `End` skip the STAT-line evaluation
@@ -593,9 +595,15 @@ functions the firmware's link may drop and none of the `core` or
 `compiler_builtins` code the core calls; that is why the gate stays
 provisional until the firmware ELF can be measured.
 
-Sizes on 2026-11-24 (the script prints all of them): total `.text`
-97,136 B, 79% of 122,880 (margin 25,744 B); `Emulator` 848 B, `Memory`
-50,968 B. Largest per-function lines (report only):
+Sizes at the end of 2026-11-24 (6f74775; the script prints all of them):
+total `.text` 115,866 B, 94% of 122,880 (margin 7,014 B); `Emulator`
+952 B, `Memory` 50,984 B.
+
+Historical, the morning of 2026-11-24, when the per-function caps were
+dropped (6294f0b, before the M10 restructuring and the move to one
+codegen unit): total `.text` 97,136 B, 79% of 122,880 (margin 25,744 B);
+`Emulator` 848 B, `Memory` 50,968 B. Largest per-function lines then
+(report only; `check-code-size.sh` prints the current ones):
 
 | Symbol | Size (B) | Old cap (B) |
 |---|---|---|
@@ -790,7 +798,7 @@ fingerprint-identical to `main` (`--audio-buffer 7 --hash-samples`).
 
 Result: 115,198 B (+1,246; 7,682 B under the total).
 
-Open: the `bus.rs` attributes of A14 one at a time (the batch says the
+Open: the `bus/` attributes of A14 (`bus.rs` was one file then) one at a time (the batch says the
 read side, `read_during_dma` and `read_oam` into `read_high`, and the
 `write_io` and `boundary` callees cost more than they gain; none was
 measured alone). L7 (timer lazy whenever IF bit 2 is set) was measured
@@ -1138,7 +1146,8 @@ the plain tile path, then `write_ppu`, then the APU set. Measure the
 firmware ELF, not the rlib, because LTO changes inlining.
 
 **DTCM** (128 KB, zero wait states, reachable by the CPU and MDMA only, not
-DMA1/2): the stack, `Hw`/`Emulator` (848 B), `Memory` (50,968 B: WRAM,
+DMA1/2): the stack, `Hw`/`Emulator` (848 B when this plan was written;
+952 B at the end of 2026-11-24), `Memory` (50,968 B then, 50,984 B now: WRAM,
 VRAM, OAM) and the read-only tables `SPREAD` 1,024 B, `ATTR_FETCH` 1,024 B
 and `POP8` 256 B (2,304 B, copied from flash at boot like `.itcm`). Frame
 and audio buffers go in AXI SRAM, because the LCD and SAI DMA must reach
