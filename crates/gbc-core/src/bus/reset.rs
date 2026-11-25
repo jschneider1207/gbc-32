@@ -46,8 +46,6 @@ impl Sys<'_> {
         }
     }
 
-    /// Sets the held buttons and the P1 select bits (4-5), requesting the
-    /// joypad interrupt if a P10-P13 line goes low ([`p1_interrupt`]).
     /// Power-on state after the boot ROM, for the inserted cartridge. The
     /// cartridge RAM, RTC, config and held buttons are kept.
     pub(crate) fn reset(&mut self, mem: &mut Memory) {

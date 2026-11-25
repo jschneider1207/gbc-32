@@ -16,6 +16,13 @@
 //! [`Ctx`] for the duration of a run call, so the tick reaches it through
 //! the one context pointer the CPU holds instead of through `Ctx::sys`
 //! (ADR 0008, amendments).
+//!
+//! This file has the state, the tick and event dispatch, the CPU's
+//! [`Bus`] and the address decode. What a register write or an event
+//! does to one subsystem is in that subsystem's file, each a further
+//! `impl Ctx` block: [`reset`] (power-on state), [`timer_io`] (timer and
+//! serial), [`apu_io`], [`ppu_io`], [`oam_dma`], [`vram_dma`] and
+//! [`stop`] (STOP mode and the speed switch).
 
 use crate::apu::{self, StereoSample};
 use crate::cart::Cart;
@@ -101,6 +108,8 @@ pub(crate) struct Sys<'a> {
 }
 
 impl Sys<'_> {
+    /// Sets the held buttons and the P1 select bits (4-5), requesting the
+    /// joypad interrupt if a P10-P13 line goes low ([`p1_interrupt`]).
     pub(crate) fn set_joypad(&mut self, buttons: Buttons, select: u8) {
         let old = p1_lines(self.buttons, self.joyp_select);
         self.buttons = buttons;

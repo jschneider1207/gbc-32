@@ -7,6 +7,13 @@ use crate::hdma::{self, Refetch};
 use crate::memory::Memory;
 use crate::schedule::{EventKind, NEVER};
 
+// Names only the doc comments use.
+#[cfg(doc)]
+use {
+    super::{read, wram},
+    crate::{Emulator, ppu::Ppu},
+};
+
 /// CGB VRAM DMA (FF51-FF55; `hdma` module, ADR 0017).
 impl Ctx<'_, '_> {
     /// Runs the CPU stall of the current transfer step (`VramDma::stall`

@@ -1048,7 +1048,7 @@ mod sync_tests {
     const STEPS: u64 = 64;
     const END: u64 = STEPS * DIV_APU + 1000;
 
-    /// The bus's write path with the APU on (bus.rs `write_apu`), after a sync.
+    /// The bus's write path with the APU on (bus/apu_io.rs `write_apu`), after a sync.
     fn write(mem: &mut Memory, reg: usize, value: u8, now: u64) {
         match reg {
             0x1A..=0x1E | 0x30..=0x3F => write_wave(mem, reg, value),

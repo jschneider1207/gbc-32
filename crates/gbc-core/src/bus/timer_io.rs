@@ -8,6 +8,10 @@ use crate::schedule::{EventKind, NEVER};
 use crate::serial::INT_SERIAL;
 use crate::timer::INT_TIMER;
 
+// Names only the doc comments use.
+#[cfg(doc)]
+use crate::{serial::Serial, timer::Timer};
+
 impl Ctx<'_, '_> {
     /// A serial byte completed (`done`): the serial interrupt.
     fn serial_done(&mut self, done: bool) {

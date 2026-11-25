@@ -7,6 +7,10 @@ use crate::cpu::Bus;
 use crate::joypad::p1_lines;
 use crate::schedule::{EventKind, NEVER};
 
+// Names only the doc comments use.
+#[cfg(doc)]
+use crate::{cpu::StopKind, joypad::p1_interrupt, timer::Timer};
+
 impl Ctx<'_, '_> {
     /// STOP's DIV reset: with nothing pending (STOP is two bytes), first
     /// the TIMA edge of AGE's later reset ([`Timer::stop_edge`], ADR 0020).

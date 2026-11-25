@@ -6,6 +6,10 @@ use super::Ctx;
 use crate::ppu::{self, View, edges};
 use crate::schedule::EventKind;
 
+// Names only the doc comments use.
+#[cfg(doc)]
+use crate::ppu::Ppu;
+
 /// The index step of a BCPD/OCPD write in CGB mode: returns the palette RAM
 /// byte the index register (BCPS/OCPS) selects in bits 0-5, then, if its
 /// bit 7 (auto-increment) is set, increments bits 0-5, wrapping 3F to 00
