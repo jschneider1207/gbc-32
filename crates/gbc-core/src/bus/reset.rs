@@ -182,7 +182,7 @@ const POST_BOOT_IO: &[(u16, u8)] = &[
 mod tests {
     extern crate std;
     use super::*;
-    use crate::bus::test_util::{load, rom};
+    use crate::testkit::{load, rom};
 
     /// The post-boot values Mooneye `misc/boot_hwio-C` and
     /// `misc/boot_div-cgbABCDE` check that depend on the mode or phase,

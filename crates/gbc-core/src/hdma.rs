@@ -199,11 +199,11 @@ impl VramDma {
 #[cfg(test)]
 mod tests {
     use crate::speed::Speed;
+    use crate::testkit::write;
     extern crate std;
     use super::HBLANK_DELAY;
-    use crate::bus::Ctx;
     use crate::ppu::Frame;
-    use crate::{Buttons, Config, Emulator, Events};
+    use crate::{Buttons, Config, Emulator};
     use std::boxed::Box;
     use std::vec;
 
@@ -224,7 +224,7 @@ mod tests {
         // LDH (55),A, then NOPs.
         rom[0x6100..0x6102].copy_from_slice(&[0xE0, 0x55]);
         rom[0x7FFE..0x8000].copy_from_slice(&[0xE0, 0x55]);
-        let emu = crate::tests::fresh();
+        let emu = crate::testkit::fresh();
         emu.load(rom, &mut [], Config::default()).unwrap();
         for i in 0..0x100 {
             emu.mem.wram[0x100 + i] = i as u8 ^ 0xA5;
@@ -239,14 +239,6 @@ mod tests {
             write(emu, reg, v);
         }
         emu
-    }
-
-    /// A CPU write through the bus, without an M-cycle.
-    fn write(emu: &mut Emulator, addr: u16, value: u8) {
-        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
-        let Emulator { mem, hw } = emu;
-        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-        ctx.write_mapped(addr, value);
     }
 
     /// One `emu.step`: its length in base clocks.

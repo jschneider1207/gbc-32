@@ -164,8 +164,8 @@ mod tests {
     use super::*;
     use crate::apu::StereoSample;
     use crate::bus::SOUND_READ_MASK;
-    use crate::bus::test_util::{load, rom, write};
     use crate::ppu::Frame;
+    use crate::testkit::{load, rom, write};
     use crate::timer::Timer;
     use crate::{Emulator, FRAME_CLOCKS};
     use std::boxed::Box;

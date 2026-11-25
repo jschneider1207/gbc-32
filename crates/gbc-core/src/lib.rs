@@ -835,9 +835,132 @@ fn vdma_turn(cpu: &mut Cpu, ctx: &mut Ctx, limit: u64, single: bool) -> bool {
         || (!single && (ctx.events.intersects(ctx.stop_on) || ctx.clock() >= limit))
 }
 
+/// Helpers shared by the crate's unit tests: one copy of the fixtures the
+/// test modules used to re-implement (review D9). Inline, as test code
+/// that needs `std` must be, and a plain `mod`: the rule recognises nothing
+/// else (`tests/hard_rules.rs`). Private to the crate root, so visible to
+/// every module.
+#[cfg(test)]
+mod testkit {
+    extern crate std;
+    use crate::bus::Ctx;
+    use crate::cpu::Bus;
+    use crate::ppu::Frame;
+    use crate::{Config, Emulator, Events, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, cart_ram_size};
+    use std::boxed::Box;
+    use std::vec;
+
+    /// A powered-off emulator with its own heap `Memory`, as a desktop
+    /// front end builds it. Leaks both, which keeps lifetimes trivial.
+    pub(crate) fn fresh() -> &'static mut Emulator<'static> {
+        Box::leak(Box::new(Emulator::new(Box::leak(Box::new(Memory::new())))))
+    }
+
+    /// A black frame buffer on the heap.
+    pub(crate) fn frame() -> Box<Frame> {
+        vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap()
+    }
+
+    /// A zeroed ROM of `len` bytes with the header's cartridge type, RAM
+    /// size code and CGB flag set.
+    pub(crate) fn rom(len: usize, cart_type: u8, ram_code: u8, cgb_flag: u8) -> &'static mut [u8] {
+        let rom = vec![0u8; len].leak();
+        rom[0x143] = cgb_flag;
+        rom[0x147] = cart_type;
+        rom[0x149] = ram_code;
+        rom
+    }
+
+    /// An emulator with `rom` loaded and a RAM buffer of the header's size.
+    pub(crate) fn load(rom: &'static [u8]) -> &'static mut Emulator<'static> {
+        let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
+        let emu = fresh();
+        emu.load(rom, ram, Config::default()).unwrap();
+        emu
+    }
+
+    /// Runs `f` with a run-call context on `emu`.
+    pub(crate) fn with_ctx(emu: &mut Emulator, f: impl FnOnce(&mut Ctx)) {
+        let mut fb = frame();
+        let Emulator { mem, hw } = emu;
+        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
+        f(&mut ctx);
+    }
+
+    /// A CPU write through the bus (no M-cycle).
+    pub(crate) fn write(emu: &mut Emulator, addr: u16, value: u8) {
+        with_ctx(emu, |ctx| ctx.write_mapped(addr, value));
+    }
+
+    /// A CGB-mode emulator with the LCD off (no PPU deadline), OAM filled
+    /// with 55, C100+i = C200+i = i ^ A5 and ROM 4000+i = i ^ 3C.
+    pub(crate) fn setup() -> &'static mut Emulator<'static> {
+        setup_with(&[])
+    }
+
+    /// [`setup`] with `program` at 0100 (the entry point).
+    pub(crate) fn setup_with(program: &[u8]) -> &'static mut Emulator<'static> {
+        let rom = vec![0u8; 0x8000].leak();
+        rom[0x143] = 0x80;
+        rom[0x100..0x100 + program.len()].copy_from_slice(program);
+        for i in 0..0xA0 {
+            rom[0x4000 + i] = i as u8 ^ 0x3C;
+        }
+        let emu = fresh();
+        emu.load(rom, &mut [], Config::default()).unwrap();
+        emu.mem.oam.fill(0x55);
+        for i in 0..0x200 {
+            emu.mem.wram[0x100 + i] = i as u8 ^ 0xA5;
+        }
+        write(emu, 0xFF40, 0x11);
+        emu
+    }
+
+    /// Idles until the next access is at `t0 + n` M-cycles.
+    pub(crate) fn idle_to(ctx: &mut Ctx, t0: u64, n: u64) {
+        while ctx.clock() < t0 + 4 * n {
+            ctx.idle();
+        }
+        assert_eq!(ctx.clock(), t0 + 4 * n);
+    }
+
+    /// Runs whole run calls until at least `clocks` from now.
+    pub(crate) fn run_for(emu: &mut Emulator, clocks: u64) {
+        let mut fb = frame();
+        let target = emu.clock() + clocks;
+        while emu.clock() < target {
+            let _ = emu.run_until(target, &mut fb, &mut []);
+        }
+    }
+
+    /// xorshift64 (Marsaglia), fixed seed: no dependency, reproducible.
+    pub(crate) struct Rng(pub(crate) u64);
+
+    impl Rng {
+        pub(crate) fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        pub(crate) fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        pub(crate) fn byte(&mut self) -> u8 {
+            self.next() as u8
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::speed::Speed;
+    use crate::testkit::{frame, fresh, run_for, write};
     extern crate std;
     use super::*;
     use std::boxed::Box;
@@ -858,36 +981,9 @@ mod tests {
         emu
     }
 
-    /// A powered-off emulator with its own heap `Memory`, as a desktop
-    /// front end builds it. Leaks both, which keeps lifetimes trivial.
-    pub(crate) fn fresh() -> &'static mut Emulator<'static> {
-        Box::leak(Box::new(Emulator::new(Box::leak(Box::new(Memory::new())))))
-    }
-
     /// A CPU write to LCDC, through the bus (no M-cycle).
     fn write_lcdc(emu: &mut Emulator, value: u8) {
-        write_reg(emu, 0xFF40, value);
-    }
-
-    /// A CPU write, through the bus (no M-cycle).
-    fn write_reg(emu: &mut Emulator, addr: u16, value: u8) {
-        let mut fb = frame();
-        let mut ctx = Ctx::new(
-            emu.mem,
-            &mut emu.hw.sys,
-            &mut fb,
-            &mut [],
-            Events::EMPTY,
-            u64::MAX,
-        );
-        ctx.write_mapped(addr, value);
-    }
-
-    fn frame() -> Box<Frame> {
-        vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT]
-            .into_boxed_slice()
-            .try_into()
-            .unwrap()
+        write(emu, 0xFF40, value);
     }
 
     #[test]
@@ -1095,15 +1191,6 @@ mod tests {
         rom
     }
 
-    /// Runs whole run calls until at least `clocks` from now.
-    fn run_for(emu: &mut Emulator, clocks: u64) {
-        let mut fb = frame();
-        let target = emu.clock() + clocks;
-        while emu.clock() < target {
-            let _ = emu.run_until(target, &mut fb, &mut []);
-        }
-    }
-
     #[test]
     fn eject_and_load_over_return_the_rtc_state() {
         let sec = u64::from(CLOCK_HZ);
@@ -1145,16 +1232,16 @@ mod tests {
         emu.load(rtc_rom(), vec![0u8; 0x2000].leak(), Config::default())
             .unwrap();
         assert!(!emu.save_dirty());
-        write_reg(emu, 0x0000, 0x0A); // RAM/RTC enable
-        write_reg(emu, 0xA000, 0x00); // same value: no change
+        write(emu, 0x0000, 0x0A); // RAM/RTC enable
+        write(emu, 0xA000, 0x00); // same value: no change
         assert!(!emu.save_dirty());
-        write_reg(emu, 0xA000, 0x33);
+        write(emu, 0xA000, 0x33);
         assert!(emu.save_dirty());
         emu.clear_save_dirty();
         assert!(!emu.save_dirty());
         // An RTC register write is a save change too.
-        write_reg(emu, 0x4000, 0x08);
-        write_reg(emu, 0xA000, 0x20);
+        write(emu, 0x4000, 0x08);
+        write(emu, 0xA000, 0x20);
         assert!(emu.save_dirty());
         // A reset keeps the flag (the save is still unsaved)...
         emu.reset();
@@ -2255,9 +2342,9 @@ mod tests {
         // color 0 white, color 3 black.
         emu.mem.vram[0x10..0x20].fill(0xFF);
         emu.mem.vram[0x1C00..0x2000].fill(1);
-        write_reg(emu, 0xFF68, 0x80);
+        write(emu, 0xFF68, 0x80);
         for v in [0xFF, 0x7F, 0, 0, 0, 0, 0, 0] {
-            write_reg(emu, 0xFF69, v);
+            write(emu, 0xFF69, v);
         }
         let start = u64::from(FRAME_CLOCKS - ppu::POST_BOOT_POS);
         let mut fb = frame();
@@ -2757,7 +2844,7 @@ mod tests {
         // `oamdma/oamdmasrcC0_speedchange_readC000`; a HALT's resumes at
         // its start).
         let emu = with_program(&[], 0x80);
-        write_reg(emu, 0xFF46, 0xC0);
+        write(emu, 0xFF46, 0xC0);
         let mut fb = frame();
         let Emulator { mem, hw } = &mut *emu;
         let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
@@ -2785,7 +2872,7 @@ mod tests {
         // copied, not dropped (and not overflow).
         let emu = with_program(&[], 0x80);
         for i in 0..0xA0u16 {
-            write_reg(emu, 0xC000 + i, 0x40 ^ i as u8);
+            write(emu, 0xC000 + i, 0x40 ^ i as u8);
         }
         let mut fb = frame();
         let Emulator { mem, hw } = &mut *emu;
@@ -3048,8 +3135,8 @@ mod tests {
             let _ = emu.run_until(start + 456 * line + t, &mut fb, &mut []);
             assert!(emu.clock() < start + 456 * line + t + 4);
         };
-        write_reg(emu, 0xFF4A, 40);
-        write_reg(emu, 0xFF4B, 71);
+        write(emu, 0xFF4A, 40);
+        write(emu, 0xFF4B, 71);
         write_lcdc(emu, 0xB1);
         if let Some((line, t)) = clear {
             to(emu, line, t);
@@ -3117,7 +3204,7 @@ mod tests {
     /// cartridge starts with neither, `post_boot_state_of_a_dmg_mode_cartridge`).
     fn input_emulator() -> &'static mut Emulator<'static> {
         let emu = emulator();
-        write_reg(emu, 0xFF00, 0x00);
+        write(emu, 0xFF00, 0x00);
         emu
     }
 

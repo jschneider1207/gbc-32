@@ -353,9 +353,9 @@ mod tests {
     //! OAM DMA timing, blocking and CGB C conflicts (`docs/reference/oam-dma.md`).
     extern crate std;
     use super::*;
-    use crate::bus::test_util::{idle_to, setup, setup_with, with_ctx};
     use crate::cpu::Bus;
     use crate::ppu::Frame;
+    use crate::testkit::{idle_to, setup, setup_with, with_ctx};
     use crate::{Buttons, Emulator, Events};
     use std::boxed::Box;
 

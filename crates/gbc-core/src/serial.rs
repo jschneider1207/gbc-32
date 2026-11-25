@@ -309,6 +309,7 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::testkit::Rng;
 
     #[test]
     fn internal_clock_transfer_sends_the_byte() {
@@ -427,26 +428,6 @@ mod tests {
             assert!(!s.div_reset(0x1000 + 3 * p, new));
             assert_eq!(s.bits, 1, "sc={sc:02X}");
             assert_eq!(next_shift(&s), new + 4 * p, "sc={sc:02X}");
-        }
-    }
-
-    /// xorshift64 (Marsaglia), fixed seed: no dependency, reproducible.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-        fn byte(&mut self) -> u8 {
-            self.next() as u8
         }
     }
 

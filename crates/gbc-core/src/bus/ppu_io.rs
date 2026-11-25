@@ -313,10 +313,10 @@ impl Ctx<'_, '_> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::bus::test_util::{idle_to, load, rom, setup, with_ctx, write};
     use crate::cpu::Bus;
     use crate::ppu::Frame;
     use crate::speed::Speed;
+    use crate::testkit::{idle_to, load, rom, setup, with_ctx, write};
     use crate::{Emulator, Events, FRAME_CLOCKS};
     use std::boxed::Box;
 

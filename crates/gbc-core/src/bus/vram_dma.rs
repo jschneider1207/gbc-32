@@ -361,9 +361,9 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::Emulator;
-    use crate::bus::test_util::{idle_to, load, rom, setup, with_ctx, write};
     use crate::bus::{Hot, read};
     use crate::cpu::Bus;
+    use crate::testkit::{idle_to, load, rom, setup, with_ctx, write};
 
     /// The per-byte VRAM DMA source read before the block fast path: the
     /// reference for `vdma_block`.

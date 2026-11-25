@@ -402,9 +402,9 @@ impl Huc3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::run_for;
     extern crate std;
-    use crate::{Config, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
-    use std::boxed::Box;
+    use crate::Config;
     use std::vec;
 
     const HZ: u64 = CLOCK_HZ as u64;
@@ -607,20 +607,9 @@ mod tests {
         rom
     }
 
-    fn run_for(emu: &mut crate::Emulator, clocks: u64) {
-        let mut fb: Box<Frame> = vec![0u16; SCREEN_WIDTH * SCREEN_HEIGHT]
-            .into_boxed_slice()
-            .try_into()
-            .unwrap();
-        let target = emu.clock() + clocks;
-        while emu.clock() < target {
-            let _ = emu.run_until(target, &mut fb, &mut []);
-        }
-    }
-
     #[test]
     fn state_api_counts_emulated_time_and_round_trips() {
-        let emu = crate::tests::fresh();
+        let emu = crate::testkit::fresh();
         assert_eq!(emu.huc3_rtc_state(), None);
         emu.load(huc3_rom(), vec![0u8; 0x2000].leak(), Config::default())
             .unwrap();
@@ -672,7 +661,7 @@ mod tests {
 
     #[test]
     fn set_state_masks_a_hostile_save() {
-        let emu = crate::tests::fresh();
+        let emu = crate::testkit::fresh();
         emu.load(huc3_rom(), vec![0u8; 0x2000].leak(), Config::default())
             .unwrap();
         let raw = Huc3RtcState {
@@ -693,7 +682,7 @@ mod tests {
 
     #[test]
     fn other_mappers_have_no_huc3_clock() {
-        let emu = crate::tests::fresh();
+        let emu = crate::testkit::fresh();
         let rom = vec![0u8; 0x8000].leak();
         rom[0x147] = 0x10; // MBC3+TIMER+RAM+BATTERY
         emu.load(rom, &mut [], Config::default()).unwrap();

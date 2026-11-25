@@ -348,7 +348,7 @@ impl Ctx<'_, '_> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::bus::test_util::{setup, with_ctx};
+    use crate::testkit::{setup, with_ctx};
 
     /// A switch to double speed with the APU on delays the APU by one
     /// 2 MHz tick (`apu::Fs::ds_delay`): a CH1 trigger in double speed

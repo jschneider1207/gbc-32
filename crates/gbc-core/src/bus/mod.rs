@@ -1360,8 +1360,8 @@ impl Emulator<'_> {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::test_util::{load, rom, write};
     use super::*;
+    use crate::testkit::{load, rom, write};
     use crate::{FRAME_CLOCKS, Frame};
     use std::boxed::Box;
 
@@ -1938,86 +1938,5 @@ mod tests {
         ] {
             assert_eq!(emu.peek(reg), v, "{reg:#06x}");
         }
-    }
-}
-
-/// Helpers shared by the unit tests of the `bus` modules. Inline, as test
-/// code that needs `std` must be (`tests/hard_rules.rs`).
-#[cfg(test)]
-mod test_util {
-    extern crate std;
-    use super::Ctx;
-    use crate::cpu::Bus;
-    use crate::ppu::Frame;
-    use crate::{Config, Emulator, Events, cart_ram_size};
-    use std::boxed::Box;
-    use std::vec;
-
-    /// An emulator with `rom` loaded and a RAM buffer of the header's size.
-    pub(super) fn load(rom: &'static [u8]) -> &'static mut Emulator<'static> {
-        let ram = vec![0u8; cart_ram_size(rom).unwrap()].leak();
-        let emu = crate::tests::fresh();
-        emu.load(rom, ram, Config::default()).unwrap();
-        emu
-    }
-
-    pub(super) fn rom(len: usize, cart_type: u8, ram_code: u8, cgb_flag: u8) -> &'static mut [u8] {
-        let rom = vec![0u8; len].leak();
-        rom[0x143] = cgb_flag;
-        rom[0x147] = cart_type;
-        rom[0x149] = ram_code;
-        rom
-    }
-
-    /// A CPU write through the bus (no M-cycle).
-    pub(super) fn write(emu: &mut Emulator, addr: u16, value: u8) {
-        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
-        let Emulator { mem, hw } = emu;
-        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-        ctx.write_mapped(addr, value);
-    }
-
-    /// A CGB-mode emulator with the LCD off (no PPU deadline), OAM filled
-    /// with 55, C100+i = C200+i = i ^ A5 and ROM 4000+i = i ^ 3C.
-    pub(super) fn setup() -> &'static mut Emulator<'static> {
-        setup_with(&[])
-    }
-
-    /// [`setup`] with `program` at 0100 (the entry point).
-    pub(super) fn setup_with(program: &[u8]) -> &'static mut Emulator<'static> {
-        let rom = vec![0u8; 0x8000].leak();
-        rom[0x143] = 0x80;
-        rom[0x100..0x100 + program.len()].copy_from_slice(program);
-        for i in 0..0xA0 {
-            rom[0x4000 + i] = i as u8 ^ 0x3C;
-        }
-        let emu = crate::tests::fresh();
-        emu.load(rom, &mut [], Config::default()).unwrap();
-        emu.mem.oam.fill(0x55);
-        for i in 0..0x200 {
-            emu.mem.wram[0x100 + i] = i as u8 ^ 0xA5;
-        }
-        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
-        let Emulator { mem, hw } = &mut *emu;
-        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-        ctx.write_mapped(0xFF40, 0x11);
-        drop(ctx);
-        emu
-    }
-
-    /// Runs `f` with a run-call context on `emu`.
-    pub(super) fn with_ctx(emu: &mut Emulator, f: impl FnOnce(&mut Ctx)) {
-        let mut fb: Box<Frame> = Box::new([0; 160 * 144]);
-        let Emulator { mem, hw } = emu;
-        let mut ctx = Ctx::new(mem, &mut hw.sys, &mut fb, &mut [], Events::EMPTY, u64::MAX);
-        f(&mut ctx);
-    }
-
-    /// Idles until the next access is at `t0 + n` M-cycles.
-    pub(super) fn idle_to(ctx: &mut Ctx, t0: u64, n: u64) {
-        while ctx.clock() < t0 + 4 * n {
-            ctx.idle();
-        }
-        assert_eq!(ctx.clock(), t0 + 4 * n);
     }
 }

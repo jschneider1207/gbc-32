@@ -41,6 +41,7 @@ mod tests {
     use crate::memory::Memory;
     use crate::schedule::{EventKind, NEVER};
     use crate::serial::{INT_SERIAL, Serial};
+    use crate::testkit::Rng;
     use crate::timer::reference::Timer as Eager;
     use crate::{Events, Frame};
     use std::boxed::Box;
@@ -163,26 +164,6 @@ mod tests {
             }
             assert!(!c.serial.running(), "a transfer longer than the window");
             (timer, serial)
-        }
-    }
-
-    /// xorshift64 (Marsaglia), fixed seed: no dependency, reproducible.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-        fn byte(&mut self) -> u8 {
-            self.next() as u8
         }
     }
 
