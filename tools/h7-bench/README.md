@@ -18,8 +18,10 @@ the first results were taken. The board is a cargo feature, `h753`
 **Status.** NUCLEO-H755ZI-Q, 2026-11-24: all three placements at both
 clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at 64 and 392 MHz
 with the first five workloads (the 392 MHz runs after the human re-plugged
-the board, which had dropped off USB once), and all three placements at
-480 MHz with all fifteen. Every bench run reproduced the PC's hashes; see "Results". The
+the board, which had dropped off USB once), all three placements at
+"480 MHz" with all fifteen, and then all three at **472 MHz**, the current
+`pll480` clock, with all fifteen ("NUCLEO-H753ZI at 472 MHz", the figures
+to use). Every bench run reproduced the PC's hashes; see "Results". The
 selftest image is still the one to flash first on a board that has not run
 this before.
 
@@ -27,10 +29,15 @@ this before.
 against the board's 32.768 kHz LSE crystal (`clockcheck`, see "Clock
 check"), the ST-LINK's MCO, the HSE reference, is 8.064 MHz, not 8.000,
 which put the CPU and AXI clocks 0.8% over their maxima. `pll480` now runs
-PLL1 from the HSI at **472 MHz** nominal (473.68 MHz measured; at most
-479.1 MHz at the HSI's datasheet tolerance). The flash wait states did not
-change, so the cycle counts measured at "480 MHz" stand; only the real-time
-budget per frame moves (see "NUCLEO-H753ZI at 480 MHz").
+PLL1 from the HSI at **472 MHz** nominal (473.62 MHz measured; at most
+479.1 MHz at the HSI's datasheet tolerance), from a 12.8 MHz reference
+in fractional mode so that the PLL input also stays in range ("Boards").
+Measured at 472 MHz, the cycle counts are not identical to the 483.86 MHz
+run's: 0.984x to 1.036x per workload and placement, 1.002x for the worst
+case in `itcm-dtcm` (3,296,548 / 3,334,278 cycles, 41.7% / 42.2% of a
+472 MHz frame). The images differ only in the bench crate's clock code,
+so the spread is most likely code layout, not the clock (see "NUCLEO-H753ZI
+at 472 MHz").
 
 Not part of the root workspace: `cargo build` at the repo root does not see
 it.
@@ -284,15 +291,26 @@ within +-20 ppm, which is far below everything measured here.
 Results on the NUCLEO-H753ZI, 2026-11-25 (LSE started on the first run;
 the start time was not captured, later runs found it running):
 
-| Image | Windows | CPU clock, average | Window min / max | Implied reference |
+| Image | Windows averaged | CPU clock, average | Window min / max (lines captured) | Implied reference |
 |---|---|---|---|---|
-| `clockcheck` (HSI 64 MHz) | 15 (30 s) | 64,229,574 Hz (+3,587 ppm) | 64,221,197 / 64,243,083 | HSI 64.230 MHz |
-| `clockcheck-pll480`, HSE (first version) | 37 (74 s) | 483,863,097 Hz (+8,048 ppm) | 483,646,110 / 484,116,400 | HSE (MCO) 8.0644 MHz |
-| `clockcheck-pll480`, HSI 472 MHz (now) | 34 (68 s) | 473,682,766 Hz (+3,565 ppm) | 473,562,160 / 473,762,450 | HSI 64.228 MHz |
+| `clockcheck` (HSI 64 MHz) | 30 (60 s; n=29) | 64,229,574 Hz (+3,587 ppm) | 64,221,197 / 64,243,083 (15) | HSI 64.230 MHz |
+| `clockcheck-pll480`, HSE (first version) | 50 (100 s; n=49) | 483,863,097 Hz (+8,048 ppm) | 483,646,110 / 484,116,400 (37) | HSE (MCO) 8.0644 MHz |
+| `clockcheck-pll480`, HSI 472 MHz, DIVM1 4 (integer, second version) | 47 (94 s; n=46) | 473,682,766 Hz (+3,565 ppm) | 473,562,160 / 473,762,450 (34) | HSI 64.228 MHz |
+| `clockcheck-pll480`, HSI 472 MHz, DIVM1 5 (fractional, now) | 51 (102 s; n=50) | 473,617,229 Hz (+3,426 ppm) | 473,525,540 / 473,678,360 (37) | HSI 64.219 MHz |
+| `clockcheck-pll`, HSI 392 MHz, DIVM1 5 (fractional, now) | 33 (66 s; n=32) | 393,290,972 Hz (+3,293 ppm) | 393,236,230 / 393,374,010 (33) | HSI 64.211 MHz |
 
-- The HSI, at 64.23 MHz (+0.36%), is inside DS12117 Table 133 (rev V:
-  63.7 to 64.3 MHz at 30 °C), and the two HSI-based images agree on it to
-  30 ppm: the measurement is consistent.
+"Windows averaged" is how many 2 s windows the average covers: every
+window since the image's reset (the last line's `n` + 1); min / max are
+over the lines captured, which can start after the first windows. The
+fractional runs: 2026-11-25, after the DIVM1 5 change.
+
+- The HSI, at 64.21 to 64.23 MHz (+0.33 to +0.36%), is inside DS12117
+  Table 133 (rev V: 63.7 to 64.3 MHz at 30 °C). The first two HSI-based
+  images agree on it to 30 ppm; the later fractional runs read 160 and
+  290 ppm lower (an HSI drift within the datasheet's, perhaps
+  temperature; not separated). The fractional `pll480` runs 473.62 MHz,
+  1.3% under the 480 MHz limit. The fraction is in effect: with FRACN1
+  not latched (x 73) it would read 1% below the integer image, not 0.014%.
 - The HSE-based "480 MHz" ran at 483.86 MHz, the MCO at 8.064 MHz,
   0.8% fast; the PC's 484.31 MHz was the right order. The MCO also moved:
   +/-0.05% from window to window and about +50 ppm in the average in 20 s,
@@ -302,18 +320,19 @@ the start time was not captured, later runs found it running):
 - `tim_ppm` equals `cpu_ppm` in every line: TIM16's clock is the AHB
   clock, CPU / 2 (HSI: CPU / 1).
 
-`clockcheck-pll480` now, verbatim:
+`clockcheck-pll480` now (fractional PLL1), verbatim:
 
 ```
 h7bench v1 banner board=NUCLEO-H753ZI image=clockcheck placement=flash-axi clock=pll472 cpu_hz=472000000 baud=115200
 h7bench v1 power cr3=0x00000042 csr1=0x0000e000 d3cr=0x0000e000 actvosrdy=1 supply=ldo
 h7bench v1 clock rcc_cr=0x0304c025 cfgr=0x0000001b d1cfgr=0x00000048 flash_acr=0x24 rsr=0x00fe0000
+h7bench v1 pll pllckselr=0x02020050 pllcfgr=0x01f9000d pll1divr=0x01010248 pll1fracr=0x0000c000
 h7bench v1 vos0 syscfg_pwrcr=0x00000081 oden=1 pwrcr_before=0x00000000 polls_to_drop=2 polls_low=6
 h7bench v1 clockcheck lse=ready waited_cycles=0 (0: already running) window_periods=65536 lse_hz=32768 ref=hsi ref_hz_nominal=64000000 tim_hz_nominal=236000000
-h7bench v1 clockcheck n=46 cycles=947373120 cpu_hz_measured=473686560 avg_s=94 avg_cpu_hz_measured=473682766 cpu_ppm=+3565.1 hsi_hz_implied=64228172 tim_hz_measured=236841384 tim_ppm=+3565.1 overcapture=0 stack_used=624
+h7bench v1 clockcheck n=50 cycles=947198460 cpu_hz_measured=473599230 avg_s=102 avg_cpu_hz_measured=473617229 cpu_ppm=+3426.3 hsi_hz_implied=64219285 tim_hz_measured=236808615 tim_ppm=+3426.3 overcapture=0 stack_used=624
 ```
 
-(The banner's `cpu` and `tcm` lines are left out above.)
+(The banner's `cpu`, `tcm` and `options` lines and the windows n=48 and 49 are left out above.)
 
 On the H755:
 
@@ -678,6 +697,87 @@ of the drop unknown; see "Still not verified".
   others; DTCM against AXI SRAM makes under 1%.
 - `stack used=2952` (itcm-dtcm), 2944 (the flash placements).
 
+### NUCLEO-H753ZI at 472 MHz, 2026-11-25 (current figures)
+
+`pll480` as it is now: PLL1 from the HSI, 12.8 MHz reference, fractional
+x 73.75, **472 MHz** nominal (473.62 MHz measured against the LSE, "Clock
+check"), VOS0, flash 4 wait states, AXI 236 MHz. Images built at b4d6c81
+(core unchanged since the 483.86 MHz run's 7d4b026; only this crate's
+clock code and the `clockcheck` image changed). `selftest-pll480` first
+(`clock=pll472`, `flash_acr=0x24`, `oden=1`, `cycles=8000009`, `cyccnt=`
+steps of 472,000,030, `tcmprobe` equal), then the three placements. In
+every placement all fifteen lines' `calls`, `frames`, `clocks` and `hash`
+equal `expected-hashes.txt` (compared on the lines without
+`min`/`mean`/`max`, a later repeat than the first). Banners:
+`clock=pll472 cpu_hz=472000000`, the `pll` line as in "Clock check",
+`itcm_bytes=64024` in `itcm-dtcm`. A second flash of
+`bench-itcm-dtcm-pll480` printed the same cycles to the last digit.
+
+Cycles per frame, mean / max, and % of a 472 MHz frame (**7,902,557
+cycles**, 472 MHz / 59.7275 Hz):
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` | % `flash-axi` | % `flash-dtcm` | % `itcm-dtcm` |
+|---|---|---|---|---|---|---|
+| worst-case | 5,188,678 / 5,251,386 | 5,116,841 / 5,182,062 | 3,296,548 / 3,334,278 | 65.7% / 66.5% | 64.7% / 65.6% | 41.7% / 42.2% |
+| cgb-raster | 2,974,477 / 3,027,148 | 2,880,291 / 2,925,168 | 2,605,630 / 2,644,564 | 37.6% / 38.3% | 36.4% / 37.0% | 33.0% / 33.5% |
+| dmg-raster | 2,356,393 / 2,390,256 | 2,359,427 / 2,390,740 | 1,924,667 / 1,947,063 | 29.8% / 30.2% | 29.9% / 30.3% | 24.4% / 24.6% |
+| event-storm | 2,190,008 / 2,216,442 | 2,123,478 / 2,140,134 | 2,016,303 / 2,031,279 | 27.7% / 28.0% | 26.9% / 27.1% | 25.5% / 25.7% |
+| cpu_instrs | 1,543,172 / 2,141,960 | 1,540,351 / 2,146,528 | 1,295,514 / 1,767,935 | 19.5% / 27.1% | 19.5% / 27.2% | 16.4% / 22.4% |
+| dma-storm | 3,249,074 / 3,256,794 | 3,227,889 / 3,235,118 | 3,088,109 / 3,092,401 | 41.1% / 41.2% | 40.8% / 40.9% | 39.1% / 39.1% |
+| halt-irq | 747,913 / 751,156 | 753,776 / 756,908 | 658,298 / 660,286 | 9.5% / 9.5% | 9.5% / 9.6% | 8.3% / 8.4% |
+| apu-writes | 1,134,930 / 1,159,974 | 1,163,854 / 1,187,010 | 897,195 / 919,289 | 14.4% / 14.7% | 14.7% / 15.0% | 11.4% / 11.6% |
+| oam-lines | 1,676,920 / 1,697,822 | 1,679,072 / 1,698,584 | 1,447,995 / 1,463,898 | 21.2% / 21.5% | 21.2% / 21.5% | 18.3% / 18.5% |
+| storm-control | 2,491,435 / 2,516,566 | 2,521,886 / 2,546,334 | 2,248,086 / 2,266,601 | 31.5% / 31.8% | 31.9% / 32.2% | 28.4% / 28.7% |
+| storm-apu | 26,570,203 / 26,841,596 | 25,743,612 / 25,981,351 | 23,961,284 / 24,174,010 | 336.2% / 339.7% | 325.8% / 328.8% | 303.2% / 305.9% |
+| storm-spsw | 15,822,280 / 15,996,594 | 15,310,679 / 15,464,886 | 14,572,044 / 14,705,973 | 200.2% / 202.4% | 193.7% / 195.7% | 184.4% / 186.1% |
+| storm-div | 16,841,934 / 17,041,328 | 16,902,052 / 17,062,206 | 16,339,897 / 16,483,324 | 213.1% / 215.6% | 213.9% / 215.9% | 206.8% / 208.6% |
+| storm-gdma | 3,248,548 / 3,281,206 | 3,171,715 / 3,203,608 | 2,876,062 / 2,901,220 | 41.1% / 41.5% | 40.1% / 40.5% | 36.4% / 36.7% |
+| storm-ppu | 31,101,566 / 31,470,508 | 30,224,496 / 30,544,076 | 28,561,042 / 28,862,232 | 393.6% / 398.2% | 382.5% / 386.5% | 361.4% / 365.2% |
+
+- The worst case in `itcm-dtcm`: 3,296,548 / 3,334,278 cycles, 41.7% /
+  42.2% of a frame, **83.4% / 84.4% of the 50% line** (3,951,279). From
+  flash 129.5% / 131.1% (`flash-dtcm`) and 131.3% / 132.9% (`flash-axi`)
+  of the line.
+- `stack used=3440` (`flash-dtcm`, `itcm-dtcm`), 3432 (`flash-axi`).
+
+**472 against 483.86 MHz**, cycles per frame at 472 over the "480 MHz"
+run below, mean (max):
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` |
+|---|---|---|---|
+| worst-case | 1.018 (1.018) | 1.007 (1.008) | 1.002 (1.002) |
+| cgb-raster | 1.005 (1.004) | 0.995 (0.994) | 0.999 (0.999) |
+| dmg-raster | 1.008 (1.008) | 1.010 (1.010) | 0.998 (0.998) |
+| event-storm | 1.034 (1.033) | 0.998 (0.998) | 1.001 (1.001) |
+| cpu_instrs | 1.001 (0.989) | 1.006 (1.004) | 1.001 (1.000) |
+| dma-storm | 0.992 (0.992) | 1.005 (1.005) | 1.018 (1.018) |
+| halt-irq | 0.996 (0.997) | 1.019 (1.019) | 1.002 (1.002) |
+| apu-writes | 0.995 (0.995) | 1.024 (1.020) | 0.999 (0.999) |
+| oam-lines | 0.995 (0.995) | 1.004 (1.004) | 1.001 (1.000) |
+| storm-control | 0.992 (0.991) | 1.007 (1.007) | 1.002 (1.002) |
+| storm-apu | 1.036 (1.036) | 1.005 (1.005) | 1.000 (1.000) |
+| storm-spsw | 1.023 (1.020) | 0.997 (0.998) | 0.985 (0.985) |
+| storm-div | 0.984 (0.984) | 1.015 (1.014) | 1.017 (1.017) |
+| storm-gdma | 1.000 (0.998) | 0.993 (0.991) | 0.998 (0.994) |
+| storm-ppu | 1.002 (1.003) | 0.991 (0.990) | 1.004 (1.004) |
+
+- Not "unchanged": 0.984x to 1.036x. The worst case in `itcm-dtcm` is
+  1.002x; `itcm-dtcm` is within 0.4% on twelve workloads and 1.5% to
+  1.8% off on `dma-storm`, `storm-spsw` and `storm-div`; the flash placements
+  move by up to 3.6% (`flash-axi` `storm-apu` and `event-storm`).
+- The clock is not the likely cause. The wait states are the same (4)
+  and every clock is a fixed ratio of the CPU clock, so a cycle count
+  should not depend on the absolute frequency; the two builds differ only
+  in this crate's board code (clock setup, banner, clock-check support),
+  which moves where the code after it lands. An
+  integer-PLL 472 MHz `bench-itcm-dtcm-pll480` (DIVM1 4 code, 761049b
+  to 9730bd3, exact build not recorded; no `pll` line) was found running on the board at the
+  start of these runs, with matching hashes: against it, at the same
+  nominal clock, today's build is 0.979x (`storm-div`) to 1.013x
+  (`dma-storm`), 0.998x on the worst case. So rebuilding alone moves
+  counts by about 2% on some workloads; a figure here carries that much
+  build-to-build uncertainty. Not separated further.
+
 ### NUCLEO-H753ZI at 480 MHz, 2026-11-25
 
 `pll480` (VOS0 via ODEN, HSE bypass 8 MHz, flash 4 wait states, AXI
@@ -691,14 +791,11 @@ cpu_hz=480000000`, `flash_acr=0x24`, `oden=1`, `syscfg_pwrcr=0x00000081`;
 `itcm_bytes=64024` in `itcm-dtcm`.
 
 **Clock correction**: the clock of these runs was HSE-based and measured
-483.86 MHz, not 480 ("Clock check"); the images now run 472 MHz nominal
-from the HSI. Cycle counts per frame do not depend on the absolute clock,
-only on the flash wait states (4 in both), so the counts below stand for
-the 472 MHz images. The real-time frame budget at 472 MHz nominal is
-**7,902,557 cycles** (472 MHz / 59.7275 Hz; 3,951,279 for the 50% bar),
-against the 8,036,499 used for the percentages below; at the measured
-473.68 MHz it is 7,930,731. The percentages of a 472 MHz frame are those
-below x 1.0169 (worst case in `itcm-dtcm`: 41.6% / 42.1%).
+483.86 MHz, not 480 ("Clock check"), over the CPU and AXI maxima; the
+images now run 472 MHz nominal from the HSI. These figures are kept as
+history: the current ones are "NUCLEO-H753ZI at 472 MHz" above, measured
+with the corrected clock, at 0.984x to 1.036x of the counts below (not
+identical, see there); the % below are of a 480 MHz frame.
 
 Cycles per frame, mean / max, and % of a 480 MHz frame (8,036,499 cycles
 at 59.7275 Hz):
@@ -798,7 +895,8 @@ clock run about 0.9% above their DS12117/RM0433 maxima. Confirmed on chip
 against the LSE crystal (483.86 MHz, MCO 8.064 MHz) and fixed: see "Clock
 check" and the clock correction above.
 
-The board is left running `bench-itcm-dtcm-pll480`.
+The board is left running `bench-itcm-dtcm-pll480` as built at b4d6c81
+(fractional 472 MHz clock; see "NUCLEO-H753ZI at 472 MHz").
 
 docs/perf.md "Measured on a Cortex-M7" relates these to the x86 instruction
 counts and to the final chip.
@@ -852,10 +950,10 @@ counts and to the final chip.
   source inside the ST-LINK is not documented here. No longer used.
 - The LSE crystal's own accuracy (not measured with an instrument; the
   HSI reading inside its datasheet range is the cross-check).
-- The 392 MHz images on the H753 at their real clock: with the HSI
-  measured at 64.230 MHz (+0.36%) they run at about 393.4 MHz, under the
-  400 MHz VOS1 limit (397.9 MHz at the HSI's +1.5% bound);
-  `clockcheck-pll` was built but not run.
+- The 392 MHz bench and selftest images with the fractional PLL1
+  (b4d6c81): rebuilt, not run. `clockcheck-pll` was: 393.29 MHz (HSI
+  64.211 MHz, +0.33%), under the 400 MHz VOS1 limit (397.9 MHz at the
+  HSI's +1.5% bound).
 
 ## Flashing order on a board that has not run this
 

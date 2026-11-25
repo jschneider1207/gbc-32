@@ -972,9 +972,56 @@ Measured and not taken:
 
 Two boards, the same Cortex-M7 r1p1 core and the same `tools/h7-bench`
 placements: a NUCLEO-H755ZI-Q at up to 392 MHz (2026-11-24, below), then
-the Stage 2 dev board, a NUCLEO-H753ZI, at 64, 392 and 480 MHz
-(2026-11-25). The h7-bench README has every table, the 64 and 392 MHz H753
+the Stage 2 dev board, a NUCLEO-H753ZI, at 64, 392, 480 (483.86 measured)
+and 472 MHz (2026-11-25; 472 MHz is the current clock). The h7-bench README has every table, the 64 and 392 MHz H753
 runs included.
+
+### NUCLEO-H753ZI at 472 MHz (2026-11-25, current)
+
+The Stage 2 clock (D11): PLL1 from the HSI, 12.8 MHz reference,
+fractional x 73.75, 472 MHz nominal (473.62 MHz measured against the
+LSE crystal; at most 479.1 MHz over the HSI's datasheet tolerance), VOS0,
+flash 4 wait states, AXI 236 MHz. Images at b4d6c81 (core as at
+7d4b026). All fifteen workloads, three placements; every line's calls,
+frames, clocks and hash equal `expected-hashes.txt`. `flash` is code in
+flash with data in DTCM; `ITCM` is the ITCM set minus the plain tile
+path, as below. The `flash-axi` column and the ratio table are in the
+h7-bench README, "NUCLEO-H753ZI at 472 MHz".
+
+**Measured: cycles per frame at 472 MHz, mean / max over 120 calls
+(cpu_instrs 600), and % of a 472 MHz frame (7,902,557 cycles):**
+
+| Workload | flash | ITCM | % of a frame, flash | % of a frame, ITCM |
+|---|---|---|---|---|
+| `synth:worst-case` | 5,116,841 / 5,182,062 | 3,296,548 / 3,334,278 | 64.7% / 65.6% | **41.7% / 42.2%** |
+| `synth:cgb-raster` | 2,880,291 / 2,925,168 | 2,605,630 / 2,644,564 | 36.4% / 37.0% | 33.0% / 33.5% |
+| `synth:dmg-raster` | 2,359,427 / 2,390,740 | 1,924,667 / 1,947,063 | 29.9% / 30.3% | 24.4% / 24.6% |
+| `synth:event-storm` | 2,123,478 / 2,140,134 | 2,016,303 / 2,031,279 | 26.9% / 27.1% | 25.5% / 25.7% |
+| `blargg/cpu_instrs` | 1,540,351 / 2,146,528 | 1,295,514 / 1,767,935 | 19.5% / 27.2% | 16.4% / 22.4% |
+| `synth:dma-storm` | 3,227,889 / 3,235,118 | 3,088,109 / 3,092,401 | 40.8% / 40.9% | 39.1% / 39.1% |
+| `synth:halt-irq` | 753,776 / 756,908 | 658,298 / 660,286 | 9.5% / 9.6% | 8.3% / 8.4% |
+| `synth:apu-writes` | 1,163,854 / 1,187,010 | 897,195 / 919,289 | 14.7% / 15.0% | 11.4% / 11.6% |
+| `synth:oam-lines` | 1,679,072 / 1,698,584 | 1,447,995 / 1,463,898 | 21.2% / 21.5% | 18.3% / 18.5% |
+| `synth:storm-control` | 2,521,886 / 2,546,334 | 2,248,086 / 2,266,601 | 31.9% / 32.2% | 28.4% / 28.7% |
+| `synth:storm-apu` | 25,743,612 / 25,981,351 | 23,961,284 / 24,174,010 | 325.8% / 328.8% | 303.2% / 305.9% |
+| `synth:storm-spsw` | 15,310,679 / 15,464,886 | 14,572,044 / 14,705,973 | 193.7% / 195.7% | 184.4% / 186.1% |
+| `synth:storm-div` | 16,902,052 / 17,062,206 | 16,339,897 / 16,483,324 | 213.9% / 215.9% | 206.8% / 208.6% |
+| `synth:storm-gdma` | 3,171,715 / 3,203,608 | 2,876,062 / 2,901,220 | 40.1% / 40.5% | 36.4% / 36.7% |
+| `synth:storm-ppu` | 30,224,496 / 30,544,076 | 28,561,042 / 28,862,232 | 382.5% / 386.5% | 361.4% / 365.2% |
+
+So at 472 MHz the worst case takes **83.4% / 84.4% of the 50% line**
+(3,951,279 cycles) with the hot set in ITCM, and misses it from flash
+(129.5% / 131.1%). The storms run 1.84 to 3.65 frame times per frame in
+ITCM (`storm-ppu` 28.56 M / 28.86 M cycles, 365.2% at most).
+
+- Against the 483.86 MHz run below (same core, same wait states), cycles
+  per frame are 0.984x to 1.036x per workload and placement, not
+  unchanged: 1.002x on the worst case in ITCM, 0.985x to 1.018x on
+  three workloads in ITCM, up to 1.036x from flash. An integer-PLL 472 MHz
+  ITCM build of the previous code differs from this one by 0.979x to
+  1.013x at the same clock, so rebuilding the bench crate alone moves
+  counts by up to about 2%: treat these figures as +-2% (code layout,
+  most likely; not separated).
 
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
@@ -1019,7 +1066,8 @@ there.
   `selftest-pll480`'s DWT lines at 484.3 MHz, 0.9% fast; h7-bench README,
   "NUCLEO-H753ZI at 480 MHz"): the % above are against the nominal 480 MHz.
   Stage 2 now runs 472 MHz from the HSI (D11): frame 7,902,557 cycles, 50%
-  line 3,951,279; cycle counts are unchanged, the % rise by x 1.0169.
+  line 3,951,279. Measured there (above), the counts are 0.984x to 1.036x
+  of these, not unchanged; the 472 MHz section has the current figures.
 
 ### NUCLEO-H755ZI-Q (2026-11-24)
 
@@ -1899,6 +1947,13 @@ measured on an older core (86d01ef), so it is approximate:
 | `synth:storm-div` | 16,062,214 / 16,212,035 | 201.7% | 176.1% | 1.66 | 16,649,536 / 16,832,276 |
 | `synth:storm-gdma` | 2,882,474 / 2,919,847 | 36.3% | 31.7% | 1.23 | 3,193,040 / 3,234,018 |
 | `synth:storm-ppu` | 28,457,135 / 28,756,285 | 357.8% | 312.3% | 1.29 | 30,503,428 / 30,852,328 |
+
+At the current 472 MHz clock (b4d6c81, "NUCLEO-H753ZI at 472 MHz"
+above), ITCM, mean / max and % of a 472 MHz frame at most:
+`storm-control` 2,248,086 / 2,266,601 (28.7%), `storm-apu` 23,961,284 /
+24,174,010 (305.9%), `storm-spsw` 14,572,044 / 14,705,973 (186.1%),
+`storm-div` 16,339,897 / 16,483,324 (208.6%), `storm-gdma` 2,876,062 /
+2,901,220 (36.7%), `storm-ppu` 28,561,042 / 28,862,232 (365.2%).
 
 So the dearest storm, `storm-ppu`, runs 3.6 frame times per frame on the
 dev board and an estimated 3.1 on the final chip (438% of a 392 MHz frame, inside the 392 MHz
