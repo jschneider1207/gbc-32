@@ -16,9 +16,9 @@ the first results were taken. The board is a cargo feature, `h753`
 "Boards" for what differs.
 
 **Status.** NUCLEO-H755ZI-Q, 2026-11-24: all three placements at both
-clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at 64 MHz and the
-392 MHz selftest; the 392 MHz bench images not yet (the board dropped off
-USB). Every bench run reproduced the PC's hashes; see "Results". The
+clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at both clocks
+(the 392 MHz runs after the human re-plugged the board, which had dropped
+off USB once). Every bench run reproduced the PC's hashes; see "Results". The
 selftest image is still the one to flash first on a board that has not run
 this before.
 
@@ -434,21 +434,37 @@ supply and rev V silicon allow, unlike the H755's SMPS; not run):
 
 (`flash-dtcm` is within 0.4 points of `flash-axi` everywhere.)
 
-392 MHz PLL (`pll392`): **not measured.** `selftest-pll` ran
-(`clock=pll392`, `d3cr=0x0000e000`, `cfgr=0x0000001b`, `d1cfgr=0x00000048`,
-`flash_acr=0x22`, `cycles=8000008` every second, `tcmprobe` equal). After
-`bench-flash-axi-pll` was copied to the drive, the whole ST-LINK (drive,
-VCP and debug interface) dropped off USB and had not come back when these
-notes were written; no output of that image was read. Cause unknown; see
-"Still not verified".
+392 MHz PLL (`pll392`: VOS1, flash 2 wait states, AXI clock = CPU clock / 2),
+measured 2026-11-25. Cycles per frame, mean / max, then % of a 392 MHz
+frame (6,563,140 cycles). Hashes equal the 64 MHz runs and `host/`:
+
+| Workload | `flash-axi` | `flash-dtcm` | `itcm-dtcm` | % `flash-axi` | % `itcm-dtcm` |
+|---|---|---|---|---|---|
+| worst-case | 4,625,922 / 4,680,200 | 4,593,882 / 4,645,866 | 3,285,344 / 3,322,872 | 70.5% / 71.3% | 50.1% / 50.6% |
+| cgb-raster | 2,783,141 / 2,836,198 | 2,811,114 / 2,856,566 | 2,604,823 / 2,643,809 | 42.4% / 43.2% | 39.7% / 40.3% |
+| dmg-raster | 2,258,589 / 2,290,448 | 2,232,378 / 2,261,918 | 1,921,983 / 1,944,282 | 34.4% / 34.9% | 29.3% / 29.6% |
+| event-storm | 2,115,450 / 2,141,192 | 2,107,003 / 2,122,730 | 2,014,338 / 2,028,449 | 32.2% / 32.6% | 30.7% / 30.9% |
+| cpu_instrs | 1,473,695 / 2,043,796 | 1,471,993 / 2,040,030 | 1,293,829 / 1,766,281 | 22.5% / 31.1% | 19.7% / 26.9% |
+
+`selftest-pll` ran first (`clock=pll392`, `d3cr=0x0000e000`,
+`cfgr=0x0000001b`, `d1cfgr=0x00000048`, `flash_acr=0x22`, `cycles=8000008`
+every second, `tcmprobe` equal). Right after `bench-flash-axi-pll` was
+first copied, the whole ST-LINK (drive, VCP, debug interface) dropped off
+USB for several minutes; after the human re-plugged it, that image was
+running and passing (`end pass=13`), so the image was not the cause. Cause
+of the drop unknown; see "Still not verified". The board is left running
+`bench-itcm-dtcm-pll`.
 
 - The worst case in `itcm-dtcm` is 3.29 M cycles, 6.3% more than the H755's
   3.09 M at bcd881e. The CPU core, the placements and the clock are the
   same and the hot set runs from ITCM, so the difference is most likely
   the core's code since bcd881e, not the board; it was not separated (the
-  H755 is no longer here). At 392 MHz that is 50.1% of a frame on
-  average, 50.7% at most: at the 50% bar, no longer under it. At 480 MHz,
-  which this board can run, it is 41%.
+  H755 is no longer here). Measured at 392 MHz: 50.1% of a frame on
+  average, 50.6% at most: at the 50% bar, no longer under it. At 480 MHz,
+  which this board can run, it would be about 41% (not run).
+- Unlike the 64 MHz runs, at 392 MHz the flash placements cost 3% more
+  cycles on the worst case (AXI at half the CPU clock, flash wait states);
+  ITCM is unchanged, 1.41x faster than flash there.
 - ITCM against flash: 1.36x on the worst case, 1.04x to 1.15x on the
   others; DTCM against AXI SRAM makes under 1%.
 - `stack used=2952` (itcm-dtcm), 2944 (the flash placements).

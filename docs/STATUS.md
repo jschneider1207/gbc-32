@@ -133,17 +133,15 @@ Working rules that matter here:
 ## Needs human
 
 Open (session 19, 2026-11-25):
-- **NUCLEO-H753ZI board dropped off USB** (ST-LINK drive E:/COM5 and debug
-  interface all gone) right after flashing `bench-flash-axi-pll`; the
-  selftest-pll image had run fine. Cause unknown (unplug, port power,
-  current with the X-NUCLEO-GFX02Z1 shield). Human: re-plug; LD6 lit =
-  over-current; then `tools/h7-bench/read-serial.sh`. Standing permission
-  (human, 2026-11-25): agents may flash this board and read its serial
-  port. Still to measure: the three `-pll` bench images (392 MHz); leave
-  `out/h753/bench-itcm-dtcm-pll.bin` on the board.
+- **NUCLEO-H753ZI** (with X-NUCLEO-GFX02Z1 shield): measured at both
+  clocks, all placements (bb3c701 + session 19 docs). Standing permission
+  (human, 2026-11-25): agents may flash it and read its serial port (E:,
+  COM5). It dropped off USB once right after a flash (cause unknown;
+  re-plugged by the human, then fine). Board left running
+  `bench-itcm-dtcm-pll`. No answer needed.
 - **H753 worst case is at the 50% bar** (bb3c701, `tools/h7-bench/README.md`):
   `bench-itcm-dtcm` 3,287,649 mean / 3,324,581 max cycles per frame =
-  50.1% / 50.7% of a 392 MHz frame (H755 measured 47.2% at bcd881e; the
+  50.1% / 50.6% of a 392 MHz frame (measured at 392 MHz) (H755 measured 47.2% at bcd881e; the
   rise is most likely core changes since, not separated). At 480 MHz
   (VOS0, allowed on this rev V part, not run) it would be ~41%. The final
   target (H735, 550 MHz) is unaffected; a Stage 2 decision.
