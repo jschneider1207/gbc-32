@@ -99,14 +99,19 @@ const HALT_IRQ: &[u8] = &[
 /// through the master volume: every APU write syncs the APU, so its fixed
 /// cost per sync counts ([`worst_case`], [`STAT_HANDLER_NR50`]). The main
 /// loop also polls STAT and writes SCX (+1 each time) once per visible
-/// line, the first time a poll sees mode 3 on a new LY, 18-42 M-cycles
-/// after mode 3 starts (the poll loop is 24 M-cycles; later when the
-/// timer handler runs in between; before the timer IRQ it compared the
-/// mode with the last poll's, and with the handlers taking most of a
-/// heavy line's modes 0 and 2 a poll saw no mode change on ~27 lines a
-/// frame): a mid-mode-3 write after the fetcher has started, so the PPU's
-/// held-fetch slow path (`Ppu::hold_fetch`, `render_held`) runs 144 times
-/// a frame, like a game's per-line parallax scroll (human, session 10).
+/// line, the first time a poll sees mode 3 and then an LY it has not
+/// written on (comparing the mode with the last poll's would miss lines:
+/// the handlers take most of a heavy line's modes 0 and 2). The write is
+/// 18 M-cycles after the poll's STAT read and the poll loop is 24, so
+/// with no handler in between it lands 18-42 M-cycles (36-84 dots) into
+/// mode 3; a handler in between moves it later. Measured over 20 frames
+/// (2,880 writes): 86% land in mode 3 after the fetcher has started (24
+/// to 196 dots in), so the PPU's held-fetch slow path (`Ppu::hold_fetch`,
+/// `render_held`) runs about 124 times a frame, like a game's per-line
+/// parallax scroll (human, session 10); 0.7% land in the first 24 dots of
+/// mode 3, where the fine-scroll discard is; 14% land in the next line's
+/// mode 2 (the line changed between the STAT read and the write), where
+/// the write is a plain one.
 /// The timer interrupt is serviced too (IE = STAT and timer): TIMA counts
 /// at 262 kHz nominal, 524 kHz in double speed, from TMA=E0, so it
 /// overflows every 256 base clocks: 16,384 Hz, 274.3 a frame, about two
