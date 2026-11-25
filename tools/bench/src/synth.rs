@@ -14,6 +14,14 @@ pub const NAMES: &[&str] = &[
     "apu-writes",
     "dmg-raster",
     "oam-lines",
+    // The storms ([`storm`]): measured, not benched (docs/perf.md,
+    // "Outside the bound").
+    "storm-control",
+    "storm-apu",
+    "storm-spsw",
+    "storm-div",
+    "storm-gdma",
+    "storm-ppu",
 ];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
@@ -684,8 +692,315 @@ fn apu_writes() -> Vec<u8> {
     code
 }
 
+// --- Storms: adversarial programs outside the benched bound ---
+//
+// `synth:storm-*` (docs/perf.md, "Outside the bound"). Each one runs one
+// kind of expensive access in the tightest loop the CPU allows, for the
+// whole frame, over the same background: the picture of `synth:worst-case`
+// and all four sound channels at their worst periods, no interrupts. They
+// are measurements of what an adversarial (or careless) program costs,
+// not workloads the 50% bar covers: none is in `scripts/check-bench.sh`.
+// `storm-control` is the background with the loop writing HRAM, so a
+// storm's own cost is its Ir minus the control's.
+
+/// The storms' picture, as `synth:worst-case` draws it, from any LCD
+/// state: LCD off, tiles 0 and 1 solid, 40 8x16 objects in four groups of
+/// 10 (Y=16/52/88/124, X=8+6i: 10 objects on 64 of the 144 lines), window
+/// at WY=0, WX=87, then LCDC=B7 (LCD, window, 8x16 objects, 8000 tiles,
+/// objects, BG). The maps are all tile 0 (VRAM as powered on).
+const STORM_SCENE: &[u8] = &[
+    0xAF, //             XOR A
+    0xE0, 0x40, //       LDH (LCDC),A    LCD off: free VRAM/OAM access
+    0x21, 0x00, 0x80, // LD HL,8000
+    0x3E, 0xFF, //       LD A,FF
+    0x06, 0x20, //       LD B,32         tiles 0 and 1 solid
+    0x22, //             LD (HL+),A
+    0x05, //             DEC B
+    0x20, 0xFC, //       JR NZ,-4
+    0x21, 0x00, 0xFE, // LD HL,FE00
+    0x16, 0x10, //       LD D,16         first group's Y
+    0x1E, 0x04, //       LD E,4          groups
+    // group:
+    0x06, 0x0A, //       LD B,10
+    0x0E, 0x08, //       LD C,8          first X
+    // obj:
+    0x7A, //             LD A,D
+    0x22, //             LD (HL+),A      Y
+    0x79, //             LD A,C
+    0x22, //             LD (HL+),A      X
+    0xAF, //             XOR A
+    0x22, //             LD (HL+),A      tile 0
+    0x22, //             LD (HL+),A      attributes 0
+    0x79, //             LD A,C
+    0xC6, 0x06, //       ADD A,6
+    0x4F, //             LD C,A
+    0x05, //             DEC B
+    0x20, 0xF2, //       JR NZ,obj
+    0x7A, //             LD A,D
+    0xC6, 0x24, //       ADD A,36
+    0x57, //             LD D,A
+    0x1D, //             DEC E
+    0x20, 0xE7, //       JR NZ,group
+    0xAF, //             XOR A
+    0xE0, 0x4A, //       LDH (WY),A
+    0x3E, 0x57, //       LD A,87
+    0xE0, 0x4B, //       LDH (WX),A
+    0x3E, 0xB7, //       LD A,B7
+    0xE0, 0x40, //       LDH (LCDC),A
+];
+
+/// The storms' background: DI, the switch to double speed (`double`), the
+/// four channels of `synth:worst-case` ([`APU_ON`], [`APU_CHANNELS`]) and
+/// [`STORM_SCENE`]. IE = 0.
+fn storm_background(double: bool) -> Vec<u8> {
+    let mut code = vec![0xF3]; //              DI
+    if double {
+        code.extend_from_slice(&[
+            0x3E, 0x01, //                     LD A,01
+            0xE0, 0x4D, //                     LDH (KEY1),A
+            0x10, 0x00, //                     STOP
+        ]);
+    }
+    code.extend_from_slice(APU_ON);
+    APU_CHANNELS.iter().for_each(|c| code.extend_from_slice(c));
+    code.extend_from_slice(STORM_SCENE);
+    code
+}
+
+/// Pairs of 2-byte steps in a storm loop.
+const STORM_PAIRS: usize = 32;
+
+/// M-cycles of one pass of a [`storm_loop`] whose steps are 2 M-cycles
+/// each (`LD (C),A`, `LD (HL),B`): the steps and the `JR`.
+#[cfg(test)]
+const STORM_LOOP_MCYCLES: u64 = 4 * STORM_PAIRS as u64 + 3;
+
+/// A storm's loop: C = `c`, HL = FF00 + `hl`, A = `a`, B = `b`, then
+/// `pair` [`STORM_PAIRS`] times and a `JR` back to the first. With
+/// `pair` = `LD (C),A; LD (HL),B` (E2, 70) and `c` = `hl`, that is a write
+/// to one register every 2 M-cycles (the densest the SM83 has), the value
+/// alternating between `a` and `b`, and 3 M-cycles for the `JR` after
+/// every 64: 64 writes per 131 M-cycles, 17,154 a frame in double speed
+/// (35,112 M-cycles), 8,577 in single speed.
+fn storm_loop(c: u8, hl: u8, a: u8, b: u8, pair: [u8; 2]) -> Vec<u8> {
+    let mut code = vec![
+        0x0E, c, //                            LD C,c
+        0x21, hl, 0xFF, //                     LD HL,FF00+hl
+        0x3E, a, //                            LD A,a
+        0x06, b, //                            LD B,b
+    ];
+    for _ in 0..STORM_PAIRS {
+        code.extend_from_slice(&pair);
+    }
+    // JR to the first pair: back over the pairs and the JR itself.
+    code.extend_from_slice(&[0x18, 0u8.wrapping_sub(2 * STORM_PAIRS as u8 + 2)]);
+    code
+}
+
+/// `LD (C),A; LD (HL),B`.
+const WRITE_PAIR: [u8; 2] = [0xE2, 0x70];
+
+/// `storm-apu@<reg>`'s two values for FF00 + `reg`: ones that keep the
+/// channel playing (a DAC off, or a volume of 0, would end the work the
+/// storm is there to cause).
+fn storm_apu_values(reg: u8) -> (u8, u8) {
+    match reg {
+        // NR11, NR21: duty 50% / 25%.
+        0x11 | 0x16 => (0x80, 0x40),
+        // NR12, NR22, NR42: volume 15 / 14, down, pace 7.
+        0x12 | 0x17 | 0x21 => (0xF7, 0xE7),
+        // NR13, NR23, NR33: period low byte.
+        0x13 | 0x18 | 0x1D => (0xFF, 0xFE),
+        // NR32: 100% / 50% (4-bit PCM through CH3's volume does this).
+        0x1C => (0x20, 0x40),
+        // NR43: r = 0 / 1 (s = 0, 7-bit).
+        0x22 => (0x08, 0x09),
+        // NR50: both sides 7 / 6.
+        0x24 => (0x77, 0x66),
+        // NR51: every channel on both sides / CH1 off on the right.
+        0x25 => (0xFF, 0xFE),
+        // Unused FF27-FF2F, wave RAM, and the rest.
+        _ => (0x00, 0xFF),
+    }
+}
+
+/// Where [`storm_gdma_table`] lives: ROM bank 1, 4000-7FFF.
+const STORM_GDMA_TABLE_AT: usize = 0x4000;
+
+/// `storm-gdma`'s ROM bank 1: 16-byte block `k` of the address space
+/// (address 16k, k = 400-7FF) holds k (little-endian) and fourteen 5A, so
+/// a block found in VRAM tells how many blocks the transfers had copied.
+fn storm_gdma_table() -> Vec<u8> {
+    let mut t = vec![0x5A; 0x4000];
+    for (j, block) in t.as_chunks_mut::<16>().0.iter_mut().enumerate() {
+        block[..2].copy_from_slice(&((STORM_GDMA_TABLE_AT / 16 + j) as u16).to_le_bytes());
+    }
+    t
+}
+
+/// The code of storm `name` (`storm-<kind>[@<variant>][:1x]`; without a
+/// variant, the kind's default below, which [`NAMES`] and docs/perf.md
+/// list), and whether it needs [`storm_gdma_table`]. All but `storm-spsw`
+/// run in double speed unless `:1x` asks for single speed.
+///
+/// - `storm-control[@hram]`: the loop writes HRAM FF80 (00 / FF).
+/// - `storm-apu[@<hex reg>]` (default `1c`, NR32): the loop writes that
+///   APU register ([`storm_apu_values`]). Every write but a powered
+///   NR50/NR51 one brings the four channels up to the write
+///   (`Apu::sync_write`). `@off`: NR52 = 0 first (APU off, where FF10-FF25
+///   ignore writes), then writes to NR32.
+/// - `storm-spsw`: IE = IF = 04 with IME off, so every STOP is the
+///   one-byte kind that switches speed without the 0x20000-clock halt
+///   (`Cpu::stop`); the loop is `LD (HL),B` (KEY1 = 01) and `STOP`: a
+///   switch every 3 M-cycles, plus the idle M-cycle to double speed, 20
+///   clocks for the two directions: 32 switches per 332 clocks, 6,769 a
+///   frame.
+/// - `storm-div[@div]`: TMA = FF, TAC = 05 (on, 262 kHz), a serial
+///   transfer started on the fast internal clock (SC = 83), then the loop
+///   writes DIV. `@tac`: no serial, the loop writes TAC = 05 / 04 (on /
+///   off at the same rate), `@tac-rate` 05 / 07 (262 kHz / 16 kHz).
+/// - `storm-gdma[@pinned]`: general-purpose VRAM DMA of one block, source
+///   from 0000 on (it advances 16 a block through the whole address
+///   space), the loop being `LD (HL),B` (HDMA3 = 88: the destination's
+///   high byte, so the blocks land in 8800-88FF, tiles the picture does
+///   not use) and `LD (C),A` (HDMA5 = 00): a block every 4 M-cycles plus
+///   its 17 M-cycle stall (double speed), 32 per 675 M-cycles, 1,665 a
+///   frame. `@free`: both writes are HDMA5 = 00 (19 M-cycles a block,
+///   1,839 a frame) and the destination runs through all of VRAM bank 0,
+///   tiles and maps included, so the picture becomes ROM bytes.
+/// - `storm-ppu[@<reg>]` (default `lcdc`): the loop writes a PPU register,
+///   so about a third of the writes land in mode 3 and move what the rest
+///   of the line shows: `lcdc` (B7 / AB: bits 2, 3 and 4, object size, BG
+///   map and tile data), `scx` (00 / 05), `scy` (00 / 04), `wx` (87 / 95),
+///   `bgp` (FF47, E4 / 1B: no effect on the picture in CGB mode), `bcpd`
+///   (BCPS = 80 first, auto-increment; 00 / FF to FF69), `lyc` (FF45, 00 /
+///   48), `stat` (FF41, 00 / 78: every STAT source; IE = 0).
+/// - `storm-io@<hex reg>` (no default): the loop writes 00 / FF to FF00 +
+///   reg, whatever that does there: for sweeping every register for a
+///   cost the kinds above miss (docs/perf.md).
+fn storm(name: &str) -> Option<(Vec<u8>, bool)> {
+    let (name, double) = match name.strip_suffix(":1x") {
+        Some(n) if n.contains('@') => (n, false),
+        Some(_) => return None,
+        None => (name, true),
+    };
+    let (kind, variant) = match name.split_once('@') {
+        Some((k, v)) => (k, Some(v)),
+        None => (name, None),
+    };
+    let mut pre: &[u8] = &[];
+    let mut table = false;
+    let (c, hl, a, b, pair) = match (kind, variant) {
+        ("storm-control", None | Some("hram")) => (0x80, 0x80, 0x00, 0xFF, WRITE_PAIR),
+        // Any I/O register, FF00 + the variant (two hex digits): 00 / FF.
+        ("storm-io", Some(v)) => {
+            let reg = u8::from_str_radix(v, 16).ok().filter(|_| v.len() == 2)?;
+            (reg, reg, 0x00, 0xFF, WRITE_PAIR)
+        }
+        ("storm-apu", Some("off")) => {
+            pre = &[
+                0xAF, //                       XOR A
+                0xE0, 0x26, //                 LDH (NR52),A    APU off
+            ];
+            (0x1C, 0x1C, 0x20, 0x40, WRITE_PAIR)
+        }
+        ("storm-apu", v) => {
+            let v = v.unwrap_or("1c");
+            let reg = u8::from_str_radix(v, 16).ok().filter(|_| v.len() == 2)?;
+            if !(0x10..=0x3F).contains(&reg) {
+                return None;
+            }
+            let (a, b) = storm_apu_values(reg);
+            (reg, reg, a, b, WRITE_PAIR)
+        }
+        ("storm-spsw", None) => {
+            pre = &[
+                0x3E, 0x04, //                 LD A,04
+                0xE0, 0x0F, //                 LDH (IF),A      timer requested,
+                0xE0, 0xFF, //                 LDH (IE),A      enabled, IME off
+            ];
+            // LD (HL),B (KEY1 = 01); STOP (one byte: IE & IF != 0).
+            (0x4D, 0x4D, 0x04, 0x01, [0x70, 0x10])
+        }
+        ("storm-div", None | Some("div")) => {
+            pre = &[
+                0x3E, 0xFF, //                 LD A,FF
+                0xE0, 0x06, //                 LDH (TMA),A
+                0x3E, 0x05, //                 LD A,05
+                0xE0, 0x07, //                 LDH (TAC),A     on, 262 kHz
+                0x3E, 0x83, //                 LD A,83
+                0xE0, 0x02, //                 LDH (SC),A      start, fast, internal
+            ];
+            (0x04, 0x04, 0x00, 0x00, WRITE_PAIR)
+        }
+        ("storm-div", Some(v @ ("tac" | "tac-rate"))) => {
+            pre = &[
+                0x3E, 0xFF, //                 LD A,FF
+                0xE0, 0x06, //                 LDH (TMA),A
+            ];
+            let b = if v == "tac" { 0x04 } else { 0x07 };
+            (0x07, 0x07, 0x05, b, WRITE_PAIR)
+        }
+        ("storm-gdma", v @ (None | Some("pinned" | "free"))) => {
+            pre = &[
+                0xAF, //                       XOR A
+                0xE0, 0x51, //                 LDH (HDMA1),A   source 0000
+                0xE0, 0x52, //                 LDH (HDMA2),A
+                0xE0, 0x54, //                 LDH (HDMA4),A   destination 8800
+                0x3E, 0x88, //                 LD A,88
+                0xE0, 0x53, //                 LDH (HDMA3),A
+            ];
+            table = true;
+            if v == Some("free") {
+                (0x55, 0x55, 0x00, 0x00, WRITE_PAIR)
+            } else {
+                // LD (HL),B (HDMA3 = 88); LD (C),A (HDMA5 = 00).
+                (0x55, 0x53, 0x00, 0x88, [0x70, 0xE2])
+            }
+        }
+        ("storm-ppu", v) => {
+            let (reg, a, b) = match v.unwrap_or("lcdc") {
+                "lcdc" => (0x40, 0xB7, 0xAB),
+                "scx" => (0x43, 0x00, 0x05),
+                "scy" => (0x42, 0x00, 0x04),
+                "wx" => (0x4B, 0x57, 0x5F),
+                "bgp" => (0x47, 0xE4, 0x1B),
+                "bcpd" => {
+                    pre = &[
+                        0x3E, 0x80, //         LD A,80
+                        0xE0, 0x68, //         LDH (BCPS),A    auto-increment from 0
+                    ];
+                    (0x69, 0x00, 0xFF)
+                }
+                "lyc" => (0x45, 0x00, 0x48),
+                "stat" => (0x41, 0x00, 0x78),
+                _ => return None,
+            };
+            (reg, reg, a, b, WRITE_PAIR)
+        }
+        _ => return None,
+    };
+    // The speed-switch storm starts in single speed and has no `:1x`.
+    let spsw = kind == "storm-spsw";
+    if spsw && !double {
+        return None;
+    }
+    let mut code = storm_background(double && !spsw);
+    code.extend_from_slice(pre);
+    code.extend_from_slice(&storm_loop(c, hl, a, b, pair));
+    Some((code, table))
+}
+
 /// The ROM image for `name`, or `None` if there is no such ROM.
 pub fn build(name: &str) -> Option<Vec<u8>> {
+    if let Some((code, table)) = storm(name) {
+        let table = if table {
+            storm_gdma_table()
+        } else {
+            Vec::new()
+        };
+        return Some(image(name, 0xC0, &code, &[(STORM_GDMA_TABLE_AT, &table)]));
+    }
     let raster = cgb_raster();
     // `worst-case@<hex digit>`: the channel mask (`worst_case`).
     let mask = match name.strip_prefix("worst-case@") {
@@ -1057,5 +1372,260 @@ mod tests {
         );
         assert_eq!(r[..5], [16, 14, 124, 62, 0x97]);
         assert_eq!(r[5] & 0x80, 0, "single speed");
+    }
+
+    // --- Storms ---
+
+    /// Runs `name` to clock `start`, then to each of the next `n` clocks,
+    /// and returns `peek(addr)` at each (the state after the instruction
+    /// that reaches the clock).
+    fn samples(name: &str, start: u64, n: u64, addr: u16) -> Vec<u8> {
+        let rom = build(name).unwrap();
+        let mut mem = Box::new(Memory::new());
+        let mut emu = Emulator::new(&mut mem);
+        emu.load(&rom, &mut [], Config::default()).unwrap();
+        let mut frame: Box<Frame> = vec![WHITE; SCREEN_WIDTH * SCREEN_HEIGHT]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+        (start..start + n)
+            .map(|t| {
+                while emu.clock() < t {
+                    let _ = emu.run_until(t, &mut frame, &mut []);
+                }
+                emu.peek(addr)
+            })
+            .collect()
+    }
+
+    /// How often `peek(addr) & mask` changes in `period` clocks of `name`,
+    /// from 0.1 s in, having checked that it repeats with that period (two
+    /// periods compared clock by clock).
+    fn changes_per_period(name: &str, addr: u16, mask: u8, period: u64) -> usize {
+        let s = samples(name, u64::from(CLOCK_HZ) / 10, 2 * period + 1, addr);
+        let p = period as usize;
+        assert!(
+            (0..=p).all(|i| (s[i] ^ s[i + p]) & mask == 0),
+            "{name}: {addr:#06x} does not repeat every {period} clocks"
+        );
+        s[..=p]
+            .windows(2)
+            .filter(|w| (w[0] ^ w[1]) & mask != 0)
+            .count()
+    }
+
+    /// Events per 70,224-clock frame, rounded, at `n` per `clocks`.
+    fn per_frame(n: u64, clocks: u64) -> u64 {
+        (n * 70_224 + clocks / 2) / clocks
+    }
+
+    /// Clocks of one pass of a storm loop of 2 M-cycle steps, double speed.
+    const STORM_LOOP_CLOCKS: u64 = 2 * STORM_LOOP_MCYCLES;
+
+    #[test]
+    fn storm_control_writes_hram_64_times_per_131_mcycles_over_the_background() {
+        // Every write changes FF80 (00 / FF): 64 per loop pass of 262
+        // clocks in double speed, 17,154 per 70,224-clock frame.
+        assert_eq!(
+            changes_per_period("storm-control", 0xFF80, 0xFF, STORM_LOOP_CLOCKS),
+            64
+        );
+        assert_eq!(per_frame(64, STORM_LOOP_CLOCKS), 17_154);
+        // The background: double speed, the picture (LCDC, object 9's X,
+        // WX), all four channels on both sides, no interrupts.
+        let at = u64::from(CLOCK_HZ) / 10;
+        let addrs = [0xFF4D, 0xFF40, 0xFE25, 0xFF4B, 0xFF26, 0xFF25, 0xFFFF];
+        let r = run("storm-control", at, &addrs);
+        assert_eq!(r[0] & 0x80, 0x80, "double speed");
+        assert_eq!(r[1..], [0xB7, 62, 0x57, 0xFF, 0xFF, 0x00]);
+        // Single speed: the same loop at 4 clocks per M-cycle.
+        let r = run("storm-control@hram:1x", at, &[0xFF4D]);
+        assert_eq!(r[0] & 0x80, 0, "single speed");
+        assert_eq!(
+            changes_per_period("storm-control@hram:1x", 0xFF80, 0xFF, 2 * STORM_LOOP_CLOCKS),
+            64
+        );
+        // Every listed storm is a ROM; a variant needs a known kind.
+        for name in NAMES.iter().filter(|n| n.starts_with("storm-")) {
+            assert!(storm(name).is_some(), "{name}");
+        }
+        assert_eq!(NAMES.iter().filter(|n| n.starts_with("storm-")).count(), 6);
+        for bad in ["storm-nope", "storm-control@x", "storm-control:1x"] {
+            assert!(build(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn storm_apu_writes_nr32_every_2_mcycles_with_every_channel_playing() {
+        // NR32 reads back bits 5-6 (the volume): 20 / 40 alternate.
+        assert_eq!(
+            changes_per_period("storm-apu", 0xFF1C, 0x60, STORM_LOOP_CLOCKS),
+            64
+        );
+        let at = u64::from(CLOCK_HZ) / 10;
+        let r = run("storm-apu", at, &[0xFF26, 0xFF4D, 0xFF40]);
+        assert_eq!(r[0], 0xFF, "APU and all four channels on");
+        assert_eq!((r[1] & 0x80, r[2]), (0x80, 0xB7));
+        // Variants: another register (CH2's envelope keeps its DAC on),
+        // the APU off, and none for a register outside FF10-FF3F.
+        assert_eq!(
+            changes_per_period("storm-apu@17", 0xFF17, 0xFF, STORM_LOOP_CLOCKS),
+            64
+        );
+        assert_eq!(run("storm-apu@17", at, &[0xFF26])[0], 0xFF);
+        assert_eq!(run("storm-apu@off", at, &[0xFF26])[0] & 0x8F, 0);
+        assert_eq!(
+            build("storm-apu").unwrap()[0x150..],
+            build("storm-apu@1c").unwrap()[0x150..]
+        );
+        for bad in [
+            "storm-apu@40",
+            "storm-apu@0f",
+            "storm-apu@1",
+            "storm-apu@xx",
+        ] {
+            assert!(build(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn storm_spsw_switches_speed_32_times_per_332_clocks() {
+        // KEY1 bit 7 is the speed. Per pair of switches: LD (HL),B and the
+        // one-byte STOP in single speed (12 clocks), the idle M-cycle and
+        // the same two in double speed (8 clocks); 16 pairs and the JR in
+        // single speed (12 clocks): 332 clocks, 6,769 switches a frame.
+        assert_eq!(changes_per_period("storm-spsw", 0xFF4D, 0x80, 332), 32);
+        assert_eq!(per_frame(32, 332), 6_769);
+        // The interrupt that keeps STOP at one byte stays pending and
+        // unserviced, and the picture is on.
+        let at = u64::from(CLOCK_HZ) / 10;
+        let r = run("storm-spsw", at, &[0xFFFF, 0xFF0F, 0xFF40]);
+        assert_eq!((r[0], r[1] & 0x04, r[2]), (0x04, 0x04, 0xB7));
+        assert!(build("storm-spsw@x").is_none());
+    }
+
+    #[test]
+    fn storm_div_holds_div_at_zero_with_the_timer_on() {
+        // DIV (the counter's bits 8-15, or 9-16 in double speed) would
+        // count once every 128 clocks: it reads 0 at each of 64 points
+        // 1,111 clocks apart only because the loop keeps resetting it.
+        let at = u64::from(CLOCK_HZ) / 10;
+        for k in 0..64 {
+            let r = run("storm-div", at + k * 1_111, &[0xFF04]);
+            assert_eq!(r[0], 0, "DIV at point {k}");
+        }
+        let r = run("storm-div", at, &[0xFF07, 0xFF06, 0xFF4D, 0xFF40, 0xFF26]);
+        assert_eq!(r[0] & 0x07, 0x05, "TAC: on, 262 kHz");
+        assert_eq!((r[1], r[2] & 0x80, r[3], r[4]), (0xFF, 0x80, 0xB7, 0xFF));
+        // The TAC variants write TAC itself: on / off, and two rates.
+        assert_eq!(
+            changes_per_period("storm-div@tac", 0xFF07, 0x07, STORM_LOOP_CLOCKS),
+            64
+        );
+        assert_eq!(
+            changes_per_period("storm-div@tac-rate", 0xFF07, 0x07, STORM_LOOP_CLOCKS),
+            64
+        );
+        assert_eq!(
+            build("storm-div").unwrap()[0x150..],
+            build("storm-div@div").unwrap()[0x150..]
+        );
+    }
+
+    /// The source blocks ([`storm_gdma_table`]'s numbers) in the 16 VRAM
+    /// blocks 8800-88FF of `storm-gdma` at clock `at`, lowest first.
+    fn gdma_blocks(name: &str, at: u64) -> Vec<u16> {
+        let addrs: Vec<u16> = (0x8800..0x8900).collect();
+        let vram = run(name, at, &addrs);
+        let mut ks: Vec<u16> = vram
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|b| {
+                assert!(b[2..].iter().all(|&x| x == 0x5A), "{at}: {b:02x?}");
+                u16::from_le_bytes([b[0], b[1]])
+            })
+            .collect();
+        ks.sort_unstable();
+        ks
+    }
+
+    #[test]
+    fn storm_gdma_copies_32_blocks_per_675_mcycles_to_8800() {
+        // A block is LD (HL),B, LD (C),A and the transfer's 17 M-cycles;
+        // 32 of them and the JR: 675 M-cycles, 1,350 clocks in double
+        // speed, 1,665 blocks a frame. The source runs on through the
+        // address space, so the 16 destination blocks (the destination's
+        // high byte is rewritten before each) hold the last 16 source
+        // blocks, which the table in ROM bank 1 numbers: ten loop passes
+        // later they are 320 blocks further.
+        let pass = 2 * (32 * (2 + 2 + 17) + 3);
+        assert_eq!((pass, per_frame(32, pass)), (1_350, 1_665));
+        // The loop starts when the speed switch's halt ends, 65,536 clocks
+        // in, and copies the table's blocks (ROM 4000-7FFF) from about
+        // 109,000 to 152,000.
+        let at = 120_000;
+        let a = gdma_blocks("storm-gdma", at);
+        let b = gdma_blocks("storm-gdma", at + 10 * pass);
+        for ks in [&a, &b] {
+            assert!(ks.windows(2).all(|w| w[1] == w[0] + 1), "{ks:?}");
+            assert!(ks[0] >= 0x400 && ks[15] < 0x800, "{ks:?}");
+        }
+        assert_eq!(b[15] - a[15], 320);
+        let r = run("storm-gdma", at, &[0xFF4D, 0xFF40]);
+        assert_eq!((r[0] & 0x80, r[1]), (0x80, 0xB7));
+        // `@free` leaves the destination alone: the same blocks, all over
+        // VRAM, 32 per 611 M-cycles.
+        assert_eq!(
+            build("storm-gdma").unwrap()[0x150..],
+            build("storm-gdma@pinned").unwrap()[0x150..]
+        );
+        let free = build("storm-gdma@free").unwrap();
+        assert_ne!(
+            free[0x150..0x4000],
+            build("storm-gdma").unwrap()[0x150..0x4000]
+        );
+        assert_eq!(free[0x4000..0x4010], storm_gdma_table()[..16]);
+    }
+
+    #[test]
+    fn storm_ppu_writes_lcdc_every_2_mcycles_with_the_lcd_on() {
+        // LCDC alternates B7 / AB (bits 2, 3 and 4), the LCD staying on.
+        let s = samples("storm-ppu", u64::from(CLOCK_HZ) / 10, 600, 0xFF40);
+        assert!(s.iter().all(|&v| v == 0xB7 || v == 0xAB), "{s:02x?}");
+        assert_eq!(
+            changes_per_period("storm-ppu", 0xFF40, 0x1C, STORM_LOOP_CLOCKS),
+            64
+        );
+        let at = u64::from(CLOCK_HZ) / 10;
+        let r = run("storm-ppu", at, &[0xFF4D, 0xFF26]);
+        assert_eq!((r[0] & 0x80, r[1]), (0x80, 0xFF));
+        assert_eq!(
+            build("storm-ppu").unwrap()[0x150..],
+            build("storm-ppu@lcdc").unwrap()[0x150..]
+        );
+        // The other registers, and single speed.
+        for (v, addr) in [("scx", 0xFF43), ("scy", 0xFF42), ("wx", 0xFF4B)] {
+            let name = format!("storm-ppu@{v}");
+            assert_eq!(
+                changes_per_period(&name, addr, 0xFF, STORM_LOOP_CLOCKS),
+                64,
+                "{name}"
+            );
+        }
+        for v in ["bgp", "bcpd", "lyc", "stat"] {
+            assert!(build(&format!("storm-ppu@{v}")).is_some(), "{v}");
+        }
+        assert_eq!(
+            changes_per_period("storm-ppu@scx:1x", 0xFF43, 0xFF, 2 * STORM_LOOP_CLOCKS),
+            64
+        );
+        assert!(build("storm-ppu@nope").is_none());
+        // The sweep variant: any register, 00 / FF.
+        assert_eq!(
+            changes_per_period("storm-io@80", 0xFF80, 0xFF, STORM_LOOP_CLOCKS),
+            64
+        );
+        assert!(build("storm-io").is_none() && build("storm-io@1").is_none());
     }
 }
