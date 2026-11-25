@@ -1,0 +1,19 @@
+[package]
+name = "h7-bench-host"
+description = "Prints the h7-bench report lines a correct run must match (calls, frames, clocks, hash)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license = "MIT"
+
+# Its own workspace: built for the PC, next to a firmware crate that only
+# builds for thumbv7em.
+[workspace]
+
+[dependencies]
+gbc-core = { path = "../../../crates/gbc-core" }
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1

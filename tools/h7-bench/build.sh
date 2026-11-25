@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Builds every h7-bench image into out/ (ELF and .bin), prints section sizes
+# and checks what can be checked without the board. README.md "Build".
+#
+#   ./build.sh            selftest, the three placements, the M4 stub, the
+#                         host expected-hash test
+#   H7_BENCH_PLL=1        also the phase B (PLL, 392 MHz) variants
+#   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
+#   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under
+#                         `flock -x <file>` (agents: the shared build lock)
+#   H7_BENCH_ITCM_DROP    tiers of perf/itcm-sections.txt left in flash
+#                         (default "plain tile path"; build.rs)
+#   H7_BENCH_CPU_INSTRS   path of blargg's cpu_instrs.gb (default: the
+#                         repo's test-roms/)
+#
+# One target directory, images built one after the other (AGENTS.md
+# "Machine resources"); never pass -j.
+set -euo pipefail
+cd "$(dirname "$0")"
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+
+TARGET=thumbv7em-none-eabihf
+OUT=out
+MAX_BIN=$((1024 * 1024))   # flash bank 1; bank 2 is the Cortex-M4's
+
+locked() { if [ -n "${H7_BENCH_LOCK:-}" ]; then flock -x "$H7_BENCH_LOCK" "$@"; else "$@"; fi; }
+
+# rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
+host=$(rustc -vV | sed -n 's/^host: //p')
+sysroot=$(rustc --print sysroot)
+[ -x "$sysroot/lib/rustlib/$host/bin/rust-objcopy" ] || { echo "FAIL: no rust-objcopy in $sysroot" >&2; exit 1; }
+# It links against the toolchain's own libLLVM.
+objcopy() { LD_LIBRARY_PATH="$sysroot/lib" "$sysroot/lib/rustlib/$host/bin/rust-objcopy" "$@"; }
+command -v readelf >/dev/null || { echo "FAIL: readelf (binutils) not found" >&2; exit 1; }
+
+mkdir -p "$OUT"
+fail=0
+bad() { echo "FAIL: $*" >&2; fail=1; }
+
+# word <file> <index>: little-endian 32-bit word of a .bin, as 8 hex digits.
+word() { od -An -tx4 -j $(($2 * 4)) -N4 "$1" | tr -d ' \n'; }
+
+# in_range <hex> <lo> <hi>: lo <= value <= hi
+in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
+
+# image <name> <features> <ram lo> <ram hi>
+image() {
+  local name=$1 features=$2 ram_lo=$3 ram_hi=$4
+  echo "== $name (features: ${features:-none})"
+  locked cargo build --release --features "$features"
+  cp "target/$TARGET/release/h7-bench" "$OUT/$name.elf"
+  objcopy -O binary "$OUT/$name.elf" "$OUT/$name.bin"
+
+  # Allocated sections: name, address, size in bytes.
+  readelf -SW "$OUT/$name.elf" | sed -n 's/^ *\[ *[0-9]*\] *//p' | awk '
+    $1 ~ /^\./ && $7 ~ /A/ { printf "  %-14s %-8s addr 0x%s size %7d\n", $1, $2, $3, strtonum("0x" $5) }'
+  local size sp reset
+  size=$(stat -c %s "$OUT/$name.bin")
+  sp=$(word "$OUT/$name.bin" 0)
+  reset=$(word "$OUT/$name.bin" 1)
+  echo "  bin $size bytes; vector[0] (initial SP) 0x$sp; vector[1] (reset) 0x$reset"
+  [ "$size" -le "$MAX_BIN" ] || bad "$name.bin is $size bytes: over flash bank 1"
+  in_range "$sp" "$ram_lo" "$ram_hi" || bad "$name: initial SP 0x$sp outside RAM"
+  [ $((16#$sp % 8)) -eq 0 ] || bad "$name: initial SP 0x$sp not 8-byte aligned"
+  in_range "$reset" 0x08000000 $((0x08000000 + size)) || bad "$name: reset vector 0x$reset outside the image"
+  [ $((16#$reset & 1)) -eq 1 ] || bad "$name: reset vector 0x$reset lacks the Thumb bit"
+  # The supply configuration must be the first code after reset.
+  local syms
+  syms=$(readelf -sW "$OUT/$name.elf")
+  grep -q ' FUNC .* __pre_init$' <<< "$syms" || bad "$name: no __pre_init function"
+}
+
+# itcm_check <name>: every glob of perf/itcm-sections.txt must name at least
+# one function that the linker put in ITCM (docs/perf.md "ITCM placement
+# plan", post-link check).
+itcm_check() {
+  local elf=$OUT/$1.elf syms n=0 missing=0 in=0 bytes=0 out_fn=0 skip=0 dropped=0 unlinked=0 d
+  local drop=${H7_BENCH_ITCM_DROP-plain tile path}
+  syms=$(readelf -sW "$elf" | awk '$4 == "FUNC" && $8 ~ /8gbc_core/ {print $2, $3, $8}')
+  while read -r glob rest; do
+    # The tiers build.rs left in flash (same variable, same default).
+    if [[ "$glob $rest" == "# Tier"* ]]; then
+      skip=0
+      while IFS= read -r -d , d; do
+        d=$(sed 's/^ *//; s/ *$//' <<< "$d")
+        [ -n "$d" ] && [[ "$glob $rest" == *"$d"* ]] && skip=1
+      done <<< "$drop,"
+    fi
+    case "$glob" in ''|'#'*|ITCM_BUDGET_BYTES=*|FLASH_OK) continue;; esac
+    if [ "$skip" -eq 1 ]; then dropped=$((dropped + 1)); continue; fi
+    n=$((n + 1))
+    # A glob whose functions are all absent from the ELF is fine: the
+    # linker dropped them as unused (this firmware only calls run_until).
+    # One with a function in flash and none in ITCM is a placement bug.
+    local pat=${glob#.text.} hit=0 flash=0
+    while read -r addr _ sym; do
+      # shellcheck disable=SC2053
+      if [[ $sym == $pat ]]; then
+        if [ $((16#$addr)) -lt $((0x10000)) ]; then hit=1; else flash=1; fi
+      fi
+    done <<< "$syms"
+    if [ "$hit" -eq 0 ] && [ "$flash" -eq 1 ]; then echo "  in flash, not in ITCM: $glob" >&2; missing=$((missing + 1)); fi
+    if [ "$hit" -eq 0 ] && [ "$flash" -eq 0 ]; then unlinked=$((unlinked + 1)); fi
+  done < ../../perf/itcm-sections.txt
+  while read -r addr sz _; do
+    if [ $((16#$addr)) -lt $((0x10000)) ]; then in=$((in + 1)); bytes=$((bytes + sz)); else out_fn=$((out_fn + 1)); fi
+  done <<< "$syms"
+  local thunks
+  thunks=$(readelf -sW "$elf" | grep -c 'Thumbv7ABSLongThunk' || true)
+  echo "  ITCM: $n globs kept ($dropped dropped: ${drop:-none}), $unlinked not linked (unused), $missing misplaced; gbc-core functions: $in in ITCM ($bytes B), $out_fn in flash; $thunks long-branch thunks"
+  [ "$missing" -eq 0 ] || bad "$1: $missing ITCM globs have their function in flash"
+}
+
+AXI_LO=0x24000000 AXI_HI=0x24080000 DTCM_LO=0x20000000 DTCM_HI=0x20020000
+
+image selftest selftest "$AXI_LO" "$AXI_HI"
+image bench-flash-axi "" "$AXI_LO" "$AXI_HI"
+image bench-flash-dtcm dtcm "$DTCM_LO" "$DTCM_HI"
+image bench-itcm-dtcm itcm "$DTCM_LO" "$DTCM_HI"
+itcm_check bench-itcm-dtcm
+if [ -n "${H7_BENCH_PLL:-}" ]; then
+  image selftest-pll selftest,pll "$AXI_LO" "$AXI_HI"
+  image bench-flash-axi-pll pll "$AXI_LO" "$AXI_HI"
+  image bench-flash-dtcm-pll dtcm,pll "$DTCM_LO" "$DTCM_HI"
+  image bench-itcm-dtcm-pll itcm,pll "$DTCM_LO" "$DTCM_HI"
+  itcm_check bench-itcm-dtcm-pll
+fi
+
+echo "== m4-stub (optional Cortex-M4 image for 0x08100000)"
+(cd m4-stub && locked cargo build --release)
+cp "m4-stub/target/$TARGET/release/h7-m4-stub" "$OUT/m4-stub.elf"
+objcopy -O binary "$OUT/m4-stub.elf" "$OUT/m4-stub.bin"
+m4_reset=$(word "$OUT/m4-stub.bin" 1)
+echo "  bin $(stat -c %s "$OUT/m4-stub.bin") bytes; vector[0] 0x$(word "$OUT/m4-stub.bin" 0); vector[1] (reset) 0x$m4_reset"
+in_range "$m4_reset" 0x08100040 0x08100100 || bad "m4-stub: reset vector 0x$m4_reset"
+[ $((16#$m4_reset & 1)) -eq 1 ] || bad "m4-stub: reset vector lacks the Thumb bit"
+
+echo "== host: expected lines (calls, frames, clocks, hash) against expected-hashes.txt"
+(cd host && locked cargo test --release)
+(cd host && locked cargo run --release)
+
+# qemu <name> <features>: run the image on QEMU's Cortex-M7 board and
+# compare its report with expected-hashes.txt.
+qemu() {
+  echo "== QEMU mps2-an500: $1 (features: $2)"
+  locked cargo build --release --features "$2"
+  cp "target/$TARGET/release/h7-bench" "$OUT/$1.elf"
+  locked timeout 900 qemu-system-arm -M mps2-an500 -cpu cortex-m7 -display none -monitor none \
+    -serial none -semihosting-config enable=on,target=native -kernel "$OUT/$1.elf" \
+    | tr -d '\r' > "$OUT/$1.txt" || bad "$1: QEMU exited with an error"
+  if diff -u expected-hashes.txt "$OUT/$1.txt"; then
+    echo "  QEMU lines match expected-hashes.txt"
+  else
+    bad "$1: QEMU lines differ from expected-hashes.txt"
+  fi
+}
+if [ -n "${H7_BENCH_QEMU:-}" ]; then
+  # The thumbv7em build of the frame loop; then the same with the hot set
+  # in a stand-in ITCM (the copy, the linker rules and the thunks).
+  qemu qemu qemu
+  qemu qemu-itcm qemu,itcm
+  thunks=$(readelf -sW "$OUT/qemu-itcm.elf" | grep -c 'Thumbv7ABSLongThunk' || true)
+  echo "  qemu-itcm: $thunks long-branch thunks"
+  [ "$thunks" -gt 0 ] || bad "qemu-itcm: no thunks, so the placement was not exercised"
+fi
+
+[ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
+echo "build.sh: OK; images in $(pwd)/$OUT"

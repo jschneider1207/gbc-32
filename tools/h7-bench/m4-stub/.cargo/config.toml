@@ -1,0 +1,5 @@
+# Nothing to set: ../.cargo/config.toml applies here too (cargo merges
+# parent configs), with the thumbv7em target and `-Tlink.x`, which finds
+# this crate's own link.x (build.rs; cortex-m-rt is not a dependency). Its
+# `target-cpu=cortex-m7` is harmless: the image is two instructions of
+# assembly, `wfi` and `b`, that every ARMv7-M core has.

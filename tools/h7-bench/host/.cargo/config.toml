@@ -1,0 +1,4 @@
+# Overrides the thumbv7em default of ../.cargo/config.toml. The root
+# config's `jobs` cap and `[build] rustflags` still apply.
+[build]
+target = "x86_64-unknown-linux-gnu"

@@ -1,0 +1,16 @@
+# The firmware only builds for the Cortex-M7. The root .cargo/config.toml
+# still applies (cargo merges the configs of parent directories): its
+# `jobs = 4` cap holds here. Its `[build] rustflags` do not, because target
+# rustflags replace them, so the CodeGenPrepare flag (ADR 0008; root
+# .cargo/config.toml) is repeated below.
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    "-C", "target-cpu=cortex-m7",
+    "-C", "llvm-args=-cgp-max-address-users-to-scan=100000",
+    # cortex-m-rt's linker script; it includes the memory.x that build.rs
+    # writes for the chosen placement.
+    "-C", "link-arg=-Tlink.x",
+]

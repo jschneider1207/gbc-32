@@ -1,0 +1,13 @@
+[package]
+name = "h7-m4-stub"
+description = "Optional Cortex-M4 image for the NUCLEO-H755ZI-Q: sleeps forever"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license = "MIT"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
