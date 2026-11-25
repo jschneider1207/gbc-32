@@ -141,6 +141,10 @@ in git):
   144 rounds a frame. A unit test checks that all four X bytes take
   every write and advance by 144 a frame. Numbers: "Object-line summary"
   below. Not in `check-bench.sh`'s list until its baseline is recorded.
+- `synth:storm-control`, `storm-apu`, `storm-spsw`, `storm-div`,
+  `storm-gdma`, `storm-ppu` (M10 review, 2026-11-24): adversarial
+  programs, one costly access in the tightest loop for the whole frame.
+  Measured, on purpose not benched: "Outside the bound" below.
 
 **Audio buffers (M6 task 8).** `run_emulation` calls the core the way the
 MCU front end will: at most one frame per call (`run_until(min(target,
@@ -1526,10 +1530,11 @@ outputs with `diff`; it is a heavy step, so run it alone.
 
 `--hash-samples` (with `--audio-buffer`) also folds every sample the calls
 wrote into the hash and adds the synthetic programs (`synth:<name>` for
-every bench program, plus `worst-case@0/1/2/4/8`, all for N seconds), so an
+every program in `synth::NAMES`, the storms of "Outside the bound"
+included, plus `worst-case@0/1/2/4/8`, all for N seconds), so an
 exact APU optimization can be shown sample-identical: run it before and
 after, at two buffer sizes (e.g. 7 and 64; the hashes do not depend on the
-split), and `diff`. 3,833 runs, about 11 s wall. Without the flag the
+split), and `diff`. 4,039 runs (2026-11-24), about 11 s wall. Without the flag the
 output is unchanged.
 
 `scripts/diff-fingerprint.sh <rev> [args]` builds `<rev>` in a temporary
@@ -1727,15 +1732,217 @@ fixed workload): Pokemon Crystal 13,835 frames/s (72,280 ns, 0.289
 Mcycles/frame), Shantae 6,965 (143,569 ns, 0.574), Wario Land 3 7,445
 (134,312 ns, 0.537). Pass them with `--rom PATH`.
 
-## Outside the bound: dense mid-mode-3 register writes
+## Outside the bound: register-write storms
 
 Human decision (2026-11-23, session 10): the 50% bar (README) covers
 realistic worst cases, which `synth:worst-case` models (all paths at once,
-plus one mid-mode-3 SCX write per line once that workload lands). Programs
-that write PPU registers many times per line are outside it. Measured by the
-M8 perf review (x86 M Ir/frame, % of the 4.02 M line; test loop `LD (C),A;
-XOR D` unrolled, a changed value every 3 M-cycles, ~11.7k writes/frame in
-double speed, ~3.8k in mode 3):
+with one mid-mode-3 SCX write per line and a 16 kHz sample player).
+Programs that write expensive registers many times per line are outside
+it. This section says how far outside, measured (M10 review, 2026-11-24;
+the section used to name only mid-mode-3 PPU writes, with a table from
+M8).
+
+**What the benched worst case does and does not bound.** The emulator's
+cost per frame is not bounded by the frame: most of it is per *access*.
+`synth:worst-case` fixes the access counts at what a demanding game does
+(per frame: 144 mid-mode-3 SCX writes, 414 APU writes, 274 timer and 146
+STAT interrupts, 144 HDMA blocks, a serial transfer and timer overflows
+back to back). It does not bound a program that spends the whole frame
+writing one costly register: the SM83 can write an I/O register every 2
+M-cycles, 17,154 times a frame in double speed, and several registers
+cost 400 to 1,200 Ir per write here. Nothing breaks or crashes in that
+case; the frame just costs more host time.
+
+**Method.** `synth:storm-*` (`tools/bench/src/synth.rs`, "Storms"): each
+runs one kind of access in the tightest loop there is (`LD (C),A` and `LD
+(HL),B` alternating, two values, 32 pairs and a `JR`: 64 writes per 131
+M-cycles) for the whole frame, in double speed, IME off. All share one
+background: the picture of `synth:worst-case` (BG, window, 10 objects on
+64 lines) and its four sound channels at their worst periods.
+`synth:storm-control` is that background with the loop writing HRAM, so a
+storm's own cost is its figure minus the control's; "Ir per event" below
+is that difference over the events per frame (net of the HRAM write each
+one displaces). Ir is measured as `scripts/check-bench.sh` does (same
+build and flags check, callgrind, `--toggle-collect='*run_emulation*'`),
+2 emulated seconds, divided by the frames the bench counts (118, 119 for
+`storm-spsw`), as in "Measured on a Cortex-M7". Core at 86d01ef (`main`,
+2026-11-24), programs at e6aa427. The storms are
+**not** in `BENCHES` or `perf/bench-baseline.txt`: they are measurements
+of what is outside the bar, and a gate on them would be a gate on
+adversarial input. They are in `synth::NAMES`, so `bench --fingerprint
+--hash-samples` and `scripts/check-sync-invariance.sh` run them (6 more
+runs; all identical under `eager-sync` and the four clock offsets when
+added).
+
+**Measured (x86 Ir), with the M7 share as an estimate.** "x line" is Ir
+per frame over the 4.02 M line. The last two columns are **estimates, not
+measurements**: Ir per frame times the 1.12 to 1.33 M7 cycles per Ir
+measured for other workloads with the hot set in ITCM ("Measured on a
+Cortex-M7"), over a frame's cycles at 392 MHz (6,563,140; the NUCLEO) and
+550 MHz (9,208,488; the STM32H735). No storm has run on the board, and
+their mix of code (and so the ratio) may differ from the measured
+workloads'. Over 100% means slower than real time by that factor.
+
+| Program | What the loop does, per frame | Ir (2 s) | M Ir / frame | x line | Ir per event | est. % of a frame, 392 MHz | est. %, 550 MHz |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `synth:worst-case` | (reference: the benched bound) | 314,195,642 | 2.66 | 0.66 | - | 45-54% (the board measured 47.8% at bcd881e, when this was 2.42 M Ir) | 32-38% |
+| `synth:storm-control` | 17,154 HRAM writes | 234,571,753 | 1.99 | 0.49 | - | 34-40% | 24-29% |
+| `synth:storm-apu` | 17,154 NR32 writes (a) | 2,361,761,435 | 20.01 | 4.98 | 1,051 | 342-406% | 243-289% |
+| `synth:storm-spsw` | 6,769 speed switches (b) | 1,013,637,629 | 8.52 | 2.12 | 965 | 145-173% | 104-123% |
+| `synth:storm-div` | 17,154 DIV writes (c) | 1,139,033,945 | 9.65 | 2.40 | 447 | 165-196% | 117-139% |
+| `synth:storm-gdma` | 1,665 one-block GDMAs (d) | 276,970,510 | 2.35 | 0.58 | 216 | 40-48% | 29-34% |
+| `synth:storm-ppu` | 17,154 LCDC writes (e) | 2,597,774,395 | 22.02 | 5.48 | 1,167 | 376-446% | 268-318% |
+
+So the most expensive input found costs **22.0 M Ir per frame, 5.5 times
+the 4.02 M line and 8.3 times `synth:worst-case`**: on the M7 an estimated
+3.8 to 4.5 frame times per frame at 392 MHz, 2.7 to 3.2 at 550 MHz. This
+is the highest figure found, not a proven maximum: the cost of a mixed
+loop is bounded by its write slots times the dearest write, so a mix of
+these should not exceed the dearest single one by much, but that is an
+argument, not a measurement.
+
+Variants (`synth:<name>@<variant>`, same method; `:1x` is single speed,
+8,577 writes a frame, against `synth:storm-control@hram:1x` at 1.48 M):
+
+| Variant | Loop | M Ir / frame | x line | Ir per event |
+|---|---|---:|---:|---:|
+| `storm-apu@12` | NR12 (envelope), F7 / E7 | 20.34 | 5.06 | 1,070 |
+| `storm-apu@22` | NR43 (noise rate) | 20.23 | 5.03 | 1,064 |
+| `storm-apu@16` | NR21 (duty) | 19.97 | 4.97 | 1,048 |
+| `storm-apu@30` | wave RAM FF30, CH3 playing | 19.86 | 4.94 | 1,042 |
+| `storm-apu@27` | unused FF27 | 18.93 | 4.71 | 988 |
+| `storm-apu@24` | NR50 (the mixer-only path) | 11.94 | 2.97 | 580 |
+| `storm-apu@off` | NR32 with the APU powered off (ignored writes) | 8.99 | 2.24 | 408 |
+| `storm-apu@1c:1x` | NR32, single speed | 10.59 | 2.64 | 1,063 |
+| `storm-div@tac` | TAC 05 / 04 (on / off) | 5.90 | 1.47 | 228 |
+| `storm-div@tac-rate` | TAC 05 / 07 (two rates) | 5.90 | 1.47 | 228 |
+| `storm-div@div:1x` | DIV, single speed | 5.30 | 1.32 | 446 |
+| `storm-gdma@free` | 1,839 GDMAs, destination not rewritten | 2.20 | 0.55 | 114 |
+| `storm-gdma@pinned:1x` | 1,341 GDMAs, single speed | 2.08 | 0.52 | 448 |
+| `storm-ppu@scy` | SCY 00 / 04 | 17.82 | 4.43 | 923 |
+| `storm-ppu@stat` | STAT 00 / 78 | 16.80 | 4.18 | 863 |
+| `storm-ppu@scx` | SCX 00 / 05 | 15.73 | 3.91 | 801 |
+| `storm-ppu@wx` | WX 87 / 95 | 13.38 | 3.33 | 664 |
+| `storm-ppu@lyc` | LYC 00 / 48 | 8.99 | 2.24 | 408 |
+| `storm-ppu@bgp` | BGP (no effect on a CGB-mode picture) | 8.87 | 2.21 | 401 |
+| `storm-ppu@bcpd` | BCPD, auto-increment | 3.84 | 0.95 | 108 |
+| `storm-ppu@lcdc:1x` | LCDC, single speed | 12.34 | 3.07 | 1,266 |
+| `storm-ppu@scx:1x` | SCX, single speed | 8.03 | 2.00 | 763 |
+
+A sweep of the other registers (`synth:storm-io@<hex>`: 00 / FF to
+FF00-FF21, FF23, FF25, FF26, FF40-FF7F and IE, 1 s each, Ir per 70,224
+clocks) found nothing dearer than the classes above: the APU registers
+15.9 to 19.8 M, SCY 17.5, STAT 16.5, SCX 14.8, WY 14.7, WX 11.9, NR51
+11.8, NR52 (power off / on) 10.5, LCDC 00 / FF (LCD off / on) 9.95, LYC
+8.8, DIV 8.8, BGP/OBP0/OBP1 8.7, TAC 5.4, TIMA 4.7, LY 4.6, SC 4.6, TMA
+4.4, IF 4.0, IE 3.9, OCPD/BCPD 3.6 to 3.7, HDMA5 3.4; every other one is
+under 3.0 M (KEY1, VBK, SVBK, P1, HDMA1-4 included; FF46 restarts an OAM
+DMA whose bus conflicts send this loop astray, so it measures nothing).
+The sweep's values are not chosen per register, so it is a screen, not a
+bound.
+
+**Case by case.** Reachability is from what games and demos are known to
+do, not from a survey of the library (none was run); the mitigation gains
+are **estimates** from the callgrind profile of the storm (inclusive Ir of
+the function named, 1 s runs), and none is implemented.
+
+- **(a) APU writes: 20.0 M at storm density, adversarial only; 1,051 Ir
+  per write is what matters.** The review estimated 5-10 M; measured is
+  twice that. Every write to FF10-FF3F except a powered NR50/NR51 brings
+  the four channels up to the write (`Apu::sync_write` -> `sync`): that
+  is 79% of the storm, `Apu::flush` alone 71% (825 Ir per write). Real
+  software writes a sound register once per sample when it plays PCM (4
+  to about 22 kHz: 70 to 370 writes a frame) plus a music driver's few
+  dozen per frame; `synth:worst-case` has 414 a frame and
+  `synth:apu-writes` 137 (8 kHz through NR50: a realistic player, not a
+  storm). A program would need a write every 2 M-cycles for the whole
+  frame, about 1 MHz, to reach the storm: none is known. Scaling: each
+  1,000 writes a frame cost about 1.05 M Ir (0.58 M through NR50/NR51).
+  Two paths cost although they cannot change the output: writes with the
+  APU off (408 Ir each, 9.0 M: FF10-FF25 are ignored then, but the sync
+  still runs) and writes to unused FF27-FF2F (988 Ir).
+  Cheapest mitigation: return before the sync for a write that cannot
+  change what the channels do (APU off and not NR52 or wave RAM; FF27-
+  FF2F; a value equal to the stored one where the register has no write
+  side effect). Estimated gain: those storms fall to about the control's
+  2 M; **no gain for (a) itself**, whose writes do change the output.
+  For (a), coalescing (apply the write to the channel state at once and
+  let `flush` mix the listed spans later, as NR50/NR51 do now) would
+  bring it towards NR50's 580 Ir per write, about 12 M (estimate); it is
+  a redesign of the write path's sync invariant (ADR 0021 section 3),
+  not a small change.
+- **(b) Speed-switch loop: 8.5 M, adversarial only.** With `IE & IF != 0`
+  and IME off, STOP is one byte and skips the 0x20000-clock halt, so a
+  switch takes 3 M-cycles (plus one idle to double speed): 6,769 a frame,
+  far denser than the review's "every ~10 M-cycles", and 965 Ir each
+  (against the double-speed control, so approximate: this loop runs at
+  both speeds; the profile has 963 in `Cpu::stop`, `Ctx::speed_switch`
+  825 of it, its DIV reset 322). The review's
+  ~3 M was low. Games switch speed once at start-up, a few again around
+  link or infrared code: single digits per session. No mitigation is
+  worth its size; if one were wanted, the DIV-reset part is (c)'s.
+- **(c) DIV and TAC writes: 9.7 M and 5.9 M, adversarial only.** 447 Ir
+  per DIV write (`div_reset_as` 406: the timer's reset 129, the APU's
+  frame-sequencer part 83, re-scheduling the timer 74 and the APU 65),
+  228 per TAC write. Games write DIV to seed a random number or restart
+  a timeout, a few times a frame at most; TAC a handful of times when a
+  sample player starts and stops. Cheapest mitigation: none needed; a
+  reset cannot simply be skipped when the counter is already near 0,
+  because the timer, serial and frame-sequencer deadlines still move.
+- **(d) Back-to-back one-block GDMA: 2.35 M, inside the bound.** The
+  review's concern does not hold: a block stalls the CPU for 17 M-cycles
+  (double speed), so the loop makes 1,665 transfers a frame (1,839 with
+  the destination left to run), and the time the CPU is stalled is time
+  it executes nothing. Both variants are below `synth:worst-case` (2.66
+  M). A real loader does this in VBlank with far fewer, larger transfers.
+  No mitigation.
+- **(e) PPU register writes: 22.0 M (LCDC), reachable in part.** 1,167 Ir
+  per LCDC write averaged over the frame; the writes that land in mode 3
+  (not counted separately) each flush the line drawn so far and re-plan the
+  rest (`Ppu::flush` 28% of the storm, `Renderer::render` 24%,
+  `render_held` 23%, `hold_fetch` 19%, overlapping). SCY, SCX, WX, WY
+  are the same path at 660 to 920 Ir; STAT is a different one (863 Ir:
+  `Ppu::write_stat` runs twice per write, one dot apart, 52% of that
+  storm), as is LYC (408). Real software: one to a few mid-mode-3 writes
+  per line (parallax, a status-bar split, a wobble effect) is common and
+  benched (`synth:worst-case` 144 a frame, `synth:cgb-raster` 288 plus
+  4,880 BCPD, `synth:dmg-raster` 288); a demo can write SCX or LCDC
+  every few M-cycles through mode 3 for a line-doubling or mid-line
+  effect, which is tens of writes per line: at 16 mode-3 writes a line
+  (2,304 a frame) the storm's average predicts about +2.7 M Ir, an
+  **estimate**, and likely low because every one of them lands in mode
+  3. So a real demo can plausibly pass the 4.02 M line; no commercial
+  game is known to. Two paths cost without changing the picture: BGP,
+  OBP0 and OBP1 in CGB mode (401 Ir each: the write syncs and flushes
+  the PPU, 33% in `flush`, though CGB mode ignores the DMG palettes) and
+  a write of the value already there.
+  Cheapest mitigation: return early for BGP/OBP0/OBP1 in CGB mode and
+  for same-value writes to SCX, SCY, WX, WY, LYC and the DMG palettes
+  (estimated gain: those storms fall to about the control's 2 M; no gain
+  for writes that do change the value). For the general case the
+  proposal on file is a dot-stepped fetcher for the rest of a line after
+  the first mid-mode-3 write (`docs/reviews/stage1-m10/E-holistic.md`),
+  estimated there at 2.5-3.5 M for the M8 programs: a large change, and
+  it costs the common case a few percent.
+
+**Consequence on the MCU.** A frame that costs more than its 16.74 ms is
+late: the front end cannot present 59.73 frames a second, so emulation
+runs slower than real time for as long as the program keeps it up, and
+an audio buffer fed per frame underruns (a gap or a repeated buffer,
+whichever the front end chooses). The core does not fail: no state is
+lost, no access is skipped, the frames and samples it does produce are
+the same ones (the invariance checks cover the storms). Stage 2 has to
+decide what the front end does with a late frame (skip presenting it,
+stretch audio, or both); the core gives it nothing but the time. The
+plan's Stage 2 task still stands: run the storms on the M7 and replace
+the estimate columns.
+
+**Historical (M8 perf review; superseded by the table above).** x86 M Ir
+per frame and % of the 4.02 M line, loop `LD (C),A; XOR D` unrolled (a
+changed value every 3 M-cycles, about 11.7k writes a frame in double
+speed, 3.8k in mode 3), on a different picture and an older core
+(`hold_fetch` and the PPU walk have been rewritten since), so the rows
+are not comparable with today's:
 
 | Write | stage1-m7 | M8 (pre-418421c) |
 |---|---:|---:|
@@ -1745,9 +1952,6 @@ double speed, ~3.8k in mode 3):
 | WX (window on), double speed | 6.13 | 7.11 |
 | SCX, single speed | 3.33 (83%) | 4.34 (108%) |
 | control (HRAM writes) | 1.83 | 1.81 |
-
-Such a game would run slower than real time on the MCU rather than fail;
-frame pacing absorbs it. Stage 2 task: measure these on the M7.
 
 ## Code size vs other cores (2026-11-23, session 12)
 
