@@ -36,6 +36,7 @@ it.
 | `bench-flash-dtcm` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
 | `bench-itcm-dtcm` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
 | `*-pll` | `+pll` | Phase B clock (392 MHz), only with `H7_BENCH_PLL=1`. Flash these last. |
+| `*-pll480` | `+pll480` | Phase C clock (480 MHz, VOS0), `h753` only, only with `H7_BENCH_PLL480=1`. Excludes `pll`. |
 | `m4-stub` | (own crate) | `h755` only: optional Cortex-M4 image, see "Dual core". Not needed. |
 
 Every image also has the board feature (`h753` or `h755`); `build.sh`
@@ -107,6 +108,7 @@ Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 ./build.sh                      # all images for the H753, the host hash test
 H7_BENCH_BOARD=h755 ./build.sh  # the same for the H755, plus the M4 stub
 H7_BENCH_PLL=1 ./build.sh       # also the 392 MHz variants
+H7_BENCH_PLL480=1 ./build.sh    # also the 480 MHz variants (h753 only; refused for h755)
 H7_BENCH_QEMU=1 ./build.sh      # also the QEMU smoke run (qemu-system-arm)
 H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
 ```
@@ -174,6 +176,49 @@ h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
 `idcode=0x20036450`: DEV_ID 0x450, REV_ID 0x2003 = revision V. `cr3=0x42`
 is the rev V reset value 0x46 with SCUEN cleared: the LDO configuration,
 locked.
+
+`selftest-pll480` on the H753 (2026-11-25, verbatim):
+
+```
+h7bench v1 banner board=NUCLEO-H753ZI image=selftest placement=flash-axi clock=pll480 cpu_hz=480000000 baud=115200
+h7bench v1 power cr3=0x00000042 csr1=0x0000e000 d3cr=0x0000e000 actvosrdy=1 supply=ldo
+h7bench v1 clock rcc_cr=0x0307c025 cfgr=0x0000001b d1cfgr=0x00000048 flash_acr=0x24 rsr=0x00fe0000
+h7bench v1 cpu cpuid=0x411fc271 idcode=0x20036450 icache=1 dcache=1 cyccnt=1 itcm_bytes=0 dtcm_table_bytes=0
+h7bench v1 tcm itcmcr=0x3b dtcmcr=0x43 at_init=0x3b,0x43 msp=0x2403ff58
+h7bench v1 options optsr=0x1bc6aaf0
+h7bench v1 vos0 syscfg_pwrcr=0x00000081 oden=1 pwrcr_before=0x00000000 polls_to_drop=2 polls_low=6
+h7bench v1 selftest n=0 delay=8000000 cycles=8000022 cyccnt=34046928 stack_used=376
+h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
+h7bench v1 selftest n=1 delay=8000000 cycles=8000008 cyccnt=516839769 stack_used=376
+h7bench v1 selftest n=2 delay=8000000 cycles=8000019 cyccnt=996839813 stack_used=376
+h7bench v1 selftest n=3 delay=8000000 cycles=8000008 cyccnt=1476839836 stack_used=376
+```
+
+- `rcc_cr` 0x0307c025: HSEON, HSERDY, HSEBYP (bits 16-18), PLL1ON and
+  PLL1RDY; `cfgr` 0x1b: SW = SWS = PLL1; `d1cfgr` 0x48: D1CPRE /1, HPRE
+  /2, D1PPRE /2; `flash_acr` 0x24: 4 wait states, WRHIGHFREQ 0b10.
+- VOS0: `d3cr` and `csr1` read the same as at 392 MHz (VOS = ACTVOS =
+  0b11, VOSRDY = ACTVOSRDY = 1): neither field has a VOS0 code (RM0433
+  sections 6.8.2 and 6.8.6), so `oden=1` is what shows VOS0.
+- `syscfg_pwrcr=0x81`: bit 7 is reserved in RM0433 Rev 9 section 12.3.10
+  (reset value 0), and it reads 0 before the ODEN write
+  (`pwrcr_before`), so the hardware sets it with VOS0; the firmware only
+  writes bit 0. Not explained by any document here.
+- `polls_to_drop` / `polls_low`: after ODEN, VOSRDY and ACTVOSRDY stay at
+  their VOS1 value for a couple of polls, then read low for a few.
+  `clock_up_480` waits for the drop, then for both flags, then at least
+  100 us more (RM0433 Figure 31 shows a 20 us ramp; the flags were low for
+  much less than that), so the clock only goes up after the ramp. The
+  first version waited only for VOSRDY, as RM0433 section 6.6.2 step 4
+  and ST's HAL do, and saw 0 polls low: it passed on the stale VOS1 flag.
+- `cycles=` is 8,000,008, and about 11 more on a line after another
+  UART line or the probe, as at 64 MHz (8,000,007 and 8,000,018).
+  Clean text at 115200 with a BRR computed for a 120 MHz PCLK puts the
+  8 MHz HSE (the ST-LINK's MCO) within a few percent of 8 MHz.
+- A failed wait panics with the step's name, at the right baud rate:
+  checked by building with the HSE wait and, separately, the final switch
+  wait made to fail (`FAULT panic panicked at src/board.rs:...:
+  clock setup failed: hse ready`, `... switch to pll1`).
 
 On the H755:
 
@@ -276,6 +321,14 @@ comments in `src/board.rs` carry the same citations.
   SYSCFG ODEN; not used), and RM0433 Table 17 gives 2 wait states,
   WRHIGHFREQ = 0b10, for a 196 MHz AXI clock at VOS1. VOS in `PWR_D3CR`:
   RM0433 section 6.8.6.
+- **Phase C clock (`pll480`, this board only).** HSE in bypass, 8 MHz
+  from the ST-LINK MCO (UM2407 section 7.5.1, SB45 on), / DIVM1 2 =
+  4 MHz, x 240 = 960 MHz VCO (the wide VCO's top, RM0433 section 8.7.13,
+  DS12117 Table 136), / 2 = 480 MHz. VOS1, then SYSCFG_PWRCR.ODEN, then
+  VOS0 (RM0433 section 6.6.2), allowed by DS12117 Table 111/112 (LDO
+  only, TJ at most 105 °C) and ES0392 section 2.2.21 (rev V). Flash 4 wait
+  states, WRHIGHFREQ = 0b10 (RM0433 Table 17, AXI 240 MHz at VOS0), set
+  before the switch; AXI/AHB 240 MHz, every APB 120 MHz.
 - **Memory** (RM0433 section 2.3.2 Table 7): ITCM 64 KB at 0, DTCM 128 KB
   at 0x2000_0000, AXI SRAM 512 KB at 0x2400_0000, the same as the H755;
   flash 2 x 1 MB from 0x0800_0000, and with one core the image may use
@@ -557,3 +610,5 @@ counts and to the final chip.
    cycle counts; `itcm_bytes=` non-zero in the banner.
 4. Only if 1 to 3 are right: `selftest-pll.bin`, then the `*-pll` bench
    images (`clock=pll392`; the hashes must not change).
+5. H753 only: `selftest-pll480.bin` (`clock=pll480`, `oden=1`,
+   `flash_acr=0x24`), then the `*-pll480` bench images.
