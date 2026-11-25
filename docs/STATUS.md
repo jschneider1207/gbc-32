@@ -74,6 +74,22 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    Small leftovers: add `synth:worst-case@0` (no APU) to the invariance
    corpus (stricter: agent decision); `synth.rs` comment says the SCX
    write lands 18-42 M-cycles into mode 3 but some land in the discard.
+   Item 7's oracle is DONE (0e674bc, session 17): `ppu/mode3_oracle.rs`
+   (test-only, SameBoy-derived dot-stepped mode 3; doc
+   `docs/reference/mode3-oracle.md`); 28,949 static and 28,040 SCX-write
+   lines agree with the core. Two disagreement classes are on its
+   enumerated exclusion list and need a verdict (one small agent each,
+   references first; no core change without one):
+   (a) WX=0, SCX&7 != 0, window starting, an object at X 1..=167: core
+   273 vs oracle 277 at SCX 3, X=5 (the core's stalls and its own
+   renderer disagree by SCX&7; SameBoy has a "TODO: verify" there);
+   (b) SCX write at positions 89..=107 with an object at X=0: core 267 vs
+   oracle 268 (SameBoy fetches X=0 objects before the discard). Note
+   gambatte `scx_during_m3_spx0` (cgb04c capture) PASSES on the core:
+   check whether it reaches these positions before blaming the core.
+   Not covered by the oracle: double speed, first line after LCD on,
+   WX/WY/LCDC mid-line writes, OAM DMA lines, pixels. Audio alias
+   measurement (A3-1) is still open under item 7.
 5. Structure: line timeline as one table (E3), `bus.rs` split along
    D-rust.md D2's nine seams, `Speed` enum (D4), speed-switch DIV-reset
    experiment (A1-06).
