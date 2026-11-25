@@ -90,16 +90,21 @@ morning after the cgu=1 pin), cpu_instrs 1,380 M (1,703 M), `.text`
    (SameBoy, GateBoy netlist, Pan Docs; no ROM reaches it), plus a
    junk-tile sharing correction when the write wraps the discard;
    exclusion removed, 40,400 fast / 536,400 exhaustive lines agree.
-   Open from it: (c) NEW unlisted class, not in the sweep: WX=0 with a
-   mid-line SCX write: 2,791 disagreements in a probe, 427 with no
-   objects (SCX 1->0 at 89: core 270, oracle 263): needs its own
-   one-behavior agent; (d) a later window write on a line whose discard
-   wrapped rebuilds stalls without the junk-tile correction (untested).
+   (c) WX=0 with a mid-line SCX write: FIXED (695a55b line, session 17):
+   the fine-scroll discard runs after a window that starts at WX=0
+   (SameBoy, GateBoy, Pan Docs; no ROM reaches it); 14,000 WX=0 lines
+   added to the sweep; on-screen-object lines stay under the ADR 0034
+   exclusion. Open edges (plan tasks, no capture pins any of them):
+   (d) a later window write on a line whose discard wrapped rebuilds the
+   stalls without the junk-tile correction or the kept WX=0 dot;
+   (e) pixels when the discard wraps (n >= 8) at WX=0: the renderer cuts
+   7 + n%8, not 7 + n. Decisive capture for (c): CGB, WX=0, SCX 1, SCX=0
+   written at 89..=97, mode 0 at 263 / 271 (at 96) / 264.
    Not covered by the oracle: double speed, first line after LCD on,
    WX/WY/LCDC mid-line writes, OAM DMA lines, pixels. Audio alias
    measurement (A3-1) is still open under item 7.
-   `.text` 116,104 B (margin 6,776 B); baseline 0270845 (latest core is
-   up to +0.47% on dmg-raster over it).
+   `.text` 116,358 B (margin 6,522 B); baseline 0270845 (latest core is
+   up to +0.72% on dmg-raster over it: re-record at the next perf merge).
    **First real M7 numbers** (NUCLEO-H755ZI-Q, all code in flash, caches
    on, HSI 64 MHz, hashes match the host): cycles/frame mean/max:
    worst-case 4.35 M / 4.40 M, cgb-raster 2.93 / 2.99, dmg-raster
