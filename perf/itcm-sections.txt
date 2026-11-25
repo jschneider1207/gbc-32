@@ -119,7 +119,7 @@ FLASH_OK .text._R*8gbc_core3apu10write_wave*                   # wave RAM writes
 FLASH_OK .text._R*8gbc_core4cart*4Cart9write_rom*              # MBC register writes (bank switches)
 FLASH_OK .text._R*8gbc_core4cart*4Cart9write_rtc*              # MBC3 RTC register writes
 # OAM DMA and VRAM DMA: only while a transfer runs or is pending
-FLASH_OK .text._R*8gbc_core3bus15read_during_dma*              # CPU reads during an OAM DMA (160 M-cycles per transfer)
+FLASH_OK .text._R*8gbc_core3bus7oam_dma15read_during_dma*      # CPU reads during an OAM DMA (160 M-cycles per transfer)
 FLASH_OK .text._R*8gbc_core3bus*3Ctx16write_during_dma*        # CPU writes during an OAM DMA
 FLASH_OK .text._R*8gbc_core3bus*3Ctx8dma_sync*                 # OAM DMA catch-up, at its events and at the end of a run call
 FLASH_OK .text._R*8gbc_core3bus*3Ctx9dma_pause*                # HALT/STOP entered during an OAM DMA
