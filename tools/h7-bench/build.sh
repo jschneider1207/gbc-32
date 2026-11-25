@@ -7,6 +7,8 @@
 #   H7_BENCH_BOARD        h753 (default: NUCLEO-H753ZI) or h755
 #                         (NUCLEO-H755ZI-Q); images go to out/<board>/
 #   H7_BENCH_PLL=1        also the phase B (PLL, 392 MHz) variants
+#   H7_BENCH_PLL480=1     also the phase C (HSE + PLL, 480 MHz, VOS0)
+#                         variants, *-pll480; h753 only
 #   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
 #   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under
 #                         `flock -x <file>` (agents: the shared build lock)
@@ -28,6 +30,9 @@ case "$BOARD" in
   h755) MAX_BIN=$((1024 * 1024)) ;;  # flash bank 1; bank 2 is the Cortex-M4's
   *) echo "FAIL: H7_BENCH_BOARD=$BOARD: not h753 or h755" >&2; exit 1 ;;
 esac
+if [ -n "${H7_BENCH_PLL480:-}" ] && [ "$BOARD" != h753 ]; then
+  echo "FAIL: H7_BENCH_PLL480 needs H7_BENCH_BOARD=h753 (VOS0 needs the LDO supply)" >&2; exit 1
+fi
 OUT=out/$BOARD
 echo "== board $BOARD; images in $OUT"
 
@@ -148,6 +153,13 @@ if [ -n "${H7_BENCH_PLL:-}" ]; then
   image bench-flash-dtcm-pll dtcm,pll "$DTCM_LO" "$DTCM_HI"
   image bench-itcm-dtcm-pll itcm,pll "$DTCM_LO" "$DTCM_HI"
   itcm_check bench-itcm-dtcm-pll
+fi
+if [ -n "${H7_BENCH_PLL480:-}" ]; then
+  image selftest-pll480 selftest,pll480 "$AXI_LO" "$AXI_HI"
+  image bench-flash-axi-pll480 pll480 "$AXI_LO" "$AXI_HI"
+  image bench-flash-dtcm-pll480 dtcm,pll480 "$DTCM_LO" "$DTCM_HI"
+  image bench-itcm-dtcm-pll480 itcm,pll480 "$DTCM_LO" "$DTCM_HI"
+  itcm_check bench-itcm-dtcm-pll480
 fi
 
 # The H753 has no Cortex-M4: no stub.

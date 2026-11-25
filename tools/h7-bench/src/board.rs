@@ -18,6 +18,11 @@
 compile_error!("features h753 and h755 exclude each other");
 #[cfg(not(any(feature = "h753", feature = "h755")))]
 compile_error!("one board feature is needed: h753 or h755");
+#[cfg(all(feature = "pll", feature = "pll480"))]
+compile_error!("features pll and pll480 exclude each other");
+// The H755 board's SMPS supply rules out VOS0 (DS12919 Table 14 note 1).
+#[cfg(all(feature = "pll480", feature = "h755"))]
+compile_error!("feature pll480 needs the h753 board (VOS0 needs the LDO supply)");
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -155,9 +160,9 @@ const CR3_SUPPLY: (u32, u32, &str) = (0x07, 0x02, "ldo");
 /// latency left at their reset values. Nothing clock-related is written.
 /// VOS3 allows 200 MHz on the H753 (DS12117 Table 111) and 64 MHz is far
 /// inside the H755's VOS3 range too.
-#[cfg(not(feature = "pll"))]
+#[cfg(not(any(feature = "pll", feature = "pll480")))]
 pub const CPU_HZ: u32 = 64_000_000;
-#[cfg(not(feature = "pll"))]
+#[cfg(not(any(feature = "pll", feature = "pll480")))]
 const CLOCK_NAME: &str = "hsi64";
 
 /// Phase B (`--features pll`): PLL1 from HSI, 64 MHz / 4 * 49 / 2 =
@@ -180,6 +185,25 @@ const CLOCK_NAME: &str = "hsi64";
 pub const CPU_HZ: u32 = 392_000_000;
 #[cfg(feature = "pll")]
 const CLOCK_NAME: &str = "pll392";
+
+/// Phase C (`--features pll480`, H753 only): 480 MHz at VOS0, the
+/// STM32H753's maximum. DS12117 Rev 10 Table 111 (rev V): VOS0 allows a
+/// 480 MHz CPU, a 240 MHz AHB/AXI clock and 120 MHz APB clocks; note 4:
+/// VOS0 only with the LDO on (this board); note 5 and Table 112: TJ at most
+/// 105 °C. ES0392 section 2.2.21: no VOS0 on revisions Y and W; this board
+/// is revision V (`idcode=0x20036450`).
+///
+/// Reference: HSE in bypass mode, 8 MHz from the ST-LINK's MCO on
+/// PH0-OSC_IN (UM2407 Rev 6 section 7.5.1: the default, SB45 on), exact
+/// where the HSI is only about 1% (plan stage-2 "Board facts").
+/// PLL1: 8 MHz / DIVM1 2 = 4 MHz reference (RM0433 section 8.7.12:
+/// PLL1RGE 0b10, 4 to 8 MHz; DS12117 Table 136: 2 to 16 MHz with the wide
+/// VCO), x DIVN1 240 = 960 MHz VCO (wide VCO, 192 to 960 MHz: RM0433
+/// section 8.7.13 and DS12117 Table 136), / DIVP1 2 = 480 MHz exactly.
+#[cfg(feature = "pll480")]
+pub const CPU_HZ: u32 = 480_000_000;
+#[cfg(feature = "pll480")]
+const CLOCK_NAME: &str = "pll480";
 
 const BAUD: u32 = 115_200;
 
@@ -272,6 +296,153 @@ fn clock_up(pwr: &pac::PWR, rcc: &pac::RCC, flash: &pac::FLASH) -> bool {
     wait_for(TRIES, || flash.acr.read().latency().bits() == 2)
 }
 
+/// What `clock_up_480` saw of the VOS0 ramp, for the banner: SYSCFG_PWRCR
+/// before ODEN was written; the polls until VOSRDY or ACTVOSRDY first read
+/// 0 after it (`u32::MAX`: never seen low); the polls that then read
+/// not-ready until both were 1 again.
+#[cfg(feature = "pll480")]
+static VOS0_DIAG: [core::sync::atomic::AtomicU32; 3] = [
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+];
+
+/// Phase C clock tree (see [`CPU_HZ`]). On a failed wait it returns the
+/// step's name, leaving the system clock on the HSI (or, if only the final
+/// read-backs failed, wherever the RCC reports it: `pclk1_hz` follows
+/// RCC_CFGR.SWS), and `init` panics with it once the UART is set up.
+///
+/// Order: supply valid; VOS1 then VOS0 (voltage before frequency, RM0433
+/// section 6.8.6 VOS); HSE; PLL1; flash wait states up (before the faster
+/// clock, RM0433 section 4.3.8 "Adjusting system frequency"); prescalers;
+/// the switch.
+#[cfg(feature = "pll480")]
+fn clock_up_480(
+    pwr: &pac::PWR,
+    rcc: &pac::RCC,
+    flash: &pac::FLASH,
+    syscfg: &pac::SYSCFG,
+) -> Result<(), &'static str> {
+    const TRIES: u32 = 4_000_000;
+    // RM0433 section 6.4.1: no VOS change before ACTVOSRDY.
+    if !pwr.csr1.read().actvosrdy().bit_is_set() {
+        return Err("actvosrdy");
+    }
+    // RM0433 section 6.6.2 "VOS0 activation/deactivation sequence":
+    // 1. VOS1 in PWR_D3CR (VOS = 0b11, section 6.8.6), here also waited
+    //    for; 2. SYSCFGEN in RCC_APB4ENR (section 8.7.48); 3. ODEN in
+    //    SYSCFG_PWRCR (section 12.3.10: "must be written only in VOS1");
+    //    4. wait for VOSRDY. Only then may the frequency go up. PWR_D3CR's
+    //    VOS field keeps 0b11 at VOS0 (it has no VOS0 code) and so does
+    //    PWR_CSR1.ACTVOS: ODEN = 1 with VOSRDY = 1 is what says VOS0.
+    // SAFETY: 0b11 is a documented value of the 2-bit VOS field.
+    pwr.d3cr.modify(|_, w| unsafe { w.vos().bits(0b11) });
+    if !wait_for(TRIES, || pwr.d3cr.read().vosrdy().bit_is_set()) {
+        return Err("vos1 vosrdy");
+    }
+    rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
+    let _ = rcc.apb4enr.read(); // the clock is on before the first access
+    VOS0_DIAG[0].store(syscfg.pwrcr.read().bits(), Ordering::Relaxed);
+    syscfg.pwrcr.modify(|_, w| w.oden().set_bit());
+    if !syscfg.pwrcr.read().oden().bit_is_set() {
+        return Err("oden write");
+    }
+    // RM0433 Figure 31: VOSRDY and ACTVOSRDY drop a little after ODEN
+    // rises and come back once VCORE has ramped from 1.26 to 1.35 V, about
+    // 20 us later. So the ready flags are still VOS1's for a moment after
+    // the write: a plain "wait for VOSRDY" (step 4, and ST's HAL) can pass
+    // at once, before the ramp (seen on the board, 2026-11-25: 0 polls
+    // low). First wait, bounded and not fatal, for a flag to drop; then for
+    // both to be 1 again.
+    let ready =
+        || pwr.d3cr.read().vosrdy().bit_is_set() && pwr.csr1.read().actvosrdy().bit_is_set();
+    let mut to_drop = 0u32;
+    let dropped = wait_for(100_000, || {
+        to_drop += 1;
+        !ready()
+    });
+    VOS0_DIAG[1].store(if dropped { to_drop } else { u32::MAX }, Ordering::Relaxed);
+    let mut low = 0u32;
+    let vos0 = wait_for(TRIES, || {
+        let r = ready();
+        low += u32::from(!r);
+        r
+    });
+    VOS0_DIAG[2].store(low, Ordering::Relaxed);
+    if !vos0 {
+        return Err("vos0 vosrdy");
+    }
+    // And in any case at least 100 us since ODEN (64 MHz HSI: 6,400
+    // cycles; `asm::delay` takes at least that many), five times the ramp
+    // of Figure 31, so the frequency never goes up on the flags alone.
+    cortex_m::asm::delay(6_400);
+    // HSE bypass: HSEBYP may only be written while the HSE is off (RM0433
+    // section 8.7.2; it is off after reset), then HSEON; HSERDY says the
+    // clock is there (section 8.5.2 "External clock source (HSE bypass)").
+    rcc.cr.modify(|_, w| w.hsebyp().set_bit());
+    rcc.cr.modify(|_, w| w.hseon().set_bit());
+    if !wait_for(TRIES, || rcc.cr.read().hserdy().bit_is_set()) {
+        return Err("hse ready");
+    }
+    // PLL1 (off after reset): source HSE, DIVM1 = 2 (4 MHz reference).
+    // RM0433 section 8.7.11.
+    rcc.pllckselr
+        .modify(|_, w| w.pllsrc().hse().divm1().bits(2));
+    // Reference range 4 to 8 MHz (PLL1RGE = 0b10), wide VCO, integer mode,
+    // only the P output. RM0433 section 8.7.12.
+    rcc.pllcfgr.modify(|_, w| {
+        w.pll1rge()
+            .range4()
+            .pll1vcosel()
+            .wide_vco()
+            .pll1fracen()
+            .reset()
+            .divp1en()
+            .enabled()
+            .divq1en()
+            .disabled()
+            .divr1en()
+            .disabled()
+    });
+    // DIVN1 field = N - 1 = 239 (x240: VCO 960 MHz), DIVP1 field = P - 1
+    // = 1 (/2: 480 MHz). RM0433 section 8.7.13.
+    // SAFETY: both are documented field values (DIVN1 4 to 512, DIVP1 /2).
+    rcc.pll1divr
+        .modify(|_, w| unsafe { w.divn1().bits(239).divp1().bits(1) });
+    rcc.cr.modify(|_, w| w.pll1on().set_bit());
+    if !wait_for(TRIES, || rcc.cr.read().pll1rdy().bit_is_set()) {
+        return Err("pll1 lock");
+    }
+    // RM0433 Table 17: AXI clock in ]225; 240] MHz at VOS0 is 4 wait
+    // states with WRHIGHFREQ = 0b10 (FLASH_ACR 0x24). Section 4.3.8: set
+    // and read back before the clock goes up; more wait states than needed
+    // are harmless on the 64 MHz HSI meanwhile.
+    // SAFETY: documented values of the LATENCY and WRHIGHFREQ fields.
+    flash
+        .acr
+        .write(|w| unsafe { w.latency().bits(4).wrhighfreq().bits(0b10) });
+    if !wait_for(TRIES, || {
+        let acr = flash.acr.read();
+        acr.latency().bits() == 4 && acr.wrhighfreq().bits() == 0b10
+    }) {
+        return Err("flash latency");
+    }
+    // CPU 480 MHz (D1CPRE /1); AXI/AHB 240 MHz (HPRE /2); every APB
+    // 120 MHz (D1PPRE, D2PPRE1/2, D3PPRE /2). DS12117 Table 111, VOS0.
+    // RM0433 sections 8.7.8 to 8.7.10.
+    rcc.d1cfgr
+        .modify(|_, w| w.d1cpre().div1().hpre().div2().d1ppre().div2());
+    rcc.d2cfgr
+        .modify(|_, w| w.d2ppre1().div2().d2ppre2().div2());
+    rcc.d3cfgr.modify(|_, w| w.d3ppre().div2());
+    // RM0433 section 8.7.7: SW = PLL1, then SWS reports it.
+    rcc.cfgr.modify(|_, w| w.sw().pll1());
+    if !wait_for(TRIES, || rcc.cfgr.read().sws().is_pll1()) {
+        return Err("switch to pll1");
+    }
+    Ok(())
+}
+
 // --- LEDs ----------------------------------------------------------------
 //
 // UM2408 section 7.6: LD1 green on PB0 (default solder bridges: SB54 on,
@@ -340,7 +511,9 @@ fn uart_byte(b: u8) {
 
 /// rcc_pclk1 as the clock registers stand (only the values this firmware
 /// sets: HSI or PLL1 at `CPU_HZ`, HPRE and D2PPRE1 /1 or /2), so the fault
-/// path gets the baud rate right wherever the clock setup stopped.
+/// path gets the baud rate right wherever the clock setup stopped. The
+/// system clock is never the HSE itself (`pll480` uses it only as PLL1's
+/// reference), so SWS is HSI or PLL1 in every image.
 fn pclk1_hz(rcc: &pac::rcc::RegisterBlock) -> u32 {
     let sys = if rcc.cfgr.read().sws().is_pll1() {
         CPU_HZ
@@ -473,7 +646,11 @@ pub fn init() -> Board {
 
     #[cfg(feature = "pll")]
     let clock_ok = clock_up(&dp.PWR, &dp.RCC, &dp.FLASH);
-    #[cfg(not(feature = "pll"))]
+    #[cfg(feature = "pll480")]
+    let clock_step = clock_up_480(&dp.PWR, &dp.RCC, &dp.FLASH, &dp.SYSCFG);
+    #[cfg(feature = "pll480")]
+    let clock_ok = clock_step.is_ok();
+    #[cfg(not(any(feature = "pll", feature = "pll480")))]
     let clock_ok = true;
 
     let d2_ok = uart_init();
@@ -504,6 +681,10 @@ pub fn init() -> Board {
     // A failed clock setup leaves the UART at an unknown baud rate and a
     // dead counter makes every figure meaningless: stop with the fault
     // blink (the panic line still goes out, readable or not).
+    #[cfg(feature = "pll480")]
+    if let Err(step) = clock_step {
+        panic!("clock setup failed: {step}");
+    }
     assert!(clock_ok, "clock setup failed");
     assert!(d2_ok, "D2 domain clocks not ready");
     assert!(cyccnt, "DWT cycle counter does not count");
@@ -594,6 +775,23 @@ impl Board {
             "h7bench v1 options optsr={:#010x}\r",
             flash.optsr_cur().read().bits()
         );
+        // VOS0: SYSCFG_PWRCR (ODEN is bit 0) now and before the write, and
+        // what the wait saw of the ramp (see `VOS0_DIAG`).
+        #[cfg(feature = "pll480")]
+        {
+            // SAFETY: a read-only access to SYSCFG_PWRCR; SYSCFG's clock
+            // has been on since `clock_up_480`.
+            let pwrcr = unsafe { (*pac::SYSCFG::ptr()).pwrcr.read().bits() };
+            let _ = writeln!(
+                out,
+                "h7bench v1 vos0 syscfg_pwrcr={pwrcr:#010x} oden={} pwrcr_before={:#010x} \
+                 polls_to_drop={} polls_low={}\r",
+                pwrcr & 1,
+                VOS0_DIAG[0].load(Ordering::Relaxed),
+                VOS0_DIAG[1].load(Ordering::Relaxed) as i32,
+                VOS0_DIAG[2].load(Ordering::Relaxed)
+            );
+        }
     }
 }
 

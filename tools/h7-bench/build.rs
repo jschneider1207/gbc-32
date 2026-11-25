@@ -226,8 +226,16 @@ fn main() {
     );
     assert!(!(itcm && !dtcm), "feature `itcm` needs `dtcm`");
     assert!(
-        !(qemu && (feature("selftest") || feature("pll"))),
-        "feature `qemu` excludes `selftest` and `pll`"
+        !(qemu && (feature("selftest") || feature("pll") || feature("pll480"))),
+        "feature `qemu` excludes `selftest`, `pll` and `pll480`"
+    );
+    assert!(
+        !(feature("pll") && feature("pll480")),
+        "features `pll` and `pll480` exclude each other"
+    );
+    assert!(
+        !(feature("pll480") && feature("h755")),
+        "feature `pll480` needs the h753 board: VOS0 needs the LDO supply"
     );
 
     fs::write(out.join("memory.x"), memory_x()).expect("write memory.x");
