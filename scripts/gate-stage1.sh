@@ -7,6 +7,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
+# The check scripts take these overrides for experiments (mutation checks
+# against a scratch budget or ITCM file, a worktree reading another tree's
+# ROMs). The gate judges against the committed files and the ROMs it
+# fetches into test-roms/ below (pinned zip hash; the desktop step and
+# romtest read test-roms/ too), so an exported override must not reach it.
+unset CODE_SIZE_BUDGETS_FILE ITCM_SET_FILE TEST_ROMS
+
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nGATE FAILED: %s\n' "$*" >&2; exit 1; }
 
