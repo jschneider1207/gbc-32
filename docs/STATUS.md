@@ -132,6 +132,27 @@ Working rules that matter here:
 
 ## Needs human
 
+Open (session 19, 2026-11-25):
+- **NUCLEO-H753ZI board dropped off USB** (ST-LINK drive E:/COM5 and debug
+  interface all gone) right after flashing `bench-flash-axi-pll`; the
+  selftest-pll image had run fine. Cause unknown (unplug, port power,
+  current with the X-NUCLEO-GFX02Z1 shield). Human: re-plug; LD6 lit =
+  over-current; then `tools/h7-bench/read-serial.sh`. Standing permission
+  (human, 2026-11-25): agents may flash this board and read its serial
+  port. Still to measure: the three `-pll` bench images (392 MHz); leave
+  `out/h753/bench-itcm-dtcm-pll.bin` on the board.
+- **H753 worst case is at the 50% bar** (bb3c701, `tools/h7-bench/README.md`):
+  `bench-itcm-dtcm` 3,287,649 mean / 3,324,581 max cycles per frame =
+  50.1% / 50.7% of a 392 MHz frame (H755 measured 47.2% at bcd881e; the
+  rise is most likely core changes since, not separated). At 480 MHz
+  (VOS0, allowed on this rev V part, not run) it would be ~41%. The final
+  target (H735, 550 MHz) is unaffected; a Stage 2 decision.
+- **`tools/h7-bench/expected-hashes.txt` is stale** (made at bcd881e;
+  worst-case and cpu_instrs hashes changed with the core, likely 7d389ce),
+  so `build.sh`'s host test fails. Board output matches the host build
+  at 74e7dc3 for all three placements. Regenerating the file is the
+  human's call (it is an expected-output file).
+
 Open (M10, session 18):
 - **New figure for the APU budget:** `docs/perf.md`'s 230k Ir/frame
   "channels and mixing" budget no longer holds with the output filter
@@ -150,21 +171,14 @@ Open (M10, session 18):
   tens of mid-mode-3 PPU writes per line are partly reachable (about
   +2.7 M Ir/frame at 16 per line, estimate). Cheap options are listed in
   the plan; none is implemented.
-- **`--long` anchor cap:** offsets of 24-31 clocks are legitimate (STOP
-  wake + CALL) but rejected by the kept +-23 cap; no workload reaches
-  them. Relaxing it to 31 needs sign-off.
+- **`--long` anchor cap:** RESOLVED session 19: kept at 23 (max offset seen
+  16); the real gap was four LCD-off-setup workloads with no frame check,
+  now checked with exact gap counts (d04fc0f, 95adc5a; reviewed).
 - **Hardware captures that would settle things:** see
   `docs/reference/unpinned.md` (48+ rows). Most likely wrong: STAT during
   OAM DMA, the speed-switch IME-on timer offset (now AGE, 4 T behind
   SameBoy), WX=0 window grid (ADR 0034), HDMA re-arm in HBlank, the APU
   double-speed trigger delay phase.
-- **Branches to delete** (merged, session 18): `m10-alias`, `m10-speed`,
-  `m10-l7`, `m10-timeline`, `m10-spsw-div`, `m10-spsw-div-code`
-  (superseded by `m10-spsw-land`), `m10-spsw-land`, `m10-line0-ds`,
-  `m10-bus-split`, `m10-docs`, `m10-stat-walk`, `m10-unpinned`,
-  `m10-tests`, `m10-audio-fir`, `m10-long-bisect` (empty),
-  `m10-gate-strict`, `m10-m0-latch`, `m10-long-check`, `m10-objlines`,
-  `m10-long-check2`, `m10-audio-tests`, `m10-storm`.
 
 Open (M10, session 17):
 - **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,
@@ -187,8 +201,6 @@ Open (M10, session 17):
 - **Gate edit made on the retire decision:** the byte-wide ROM load step
   was removed from `gate-stage1.sh` and `check-rom-loads.sh` deleted
   (6d8434f); say if a replacement check is wanted.
-- **Branches to delete** (session 17, merged): `m10-bus-fast`,
-  `m10-rom-wide`, `m10-bench-irq`, `m10-sched`, `m10-sync-apu`.
 - FYI: Shantae (heavy HDMA) is worth a replay after cab6e24 (HBlank HDMA
   trigger fix); no evidence it was affected.
 
@@ -209,9 +221,6 @@ Open (M10, session 16):
   land it will load as them). SameBoy and real no-MBC boards ignore 0147.
 - **Audio aliasing** (A3-1): fix candidates roughly double the channel and
   mixing cost; will come back with a measurement before changing anything.
-- **Branches to delete** (agent `git branch -D` is denied), merged by
-  fast-forward in session 16: `m10-timer-lazy`, `m10-ppu-lcdoff`,
-  `m10-cart-unsupported`, `m10-hdma-cancel`, `m10-speed-switch`.
 
 Open (earlier sessions):
 - **Stage 3 ROM memory (hardware repo, human-owned):** independent review
@@ -227,20 +236,6 @@ Open (earlier sessions):
   all passed. Open: smoothness vs SameBoy (see Next up, desktop), a
   gamepad, Pokémon Crystal (RTC across a restart), Alone in the Dark, Link's
   Awakening DX, and Pokémon Red (DMG compat palette; not in the plan table).
-- **Branches to delete** (agent `git branch -D` is denied). Stale/superseded:
-  `ppu-edges`, `edges-hdma-scratch`, `lcd-offset-step1`, `lcd-offset-phase`,
-  `ppu-edges-step1b` and `hdma-trigger` (landed as rebased copies in
-  session 12). Merged in session 12: `m9-spsw`, `m9-step1b-hdma`, `m9-late-wy`.
-  Merged in session 15 (fast-forward): `m9-apu-15`, `m9-mealy-cd`,
-  `m9-lcd-offset`, `m9-m3start-access`, `m9-scx-0367c0`,
-  `m9-acid-hell-lcdc`, `m9-speedchange-ch1`, `m9-tile-sel-set`,
-  `m9-tile-sel-latch`, `m9-cgb-wx-glitch`.
-  Fully merged (`git cherry main <b>` shows no `+`): `bench-worst-case-midline-scx`,
-  `ppu-objmix`, `wip/speed-switch-h3`, `worktree-agent-a62aec9bd37d37e1c`,
-  `worktree-agent-ab9ff6f40452030b3`, `worktree-agent-ae119d2f1346ad041`.
-  Not fully merged, keep until checked: `ppu-bg-attributes` (1 `+`),
-  `worktree-agent-a46dc3e70b2125ffb` (1 `+`). Worktree-agent branches may be
-  locked worktrees (`git worktree remove --force --force`).
 - Optional, strongest guard against a repeat of the BSOD: set
   `guiApplications=false` in `%UserProfile%\.wslconfig` (disables WSLg).
 - FYI: `wsl-pro.service` restarts every 2 s because a cmd.exe AutoRun entry
