@@ -2,8 +2,10 @@
 # Builds every h7-bench image into out/ (ELF and .bin), prints section sizes
 # and checks what can be checked without the board. README.md "Build".
 #
-#   ./build.sh            selftest, the three placements, the M4 stub, the
-#                         host expected-hash test
+#   ./build.sh            selftest, the three placements, the host
+#                         expected-hash test (and the M4 stub for h755)
+#   H7_BENCH_BOARD        h753 (default: NUCLEO-H753ZI) or h755
+#                         (NUCLEO-H755ZI-Q); images go to out/<board>/
 #   H7_BENCH_PLL=1        also the phase B (PLL, 392 MHz) variants
 #   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
 #   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under
@@ -20,8 +22,14 @@ cd "$(dirname "$0")"
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 TARGET=thumbv7em-none-eabihf
-OUT=out
-MAX_BIN=$((1024 * 1024))   # flash bank 1; bank 2 is the Cortex-M4's
+BOARD=${H7_BENCH_BOARD:-h753}
+case "$BOARD" in
+  h753) MAX_BIN=$((2048 * 1024)) ;;  # both flash banks (single core)
+  h755) MAX_BIN=$((1024 * 1024)) ;;  # flash bank 1; bank 2 is the Cortex-M4's
+  *) echo "FAIL: H7_BENCH_BOARD=$BOARD: not h753 or h755" >&2; exit 1 ;;
+esac
+OUT=out/$BOARD
+echo "== board $BOARD; images in $OUT"
 
 locked() { if [ -n "${H7_BENCH_LOCK:-}" ]; then flock -x "$H7_BENCH_LOCK" "$@"; else "$@"; fi; }
 
@@ -50,7 +58,7 @@ in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 image() {
   local name=$1 features=$2 ram_lo=$3 ram_hi=$4
   echo "== $name (features: ${features:-none})"
-  locked cargo build --release --features "$features"
+  locked cargo build --release --no-default-features --features "$BOARD${features:+,$features}"
   cp "target/$TARGET/release/h7-bench" "$OUT/$name.elf"
   objcopy -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
@@ -62,7 +70,7 @@ image() {
   sp=$(word "$OUT/$name.bin" 0)
   reset=$(word "$OUT/$name.bin" 1)
   echo "  bin $size bytes; vector[0] (initial SP) 0x$sp; vector[1] (reset) 0x$reset"
-  [ "$size" -le "$MAX_BIN" ] || bad "$name.bin is $size bytes: over flash bank 1"
+  [ "$size" -le "$MAX_BIN" ] || bad "$name.bin is $size bytes: over $MAX_BIN B of flash"
   in_range "$sp" "$ram_lo" "$ram_hi" || bad "$name: initial SP 0x$sp outside RAM"
   [ $((16#$sp % 8)) -eq 0 ] || bad "$name: initial SP 0x$sp not 8-byte aligned"
   in_range "$reset" 0x08000000 $((0x08000000 + size)) || bad "$name: reset vector 0x$reset outside the image"
@@ -142,14 +150,17 @@ if [ -n "${H7_BENCH_PLL:-}" ]; then
   itcm_check bench-itcm-dtcm-pll
 fi
 
-echo "== m4-stub (optional Cortex-M4 image for 0x08100000)"
-(cd m4-stub && locked cargo build --release)
-cp "m4-stub/target/$TARGET/release/h7-m4-stub" "$OUT/m4-stub.elf"
-objcopy -O binary "$OUT/m4-stub.elf" "$OUT/m4-stub.bin"
-m4_reset=$(word "$OUT/m4-stub.bin" 1)
-echo "  bin $(stat -c %s "$OUT/m4-stub.bin") bytes; vector[0] 0x$(word "$OUT/m4-stub.bin" 0); vector[1] (reset) 0x$m4_reset"
-in_range "$m4_reset" 0x08100040 0x08100100 || bad "m4-stub: reset vector 0x$m4_reset"
-[ $((16#$m4_reset & 1)) -eq 1 ] || bad "m4-stub: reset vector lacks the Thumb bit"
+# The H753 has no Cortex-M4: no stub.
+if [ "$BOARD" = h755 ]; then
+  echo "== m4-stub (optional Cortex-M4 image for 0x08100000)"
+  (cd m4-stub && locked cargo build --release)
+  cp "m4-stub/target/$TARGET/release/h7-m4-stub" "$OUT/m4-stub.elf"
+  objcopy -O binary "$OUT/m4-stub.elf" "$OUT/m4-stub.bin"
+  m4_reset=$(word "$OUT/m4-stub.bin" 1)
+  echo "  bin $(stat -c %s "$OUT/m4-stub.bin") bytes; vector[0] 0x$(word "$OUT/m4-stub.bin" 0); vector[1] (reset) 0x$m4_reset"
+  in_range "$m4_reset" 0x08100040 0x08100100 || bad "m4-stub: reset vector 0x$m4_reset"
+  [ $((16#$m4_reset & 1)) -eq 1 ] || bad "m4-stub: reset vector lacks the Thumb bit"
+fi
 
 echo "== host: expected lines (calls, frames, clocks, hash) against expected-hashes.txt"
 (cd host && locked cargo test --release)
@@ -159,7 +170,7 @@ echo "== host: expected lines (calls, frames, clocks, hash) against expected-has
 # compare its report with expected-hashes.txt.
 qemu() {
   echo "== QEMU mps2-an500: $1 (features: $2)"
-  locked cargo build --release --features "$2"
+  locked cargo build --release --no-default-features --features "$BOARD,$2"
   cp "target/$TARGET/release/h7-bench" "$OUT/$1.elf"
   locked timeout 900 qemu-system-arm -M mps2-an500 -cpu cortex-m7 -display none -monitor none \
     -serial none -semihosting-config enable=on,target=native -kernel "$OUT/$1.elf" \

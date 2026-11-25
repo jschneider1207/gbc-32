@@ -1,4 +1,5 @@
-//! NUCLEO-H755ZI-Q measurement spike: Cortex-M7 cycles per emulated frame
+//! STM32H7 Nucleo measurement spike (NUCLEO-H753ZI or NUCLEO-H755ZI-Q):
+//! Cortex-M7 cycles per emulated frame
 //! for the bench workloads, printed on the ST-LINK virtual COM port. See
 //! README.md for the board facts and their sources.
 //!

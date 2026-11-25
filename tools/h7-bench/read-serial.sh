@@ -4,12 +4,13 @@
 #
 #   ./read-serial.sh [seconds]
 #
-#   H7_COM   the Windows port (default COM3, "STMicroelectronics STLink
-#            Virtual COM Port" in Device Manager)
+#   H7_COM   the Windows port (default COM5, the NUCLEO-H753ZI's
+#            "STMicroelectronics STLink Virtual COM Port" in Device
+#            Manager; the H755 board was COM3)
 set -euo pipefail
 
 secs=${1:-10}
-port=${H7_COM:-COM3}
+port=${H7_COM:-COM5}
 case "$secs" in ''|*[!0-9]*) echo "usage: read-serial.sh [seconds]" >&2; exit 2;; esac
 case "$port" in COM[0-9]|COM[0-9][0-9]) ;; *) echo "read-serial.sh: bad port $port" >&2; exit 2;; esac
 

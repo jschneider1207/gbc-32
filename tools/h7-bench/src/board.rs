@@ -1,10 +1,23 @@
-//! NUCLEO-H755ZI-Q (MB1363, STM32H755ZIT6) bring-up: supply, clock, LEDs,
-//! the ST-LINK virtual COM port, caches, TCM placement, the cycle counter
-//! and the fault handlers. Cortex-M7 only; see README.md "Dual core" for
-//! what the Cortex-M4 does meanwhile.
+//! Board bring-up: supply, clock, LEDs, the ST-LINK virtual COM port,
+//! caches, TCM placement, the cycle counter and the fault handlers. Two
+//! boards, chosen by a cargo feature (README.md "Boards"):
 //!
-//! Sources: UM2408 Rev 6 (the board), RM0399 Rev 5 (the MCU), DS12919 Rev 3
-//! (the STM32H755xI datasheet).
+//! - `h753`: NUCLEO-H753ZI (MB1364, STM32H753ZIT6), single core, LDO
+//!   supply. Sources: UM2407 Rev 6 (the board), RM0433 Rev 9 (the MCU),
+//!   DS12117 Rev 10 (the STM32H753xI datasheet).
+//! - `h755`: NUCLEO-H755ZI-Q (MB1363, STM32H755ZIT6), dual core, direct
+//!   SMPS supply; Cortex-M7 only, see README.md "Dual core" for what the
+//!   Cortex-M4 does meanwhile. Sources: UM2408 Rev 6, RM0399 Rev 5,
+//!   DS12919 Rev 3.
+//!
+//! LEDs, the UART pins and every register this file touches outside
+//! PWR_CR3 are at the same places on both (UM2407 sections 7.6.1 and
+//! 7.6.5; RM0433 and RM0399 register maps).
+
+#[cfg(all(feature = "h753", feature = "h755"))]
+compile_error!("features h753 and h755 exclude each other");
+#[cfg(not(any(feature = "h753", feature = "h755")))]
+compile_error!("one board feature is needed: h753 or h755");
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -12,11 +25,42 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use cortex_m::peripheral::{DWT, SCB};
 use cortex_m_rt::exception;
+#[cfg(feature = "h755")]
 use stm32h7::stm32h747cm7 as pac;
+#[cfg(feature = "h753")]
+use stm32h7::stm32h753v as pac;
+
+#[cfg(feature = "h753")]
+const BOARD: &str = "NUCLEO-H753ZI";
+#[cfg(feature = "h755")]
+const BOARD: &str = "NUCLEO-H755ZI-Q";
 
 // --- Supply --------------------------------------------------------------
 //
-// THE item that can lock the board. UM2408 section 7.4.8, Table 10: the
+// THE item that can lock the board. The two boards need different values:
+// the bits of PWR_CR3's low byte do not even mean the same on the two
+// chips (bit 2 is SDEN on the H755 and SCUEN on the H753).
+//
+// NUCLEO-H753ZI (`h753`). The STM32H753 has no SMPS: its core supply is the
+// LDO or an external regulator in bypass (RM0433 section 6.4, Figure 20 and
+// Table 34 "Supply configuration control"). The MB1364 board powers VCORE
+// from the LDO (UM2407 has no SMPS or bypass option; VCAP has its
+// capacitors only). Table 34, row "LDO supply": LDOEN = 1, BYPASS = 0.
+// PWR_CR3 (RM0433 section 6.8.4, offset 0x0C): BYPASS bit 0, LDOEN bit 1,
+// SCUEN bit 2 ("single write enabled to supply configuration"), bits 7:3
+// reserved, kept as read; reset value 0x06 (rev Y) or 0x46 (rev V), i.e.
+// the default configuration is already the LDO. So the low three bits
+// become 0b010, exactly ST's `HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY)`
+// (`MODIFY_REG(PWR->CR3, PWR_CR3_SCUEN | PWR_CR3_LDOEN | PWR_CR3_BYPASS,
+// PWR_CR3_LDOEN)`). Section 6.8.4: the low byte "is written once after
+// POR"; an invalid LDOEN/BYPASS combination is ignored, locks the register
+// and leaves ACTVOSRDY low until a power cycle; the write must come before
+// any VOS or clock change. BYPASS = 1 (no core supply on this board) is the
+// value that must never be written. Section 6.4.1 step 5 and its a/b: no
+// RAM writes and no VOS change until ACTVOSRDY (PWR_CSR1 bit 13, section
+// 6.8.2) reads 1; PWR at 0x5802_4800 (section 2.3.2, Table 8).
+//
+// NUCLEO-H755ZI-Q (`h755`). UM2408 section 7.4.8, Table 10: the
 // board's default is "Supply config 2: Internal SMPS only" (SMPS on, LDO
 // off), and its warning says the firmware must select the matching
 // configuration, `PWR_DIRECT_SMPS_SUPPLY` in ST's HAL, or "after the reset,
@@ -48,6 +92,7 @@ use stm32h7::stm32h747cm7 as pac;
 //
 // PWR is at 0x5802_4800 (RM0399 section 2.3, memory map; checked against
 // the PAC in `init`).
+#[cfg(feature = "h755")]
 core::arch::global_asm!(
     ".section .text.__pre_init, \"ax\", %progbits",
     ".global __pre_init",
@@ -70,17 +115,46 @@ core::arch::global_asm!(
     ".size __pre_init, . - __pre_init",
 );
 
+// The H753 version: the same sequence with RM0433's bits (see above).
+#[cfg(feature = "h753")]
+core::arch::global_asm!(
+    ".section .text.__pre_init, \"ax\", %progbits",
+    ".global __pre_init",
+    ".type __pre_init, %function",
+    ".thumb_func",
+    "__pre_init:",
+    "    ldr r0, =0x58024800", // PWR
+    "    ldr r1, [r0, #0x0C]", // PWR_CR3
+    "    bic r1, r1, #0x07",   // SCUEN, LDOEN, BYPASS
+    "    orr r1, r1, #0x02",   // LDOEN alone: LDO supply, update locked
+    "    str r1, [r0, #0x0C]",
+    "    ldr r2, =2000000",
+    "1:  ldr r1, [r0, #0x04]", // PWR_CSR1
+    "    tst r1, #0x2000",     // ACTVOSRDY
+    "    bne 2f",
+    "    subs r2, r2, #1",
+    "    bne 1b",
+    "2:  bx lr",
+    "    .ltorg",
+    ".size __pre_init, . - __pre_init",
+);
+
 const PWR_BASE: usize = 0x5802_4800;
-/// PWR_CR3 supply bits (see above) and their value for direct SMPS.
-const CR3_SUPPLY_MASK: u32 = 0x3F;
-const CR3_DIRECT_SMPS: u32 = 0x04;
+/// PWR_CR3 supply bits (see above), the value this board needs, and its
+/// name in the banner.
+#[cfg(feature = "h755")]
+const CR3_SUPPLY: (u32, u32, &str) = (0x3F, 0x04, "direct-smps");
+#[cfg(feature = "h753")]
+const CR3_SUPPLY: (u32, u32, &str) = (0x07, 0x02, "ldo");
 
 // --- Clock ---------------------------------------------------------------
 
 /// Phase A (default): the 64 MHz HSI the chip resets to (RM0399 section
-/// 9.5.6 and 9.7.2: the HSI is the system clock after reset, HSIDIV /1), every
-/// prescaler /1, voltage scale VOS3 and the flash latency left at their
-/// reset values. Nothing clock-related is written.
+/// 9.5.6 and 9.7.2, RM0433 section 8.5.6: the HSI is the system clock after
+/// reset, HSIDIV /1), every prescaler /1, voltage scale VOS3 and the flash
+/// latency left at their reset values. Nothing clock-related is written.
+/// VOS3 allows 200 MHz on the H753 (DS12117 Table 111) and 64 MHz is far
+/// inside the H755's VOS3 range too.
 #[cfg(not(feature = "pll"))]
 pub const CPU_HZ: u32 = 64_000_000;
 #[cfg(not(feature = "pll"))]
@@ -94,6 +168,14 @@ const CLOCK_NAME: &str = "hsi64";
 /// 392 and not 400: the HSI is the reference (no dependency on the
 /// ST-LINK's 8 MHz MCO) and its tolerance of about 1% must stay under the
 /// limit.
+///
+/// H753 (LDO supply): DS12117 Rev 10 Table 111 (rev V): VOS1 allows a
+/// 400 MHz CPU and a 200 MHz AHB/AXI clock (VOS0, 480 MHz, only on rev V);
+/// rev Y's limit is 400 MHz at VOS1 too (DS12117 feature list note 3). So
+/// the same 392 MHz tree at VOS1 is valid on either revision, with the same
+/// flash setting (RM0433 Table 17: AXI in ]185; 210] MHz at VOS1 is 2 wait
+/// states, WRHIGHFREQ = 0b10). PWR_D3CR VOS: RM0433 section 6.8.6, 0b11 =
+/// scale 1. VOS0 is not used: on the H753 it also needs SYSCFG ODEN.
 #[cfg(feature = "pll")]
 pub const CPU_HZ: u32 = 392_000_000;
 #[cfg(feature = "pll")]
@@ -194,6 +276,8 @@ fn clock_up(pwr: &pac::PWR, rcc: &pac::RCC, flash: &pac::FLASH) -> bool {
 //
 // UM2408 section 7.6: LD1 green on PB0 (default solder bridges: SB54 on,
 // SB65 off), LD2 yellow on PE1, LD3 red on PB14; "on when the I/O is HIGH".
+// UM2407 section 7.6.1 (H753 board): the same pins, LD1 on PB0 with SB39
+// on and SB47 off.
 // LD1 is the liveness sign, LD2 is on once `init` is through, LD3 means a
 // fault.
 
@@ -237,7 +321,8 @@ pub fn wait_since(t0: u32, n: u32) {
 
 /// USART3 transmitter, polled. UM2408 section 7.10 and Table 12: PD8
 /// (USART3 TX) and PD9 (USART3 RX) go to the ST-LINK virtual COM port by
-/// default (SB16 and SB17 on). DS12919 alternate-function table: both are
+/// default (SB16 and SB17 on); UM2407 section 7.6.5 and Table 10 (H753
+/// board): the same pins, SB19 and SB12 on. DS12919 alternate-function table: both are
 /// AF7. 115200 8N1. Only TX is used; PD9 is left alone.
 pub struct Uart(());
 
@@ -275,10 +360,11 @@ fn uart_init() -> bool {
     let (rcc, gpiod, usart) =
         unsafe { (&*pac::RCC::ptr(), &*pac::GPIOD::ptr(), &*pac::USART3::ptr()) };
     rcc.ahb4enr.modify(|_, w| w.gpioden().set_bit());
-    // USART3 is in the D2 domain, the Cortex-M4's. Enabling its clock from
-    // this CPU allocates it to CPU1, which keeps D2 clocked whatever the
-    // M4 does (RM0399 section 9.5.10 "Peripheral allocation"); D2CKRDY
-    // tells when the domain's clocks run.
+    // USART3 is in the D2 domain, the Cortex-M4's on the H755. Enabling its
+    // clock from this CPU allocates it to CPU1, which keeps D2 clocked
+    // whatever the M4 does (RM0399 section 9.5.10 "Peripheral allocation";
+    // RM0433 section 8.5.10 on the H753); D2CKRDY (RCC_CR bit 15, both
+    // manuals) tells when the domain's clocks run.
     rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
     let d2_ok = wait_for(4_000_000, || rcc.cr.read().d2ckrdy().bit_is_set());
     gpiod.afrh.modify(|_, w| w.afr8().af7());
@@ -441,12 +527,11 @@ impl Board {
         let cpuid = unsafe { (*cortex_m::peripheral::CPUID::PTR).base.read() };
         let cr3 = pwr.cr3.read().bits();
         let csr1 = pwr.csr1.read();
-        let opt = flash.optsr_cur().read();
         let out = &mut self.uart;
         // The UART writer never fails.
         let _ = writeln!(
             out,
-            "\r\nh7bench v1 banner board=NUCLEO-H755ZI-Q image={image} placement={PLACEMENT} \
+            "\r\nh7bench v1 banner board={BOARD} image={image} placement={PLACEMENT} \
              clock={CLOCK_NAME} cpu_hz={CPU_HZ} baud={BAUD}\r"
         );
         let _ = writeln!(
@@ -455,8 +540,8 @@ impl Board {
             csr1.bits(),
             pwr.d3cr.read().bits(),
             u8::from(csr1.actvosrdy().bit_is_set()),
-            if cr3 & CR3_SUPPLY_MASK == CR3_DIRECT_SMPS {
-                "direct-smps"
+            if cr3 & CR3_SUPPLY.0 == CR3_SUPPLY.1 {
+                CR3_SUPPLY.2
             } else {
                 "MISMATCH"
             }
@@ -490,13 +575,24 @@ impl Board {
             self.tcm_boot.1,
             cortex_m::register::msp::read()
         );
+        // Read only: this firmware never changes an option byte.
+        #[cfg(feature = "h755")]
+        {
+            let opt = flash.optsr_cur().read();
+            let _ = writeln!(
+                out,
+                "h7bench v1 dualcore optsr={:#010x} bcm7={} bcm4={} boot_c2={}\r",
+                opt.bits(),
+                u8::from(opt.boot_cm7().bit_is_set()),
+                u8::from(opt.boot_cm4().bit_is_set()),
+                u8::from(rcc.gcr.read().boot_c2().bit_is_set())
+            );
+        }
+        #[cfg(feature = "h753")]
         let _ = writeln!(
             out,
-            "h7bench v1 dualcore optsr={:#010x} bcm7={} bcm4={} boot_c2={}\r",
-            opt.bits(),
-            u8::from(opt.boot_cm7().bit_is_set()),
-            u8::from(opt.boot_cm4().bit_is_set()),
-            u8::from(rcc.gcr.read().boot_c2().bit_is_set())
+            "h7bench v1 options optsr={:#010x}\r",
+            flash.optsr_cur().read().bits()
         );
     }
 }

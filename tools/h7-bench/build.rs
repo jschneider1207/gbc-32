@@ -19,17 +19,26 @@ const SYNTH: [&str; 4] = ["worst-case", "cgb-raster", "dmg-raster", "event-storm
 const CPU_INSTRS_DEFAULT: &str = "/home/jess/gbc-32/test-roms/blargg/cpu_instrs/cpu_instrs.gb";
 const ITCM_SET: &str = "../../perf/itcm-sections.txt";
 
-/// RM0399 Rev 5, section 2.3 "Memory organization" (memory map): flash bank
-/// 1 at 0x0800_0000 (1 MB; bank 2 at 0x0810_0000 is the Cortex-M4's default
-/// boot address, section 2.6 Table 9, so the M7 image must stay out of it),
-/// ITCM 64 KB at 0, DTCM 128 KB at 0x2000_0000, AXI SRAM 512 KB at
-/// 0x2400_0000.
+/// NUCLEO-H755ZI-Q. RM0399 Rev 5, section 2.3 "Memory organization" (memory
+/// map): flash bank 1 at 0x0800_0000 (1 MB; bank 2 at 0x0810_0000 is the
+/// Cortex-M4's default boot address, section 2.6 Table 9, so the M7 image
+/// must stay out of it), ITCM 64 KB at 0, DTCM 128 KB at 0x2000_0000, AXI
+/// SRAM 512 KB at 0x2400_0000.
 ///
 /// ITCM starts at 0x100 here: nothing is placed at address 0, so the copy
 /// loop never forms a null pointer and a null function pointer does not land
 /// on code.
 const MEM_H755: &str = "\
   FLASH : ORIGIN = 0x08000000, LENGTH = 1024K
+  ITCM  : ORIGIN = 0x00000100, LENGTH = 0xFF00
+";
+/// NUCLEO-H753ZI. RM0433 Rev 9, section 2.3.2, Table 7 "Memory map and
+/// default device memory area attributes": flash bank 1 at 0x0800_0000 and
+/// bank 2 at 0x0810_0000 (1 MB each, contiguous; single core, so the image
+/// may use both), ITCM 64 KB at 0, DTCM 128 KB at 0x2000_0000, AXI SRAM
+/// 512 KB at 0x2400_0000: the same RAM map as the H755.
+const MEM_H753: &str = "\
+  FLASH : ORIGIN = 0x08000000, LENGTH = 2048K
   ITCM  : ORIGIN = 0x00000100, LENGTH = 0xFF00
 ";
 const RAM_DTCM: &str = "\
@@ -127,7 +136,8 @@ fn memory_x() -> String {
         format!("MEMORY {{\n{MEM_QEMU}}}\n{AXI_SECTION}")
     } else {
         let ram = if feature("dtcm") { RAM_DTCM } else { RAM_AXI };
-        format!("MEMORY {{\n{MEM_H755}{ram}}}\n{AXI_SECTION}")
+        let mem = if feature("h755") { MEM_H755 } else { MEM_H753 };
+        format!("MEMORY {{\n{mem}{ram}}}\n{AXI_SECTION}")
     };
     if feature("itcm") {
         // The hot set runs from ITCM and is loaded from flash; main copies
@@ -193,6 +203,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=H7_BENCH_ITCM_DROP");
 
     let (itcm, dtcm, qemu) = (feature("itcm"), feature("dtcm"), feature("qemu"));
+    assert!(
+        feature("h753") != feature("h755"),
+        "exactly one board feature: h753 or h755 (build.sh: H7_BENCH_BOARD)"
+    );
     assert!(!(itcm && !dtcm), "feature `itcm` needs `dtcm`");
     assert!(
         !(qemu && (feature("selftest") || feature("pll"))),

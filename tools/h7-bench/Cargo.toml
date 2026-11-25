@@ -1,6 +1,6 @@
 [package]
 name = "h7-bench"
-description = "NUCLEO-H755ZI-Q measurement spike: Cortex-M7 cycles per emulated frame"
+description = "NUCLEO-H753ZI (or NUCLEO-H755ZI-Q) measurement spike: Cortex-M7 cycles per emulated frame"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.100"
@@ -19,6 +19,13 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [features]
+# The board (README "Boards"); exactly one. build.sh picks it from
+# H7_BENCH_BOARD (default h753) and passes --no-default-features.
+default = ["h753"]
+# NUCLEO-H753ZI (MB1364, STM32H753ZIT6): single core, LDO supply.
+h753 = ["stm32h7/stm32h753v"]
+# NUCLEO-H755ZI-Q (MB1363, STM32H755ZIT6): dual core, direct SMPS supply.
+h755 = ["stm32h7/stm32h747cm7"]
 # Placement (README "Placements"). None: code in flash, data in AXI SRAM.
 # Stack, statics and the core's lookup tables in DTCM.
 dtcm = []
@@ -39,9 +46,10 @@ cortex-m = "0.7.7"
 # `paint-stack`: the startup code fills the unused stack with 0xCCCCCCCC, so
 # the report can say how deep it went (src/stack.rs).
 cortex-m-rt = { version = "0.7.5", features = ["paint-stack"] }
-# PAC only, no HAL. The H745/H755 share the H747 register description
-# (RM0399 covers all four).
-stm32h7 = { version = "0.15.1", features = ["stm32h747cm7"] }
+# PAC only, no HAL; the device feature comes from the board feature. The
+# H745/H755 share the H747 register description (RM0399 covers all four);
+# the H753 uses the H753 one for silicon revision V (RM0433).
+stm32h7 = "0.15.1"
 cortex-m-semihosting = { version = "0.5", optional = true }
 
 # As the root workspace's release profile (root Cargo.toml): default
