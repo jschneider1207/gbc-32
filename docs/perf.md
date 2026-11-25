@@ -782,6 +782,42 @@ read side, `read_during_dma` and `read_oam` into `read_high`, and the
 measured alone), and L7 (timer lazy whenever IF bit 2 is set), not
 tried.
 
+### `Speed` enum (M10, review D4 first half, fbfdf96)
+
+One `speed::Speed` replaces the `double: bool`, M-cycle-length and
+shift-count forms of the CPU speed; `Hot::mcycle` stays the number the
+tick reads. Fingerprint-identical to `main` (63ff596). Total gbc-core
+`.text` on thumbv7em: 116,358 -> 115,792 B (-566).
+
+| Line | Ir, `main` | Ir, fbfdf96 | Delta |
+|---|---|---|---|
+| cpu_instrs | 1,264,181,920 | 1,264,344,877 | +0.013% |
+| cgb_sound | 890,360,439 | 890,523,572 | +0.018% |
+| cgb-acid2 | 650,060,048 | 650,309,926 | +0.038% |
+| event-storm | 175,085,826 | 175,300,379 | +0.123% |
+| dma-storm | 382,222,944 | 381,935,612 | -0.075% |
+| halt-irq | 263,062,919 | 263,308,262 | +0.093% |
+| worst-case | 286,755,768 | 286,951,099 | +0.068% |
+| cgb-raster | 267,389,069 | 267,388,402 | -0.000% |
+| apu-writes | 77,367,946 | 77,400,848 | +0.043% |
+| dmg-raster | 185,851,400 | 185,765,879 | -0.046% |
+
+(The commit body's "other nine within +-0.02%" was an intermediate
+build's figure; these are the tip's.) Notes:
+
+- With `dma_conflict` and `OamDma::due` taking a `Speed` from
+  `Hot::speed()`, dma-storm was +1.74%; with only `Ctx::dma_sync`'s
+  `due` left on it, +0.45% (4 Ir per call, 359,511 calls). Both now take
+  the shift from the tick's word (`Hot::mcycle_shift`).
+- The event-storm and halt-irq rise is one instruction per call in
+  `Ctx::schedule_serial` (+99,086 Ir over 99k calls) and in `boundary`
+  (+117,526): the functions `set_countdown` is inlined into. It is not
+  the timer's field (`Timer::shift: u32` restored: 175,302,438), nor
+  `set_countdown`'s text, nor either DMA path taken back one at a time
+  (175,300,379 each); an intermediate build of the same branch measured
+  175,083,770 (-0.001%). Register allocation moving with the unit
+  layout (review D2a, `codegen-units`), as far as it was traced.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change
