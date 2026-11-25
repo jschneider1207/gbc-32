@@ -444,9 +444,9 @@ Open M10 review items (Stage 1). IDs are rows of `docs/reviews/stage1-m10.md`; t
 - [ ] M10 outside-the-bound mitigations (human decides, numbers in docs/perf.md "Outside the bound"): APU early return for powered-off and unused-register writes, APU write coalescing, skipping BGP/OBPx and same-value PPU writes in CGB mode; adversarial-only loops (speed switch, DIV/TAC) have none worth it
 - [ ] M10 filter review low: `fir`'s `>> 10` floors (about -0.5 LSB bias on non-steady signals, `fir(-x) != -fir(x)` by 1); adding 512 before the shift changes the output and the ratchet values
 - [ ] M10 `--long` check: `ANCHOR_TOLERANCE` (23) rejects legitimate offsets of 24-31 (STOP wake + CALL); relaxing it to `OVERSHOOT` needs the human; four workloads (cgb-acid2, cpu_instrs, cgb_sound, rtc3test) get no frame check
-- [ ] M10 close review C-P3 (low): refresh the per-function size report (`Ctx::div_reset` is gone, 32 of 61 lines are over, `Apu::flush` and `hold_fetch` have no line)
+- [x] M10 close review C-P3 (low; e57aeb2: `div_reset_as` at the old 540, `Apu::flush` and `hold_fetch` lines added, no figure raised): refresh the per-function size report (`Ctx::div_reset` is gone, 32 of 61 lines are over, `Apu::flush` and `hold_fetch` have no line)
 - [ ] M10 close review C-T6 (low): `tools/h7-bench` is its own workspace, outside the gate's fmt/clippy/test: add its fmt and clippy (and a `--target` build) to the gate (stricter)
-- [ ] M10 close review C-T7 (low): `acceptance/README.md` "Gate" list omits the SM83, ITCM-set and invariance steps `gate-stage1.sh` runs: add them (stricter)
+- [x] M10 close review C-T7 (low; c07fb77, c8977be): `acceptance/README.md` "Gate" list omits the SM83, ITCM-set and invariance steps `gate-stage1.sh` runs: add them (stricter)
 - [ ] M10 close review C-V5 (low): double speed, the STAT phase-2 rule at a line's dot 0 does not look back to the previous line's dot 455 (benign today): make it consistent or state why not
 - [ ] M10 close review C-H1 (low): double speed with `ds_delay`, a DIV reset on the edge clock can drop a delayed frame-sequencer step (`bus/apu_io.rs` `apu_div_reset`, `set_div_apu_deadline`): test and fix against SameBoy
 - [ ] M10 close review C-H2 (low): STOP mode defers a pending sweep event until wake (`bus/stop.rs`): check against SameBoy and fix or tag

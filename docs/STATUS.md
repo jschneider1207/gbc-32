@@ -7,9 +7,11 @@
 - **Milestone:** M10 (in-depth review) is closed: `stage1-m10` (b6b59e7),
   gate exit 0 on that commit. M1-M9 tagged likewise. All Stage 1
   milestones are tagged; declaring the stage complete is the human's.
-- **Last updated:** 2026-11-24, session 18 (log
-  `logs/2026-11-24-18-m10-structure-close-review.md`; session 17:
-  `logs/2026-11-24-17-m10-perf-bench.md`).
+- **Last updated:** 2026-11-25, session 19 (log
+  `logs/2026-11-25-19-stage1-lows.md`; session 18:
+  `logs/2026-11-24-18-m10-structure-close-review.md`).
+- **Model (human, 2026-11-25): Opus is fine for the remaining Stage 1
+  work**; the Fable-only rule below applied to M10, which is closed.
 - **Model (human, 2026-11-24): the main session for the rest of M10 must
   be Fable (`claude-fable-5-2`), as session 16 was.** If the main session
   is running on another model, stop and tell the human before doing any
@@ -62,9 +64,9 @@ reviews and, at the end, the "Milestone-close review (session 18)" table
 5. **Next, the human's:** declare Stage 1 complete (or not); the
    real-game checklist at the bottom of the plan; the open decisions
    under "Needs human". For an agent with nothing else unblocked: the
-   open M10 plan tasks (lows), most useful first: the stale per-function
-   size report (C-P3), `acceptance/README.md` gate-step list (C-T7), the
-   close-review lows C-H1..C-H5. Start a fresh session.
+   open M10 plan tasks (lows), most useful first: the close-review lows
+   C-H1..C-H5 (C-P3 done e57aeb2, C-T7 done c07fb77/c8977be in session
+   19). Start a fresh session.
 
 Agent-run check results were spot-checked by diff (comment-only filters,
 file lists), not re-run; the full gate in step 3 is the independent run.
@@ -133,8 +135,11 @@ Working rules that matter here:
 Open (M10, session 18):
 - **New figure for the APU budget:** `docs/perf.md`'s 230k Ir/frame
   "channels and mixing" budget no longer holds with the output filter
-  (ADR 0035: about +229k Ir/frame on the worst case, +64k on silent
-  programs). Report-only today.
+  (ADR 0035). Re-measured session 19 (docs/perf.md "Re-measured"):
+  (a) 402.8k Ir/frame (427.0k counting both `apu_sync` entries; the old
+  224.1k's method is ambiguous on that), (b) 731.1 Ir per write (under
+  950). Agent proposal: (a) 450k, (b) keep 950 or tighten to 770.
+  Report-only today.
 - **Costs of the filter beyond the worst case** (told to the human, no
   answer needed unless they object): apu-writes +33.6%, halt-irq +14.6%,
   cgb-acid2 +10.6%. The filter saturates to i16 (unity gain kept; only a

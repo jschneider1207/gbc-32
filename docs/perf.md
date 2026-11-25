@@ -169,6 +169,18 @@ write (884.6 at 117461b, `synth:apu-writes` minus its `@hram` control).
 The overall bar, `synth:worst-case` <= 4.02 M Ir/frame (now with ~146
 NR50 writes/frame, APU share ~353k), stays the real guard.
 
+**Re-measured (session 19, 2026-11-25, at c07fb77, check-bench method).**
+(a) channels and mixing: 402.8k Ir/frame, `Ctx::apu_sync` inclusive under
+`div_apu_event` (48,121,826 Ir / 119.455 frames), on a scratch
+`worst-case` variant with no APU register writes (mask F, plain STAT
+handler, timer handler writing HRAM, as `worst-case@0` but with the
+channels on); 427.0k with the second `apu_sync` entry (from
+`Emulator::run`) added. The 224.1k figure's choice between the two is not
+recorded. (b) APU register writes: 731.1 Ir per write (`synth:apu-writes`
+103,354,637 minus `@hram` 91,355,345, over 16,411 `write_apu` calls): the
+control now pays the doubled window cost too. `synth:worst-case` 2.630 M
+Ir/frame, APU share 652.7k. New figures are the human's (STATUS).
+
 **Output filter (ADR 0035, 2026-11-24).** The output is now 64-clock
 window sums and an 8-tap FIR at half rate instead of 128-clock averages
 (`apu/mix.rs`; alias levels in `docs/reference/audio-aliasing.md`). The
