@@ -3,181 +3,127 @@
 > Read this first every session. Rewrite it (don't append) at the end of
 > each session so a fresh session can pick up from here.
 
-- **Stage:** 1 is **COMPLETE** (declared by the human, 2026-11-25). Last
-  full gate pass: `stage1-m10` (b6b59e7). Stage 2 (STM32H7 platform
-  layer, `README.md` §2) is next and has **no plan yet**: the first task is
-  drafting `docs/plan/stage-2.md` for the human's approval.
-- **Dev-board clock (human, 2026-11-25, D11):** Stage 2 runs the NUCLEO-H753ZI at **472 MHz from the HSI** (PLL1 64 MHz /4 x59 /2, VOS0 via ODEN, AXI 236 MHz), not 480 MHz from the ST-LINK MCO: the MCO measured 8.0644 MHz, so the CPU ran at 483.9 MHz, out of spec. Figures: real-time frame **7,902,557 cycles**, 50% report line **3,951,279**.
-- **Last updated:** 2026-11-25, session 20 (log
-  `logs/2026-11-25-20-stage1-complete.md`; session 19:
-  `logs/2026-11-25-19-stage1-lows.md`).
-- **Model (human, 2026-11-25): Opus is fine for the remaining Stage 1
-  work**; the Fable-only rule below applied to M10, which is closed.
-- **Model (human, 2026-11-24): the main session for the rest of M10 must
-  be Fable (`claude-fable-5-2`), as session 16 was.** If the main session
-  is running on another model, stop and tell the human before doing any
-  work. Subagents run on whatever model the main (Fable) session judges
-  best for each task.
+- **Stage:** 1 is **COMPLETE** (human, 2026-11-25; last full gate pass tag
+  `stage1-m10`). **Stage 2 (STM32H753 firmware) is in progress: M0 done**
+  (gate passed, milestone review fixed, tag `stage2-m0`). M1 is next.
+  Plan: `docs/plan/stage-2.md` (approved 2026-11-25; decisions D1-D11).
+- **Dev-board clock (human, 2026-11-25, D11):** NUCLEO-H753ZI at **472 MHz
+  from the HSI** (DIVM1 5 -> 12.8 MHz, fractional N 73.75, AXI 236 MHz, APB
+  118 MHz, VOS0 via ODEN, flash 4 WS); measured 473.62 MHz against the LSE.
+  Real-time frame **7,902,557 cycles**; 50% report line **3,951,279**
+  (reported, not gated). The ST-LINK MCO (HSE bypass) is 8.0644 MHz and is
+  not used.
+- **M0 results** (itcm-dtcm, 472 MHz; `tools/h7-bench/README.md`,
+  `docs/perf.md`): worst-case 41.7% / 42.2% of a frame (84.4% of the report
+  line, max); cpu_instrs 22.4% max; event-storm 25.7% max (the Stage 1
+  event-density task is closed). Only storm-ppu/apu/div/spsw exceed a frame
+  (outside the bound).
+- **Last updated:** 2026-11-25, session 21 (log
+  `logs/2026-11-25-21-stage2-m0.md`; session 20:
+  `logs/2026-11-25-20-stage1-complete.md`).
+- **Model (human, 2026-11-25):** Opus is fine; the Fable-only rule applied
+  to Stage 1 M10, which is closed.
 
-## Next up: Stage 2 M0 (480 MHz measurement)
+## Next up: Stage 2 M1 (firmware skeleton, link-time placement, host-side gate)
 
-The Stage 2 plan is `docs/plan/stage-2.md`, approved by the human on
-2026-11-25. Decisions D1-D10 are in its "Decisions" section. Key points:
-- The dev-board performance vs the 50% bar is **report-only**. The README
-  target now applies to the H735 at 550 MHz. Gated: real time at 480 MHz
-  and the +3% cycle ratchet.
-- Input: the shield joystick is the D-pad; all 8 buttons can also come
-  from the PC over serial. Saves travel PC <-> board over serial (no QSPI
-  saves).
-- Crates are per board: `gbc-nucleo-h753` (Stage 2), later `gbc-handheld`.
-  Shared logic lives in `gbc-firmware`, the serial protocol in `gbc-link`, the PC side in `tools/gbc-pc` (ADR 0005 amendment).
+Tasks (details and acceptance in `docs/plan/stage-2.md` M1):
+1. **First: the crate-layout ADR** (next free number **0036**): per-board
+   firmware crates (`gbc-nucleo-h753`, later `gbc-handheld`), `gbc-firmware`
+   shared logic, `gbc-link` serial protocol, PAC-only, one `memory.x` from
+   `perf/itcm-sections.txt`, board module boundary.
+2. `gbc-nucleo-h753` boots at 472 MHz, MPU, I/D-cache on, fault handler with
+   UART report; banner prints the LSE-measured clock (D11).
+3. `headless` image (core in the M6-target placement, ROM from internal
+   flash, scripted input, per-frame video hash + audio hash over UART) and
+   its host counterpart in `tools/`; QEMU (`mps2-an500`) smoke of the same.
+4. `scripts/check-itcm-elf.sh` (post-link ITCM check, mutation-checked);
+   settle the provisional size gate on the firmware link (changing 122,880 B
+   needs the human); name the ~1.7 KB anonymous `.rodata` (C-P7).
+5. `scripts/gate-stage2.sh` host part, plus fmt/clippy/build for
+   `tools/h7-bench`, its `host/`, and `gbc-nucleo-h753` (C-T6); board lock.
 
-1. M0: bring h7-bench up at 480 MHz (VOS0 + ODEN) and measure every
-   placement (see the plan).
-2. Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
-   unplayed checklist rows (Pokémon Crystal, Alone in the Dark) were not
-   required for the sign-off.
+Key plan points: board performance vs the 50% bar is report-only (the README
+target applies to the H735 at 550 MHz); gated are real time and the +3%
+cycle ratchet. Input: shield joystick plus PC over serial; saves travel over
+serial. Shared logic in `gbc-firmware`, protocol in `gbc-link`, PC side in
+`tools/gbc-pc` (ADR 0005 amendment).
 
-## Stage 1 close (history, M10)
+**Risk for M6 (open, decide there):** with the same clock and sources, a
+rebuild moves cycles/frame by about +-2% (code layout), against the planned
++3% on-board ratchet. M6's baseline must say how it handles that.
 
-**Read `docs/reviews/stage1-m10.md` first**: the triage of the eight M10
-reviews and, at the end, the "Milestone-close review (session 18)" table
-(four fresh reviewers over `stage1-m9..2821437`; no high; three mediums).
-
-**State of `main`** (session 18; every item below is merged):
-- Structure: `Speed` enum (5e116e5), line timeline as one table
-  (`ppu/timeline.rs`, 2529ce6), `bus.rs` split into `bus/` (eight
-  modules, 0 B / 0 Ir), test layout (`testkit`, 77b64be), docs and comment
-  sweep (`docs/architecture.md` rewritten, a1a499d), `UNPINNED:` tags +
-  `docs/reference/unpinned.md` + `tests/unpinned.rs` (d900f7b).
-- Behaviour changes, each with a test seen failing: line 0 double-speed
-  write view (ab37d1f); single-speed walk points at 0:5 / 153:13
-  (c598882); speed switch and STOP on AGE's model (2821437, ADR 0020
-  amendment, human approved); output filter box 64 + 8-tap FIR (ADR 0035,
-  human approved); VBlank mode-0 latch and late-LYC-write interrupt dot
-  (d614c28, 4619272, close-review C-V1/C-V2).
-- Perf: object-line summary (86d01ef, C-P1; new gated line
-  `synth:oam-lines`); L7 measured and dropped. Baseline 9030669:
-  worst-case 314.2 M Ir (2.618 M/frame, 65.1% of the 4.02 M line),
-  cpu_instrs 1,327.5 M, `.text` 116,150 B (margin 6,730 B).
-- Gate, stricter only: env overrides unset, eager-sync feature proof,
-  `cargo doc -D warnings` step, `worst-case@0` in the invariance corpus;
-  `--long` frame check rewritten (d017dd5, human approved): frames counted
-  from the first one, each within 23 clocks of its due clock.
-
-**Remaining, in order:**
-1. DONE: `m10-storm` merged (f335f4b). Measured Ir/frame against the
-   4.02 M line: storm-ppu 22.0 M, storm-apu 20.0 M, storm-div 9.65 M,
-   storm-spsw 8.52 M; GDMA 2.35 M is inside. Also merged after the first
-   STATUS rewrite: two more reviews (the filter diff; the gate-check
-   diff) and their fixes: filter tests restored (99f7d4f), `--long`
-   first-frame cap + offset spread + gate refuses stray rustc-flag
-   variables (d1759e7).
-2. DONE: plan box ticked, C-P2 row updated.
-3. DONE: full `./scripts/gate-stage1.sh` on b6b59e7: `GATE PASSED: stage
-   1` (must 86/86, should 40/40, stretch 3437/3461, audio 131/131; the
-   code-size and ITCM steps print their report-only WARNs: a stale
-   `Ctx::div_reset` line and the H753 hot set over by 11,072 B).
-4. DONE: `romtest --update-baseline` wrote an identical
-   `acceptance/results/stage1.json` (nothing to commit); tagged
-   `stage1-m10` at b6b59e7.
-5. **Next, the human's:** declare Stage 1 complete (or not); the
-   real-game checklist at the bottom of the plan; the open decisions
-   under "Needs human". For an agent with nothing else unblocked: the
-   open M10 plan tasks (lows), most useful first: the close-review lows
-   C-H1..C-H5 (C-P3 done e57aeb2, C-T7 done c07fb77/c8977be in session
-   19). Start a fresh session.
-
-Agent-run check results were spot-checked by diff (comment-only filters,
-file lists), not re-run; the full gate in step 3 is the independent run.
+Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
+unplayed checklist rows (Pokemon Crystal, Alone in the Dark). Stage 1 close
+history: `docs/reviews/stage1-m10.md`, tag `stage1-m10`, logs for sessions
+18-20.
 
 **How work is run:** one agent per theme in a scratch worktree under the
-session scratchpad (`git worktree add <scratch>/wt-x -b m10-x main`), every
+session scratchpad (`git worktree add <scratch>/wt-x -b <branch> main`), every
 cargo/valgrind command under `flock -x <scratch>/build.lock` (absolute
 path). The orchestrator rebases the branch on `main`, re-runs clippy,
-tests, `check-code-size.sh`, `check-itcm-set.sh`, `diff-fingerprint.sh main
---audio-buffer 7 --hash-samples`, `check-sync-invariance.sh`, romtest full
-manifest and `check-bench.sh`, then `git merge --ff-only`, removes the
-worktree, and re-records `perf/bench-baseline.txt` after perf merges.
-Correctness fixes need a test seen failing first; refactors must be
-fingerprint-identical. Briefs that worked are in the session transcript
-only; the pattern is: goal, files, constraints, what to measure, exact
-report format, commit trailer.
+tests, and for `gbc-core` changes `check-code-size.sh`, `check-itcm-set.sh`,
+`diff-fingerprint.sh main --audio-buffer 7 --hash-samples`,
+`check-sync-invariance.sh`, romtest full manifest and `check-bench.sh`, then
+`git merge --ff-only`, removes the worktree, and re-records
+`perf/bench-baseline.txt` after perf merges. Correctness fixes need a test
+seen failing first; refactors must be fingerprint-identical. Brief pattern:
+goal, files, constraints, what to measure, exact report format, commit
+trailer. Board: one agent at a time; standing permission to flash and read
+serial (see Needs human).
 
-**Gates now:** total gbc-core `.text` <= 122,880 B (128 KiB ITCM on the
-H735 minus 8 KiB reserve; provisional until a firmware ELF exists); +3% Ir
-vs `perf/bench-baseline.txt`; fuzz under the `checked` profile; invariance
-checks.
-Per-function size lines and the H753 ITCM hot set are report-only (the
-dev-board set is over its figure: expected, WARN only). Release profile:
-`codegen-units = 1` plus
+**Gates now:** `./scripts/gate-stage1.sh` keeps running unchanged (step H2
+of the Stage 2 gate; removing a step needs the human). Total gbc-core
+`.text` <= 122,880 B (128 KiB ITCM on the H735 minus 8 KiB reserve;
+provisional until M1 settles it on a firmware link); +3% Ir vs
+`perf/bench-baseline.txt`; fuzz under the `checked` profile; invariance
+checks. Per-function size lines and the H753 ITCM hot set are report-only.
+Release profile: `codegen-units = 1` plus
 `-C llvm-args=-cgp-max-address-users-to-scan=100000` (human approved).
+Per commit: `cargo fmt`, `clippy`, `test`, plus `gate-stage2.sh --host-only`
+for firmware commits once it exists. `stage2` gate and manifest are proposed
+in the plan, not yet created.
 
 **Human (session 14): the desktop client is a throwaway used to validate
-the core; spend minimal time on it.** Fix only what blocks core validation
-(crashes, lost saves, wrong output). No more smoothness/pacing polish after
-the in-flight present-phase fix. The SameBoy differential harness stays
-worthwhile (it validates the core), at lower priority than M9 ROM fixes.
+the core; spend minimal time on it.** Fix only what blocks core validation.
 
 **Safety (read AGENTS.md "Machine resources"):** never open the Linux
 window under WSLg and never use the GPU from WSL. Window/audio/input smoke
 tests use `scripts/run-windows.sh <rom> --frames N [--out shot.png]` on a
-scratch ROM copy (it forwards `GBC_FRAME_STATS`/`GBC_AUDIO_STATS` via
-WSLENV); short, and only for front-end changes. Windows Update can shut WSL
-down mid-session: commit often.
+scratch ROM copy; short, and only for front-end changes. Windows Update can
+shut WSL down mid-session: commit often.
 
 Desktop front end (`crates/gbc-desktop`): `gbc-desktop <rom> [--scale K]
 [--frames N] [--screenshot out.png] [--dmg-palette auto|gray]
-[--headless]`. Default scale 4. Blank LCD shows white. Raw RGB555->888
-colours, no colour correction (human decision, session 14). Save:
-`<stem>.sav` (ADR 0023). Keys: arrows, Z = B, X = A, Enter = Start, Right
-Shift/Backspace = Select, Esc quits (same game keys as SameBoy).
+[--headless]`. Save: `<stem>.sav` (ADR 0023). Keys: arrows, Z = B, X = A,
+Enter = Start, Right Shift/Backspace = Select, Esc quits.
 
 Working rules that matter here:
 - Every new test is mutation-checked: break the code, see it fail (AGENTS.md).
 - `scripts/diff-fingerprint.sh <rev>` proves "no behavior change" (in a
   worktree pass `--root /home/jess/gbc-32/test-roms`).
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
-  diff-fingerprint, gate) alone. Session 14 used a shared flock
-  (`flock -s` for builds, `flock -x` for heavy steps) on one lock file in
-  the session scratchpad; it serialises heavy steps but doesn't cap builds
-  at 2, so launch at most 2 building agents.
+  diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0030).
-- PPU design size estimates ran ~2-3x low; measure early.
+- ADR numbers: check `docs/decisions/` before committing one (next free 0036).
+- `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
+  report after a flash is often truncated by the ST-LINK. Don't time with
+  the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None. Everything from session 18 is merged by fast-forward and its
-  worktree removed.
+- None.
 
 ## Needs human
 
-Open (session 19, 2026-11-25):
-- **NUCLEO-H753ZI** (with X-NUCLEO-GFX02Z1 shield): measured at both
-  clocks, all placements (bb3c701 + session 19 docs). Standing permission
-  (human, 2026-11-25): agents may flash it and read its serial port (E:,
-  COM5). It dropped off USB once right after a flash (cause unknown;
-  re-plugged by the human, then fine). Board left running
-  `bench-itcm-dtcm-pll`. No answer needed.
-- **H753 worst case is at the 50% bar** (bb3c701, `tools/h7-bench/README.md`):
-  `bench-itcm-dtcm` 3,287,649 mean / 3,324,581 max cycles per frame =
-  50.1% / 50.6% of a 392 MHz frame (measured at 392 MHz) (H755 measured 47.2% at bcd881e; the
-  rise is most likely core changes since, not separated). At 480 MHz
-  (VOS0, allowed on this rev V part, not run) it would be ~41%. The final
-  target (H735, 550 MHz) is unaffected. DECIDED (human, 2026-11-25):
-  target 480 MHz on the dev board (see top). Remove at the next rewrite.
-- **`tools/h7-bench/expected-hashes.txt`** regenerated (human approved,
-  2026-11-25): only worst-case and cpu_instrs changed, to the values the
-  board prints; `host/` test passes. Remove at the next STATUS rewrite.
+Open (session 21, 2026-11-25):
+- **NUCLEO-H753ZI** (X-NUCLEO-GFX02Z1 shield; E: / COM5): standing
+  permission (human, 2026-11-25) for agents to flash it and read its serial
+  port. It dropped off USB once right after a flash (cause unknown;
+  re-plugged, then fine). Left running `bench-itcm-dtcm-pll480` (the 472 MHz
+  clock; the image keeps the `pll480` name, banner `clock=pll472`). No answer
+  needed. The NUCLEO-H755ZI-Q is retired; `tools/h7-bench` keeps an `h755`
+  feature.
 
 Open (M10, session 18):
-- **New figure for the APU budget:** `docs/perf.md`'s 230k Ir/frame
-  "channels and mixing" budget no longer holds with the output filter
-  (ADR 0035). Re-measured session 19 (docs/perf.md "Re-measured"):
-  (a) 402.8k Ir/frame (427.0k counting both `apu_sync` entries; the old
-  224.1k's method is ambiguous on that), (b) 731.1 Ir per write (under
-  950). DECIDED (human, 2026-11-25): (a) 450k, (b) 770 (ADR 0021
-  amendment). Report-only. Remove this item at the next STATUS rewrite.
 - **Costs of the filter beyond the worst case** (told to the human, no
   answer needed unless they object): apu-writes +33.6%, halt-irq +14.6%,
   cgb-acid2 +10.6%. The filter saturates to i16 (unity gain kept; only a
@@ -187,10 +133,8 @@ Open (M10, session 18):
   Ir per 1,000 writes (real players do 70-414 per frame); demos with
   tens of mid-mode-3 PPU writes per line are partly reachable (about
   +2.7 M Ir/frame at 16 per line, estimate). Cheap options are listed in
-  the plan; none is implemented.
-- **`--long` anchor cap:** RESOLVED session 19: kept at 23 (max offset seen
-  16); the real gap was four LCD-off-setup workloads with no frame check,
-  now checked with exact gap counts (d04fc0f, 95adc5a; reviewed).
+  the plan; none is implemented. Measured at 472 MHz (Stage 2 M0): storm-ppu, storm-apu,
+  storm-div and storm-spsw exceed a frame; event-storm is 25.7% max.
 - **Hardware captures that would settle things:** see
   `docs/reference/unpinned.md` (48+ rows). Most likely wrong: STAT during
   OAM DMA, the speed-switch IME-on timer offset (now AGE, 4 T behind
@@ -201,20 +145,9 @@ Open (M10, session 17):
 - **Hardware capture that settles ADR 0034** (WX=0 window grid): CGB,
   WX=0, WY=0, each SCX&7 in 1..=7, window tiles with distinguishable
   columns: the window pixel at screen x=0 is column 7, 7+f, or 8+f.
-- **NUCLEO-H755ZI-Q spike** (human, 2026-11-24): board on USB (drive E:
-  = /mnt/e label NOD_H755ZIQ, VCP COM3), full chip erase done, option
-  bytes BCM7+BCM4 enabled (not to be changed). Standing permission to
-  flash it and read the serial port without asking; CubeProgrammer is
-  the human's recovery tool (connect under reset). Firmware:
-  `tools/h7-bench` (merged, session 17). Board left running
-  `bench-itcm-dtcm-pll`.
-  `qemu-system-arm` 8.2.2 is installed (mps2-an500).
-- **M7 instruction counts without hardware:** the human offered to install
-  `qemu-system-arm` in WSL (`sudo apt install qemu-system-arm`) when they
-  get a chance; then build a bare-metal Cortex-M7 harness (e.g. machine
-  mps2-an500) counting thumb instructions for worst-case and cpu_instrs
-  (TCG insn plugin, or `-icount`). STM32CubeIDE (Windows) has no simulator;
-  useful only once a board exists.
+- **Cortex-M7 cycle proxy:** the board now measures cycles. u32 clocks (B4),
+  dot-stepped mode 3 in the core (E1) and the CPU fetch rework (E5) still
+  wait for Stage 2.
 - **Gate edit made on the retire decision:** the byte-wide ROM load step
   was removed from `gate-stage1.sh` and `check-rom-loads.sh` deleted
   (6d8434f); say if a replacement check is wanted.
@@ -222,13 +155,6 @@ Open (M10, session 17):
   trigger fix); no evidence it was affected.
 
 Open (M10, session 16):
-- **A better M7 cycle proxy without hardware** (review B3): x86 Ir tracks
-  M7 cycles poorly (thumb/x86 instruction ratio 0.9-3.35 per function; all
-  clock math is u64). Options that need a system install: `qemu-system-arm`
-  with an instruction-count plugin, or an i686 valgrind. Or a one-day
-  NUCLEO-H753ZI spike measuring two bench workloads. Until then the 4.02 M
-  line is a belief, and u32 clocks (B4) / dot-stepped mode 3 in the core
-  (E1) / the CPU fetch rework (E5) wait for Stage 2.
 - **HDMA cancel with a non-zero value while a block is already triggered**
   (A4-2, 6094acb): we now copy that one block (gambatte); SameBoy master
   copies value+1 blocks (what we did before). The CGB captures only cancel
@@ -250,7 +176,7 @@ Open (earlier sessions):
 - **Real-game checklist** (plan, bottom; M9 task), on native Windows.
   Session 14: Wario Land 3 and Shantae played (look and sound right);
   Ctrl+C and Esc saves, `.sav` across restart and the audio device switch
-  all passed. Open: smoothness vs SameBoy (see Next up, desktop), a
+  all passed. Open: smoothness vs SameBoy (desktop client), a
   gamepad, Pokémon Crystal (RTC across a restart), Alone in the Dark, Link's
   Awakening DX, and Pokémon Red (DMG compat palette; not in the plan table).
 - Optional, strongest guard against a repeat of the BSOD: set
@@ -318,7 +244,7 @@ Decided in session 16 (2026-11-24, M10 review), human:
   thumb `.text` smaller). Tied to the pinned toolchain: re-check on any
   toolchain bump.
 - Retire ADR 0027 (byte-wide ROM reads): "Yes retire that ADR". Work
-  item 2 under "Remaining".
+  (done).
 - Mappers ("Add HuC1 + HuC3"): Stage 1 adds HuC1 and HuC3 (ADR 0016 scope
   change) on top of a safe failure for every other unsupported mapper
   (caller-visible, no RAM). MBC7 and the rest stay out.
@@ -478,6 +404,7 @@ Context on earlier human decisions:
 - Token cost (session 05): agents must be small, one behavior each.
 - Remote `origin` = `git@github.com:jschneider1207/gbc-32.git`. The human
   pushes; agents never do.
+
 
 ## Environment
 
