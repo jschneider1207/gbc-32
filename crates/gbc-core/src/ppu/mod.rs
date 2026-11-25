@@ -1114,18 +1114,43 @@ impl Ppu {
         // `statChangeTriggersM2IrqCgb`) triggers while `2 < T <= 4(1 + ds)`,
         // our t < 5 single speed, t < 6 double speed (T in half-dots).
         // CGB04C `m2enable/late_enable_ds_1`, `late_enable_m0disable_ds_1`.
-        //
-        // (Review E3, kept as found: line 0 in double speed, dot 4 with
-        // mode 2 selected. The walk's mode-1 source lasts to its pulse at
-        // dot 5 there (`timeline::Src::Line0Mode1`), but every view sees
-        // it end at 4. So a STAT write at 0:4 that leaves modes 1 and 2
-        // selected lowers the line, and the pulse then requests an
-        // interrupt that the walk alone blocks. Not checked against
-        // hardware or a reference.)
         let m2_end = match view {
             View::StatPhase1 if l != 0 => timeline::CMP_WALK + speed.extra(),
             _ => edges::MODE2_SOURCE_END,
         };
+        // Line 0 in double speed, the dot between `Ly3` and the pulse
+        // (t = 4): the walk's rule (`timeline::Src::Line0Mode1`), with
+        // the selects as they are now (a STAT write's: as written). With
+        // mode 2 selected the mode-1 source lasts to the pulse, so a write
+        // landing here that keeps modes 1 and 2 selected (a first phase
+        // or LYC write at t = 4, off the default grid; a second phase
+        // from an access at t = 3, on it) leaves the line up and the
+        // pulse requests nothing. (Review E3: the views saw the source end
+        // at 4 whatever the selects, the line dropped, and the pulse
+        // requested an interrupt no reference has.) SameBoy
+        // (`display.c`, line 0: `mode_for_interrupt` stays 1 until it
+        // becomes 2 for the pulse) has no gap at all; gambatte (behaviour
+        // only: `mstat_irq.h` `doM2Event` blocks line 0's event by the
+        // mode-1 select as of the last write more than a dot before it,
+        // and `video.cpp` `statChangeTriggersStatIrqCgb` triggers nothing
+        // without a newly set select) requests nothing either. No ROM
+        // writes STAT here with both selected; the static case is CGB04C
+        // `lcdirq_precedence/m2irq_ly00_lcdstat30`.
+        // With mode 2 not selected the source ended at `Ly3`, as before
+        // (`lycEnable/lycwirq_trigger_ly00_stat50_ds_lcdoffset1_2`).
+        // Still not gambatte's: a write at t = 4 that clears the mode-1
+        // select lowers the line here, and the pulse then requests the
+        // interrupt (SameBoy's level model does too); gambatte's latch
+        // keeps the block (the single-speed `MODE_HOLD` at t = 3). And
+        // `10 -> 30` at t = 4 requests one (`Ppu::write_stat`), gambatte
+        // none. No ROM for either.
+        if l == 0
+            && speed.is_double()
+            && t == edges::ly0_pt(Speed::Double)
+            && self.stat_select & SEL_MODE2 != 0
+        {
+            return 1;
+        }
         if t < m2_end {
             match l {
                 0 if hold && t >= edges::MODE_HOLD_SS => MODE_HOLD,

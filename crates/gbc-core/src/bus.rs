@@ -5607,6 +5607,25 @@ mod dma_tests {
         n: u64,
         double: bool,
     ) -> u8 {
+        irq_after_write_on(scx, lyc, sel, pos, reg, value, n, double, 0)
+    }
+
+    /// [`irq_after_write`] with the CPU's M-cycle grid moved `skip` clocks
+    /// against the frame (as a speed switch can; gambatte's `lcdoffset`
+    /// ROMs): in double speed the default grid's accesses are at odd line
+    /// positions, with `skip` = 1 at even ones.
+    #[allow(clippy::too_many_arguments)]
+    fn irq_after_write_on(
+        scx: u8,
+        lyc: u8,
+        sel: u8,
+        pos: u64,
+        reg: u16,
+        value: u8,
+        n: u64,
+        double: bool,
+        skip: u64,
+    ) -> u8 {
         let emu = setup();
         let mut stat = 0;
         with_ctx(emu, |ctx| {
@@ -5620,6 +5639,9 @@ mod dma_tests {
             // The switch's own timing is not under test.
             ctx.hot
                 .set_speed(if double { Speed::Double } else { Speed::Normal });
+            if skip != 0 {
+                ctx.skip_clocks(skip);
+            }
             while ctx.clock() < e + pos - 3 {
                 ctx.idle();
             }
@@ -5709,6 +5731,45 @@ mod dma_tests {
             stat_irq_after_write_with(1, 0x60, 456 + 455, 0x20, 2, false),
             STAT
         );
+    }
+
+    /// Double speed, line 0: with mode 2 selected the mode-1 source lasts
+    /// to the mode-2 pulse (t = 5), also for a write landing on the dot
+    /// before it (t = 4: a STAT write's second phase from an access at
+    /// t = 3 on the default grid, its first phase or a LYC write at t = 4
+    /// on the grid of the `lcdoffset1` ROMs). So a write there that keeps
+    /// modes 1 and 2 selected leaves the line up, and the pulse requests
+    /// nothing (SameBoy `display.c`: mode 1 until the pulse; gambatte
+    /// `mstat_irq.h` `doM2Event`, behaviour only: blocked by the mode-1
+    /// select). With mode 2 not selected the source ends at t = 4
+    /// (`lycEnable/lycwirq_trigger_ly00_stat50_ds_lcdoffset1_2`, CGB04C).
+    #[test]
+    fn double_speed_line_0_mode_1_holds_to_the_pulse_for_writes() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let l0 = 154 * 456;
+        // The access at line 0 dot `t` (even: the grid moved one clock).
+        let w = |lyc, sel, t: u64, reg, value| {
+            irq_after_write_on(0, lyc, sel, l0 + t, reg, value, 4, true, (t + 1) % 2)
+        };
+        for t in 1..8 {
+            // The same selects, the LYC select added (no match), mode 2
+            // added to mode 1 before the pulse, and a LYC write.
+            assert_eq!(w(0xFF, 0x30, t, 0xFF41, 0x30), 0, "30 -> 30 at {t}");
+            assert_eq!(w(0xFF, 0x30, t, 0xFF41, 0x70), 0, "30 -> 70 at {t}");
+            assert_eq!(w(0xFF, 0x30, t, 0xFF45, 0xFE), 0, "LYC at {t}");
+            if t <= 3 {
+                assert_eq!(w(0xFF, 0x10, t, 0xFF41, 0x30), 0, "10 -> 30 at {t}");
+            }
+        }
+        // Mode 1 cleared before the pulse: the pulse's interrupt
+        // (`m2enable/m2_late_m1disable_ly0_ds_1`, the access at t = 3);
+        // after it, none (`_ds_2`, t = 5).
+        assert_eq!(w(0xFF, 0x30, 3, 0xFF41, 0x20), STAT);
+        assert_eq!(w(0xFF, 0x30, 5, 0xFF41, 0x20), 0);
+        // Mode 2 not selected: the mode-1 source is over at t = 4, and a
+        // LYC = 0 match selected there raises the line.
+        assert_eq!(w(0, 0x10, 3, 0xFF41, 0x50), 0);
+        assert_eq!(w(0, 0x10, 4, 0xFF41, 0x50), STAT);
     }
 
     /// Double speed: a STAT write's first phase enabling mode 2 at t = 5

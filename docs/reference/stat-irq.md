@@ -105,10 +105,20 @@ never rises with mode 1 selected. In double speed it ends a dot before
 the pulse, except with mode 2 selected: then it lasts to the pulse as in
 single speed, so a selected mode 1 blocks it. That models gambatte's
 block without a selects test in the hot `Ly4` arm (measured: masking the
-selects there cost ~0.4% Ir on cgb-acid2). It differs from gambatte for a
-write at 0:4 with modes 1 and 2 selected: its view ends the mode-1
-source, and the pulse then rises (no ROM). The read and write views are unchanged (LYC=0 from 153:12; line
-0 sees mode 1 to t = 4). The default double-speed phase (M-cycle
+selects there cost ~0.4% Ir on cgb-acid2). The STAT and LYC write views
+at 0:4 follow the same rule with the selects as of the write
+(`Ppu::mode_source`): a write there that keeps modes 1 and 2 selected
+leaves the line up and the pulse requests nothing, as in SameBoy
+(`display.c`: `mode_for_interrupt` is 1 until the pulse) and gambatte
+(no trigger without a newly set select; the event blocked by mode 1).
+Until review E3 the views saw the source end at 4 whatever the selects,
+and the pulse then requested an interrupt (reachable: a second phase
+from an access at 0:3 on the default grid, a first phase or LYC write at
+0:4 on the `lcdoffset1` grid; no ROM). Still unlike gambatte, no ROM: a
+write at 0:4 clearing mode 1 unblocks the pulse (gambatte's latch keeps
+the block; SameBoy's line also drops), and `10 -> 30` at 0:4 requests an
+interrupt (gambatte: none). The read views are unchanged (LYC=0 from
+153:12; line 0 sees mode 1 to t = 4). The default double-speed phase (M-cycle
 boundaries at odd t) can't tell these from a dot earlier except through
 the dispatch's IF clear, one dot into its last M-cycle; `ds_lcdoffset1`
 (even t) can. CGB04C:

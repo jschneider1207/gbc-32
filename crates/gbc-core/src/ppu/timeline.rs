@@ -751,9 +751,9 @@ mod tests {
     /// The walk's mode source at dot `t` of line `l`: the source of the
     /// last row at or before `t` that has one (over the line start: the
     /// previous line's last; the first line starts with none, as the LCD
-    /// enable leaves it). `end`: the line's mode-3 end. Line 0's `Ly3` in
-    /// double speed is taken with mode 2 not selected.
-    fn walk_src(l: u32, t: u32, first: bool, speed: Speed, end: u32) -> u8 {
+    /// enable leaves it). `end`: the line's mode-3 end; `m2`: mode 2 is
+    /// selected (line 0's `Ly3` in double speed).
+    fn walk_src(l: u32, t: u32, first: bool, speed: Speed, end: u32, m2: bool) -> u8 {
         let class = Class::of(l, first);
         let mut src = match class {
             Class::First => NO_MODE,
@@ -771,7 +771,7 @@ mod tests {
                     Src::Idle => src,
                     Src::Mode(m) => m,
                     Src::Pulse(_) => NO_MODE,
-                    Src::Line0Mode1 if speed.is_double() => NO_MODE,
+                    Src::Line0Mode1 if speed.is_double() && !m2 => NO_MODE,
                     Src::Line0Mode1 => 1,
                 };
             }
@@ -828,12 +828,17 @@ mod tests {
     }
 
     /// The write views' mode source is the walk's, row for row, except in
-    /// the windows [`view_only`] lists.
+    /// the windows [`view_only`] lists; with and without mode 2 selected
+    /// (line 0 in double speed: the mode-1 source to `Ly3` or to the
+    /// pulse, `Src::Line0Mode1`).
     #[test]
     fn write_views_see_the_walk_s_mode_source() {
-        for (first, speed, end) in cases() {
+        for ((first, speed, end), select) in
+            cases().into_iter().flat_map(|c| [(c, 0x08), (c, 0x28)])
+        {
             let Some(end) = end else { continue };
-            let mut p = Latched::new(first, Some(end), 0x08);
+            let m2 = select & 0x20 != 0;
+            let mut p = Latched::new(first, Some(end), select);
             for l in 0..154 {
                 let class = Class::of(l, first);
                 for t in 0..LINE {
@@ -851,11 +856,11 @@ mod tests {
                     let now = u64::from(l * LINE + t);
                     for view in [View::StatPhase1, View::StatPhase2, View::LycWrite] {
                         let want = view_only(l, t, first, speed, view, end)
-                            .unwrap_or_else(|| walk_src(l, t, first, speed, end));
+                            .unwrap_or_else(|| walk_src(l, t, first, speed, end, m2));
                         assert_eq!(
                             p.ppu.mode_source(now, a, speed, view),
                             want,
-                            "line {l} dot {t} first {first} {speed:?} {view:?} end {end}"
+                            "line {l} dot {t} first {first} {speed:?} {view:?} end {end} m2 {m2}"
                         );
                     }
                 }
