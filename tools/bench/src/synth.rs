@@ -13,6 +13,7 @@ pub const NAMES: &[&str] = &[
     "cgb-raster",
     "apu-writes",
     "dmg-raster",
+    "oam-lines",
 ];
 
 /// Nintendo logo (header 0x104-0x133), checked by the real boot ROM.
@@ -499,6 +500,98 @@ const DMG_RASTER: &[u8] = &[
     0x18, 0xD7, //       JR line
 ];
 
+/// HBlank sprite multiplexing on an ordinary CGB frame (single speed): the
+/// CPU rewrites OAM on every visible line, so the PPU's summary of the
+/// lines objects cover (`ObjectLines` in gbc-core's ppu) is stale at every
+/// line's scan (M10 review). With the LCD off: tiles 0-3 have all four
+/// colors across each row (55/33), the BG map (9800) is all tile 0, and 40
+/// 8x16 objects (tile 2, OBJ palette 10-i & 7) sit in four groups of 10 as
+/// in `synth:worst-case` (Y=16/52/88/124, X=8+6i): 10 objects on 64 of the
+/// 144 lines, none on the other 80. OBJ palette RAM gets 64 non-zero bytes.
+/// LCDC=97 (LCD, 8000 tiles, 8x16 objects, objects, BG). Per line: wait
+/// for mode 0, then write E (+1 per line) to the X of objects 0, 10, 20
+/// and 30 (the first of each group), 14 M-cycles of writes that end at
+/// most 104 dots into an HBlank of 121 dots or more (mode 3 is 255 dots
+/// with the 10 objects), so OAM is open for all four; then wait for mode 3
+/// (which also skips VBlank: 144 rounds of writes a frame).
+const OAM_LINES: &[u8] = &[
+    0xF3, //             DI
+    0xAF, //             XOR A
+    0xE0, 0x40, //       LDH (LCDC),A    LCD off: free VRAM/OAM access
+    0x21, 0x00, 0x80, // LD HL,8000
+    0x06, 0x20, //       LD B,32         tiles 0-3
+    // tile:
+    0x3E, 0x55, //       LD A,55
+    0x22, //             LD (HL+),A
+    0x3E, 0x33, //       LD A,33
+    0x22, //             LD (HL+),A      colors 0-3 across each row
+    0x05, //             DEC B
+    0x20, 0xF7, //       JR NZ,tile
+    0x21, 0x00, 0x98, // LD HL,9800
+    // map:
+    0xAF, //             XOR A
+    0x22, //             LD (HL+),A      BG map: tile 0
+    0x7C, //             LD A,H
+    0xFE, 0x9C, //       CP 9C
+    0x20, 0xF9, //       JR NZ,map
+    0x21, 0x00, 0xFE, // LD HL,FE00
+    0x16, 0x10, //       LD D,16         first group's Y
+    0x1E, 0x04, //       LD E,4          groups
+    // group:
+    0x06, 0x0A, //       LD B,10
+    0x0E, 0x08, //       LD C,8          first X
+    // obj:
+    0x7A, //             LD A,D
+    0x22, //             LD (HL+),A      Y
+    0x79, //             LD A,C
+    0x22, //             LD (HL+),A      X
+    0x3E, 0x02, //       LD A,2
+    0x22, //             LD (HL+),A      tile 2 (and 3)
+    0x78, //             LD A,B
+    0xE6, 0x07, //       AND 07
+    0x22, //             LD (HL+),A      attributes: OBJ palette B & 7
+    0x79, //             LD A,C
+    0xC6, 0x06, //       ADD A,6
+    0x4F, //             LD C,A
+    0x05, //             DEC B
+    0x20, 0xEE, //       JR NZ,obj
+    0x7A, //             LD A,D
+    0xC6, 0x24, //       ADD A,36
+    0x57, //             LD D,A
+    0x1D, //             DEC E
+    0x20, 0xE3, //       JR NZ,group
+    0x3E, 0x80, //       LD A,80
+    0xE0, 0x6A, //       LDH (OCPS),A    auto-increment from 0
+    0x06, 0x40, //       LD B,64
+    // pal:
+    0x78, //             LD A,B
+    0xE0, 0x6B, //       LDH (OCPD),A
+    0x05, //             DEC B
+    0x20, 0xFA, //       JR NZ,pal
+    0x3E, 0x97, //       LD A,97
+    0xE0, 0x40, //       LDH (LCDC),A
+    // line:             (E = 0 after the groups)
+    0x1C, //             INC E
+    0x21, 0x01, 0xFE, // LD HL,FE01      object 0's X
+    // wait:
+    0xF0, 0x41, //       LDH A,(STAT)
+    0xE6, 0x03, //       AND 3
+    0x20, 0xFA, //       JR NZ,wait      until mode 0
+    0x73, //             LD (HL),E
+    0x2E, 0x29, //       LD L,29         object 10's X
+    0x73, //             LD (HL),E
+    0x2E, 0x51, //       LD L,51         object 20's X
+    0x73, //             LD (HL),E
+    0x2E, 0x79, //       LD L,79         object 30's X
+    0x73, //             LD (HL),E
+    // mode3:
+    0xF0, 0x41, //       LDH A,(STAT)
+    0xE6, 0x03, //       AND 3
+    0xFE, 0x03, //       CP 3
+    0x20, 0xF8, //       JR NZ,mode3
+    0x18, 0xE2, //       JR line
+];
+
 /// Where the worst-case STAT handler lives: after the vectors, so the
 /// timer vector at 0x50 is free for [`TIMER_HANDLER`].
 const STAT_HANDLER_AT: usize = 0x68;
@@ -626,6 +719,7 @@ pub fn build(name: &str) -> Option<Vec<u8>> {
         "apu-writes@hram" => (&pcm, vec![(0x50, &PCM_HANDLER_HRAM)]),
         "cgb-raster" => (&raster, vec![]),
         "dmg-raster" => (DMG_RASTER, vec![]),
+        "oam-lines" => (OAM_LINES, vec![]),
         _ => return None,
     };
     // Pan Docs, 0143 (CGB flag): bit 7 clear runs the cartridge in DMG
@@ -937,5 +1031,31 @@ mod tests {
             // two around the mid-line BGP write.
             assert!(changes(&row[80..]) <= 1, "window on line {y}");
         }
+    }
+
+    #[test]
+    fn oam_lines_rewrites_four_object_xs_in_every_hblank() {
+        // The X of objects 0, 10, 20 and 30, a frame apart: all four took
+        // every write (OAM was open), 144 a frame (one per visible line).
+        let xs = [0xFE01, 0xFE29, 0xFE51, 0xFE79];
+        let at = u64::from(CLOCK_HZ) / 10;
+        let mut prev: Option<u8> = None;
+        for k in 0..4 {
+            let r = run("oam-lines", at + k * 70_224, &xs);
+            assert!(r.iter().all(|&x| x == r[0]), "frame {k}: {r:?}");
+            if let Some(p) = prev {
+                assert_eq!(r[0].wrapping_sub(p), 144, "frame {k}");
+            }
+            prev = Some(r[0]);
+        }
+        // The rest of OAM is as set up: 8x16 objects at Y=16+36k, X=8+6i,
+        // and LCDC has the LCD, 8x16 objects, objects and BG on.
+        let r = run(
+            "oam-lines",
+            at,
+            &[0xFE00, 0xFE05, 0xFE9C, 0xFE9D, 0xFF40, 0xFF4D],
+        );
+        assert_eq!(r[..5], [16, 14, 124, 62, 0x97]);
+        assert_eq!(r[5] & 0x80, 0, "single speed");
     }
 }
