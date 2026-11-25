@@ -754,6 +754,34 @@ re-measured; the recorded result (ADR 0028: +2.1% cpu_instrs) stands.
 plainly instead of through `black_box` (+336 B, `Debug` output only, no
 bench line executes it). A14, A8 and A11 are open.
 
+### Small-state and attribute pass (M10, inventory themes 1, 4, 11)
+
+Each row is one step measured against the row before it (check-bench
+Ir, ten lines: `synth:dmg-raster` is new; total gbc-core `.text` on
+thumbv7em, 113,952 B at the start, base cab6e24). Every kept step is
+fingerprint-identical to `main` (`--audio-buffer 7 --hash-samples`).
+
+| Step | Ir (lines that moved) | `.text` (B) | Outcome |
+|---|---|---|---|
+| A4 `Timer::schedule_overflow` unpinned, re-measured with the serviced 16 kHz timer interrupt in `synth:worst-case` | event-storm -0.268%, halt-irq -0.261%, cgb-acid2 -0.172%, apu-writes -0.136%, worst-case -0.128%, cgb_sound -0.082%, cpu_instrs -0.058%, dma-storm -0.047%, dmg-raster -0.039%, cgb-raster -0.027% | +1,304 | dropped again: no line reaches 0.5% |
+| S10 FF55 read from `VramDma::read_hdma5`, no mirror in `io[0x55]` | worst-case +0.059% (its loop reads FF55); others identical | +2 | kept |
+| S2, S3, S9 `Sys::switch_halt_end`, `VramDma::stall_end` and `Refetch` enum; `apu::Fs::ds_delay`; `Apu::write(.., double: bool, ..)` | all ten within +-0.06% (worst-case -0.050%, apu-writes -0.056%) | +256 | kept |
+| S4 `&mut` CPU read path (`read_cpu`, `read_high_cpu` with the body inlined in both copies), `ReadClears` a plain `[u32; 5]`; `read_high_cpu` left to the inliner | cgb_sound +1.871%, dma-storm +1.110%, cpu_instrs +0.913%, cgb-raster +0.656%, dmg-raster +0.483%; halt-irq -0.365% | +10,702 (`Cpu::run` 36,264; over the total) | dropped |
+| S4 the same with `read_high_cpu` `#[inline(never)]` | all ten slower: event-storm +0.282%, worst-case +0.277%, cgb-raster +0.191%, dmg-raster +0.182%, cpu_instrs +0.181%, halt-irq +0.123%, dma-storm +0.104%, apu-writes +0.083% | +140 | dropped: the atomics behind `&` stay (ADR 0028) |
+| A8 `stop_div_reset`, `set_div_apu_deadline`, `start_audio`, `finish` unpinned; `vdma_turn` kept out of line (inlined, `vram_dma` and `vdma_stall` become callees of `Emulator::run` and the ITCM closure check fails) | all ten within +-0.05% | +138 | kept |
+| A11 `LineObjects::consider_cold` removed, `scan_to` calls `consider` | cgb-acid2 -0.163%, dma-storm -0.259%; others identical | +186 | kept |
+| A14 every listed bare `#[inline(never)]` removed in `bus.rs` (17), `ppu/mod.rs` (9), `apu/` (10, with `read_apu`) and `cart/` (3) at once | cpu_instrs +4.472%, dma-storm +6.940%, event-storm +3.560%, worst-case +3.511%, dmg-raster +1.919%, halt-irq +0.561%; cgb-acid2 -2.082%, apu-writes -0.803%, cgb_sound -0.685% | +1,348 (`read_high` 956 -> 2,100, `write_io` 710 -> 2,912, `boundary` 1,080 -> 1,736) | dropped as a batch |
+| A14 `ppu/mod.rs`, `apu/` (without `read_apu`, which inlines into `read_high`) and `cart/` only | all ten faster: cpu_instrs -0.146%, cgb_sound -0.719%, cgb-acid2 -0.805%, event-storm -0.304%, dma-storm -0.040%, halt-irq -0.884%, worst-case -0.625%, cgb-raster -1.204%, apu-writes -1.683%, dmg-raster -0.352% | +566 | superseded by the next row |
+| A14 as the row above with the RTC paths (`read_rtc`, `write_rtc`, `latch_rtc`) pinned again: rare paths, and `write_rtc` inlined into `Cart::write_ram` makes that a flash callee of `write_mapped` (ITCM closure check) | against the A11 row: cpu_instrs -0.421%, cgb_sound -0.762%, cgb-acid2 -0.815%, event-storm -0.304%, dma-storm -0.228%, halt-irq -1.007%, worst-case -0.739%, cgb-raster -1.204%, apu-writes -1.725%, dmg-raster -0.355% | +664 | kept |
+
+Result: 115,198 B (+1,246; 7,682 B under the total).
+
+Open: the `bus.rs` attributes of A14 one at a time (the batch says the
+read side, `read_during_dma` and `read_oam` into `read_high`, and the
+`write_io` and `boundary` callees cost more than they gain; none was
+measured alone), and L7 (timer lazy whenever IF bit 2 is set), not
+tried.
+
 ### Size pass, M9 (2026-11-23, branch `core-size`)
 
 `.text` 97,068 -> 95,652 B (-1,416) with no behavior change
