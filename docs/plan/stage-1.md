@@ -380,9 +380,9 @@ overlap:
 a concrete failure scenario or measurement. All findings and their triage
 are recorded in `docs/reviews/stage1-m10.md`.
 
-- [ ] Run the four reviews (A-D) in parallel. They are read-only, so the
+- [x] Run the four reviews (A-D) in parallel. They are read-only, so the
   machine-resource limits on builds still apply to any measurement runs.
-- [ ] Triage (AGENTS.md "Triage"): verify each finding and give each
+- [x] Triage (AGENTS.md "Triage"): verify each finding and give each
   rejected one a one-line reason.
 - [ ] Fix the confirmed high and medium findings, one theme per fix
   agent, in this order:
@@ -394,7 +394,7 @@ are recorded in `docs/reviews/stage1-m10.md`.
   3. D, refactors. Each is behavior-preserving and fingerprint
      identical, with bench and size within noise. They go last because
      they touch the most code.
-- [ ] Turn the lows into one-line tasks in the Stage 2 plan (or here, if
+- [x] Turn the lows into one-line tasks in the Stage 2 plan (or here, if
   they're Stage 1 only).
 - [ ] M10 lows (HuC3, from the diff review): the clock protocol follows Pan Docs where SameBoy differs (command runs on the semaphore write; locations 00-06 are a buffer, not the live counters): check against a real Robopon / Pocket Family trace or switch to SameBoy's model; a `.sav` moved between SameBoy and us can be a minute off; a replay of a HuC3 game starts its clock at zero without a warning (`docs/reference/hudson-mappers.md`)
 - [ ] Budget changes: tightening one is an agent decision (record it);
@@ -402,16 +402,17 @@ are recorded in `docs/reviews/stage1-m10.md`.
 
 Open M10 review items (Stage 1). IDs are rows of `docs/reviews/stage1-m10.md`; the raw reports in `docs/reviews/stage1-m10/` have the details. Already tasks elsewhere: A2-07 and the `stat_during_dma` half of A2-11 (M8 "PPU edge cases"), A4-9 (M4 hardware review, MBC3 latch).
 
-- [ ] M10 A2-02 (medium): the STAT interrupt model as one mechanism: an event view of `(stat_select, lyc)` with landing clocks, then the single-speed walk points 0:4 and 153:12 move to 5 and 13 (as in double speed) and the remaining compensations go (`docs/reference/stat-irq.md` "Open"; needs gambatte's select/LYC latch for the line-0/153 write views first)
-- [ ] M10 E4 / A1-07 (medium): the typed request is done (ADR 0033); left: one `LAND[reg][speed]` landing table in `ppu/edges.rs` for FF0F and FF40-FF4B writes read by `write_ppu` instead of per-site offsets, fingerprint-identical
-- [ ] M10 E7 / A2-11 (medium): tag every single-source or one-ROM behaviour in code with one grep-able marker (`UNPINNED:`) and list them in `docs/reference/` (E7's list, A2-11's `stat_during_dma` / `fix_attrs` `d - 5` / DMG `POST_BOOT_POS`, A2-08, A4-2 non-zero cancel, the ADR 0034 grid); game-reachable ones go into the real-game checklist
-- [ ] M10 D4 (medium, rest): one per-speed idiom in `ppu/edges.rs` (the `_SS`/`_DS` pairs and `Observer { ss, ds }` as one `PerSpeed<T>`-style type)
-- [ ] M10 D4 (medium, rest): replace the packed `al: u8` argument of `Noise::write` / `Apu::write_rest` with a typed argument; measure APU per-write Ir
-- [ ] M10 D4 (medium, rest): `Counter(u64)` newtype for system-counter values (`Timer::sc`, `Timer::clock_at`, the serial paths; ~29 sites); fingerprint-identical, measure `synth:event-storm`
-- [ ] M10 D6 (medium, rest): `Planes`, `Refetch`, `TileLead` and `Stalls` landed; left: split `hold_fetch` and `write_ppu` along their paragraphs, `ModeSource`/`Early` enums instead of masked bytes, the renderer's per-line scratch as one `&mut` (only with `check-bench.sh` numbers), `get()` at the cold index-masking sites
-- [ ] M10 D7 / E11 (medium): rewrite `docs/architecture.md` for the current tree (status block, workspace and module lists from the tree, VRAM DMA + speed-switch glue, mid-line fetch model, what is in `Memory` and why), after the `bus/` split (D2) lands
-- [ ] M10 D8 / A1-09 (medium): sweep stale, roadmap-tense and change-history comments (D-rust.md D8, A1-cpu-bus.md A1-09, inventory section 6, stale names such as `Memory::obj_rank` and the `Emulator` size in `lib.rs`), fix the broken doc link, and add `RUSTDOCFLAGS="-D warnings" cargo doc -p gbc-core --no-deps --document-private-items` to the gate (stricter)
-- [ ] M10 D9 (medium): one `#[cfg(test)] testkit` module for the duplicated test helpers, the eager serial reference out of `Serial` into `timer/reference.rs`; inline test modules to sibling files (keep `tests/hard_rules.rs` at least as strict, mutation-checked)
+- [ ] M10 A2-02 (medium, rest; carried over, human session 18): the walk points moved to 0:5 and 153:13 (c598882); left: gambatte's select/LYC latch as one latched copy of `(stat_select, lyc)` with landing clocks instead of the per-window rules (`MODE_HOLD`, `MODE_1_STICKY`, the mode-0 latch, `point_before_write`, `on_ly0_pulse`; `docs/reference/stat-irq.md` "Open")
+- [ ] M10 E4 / A1-07 (medium, rest; carried over, human session 18): the typed request is done (ADR 0033); left: one `LAND[reg][speed]` landing table in `ppu/edges.rs` for FF0F and FF40-FF4B writes read by `write_ppu` instead of per-site offsets, fingerprint-identical
+- [x] (d900f7b: `docs/reference/unpinned.md`, `tests/unpinned.rs`) M10 E7 / A2-11 (medium): tag every single-source or one-ROM behaviour in code with one grep-able marker (`UNPINNED:`) and list them in `docs/reference/` (E7's list, A2-11's `stat_during_dma` / `fix_attrs` `d - 5` / DMG `POST_BOOT_POS`, A2-08, A4-2 non-zero cancel, the ADR 0034 grid); game-reachable ones go into the real-game checklist
+- [ ] M10 D4 (medium, rest; carried over, human session 18): one per-speed idiom in `ppu/edges.rs` (the `_SS`/`_DS` pairs and `Observer { ss, ds }` as one `PerSpeed<T>`-style type)
+- [ ] M10 D4 (medium, rest; carried over, human session 18): replace the packed `al: u8` argument of `Noise::write` / `Apu::write_rest` with a typed argument; measure APU per-write Ir
+- [ ] M10 D4 (medium, rest; carried over, human session 18): `Counter(u64)` newtype for system-counter values (`Timer::sc`, `Timer::clock_at`, the serial paths; ~29 sites); fingerprint-identical, measure `synth:event-storm`
+- [ ] M10 D6 (medium, rest; carried over, human session 18): `Planes`, `Refetch`, `TileLead` and `Stalls` landed; left: split `hold_fetch` and `write_ppu` along their paragraphs, `ModeSource`/`Early` enums instead of masked bytes, the renderer's per-line scratch as one `&mut` (only with `check-bench.sh` numbers), `get()` at the cold index-masking sites
+- [x] (a3be8f3, a1a499d) M10 D7 / E11 (medium): rewrite `docs/architecture.md` for the current tree (status block, workspace and module lists from the tree, VRAM DMA + speed-switch glue, mid-line fetch model, what is in `Memory` and why), after the `bus/` split (D2) lands
+- [x] (8dce1b6, a1a499d; gate step ac37969) M10 D8 / A1-09 (medium): sweep stale, roadmap-tense and change-history comments (D-rust.md D8, A1-cpu-bus.md A1-09, inventory section 6, stale names such as `Memory::obj_rank` and the `Emulator` size in `lib.rs`), fix the broken doc link, and add `RUSTDOCFLAGS="-D warnings" cargo doc -p gbc-core --no-deps --document-private-items` to the gate (stricter)
+- [x] (b2c5b23, cdc329c, 77b64be; `lib.rs` left, task below) M10 D9 (medium): one `#[cfg(test)] testkit` module for the duplicated test helpers, the eager serial reference out of `Serial` into `timer/reference.rs`; inline test modules to sibling files (keep `tests/hard_rules.rs` at least as strict, mutation-checked)
+- [ ] M10 D9 (rest, low): split `lib.rs`'s two inline test modules (~2,600 lines, from line ~843) by behaviour into sibling inline `#[cfg(test)]` modules, as 77b64be did for `ppu`
 - [ ] M10 D13 (low): document the inlining convention (`foo` / `foo_inline` twins, `#[cold]` only with a named rare condition, the measurement that justifies each) in `docs/perf.md` or `docs/architecture.md`
 - [ ] M10 D14 (low): API nits: `Config` `#[non_exhaustive]` + constructor, `Emulator::peek` next to the other debug accessors, document `run_until(u64::MAX)` as invalid (or clamp), a cold `Debug` for `Emulator`, public register-pair accessors
 - [ ] M10 D10 (low): named register addresses (`mod reg`) and LCDC/STAT bit constants instead of raw literals outside `render.rs`
@@ -420,7 +421,7 @@ Open M10 review items (Stage 1). IDs are rows of `docs/reviews/stage1-m10.md`; t
 - [ ] M10 C8 (low): declare `Memory`'s small arrays before `wram`/`vram` so they sit inside Thumb-2's 4 KB offset range; measure `.text` and Ir before keeping it
 - [ ] M10 B11 (low): PPU sync fixed cost: cache `next_event` / draw the line lazily at the HBlank event (B-perf.md B11, about -1.3% worst-case estimated); low priority
 - [ ] M10 B12 (low, rest): per-channel APU sync for channel-register writes, only with a bench line that shows the cost
-- [ ] M10 B13 (low, rest): the remaining bounds-check panic sites in `latch`, `set_stalls`, `last_fetched`, `mix_planes`, `write_during_dma`: mask the indices or narrow the README's "no hidden panics in hot paths" claim to the functions it holds for
+- [ ] M10 B13 / C-P6 (low, rest): the remaining release panic sites (thumbv7em): `panic_bounds_check` in `latch`, `write_during_dma`; `slice_index_fail` in `set_stalls`, `last_fetched`, `mix_planes` (2), `apply_inputs`, `set_buttons_at`; `panic_fmt` in `set_buttons_at`; the divide-by-zero check in `speed_switch_halt` (`bus/stop.rs`): mask the indices or narrow the README's "no hidden panics in hot paths" claim to the functions it holds for
 - [ ] M10 A2-10 (low): TILE_SEL set-glitch in the "unknown latch" state: track the latch (recompute in `tile_byte_8000`) or drop the glitch there as SameBoy does; check with the mode-3 oracle and state the choice in the design doc
 - [ ] M10 A3-4 (low): state the APU trigger windows as one 1 MHz-grid rule (`c + ((g - now - c) & 3)` per speed) in `docs/reference/apu.md` and code, measured against the gambatte `sound/`/`speedchange*` and SameSuite ch1/2 groups; try one "write lands N clocks later" delay for the sweep/envelope windows, drop it if the ROMs disagree
 - [ ] M10 A3-7 (low, desktop): start the desktop DC blocker from the first sample, not zero (start-up and device-restart thump); desktop is throwaway, low priority
@@ -430,14 +431,25 @@ Open M10 review items (Stage 1). IDs are rows of `docs/reviews/stage1-m10.md`; t
 - [ ] M10 mode-3 oracle open edge (d): a later window write on a line whose fine-scroll discard wrapped rebuilds the stalls without the junk-tile correction or the kept WX=0 dot (`docs/reference/mode3-oracle.md`)
 - [ ] M10 mode-3 oracle open edge (e): pixels when the discard wraps (n >= 8) at WX=0: the renderer cuts 7 + n%8, not 7 + n
 - [ ] M10 mode-3 oracle coverage: extend it to double speed, the first line after LCD on, WX/WY/LCDC mid-line writes, OAM DMA lines and pixels (today it compares mode-3 length and stalls only)
-- [ ] M10 invariance: add `synth:worst-case@0` (no APU) to the `check-sync-invariance.sh` corpus (stricter)
-- [ ] M10 bench: `tools/bench/src/synth.rs` ~102 says the mid-line SCX write lands 18-42 M-cycles into mode 3; some land in the fine-scroll discard: correct the comment
+- [x] (6367b5b) M10 invariance: add `synth:worst-case@0` (no APU) to the `check-sync-invariance.sh` corpus (stricter)
+- [x] (a672fb6) M10 bench: `tools/bench/src/synth.rs` ~102 says the mid-line SCX write lands 18-42 M-cycles into mode 3; some land in the fine-scroll discard: correct the comment
 - [ ] M10 perf: inventory A14's `bus.rs` attributes one at a time (the batch regressed, none measured alone; docs/perf.md "Small-state and attribute pass"); `Ctx::write_high` is gone (61b2ed4) and `Apu::write_rest` lost its pin in the kept `apu/` batch, so neither needs its own run
 - [ ] M10 perf: the push-only inline WRAM write (`Bus::write_stack`, +1,664 B for -0.75% cpu_instrs, docs/perf.md "CPU read path") if `.text` room is left at the end of M10
 - [ ] M10 romtest: `main` holds the stderr lock for the whole run, so an `eprintln!` (or panic message) from a worker thread deadlocks; hand workers an unlocked handle or lock per write
 - [ ] M10 E6 (rest): real-game frame goldens: ADR 0030 recordings over the human's ROMs replayed headless, per-frame hashes committed (ROMs not), skipped when the ROM is absent; needs the human's recordings
-- [ ] M10 A1-06 (medium, human): per the human's ADR 0020 decision, land `m10-spsw-div-code` (then drop the unused `ime` argument of `Bus::speed_switch`) or keep today's fit and record why (`docs/reference/speed-switch.md`)
-- [ ] M10 A3-1 (medium, human): apply the aliasing option the human picks (`docs/reference/audio-aliasing.md`; box 64 + 8-tap FIR about +10% worst-case Ir) or record it as a known limitation
+- [x] (2821437, ADR 0020 amendment; human approved, session 18) M10 A1-06 (medium, human): per the human's ADR 0020 decision, land `m10-spsw-div-code` (then drop the unused `ime` argument of `Bus::speed_switch`) or keep today's fit and record why (`docs/reference/speed-switch.md`)
+- [x] (7d389ce, ADR 0035; the human chose box 64 + 8-tap FIR, session 18) M10 A3-1 (medium, human): apply the aliasing option the human picks (`docs/reference/audio-aliasing.md`; box 64 + 8-tap FIR about +10% worst-case Ir) or record it as a known limitation
+- [ ] M10 A3-1 follow-up (human): docs/perf.md's 230k Ir/frame APU "channels and mixing" budget no longer describes the APU (the FIR adds ~229k on the worst case, ADR 0035); the new figure is the human's to set
+- [ ] M10 close review C-P2 (medium, in progress, session 18, branch `m10-storm`): docs/perf.md "Outside the bound" names only PPU writes; measure dense APU writes, KEY1+STOP loops, DIV/TAC loops and back-to-back GDMA against the benched worst case and update the table; mitigations are a later decision for the human
+- [ ] M10 close review C-P3 (low): refresh the per-function size report (`Ctx::div_reset` is gone, 32 of 61 lines are over, `Apu::flush` and `hold_fetch` have no line)
+- [ ] M10 close review C-T6 (low): `tools/h7-bench` is its own workspace, outside the gate's fmt/clippy/test: add its fmt and clippy (and a `--target` build) to the gate (stricter)
+- [ ] M10 close review C-T7 (low): `acceptance/README.md` "Gate" list omits the SM83, ITCM-set and invariance steps `gate-stage1.sh` runs: add them (stricter)
+- [ ] M10 close review C-V5 (low): double speed, the STAT phase-2 rule at a line's dot 0 does not look back to the previous line's dot 455 (benign today): make it consistent or state why not
+- [ ] M10 close review C-H1 (low): double speed with `ds_delay`, a DIV reset on the edge clock can drop a delayed frame-sequencer step (`bus/apu_io.rs` `apu_div_reset`, `set_div_apu_deadline`): test and fix against SameBoy
+- [ ] M10 close review C-H2 (low): STOP mode defers a pending sweep event until wake (`bus/stop.rs`): check against SameBoy and fix or tag
+- [ ] M10 close review C-H3 (low): VRAM DMA ignores VRAM write blocking in mode 3 (SameBoy writes the other bank): state it at the site with an `UNPINNED:` tag, or model it
+- [ ] M10 close review C-H4 (low): stale comment `hdma.rs` ~15 ("an interrupt dispatch due then goes first"; the code runs the block first)
+- [ ] M10 close review C-H5 (low): HDMA re-arm can drop an already requested block in a one-M-cycle window (SameBoy agrees with the code, gambatte not): tag it `UNPINNED:` with both references
 
 **Acceptance:** `./scripts/gate-stage1.sh` exits 0; no confirmed high or
 medium finding is open; `docs/reviews/stage1-m10.md` records every
@@ -456,6 +468,8 @@ They only matter on the MCU or are deferred by decision (human, session 16).
 - [ ] Stage 2, M10 C9: per-4-KiB save-dirty map (`Emulator::save_dirty_blocks()`) if saves hitch; public API addition, needs an ADR and a reviewer
 - [ ] Stage 2, M10 C10: split the three one-level mutual recursions (`read_high`/`read_during_dma`, `set_stalls`/`set_stalls_retriggered`, `render`/`render_held`/`render_zero`) if a provable static stack bound is wanted
 - [ ] Stage 2, M10 S4 / L7: the `&mut` CPU read path and the always-lazy timer were dropped on x86 Ir (docs/perf.md); re-measure them on the M7 if the frame budget is tight
+- [ ] Stage 2, M10 close review C-P5: `.text` margin ~5.5% (~116 KB after 95,652 B at `stage1-m9`); the size gate is provisional (excludes compiler_builtins and core panic code), 5.8 KB of nop padding is unmeasured on the M7, and fmt code (2,218 B) counts against it: measure on the firmware link and settle the gate
+- [ ] Stage 2, M10 close review C-P7: ~1.7 KB of anonymous `.rodata` is not matched by the `.dtcm_rodata` globs: name it or widen the globs at the firmware link
 - [ ] Stage 3, M10 A4-10: MBC5 rumble out of the core (`Emulator::rumble()` or an event) once the board has a motor decision
 
 ---
