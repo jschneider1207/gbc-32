@@ -793,23 +793,35 @@ impl Ppu {
         (self.line.start == line_start).then_some(u32::from(self.line.end))
     }
 
-    /// The line position of the walk's mode-0 interrupt point
-    /// ([`Pt::HBlank`]) on the line at `a`, or [`LINE`] if its mode-3 end
-    /// isn't latched yet.
-    fn m0_irq_at(&self, now: u64, a: At) -> u32 {
-        let start = now.wrapping_sub(u64::from(a.t));
-        self.latched_end(start)
-            .map_or(LINE, |e| e + timeline::HBLANK_AFTER_END)
-    }
-
     /// Whether a STAT or LYC write landing at `now`, `delay` dots after its
     /// access, has its access at most `latch` dots (single, double speed)
-    /// before the line's mode-0 interrupt point and lands before or at it
+    /// before the line's mode-0 interrupt point (the walk's
+    /// [`Pt::HBlank`]) and lands before or at it
     /// ([`edges::M0_STAT_LATCH`]).
+    ///
+    /// Only on a line whose mode-3 end is latched: a visible line (the
+    /// first after LCD enable too) from its `Latch` point on. Lines
+    /// 144-153 have no mode-0 interrupt and so no latch (gambatte
+    /// `mstat_irq.h` `doM0Event`, behaviour only: the mode-0 event is for
+    /// lines 0-143), and a visible line before its `Latch` point is more
+    /// than 160 dots from the interrupt. (Until the M10 review an
+    /// unlatched line counted as having the interrupt at its end, [`LINE`]:
+    /// STAT writes at dots 454-455 and LYC writes at 450-454 of a VBlank
+    /// line were "just before the mode-0 interrupt".)
+    ///
+    /// UNPINNED: m0-latch-first-line (a): the latch on the first line after
+    /// LCD enable follows gambatte's model (its `mstat_irq.h` latches
+    /// against the mode-0 event's time on every line alike); no ROM writes
+    /// STAT or LYC just before that line's mode-0 interrupt. An
+    /// `m0enable/disable`-style capture on the line after an LCD enable
+    /// would settle it.
     fn m0_latched(&self, now: u64, speed: Speed, delay: u32, latch: [u32; 2]) -> bool {
         let a = self.at(now);
-        let irq = self.m0_irq_at(now, a) + delay;
-        a.t < irq && irq <= a.t + speed.pick(latch)
+        let start = now.wrapping_sub(u64::from(a.t));
+        self.latched_end(start).is_some_and(|end| {
+            let irq = end + timeline::HBLANK_AFTER_END + delay;
+            a.t < irq && irq <= a.t + speed.pick(latch)
+        })
     }
 
     // --- Reads (side-effect free) ---

@@ -889,8 +889,25 @@ mod tests {
         double: bool,
         skip: u64,
     ) -> u8 {
+        irq_and_line_after_write_on(scx, lyc, sel, pos, reg, value, n, double, skip).0
+    }
+
+    /// [`irq_after_write_on`], and whether the STAT interrupt line is high
+    /// when the write has landed.
+    #[allow(clippy::too_many_arguments)]
+    fn irq_and_line_after_write_on(
+        scx: u8,
+        lyc: u8,
+        sel: u8,
+        pos: u64,
+        reg: u16,
+        value: u8,
+        n: u64,
+        double: bool,
+        skip: u64,
+    ) -> (u8, bool) {
         let emu = setup();
-        let mut stat = 0;
+        let mut stat = (0, false);
         with_ctx(emu, |ctx| {
             if scx != 0 {
                 ctx.write(0xFF43, scx);
@@ -911,10 +928,11 @@ mod tests {
             assert_eq!(ctx.clock(), e + pos - 3);
             ctx.sys.iflags = 0;
             ctx.write(reg, value);
+            let high = ctx.sys.ppu.stat_line_high();
             while ctx.clock() < e + pos - 3 + n * ctx.hot.mcycle() {
                 ctx.idle();
             }
-            stat = ctx.sys.iflags & crate::ppu::INT_STAT;
+            stat = (ctx.sys.iflags & crate::ppu::INT_STAT, high);
         });
         stat
     }
@@ -1071,6 +1089,71 @@ mod tests {
         // Double speed: 1 dot before, blocked; 2 dots before, not.
         assert_eq!(w(1, at + 2, true), 0);
         assert_eq!(w(0, at, true), STAT);
+    }
+
+    /// The mode-0 latch exists only where a mode-0 interrupt comes (lines
+    /// 0-143, gambatte `mstat_irq.h` `doM0Event`, behaviour only): at the
+    /// end of a VBlank line a STAT write clearing the mode-0 select
+    /// requests nothing, and neither a STAT write clearing the LYC select
+    /// nor a LYC write ending LY=LYC keeps the line up. Every CPU grid,
+    /// both speeds. (Until the M10 review the last 2 dots of lines 144-153
+    /// counted as "just before the mode-0 interrupt": the write at dot 455
+    /// of the default single-speed grid requested a STAT interrupt.)
+    #[test]
+    fn no_mode_0_latch_on_vblank_lines() {
+        for double in [false, true] {
+            let m = if double { 2 } else { 4 };
+            for skip in 0..m {
+                for line in 144..154u64 {
+                    // The accesses of this grid in the line's last dots.
+                    for t in (440..456u64).filter(|t| (t + 2 * m - 3 - skip) % m == 0) {
+                        let w = |lyc, sel, reg, value, n| {
+                            let pos = line * 456 + t;
+                            irq_and_line_after_write_on(
+                                0, lyc, sel, pos, reg, value, n, double, skip,
+                            )
+                        };
+                        let at = std::format!("{line}:{t}, double {double}, grid {skip}");
+                        // Mode 0 selected alone: the line is low, and stays.
+                        for value in [0x00, 0x20, 0x40] {
+                            let got = w(0xFF, 0x08, 0xFF41, value, 1);
+                            assert_eq!(got, (0, false), "08 -> {value:02X} at {at}");
+                        }
+                        // LY=LYC holds the line (line 153 compares 0 here);
+                        // it drops with the LYC select or with LYC.
+                        let lyc = if line == 153 { 0 } else { line as u8 };
+                        let got = w(lyc, 0x48, 0xFF41, 0x08, 1);
+                        assert_eq!(got, (0, false), "48 -> 08 at {at}");
+                        // (A single-speed LYC write landing in the next
+                        // line's first dots is deferred: `Ppu::write_lyc`.)
+                        if double || t < 455 {
+                            let got = w(lyc, 0x48, 0xFF45, 0xFF, 2);
+                            assert_eq!(got, (0, false), "LYC -> FF at {at}");
+                        }
+                    }
+                }
+            }
+        }
+        // Line 143 has its mode 0 to the end: clearing the select there
+        // lowers the line, with no interrupt either.
+        let got =
+            irq_and_line_after_write_on(0, 0xFF, 0x08, 143 * 456 + 455, 0xFF41, 0, 1, false, 0);
+        assert_eq!(got, (0, false));
+    }
+
+    /// The first line after LCD enable has a mode-0 interrupt (2 dots
+    /// later than on other lines, as its mode 3: SCX 2 at t = 261, SCX 3
+    /// at 262), and the same latch before it: a STAT write clearing the
+    /// mode-0 select 2 dots before it is too late, 3 dots before it is
+    /// not. gambatte (`mstat_irq.h`, behaviour only) latches against the
+    /// mode-0 event's time on every line 0-143 alike. No ROM we have
+    /// writes STAT there.
+    #[test]
+    fn first_line_after_lcd_on_has_the_mode_0_latch() {
+        const STAT: u8 = crate::ppu::INT_STAT;
+        let w = |scx| irq_after_write(scx, 0xFF, 0x08, 259, 0xFF41, 0, 3, false);
+        assert_eq!(w(2), STAT);
+        assert_eq!(w(3), 0);
     }
 
     /// A LYC write ending LY=LYC just before the mode-0 interrupt (line 2)

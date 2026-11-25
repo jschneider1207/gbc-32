@@ -239,6 +239,18 @@ ROMs: `disable_{,scx3_,scx4_,scx7_}2` (2) and `disable_scx{1,2,5}_1`
 latch, a 1-dot LYC one), the reason these ROMs' CGB and DMG results
 differ.
 
+The latch exists only where a mode-0 interrupt comes: on a line whose
+mode-3 end is known (`Ppu::m0_latched`), i.e. lines 0-143, the first line
+after LCD enable included (its interrupt is 2 dots later, as its mode 3;
+gambatte latches against the event's time on every line alike; no ROM
+writes STAT there). Lines 144-153 have no mode-0 event and no latch. Until
+2026-11-24 (M10 review) an unlatched line counted as having the interrupt
+at its end, dot 456, so on lines 144-153 a STAT write with its access at
+dots 454-455 that cleared the mode-0 select requested a STAT interrupt
+(dot 455 is on the default single-speed grid), and a STAT write clearing
+the LYC select there, or a LYC write at 450-454 ending LY=LYC, left the
+line up until the walk's next point. No ROM did either.
+
 Double speed, line start: a STAT write's phase 2 (half a dot after the
 access, a whole dot on our grid) sees the previous line's mode 0 while
 the access is before `t = 3` (gambatte `T > 8` half-dots), i.e. phase 2
@@ -345,3 +357,5 @@ write the walk's point requests at once).
   boundary there (see "Line 0 and line 153's LYC=0" above): a capture of
   `lycint152_lyc0irq`-style rows at lcd offset 3 would settle the read
   side directly.
+- The mode-0 latch on the first line after LCD enable follows gambatte's
+  model alone (`unpinned.md`, `m0-latch-first-line`).
