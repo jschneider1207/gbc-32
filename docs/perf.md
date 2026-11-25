@@ -747,12 +747,12 @@ kind due, so the event order is the old loop's.
 
 **OAM DMA read clears (theme 4).** `Memory::dma_read_clears` moved to
 `Sys` (still atomics behind `&`): cgb-acid2 +0.03%, worst-case +0.01%,
--32 B. The `&mut` CPU read path (to make it a plain `[u32; 5]`) was not
-re-measured; the recorded result (ADR 0028: +2.1% cpu_instrs) stands.
+-32 B. The `&mut` CPU read path (to make it a plain `[u32; 5]`) was
+re-measured in the next pass and dropped again.
 
 **Attribute sweep (theme 11).** Only T2 was done: `fmt_flags` loops
 plainly instead of through `black_box` (+336 B, `Debug` output only, no
-bench line executes it). A14, A8 and A11 are open.
+bench line executes it). A14, A8 and A11: the next pass.
 
 ### Small-state and attribute pass (M10, inventory themes 1, 4, 11)
 
