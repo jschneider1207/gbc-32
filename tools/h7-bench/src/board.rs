@@ -165,14 +165,16 @@ pub const CPU_HZ: u32 = 64_000_000;
 #[cfg(not(any(feature = "pll", feature = "pll480")))]
 const CLOCK_NAME: &str = "hsi64";
 
-/// Phase B (`--features pll`): PLL1 from HSI, 64 MHz / 4 * 49 / 2 =
-/// 392 MHz. DS12919 Table 13 and Table 14: with the SMPS supplying VCORE
+/// Phase B (`--features pll`): PLL1 from HSI, 64 MHz / 5 x 61.25 / 2 =
+/// 392 MHz (fractional mode, see `PLL_REF_DIV`). DS12919 Table 13 and Table 14: with the SMPS supplying VCORE
 /// the highest scale is VOS1 and its limit is 400 MHz (Table 14 note 1:
 /// "VOS0 (power scale 0) is not available when the SMPS step-down converter
 /// directly supplies VCORE"), so 480 MHz is out of reach on this board.
 /// 392 and not 400: the HSI is the reference (no dependency on the
 /// ST-LINK's 8 MHz MCO) and its tolerance of about 1% must stay under the
-/// limit.
+/// limit: at the HSI's upper bound (see `PLL_REF_DIV`) the CPU runs at
+/// 397.9 MHz, AXI 198.9 MHz, APB 99.5 MHz, VCO 795.8 MHz (rev Y's wide VCO
+/// stops at 836 MHz, DS12117 Table 39; rev V's at 960 MHz, Table 136).
 ///
 /// H753 (LDO supply): DS12117 Rev 10 Table 111 (rev V): VOS1 allows a
 /// 400 MHz CPU and a 200 MHz AHB/AXI clock (VOS0, 480 MHz, only on rev V);
@@ -207,15 +209,16 @@ const CLOCK_NAME: &str = "pll392";
 /// 64.3 x 1.0103 = 64.96 MHz (+1.5%). The board's HSI measured
 /// 64.230 MHz (+0.36%).
 ///
-/// PLL1: 64 MHz / DIVM1 4 = 16 MHz reference (RM0433 section 8.7.12:
-/// PLL1RGE 0b11, 8 to 16 MHz; DS12117 Table 136: 2 to 16 MHz), x DIVN1 59
-/// = 944 MHz VCO (wide VCO, 192 to 960 MHz), / DIVP1 2 = 472 MHz; AXI
-/// 236 MHz, APB 118 MHz. At the HSI's 64.96 MHz bound: CPU 479.1 MHz, AXI
-/// 239.6 MHz, both under the limits. The next step up, N 60, is the
-/// 480 MHz that leaves no margin at all. Flash wait states are unchanged:
-/// AXI in ]225; 240] MHz at VOS0 is 4 (RM0433 Table 17), and 4 stay valid
-/// (more than needed) down to the HSI's -2% bound, so cycle counts
-/// measured at 480 MHz still hold.
+/// PLL1: 64 MHz / DIVM1 5 = 12.8 MHz reference (see `PLL_REF_DIV`),
+/// x 73.75 (fractional mode: DIVN1 73, FRACN1 6144 / 8192) = 944 MHz VCO
+/// (wide VCO, 192 to 960 MHz, RM0433 section 8.7.12), / DIVP1 2 =
+/// 472 MHz; AXI 236 MHz, APB 118 MHz. At the HSI's upper bound
+/// (64.96 MHz): reference 12.99 MHz, VCO 958.2 MHz, CPU 479.1 MHz, AXI
+/// 239.6 MHz, all under their limits. The next integer step, x 60 from a
+/// 16 MHz reference, is the 480 MHz that leaves no margin at all. Flash
+/// wait states: AXI in ]225; 240] MHz at VOS0 is 4 (RM0433 Table 17), and
+/// 4 stay valid (more than needed) down to the HSI's lower bound (AXI
+/// 229.9 MHz).
 #[cfg(feature = "pll480")]
 pub const CPU_HZ: u32 = 472_000_000;
 #[cfg(feature = "pll480")]
@@ -229,6 +232,78 @@ const PLACEMENT: &str = "itcm-dtcm";
 const PLACEMENT: &str = "flash-dtcm";
 #[cfg(not(feature = "dtcm"))]
 const PLACEMENT: &str = "flash-axi";
+
+/// PLL1's reference divider (DIVM1) for both PLL images, and the
+/// fractional multipliers that keep the nominal frequencies.
+///
+/// The reference must stay inside the PLL1RGE band at every HSI frequency
+/// the part allows. DS12117 Table 133 (rev V): 63.7 to 64.3 MHz at 3.3 V
+/// and TJ 30 °C, drift over temperature -2% to +1% (TJ -40 to 105 °C),
+/// over VDD -0.12% to +0.03%: 62.35 to 64.96 MHz. The first version used
+/// DIVM1 4, a 16 MHz reference at nominal: exactly the top of the band
+/// (RM0433 section 8.7.12, PLL1RGE 0b11: 8 to 16 MHz; DS12117 Table 136:
+/// fPLL_IN 2 to 16 MHz), and over it on this board (HSI measured
+/// 64.228 MHz: 16.06 MHz). DIVM1 5 gives 12.47 to 12.99 MHz over the whole
+/// tolerance (12.85 MHz on this board), well inside 8 to 16 MHz, with the
+/// VCO selection unchanged (RM0433 section 8.5.5: above 2 MHz, the wide
+/// VCO).
+///
+/// x 61.25 and x 73.75 are not integers, so PLL1 runs in fractional mode:
+/// VCO = ref x (DIVN1 + FRACN1 / 2^13) (RM0433 section 8.7.14), the
+/// DIVN1 field holding N - 1 (section 8.7.13). The ratios equal the old
+/// integer settings' (61.25 / 5 = 49 / 4, 73.75 / 5 = 59 / 4), so every
+/// nominal frequency is unchanged. DS12117 Table 136: sigma-delta mode
+/// locks within 166 us (CKIN >= 8 MHz), and its long-term jitter is
+/// +-0.8% against +-0.7% in integer mode: a spread of the period, not a
+/// shift of the mean frequency, which is what the margins are about.
+#[cfg(any(feature = "pll", feature = "pll480"))]
+const PLL_REF_DIV: u8 = 5;
+/// 392 MHz: x 61.25, DIVN1 field 60 (N 61), FRACN1 0.25 x 8192.
+#[cfg(feature = "pll")]
+const PLL_N_FRAC: (u16, u16) = (61 - 1, 2048);
+/// 472 MHz: x 73.75, DIVN1 field 72 (N 73), FRACN1 0.75 x 8192.
+#[cfg(feature = "pll480")]
+const PLL_N_FRAC: (u16, u16) = (73 - 1, 6144);
+
+/// Programs PLL1 (off after reset) from the HSI as `PLL_REF_DIV` and
+/// `PLL_N_FRAC` say, P output /2 only, and turns it on. RM0433 section
+/// 8.5.5, "PLL initialization phase" and Figure 48 (fractional mode):
+/// source and DIVM1; FRACN1; PLLCFGR with PLL1FRACEN = 1 (its 0 to 1 edge
+/// latches FRACN1 into the modulator, section 8.7.12; it is 0 after reset
+/// with the PLL off, so the edge is this write); the dividers; PLL1ON.
+/// Returns whether PLL1RDY rose.
+#[cfg(any(feature = "pll", feature = "pll480"))]
+fn pll1_on(rcc: &pac::RCC, tries: u32) -> bool {
+    // Source HSI (64 MHz, HSIDIV /1 at reset), DIVM1 (RM0433 section
+    // 8.7.11). The HSE is not used (see `CPU_HZ`).
+    rcc.pllckselr
+        .modify(|_, w| w.pllsrc().hsi().divm1().bits(PLL_REF_DIV));
+    rcc.pll1fracr.write(|w| w.fracn1().bits(PLL_N_FRAC.1));
+    // Reference range 8 to 16 MHz (PLL1RGE = 0b11), wide VCO (192 to
+    // 960 MHz), fractional latch on, only the P output (RM0433 section
+    // 8.7.12).
+    rcc.pllcfgr.modify(|_, w| {
+        w.pll1rge()
+            .range8()
+            .pll1vcosel()
+            .wide_vco()
+            .pll1fracen()
+            .set()
+            .divp1en()
+            .enabled()
+            .divq1en()
+            .disabled()
+            .divr1en()
+            .disabled()
+    });
+    // DIVN1 field = N - 1, DIVP1 field = P - 1 = 1 (/2). RM0433 section
+    // 8.7.13.
+    // SAFETY: documented field values (DIVN1 4 to 512, DIVP1 /2).
+    rcc.pll1divr
+        .modify(|_, w| unsafe { w.divn1().bits(PLL_N_FRAC.0).divp1().bits(1) });
+    rcc.cr.modify(|_, w| w.pll1on().set_bit());
+    wait_for(tries, || rcc.cr.read().pll1rdy().bit_is_set())
+}
 
 /// Polls `ready` up to `tries` times.
 fn wait_for(tries: u32, mut ready: impl FnMut() -> bool) -> bool {
@@ -260,33 +335,10 @@ fn clock_up(pwr: &pac::PWR, rcc: &pac::RCC, flash: &pac::FLASH) -> bool {
     if !wait_for(TRIES, || pwr.d3cr.read().vosrdy().bit_is_set()) {
         return false;
     }
-    // PLL1 (off after reset): source HSI, DIVM1 = 4 (16 MHz reference).
-    // RM0399 section 9.7.10.
-    rcc.pllckselr
-        .modify(|_, w| w.pllsrc().hsi().divm1().bits(4));
-    // Reference range 8 to 16 MHz (PLL1RGE = 0b11), wide VCO (192 to
-    // 960 MHz), integer mode, only the P output. RM0399 section 9.7.11.
-    rcc.pllcfgr.modify(|_, w| {
-        w.pll1rge()
-            .range8()
-            .pll1vcosel()
-            .wide_vco()
-            .pll1fracen()
-            .reset()
-            .divp1en()
-            .enabled()
-            .divq1en()
-            .disabled()
-            .divr1en()
-            .disabled()
-    });
-    // DIVN1 field = N - 1 = 48 (x49: VCO 784 MHz), DIVP1 field = P - 1 = 1
-    // (/2: 392 MHz). RM0399 section 9.7.12.
-    // SAFETY: both are documented field values (DIVN1 4 to 512, DIVP1 /2).
-    rcc.pll1divr
-        .modify(|_, w| unsafe { w.divn1().bits(48).divp1().bits(1) });
-    rcc.cr.modify(|_, w| w.pll1on().set_bit());
-    if !wait_for(TRIES, || rcc.cr.read().pll1rdy().bit_is_set()) {
+    // PLL1: 12.8 MHz reference x 61.25 = VCO 784 MHz, /2 = 392 MHz (see
+    // `PLL_REF_DIV`; RM0399 sections 9.7.10 to 9.7.13 describe the same
+    // PLL1 registers for the H755).
+    if !pll1_on(rcc, TRIES) {
         return false;
     }
     // CPU 392 MHz (D1CPRE /1); AXI/AHB 196 MHz (HPRE /2: limit 200, and it
@@ -392,34 +444,9 @@ fn clock_up_480(
     // cycles; `asm::delay` takes at least that many), five times the ramp
     // of Figure 31, so the frequency never goes up on the flags alone.
     cortex_m::asm::delay(6_400);
-    // PLL1 (off after reset): source HSI (64 MHz, HSIDIV /1 at reset),
-    // DIVM1 = 4 (16 MHz reference). RM0433 section 8.7.11. The HSE is not
-    // used (see `CPU_HZ`).
-    rcc.pllckselr
-        .modify(|_, w| w.pllsrc().hsi().divm1().bits(4));
-    // Reference range 8 to 16 MHz (PLL1RGE = 0b11), wide VCO, integer
-    // mode, only the P output. RM0433 section 8.7.12.
-    rcc.pllcfgr.modify(|_, w| {
-        w.pll1rge()
-            .range8()
-            .pll1vcosel()
-            .wide_vco()
-            .pll1fracen()
-            .reset()
-            .divp1en()
-            .enabled()
-            .divq1en()
-            .disabled()
-            .divr1en()
-            .disabled()
-    });
-    // DIVN1 field = N - 1 = 58 (x59: VCO 944 MHz), DIVP1 field = P - 1
-    // = 1 (/2: 472 MHz). RM0433 section 8.7.13.
-    // SAFETY: both are documented field values (DIVN1 4 to 512, DIVP1 /2).
-    rcc.pll1divr
-        .modify(|_, w| unsafe { w.divn1().bits(58).divp1().bits(1) });
-    rcc.cr.modify(|_, w| w.pll1on().set_bit());
-    if !wait_for(TRIES, || rcc.cr.read().pll1rdy().bit_is_set()) {
+    // PLL1: 12.8 MHz reference x 73.75 = VCO 944 MHz, /2 = 472 MHz (see
+    // `PLL_REF_DIV`).
+    if !pll1_on(rcc, TRIES) {
         return Err("pll1 lock");
     }
     // RM0433 Table 17: AXI clock in ]225; 240] MHz at VOS0 (236 MHz) is 4
@@ -900,6 +927,16 @@ impl Board {
             rcc.d1cfgr.read().bits(),
             flash.acr.read().bits(),
             rcc.rsr.read().bits()
+        );
+        // PLL1 as programmed (reset values in the HSI images).
+        let _ = writeln!(
+            out,
+            "h7bench v1 pll pllckselr={:#010x} pllcfgr={:#010x} pll1divr={:#010x} \
+             pll1fracr={:#010x}\r",
+            rcc.pllckselr.read().bits(),
+            rcc.pllcfgr.read().bits(),
+            rcc.pll1divr.read().bits(),
+            rcc.pll1fracr.read().bits()
         );
         let _ = writeln!(
             out,

@@ -105,10 +105,12 @@ code adds about 2.3 KB of `.text` and 20 B of `.bss`; the images without
 | `bench-flash-dtcm-pll480` | 711,632 | - | 130,140 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
 | `bench-itcm-dtcm-pll480` | 712,688 | 64,024 | 67,176 | 527,504 | 2,304 + 51,016 + 24 | 58,368 |
 
-With the HSI-based 472 MHz clock (no HSE setup) the `.bin`s are
+With the HSI-based 472 MHz clock (no HSE setup) the `.bin`s were
 11,924 (`selftest-pll480`), 711,040, 711,344 and 712,416 B; `clockcheck`
-is 13,188 B and `clockcheck-pll480` 15,644 B. The images without `pll480`
-did not change.
+13,188 B and `clockcheck-pll480` 15,644 B. With the fractional PLL1
+setup and the banner's `pll` line (every image) they are 12,072, 711,208,
+711,512 and 712,584 B; `clockcheck` 13,336 B, `clockcheck-pll480`
+15,816 B.
 
 `.rodata` is mostly the fifteen ROM images (fourteen of 32 KiB and cpu_instrs at 64 KiB: 512 KiB). The `.bin` is 34% of the H753's 2 MiB flash and 68% of the H755's 1 MiB bank 1, so both still fit. The stack starts at the
 top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
@@ -229,7 +231,10 @@ h7bench v1 selftest n=3 delay=8000000 cycles=8000008 cyccnt=1476839836 stack_use
   With the HSI clock (`clock=pll472 cpu_hz=472000000`) the banner reads
   the same except `rcc_cr=0x0304c025`: HSEON and HSERDY clear (HSEBYP,
   bit 18, still reads 1 after the earlier image set it; the HSE is off),
-  and the `cyccnt=` steps are 472,000,000.
+  and the `cyccnt=` steps are 472,000,000. Since the fractional PLL1
+  setup every image also prints a `pll` line after `clock`: `pllckselr`,
+  `pllcfgr`, `pll1divr`, `pll1fracr` (reset values in the HSI images; see
+  "Boards" for the `pll480` values).
 - VOS0: `d3cr` and `csr1` read the same as at 392 MHz (VOS = ACTVOS =
   0b11, VOSRDY = ACTVOSRDY = 1): neither field has a VOS0 code (RM0433
   sections 6.8.2 and 6.8.6), so `oden=1` is what shows VOS0.
@@ -419,9 +424,18 @@ comments in `src/board.rs` carry the same citations.
   WRHIGHFREQ = 0b10, for a 196 MHz AXI clock at VOS1. VOS in `PWR_D3CR`:
   RM0433 section 6.8.6.
 - **Phase C clock (`pll480`, this board only).** Since 2026-11-25: PLL1
-  from the HSI, 64 MHz / DIVM1 4 = 16 MHz, x 59 = 944 MHz VCO (wide VCO,
-  192 to 960 MHz, RM0433 section 8.7.13, DS12117 Table 136), / 2 =
-  **472 MHz** nominal; AXI/AHB 236 MHz, every APB 118 MHz. VOS1, then
+  from the HSI, 64 MHz / DIVM1 5 = 12.8 MHz reference, x 73.75 = 944 MHz
+  VCO, / 2 = **472 MHz** nominal; AXI/AHB 236 MHz, every APB 118 MHz.
+  x 73.75 is fractional mode: DIVN1 field 72 (N 73; the field holds
+  N - 1, RM0433 section 8.7.13), FRACN1 6144 (0.75 x 2^13, section
+  8.7.14), loaded and latched by PLL1FRACEN 0 -> 1 before PLL1ON as
+  RM0433 section 8.5.5 "PLL initialization phase" and Figure 48 give it.
+  The banner's `pll` line shows the registers (`pllckselr=0x02020050
+  pllcfgr=0x01f9000d pll1divr=0x01010248 pll1fracr=0x0000c000`). The
+  first HSI version used DIVM1 4, x 59: a 16 MHz reference, the very top
+  of the PLL input range (RM0433 section 8.7.12 PLL1RGE 0b11: 8 to
+  16 MHz; DS12117 Table 136: fPLL_IN 2 to 16 MHz), and over it with this
+  board's HSI (16.06 MHz). VOS1, then
   SYSCFG_PWRCR.ODEN, then VOS0 (RM0433 section 6.6.2), allowed by DS12117
   Table 111/112 (LDO only, TJ at most 105 °C) and ES0392 section 2.2.21
   (rev V). Flash 4 wait states, WRHIGHFREQ = 0b10 (RM0433 Table 17, AXI in
@@ -432,12 +446,28 @@ comments in `src/board.rs` carry the same citations.
   and has no stated tolerance, so no margin on it can be shown, on this
   board or another NUCLEO's ST-LINK. The HSI has a datasheet bound
   (DS12117 Table 133, rev V): at most 64.3 MHz at 30 °C, +1% for TJ -20
-  to 105 °C, +0.03% over VDD, so at most 64.96 MHz (+1.5%). 472 MHz
-  nominal is then at most 479.1 MHz (AXI 239.6 MHz), under the 480 / 240
-  MHz limits; the next PLL step, x 60, is 480 MHz nominal, no margin.
-  Measured: 473.68 MHz (HSI +0.36%), 1.3% under the limit. At the HSI's
-  low bound (-2% below -20 °C, 63.7 MHz) the AXI clock stays above
-  225 MHz, and 4 wait states are valid at any lower clock anyway.
+  to 105 °C, +0.03% over VDD, so at most 64.96 MHz (+1.5%); at least
+  63.7 MHz -2% (TJ down to -40 °C) -0.12% (VDD) = 62.35 MHz. Every
+  limit at both bounds (RM0433 sections 8.7.12 and 8.7.13, DS12117
+  Tables 111 and 136):
+
+  | Clock | Limit | 62.35 MHz HSI | 64 MHz (nominal) | 64.23 MHz (this board) | 64.96 MHz HSI |
+  |---|---|---|---|---|---|
+  | fPLL_IN (HSI / 5) | 8 to 16 MHz | 12.47 | 12.80 | 12.85 | 12.99 |
+  | VCO (x 73.75) | 192 to 960 MHz | 919.7 | 944.0 | 947.4 | 958.2 |
+  | CPU (VCO / 2) | 480 MHz | 459.8 | 472.0 | 473.7 | 479.1 |
+  | AXI/AHB (CPU / 2) | 240 MHz | 229.9 | 236.0 | 236.8 | 239.6 |
+  | APB (AXI / 2) | 120 MHz | 115.0 | 118.0 | 118.4 | 119.8 |
+
+  VCO, CPU, AXI and APB all end 0.19% under their limits at the upper
+  bound (one ratio), fPLL_IN 19% under. The next integer step, x 60
+  from 16 MHz, is 480 MHz nominal, no margin. Measured against the LSE:
+  473.62 MHz (HSI 64.219 MHz, +0.34%; "Clock check"). The AXI clock
+  stays in ]225; 240] MHz at the low bound, and 4 wait states are valid
+  at any lower clock anyway. The table is about the mean frequency: the
+  PLL's long-term jitter (DS12117 Table 136: +-0.8% in sigma-delta mode,
+  +-0.7% in integer mode) is a period spread that the datasheet does not
+  relate to the frequency limits, and integer mode has it too.
 - **Memory** (RM0433 section 2.3.2 Table 7): ITCM 64 KB at 0, DTCM 128 KB
   at 0x2000_0000, AXI SRAM 512 KB at 0x2400_0000, the same as the H755;
   flash 2 x 1 MB from 0x0800_0000, and with one core the image may use
@@ -482,9 +512,15 @@ datasheet). The code comments in `src/board.rs` carry the same citations.
   available when the SMPS step-down converter directly supplies VCORE"):
   the highest scale on this board is VOS1, limit 400 MHz. 480 MHz is not
   reachable without rework to LDO supply.
-- Phase B: PLL1 from HSI, 64 MHz / 4 x 49 / 2 = 392 MHz (the HSI's
-  tolerance must stay under 400), AXI/AHB 196 MHz (also the M4's clock,
-  limit 200), APB 98 MHz, flash 2 wait states with WRHIGHFREQ = 2.
+- Phase B: PLL1 from HSI, 64 MHz / 5 x 61.25 / 2 = 392 MHz (the HSI's
+  tolerance must stay under 400: 397.9 MHz at the H753's HSI bound,
+  DS12117 Table 133; DS12919 not checked for it),
+  AXI/AHB 196 MHz (also the M4's clock, limit 200), APB 98 MHz, flash 2
+  wait states with WRHIGHFREQ = 2. x 61.25 is fractional mode (DIVN1
+  field 60, FRACN1 2048), with a 12.8 MHz reference and a 784 MHz VCO,
+  as in `pll480` ("NUCLEO-H753ZI"); the 2026-11-24 runs used the integer
+  64 / 4 x 49 / 2, the same nominal clock from a 16 MHz reference (the
+  top of the 8 to 16 MHz range, RM0399 has the same PLL1).
 
 ### Dual core
 
