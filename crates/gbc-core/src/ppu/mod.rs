@@ -1768,7 +1768,17 @@ impl Ppu {
         // its match flip-flop PUXA are clocked from CLKPIPE). The stalls
         // stay listed at pixel 0, after the discard: the totals are the
         // same, only the compares' dots differ.
-        let held = if reg == 0x43 { self.x0_fetch_dots() } else { 0 };
+        // Looked up only where it can matter: on a line with stalls, while
+        // 10 objects at X = 0 (5 + 6 * 10 dots) could still be holding the
+        // discard. Measured: `synth:dmg-raster` +0.53% with the lookup on
+        // every SCX write, +0.41% with this.
+        const MAX_HELD: i32 = 5 + 6 * objects::MAX_PER_LINE as i32;
+        let early = t + DISCARD_LEAD - MAX_HELD <= first_pixel;
+        let held = if reg == 0x43 && early && !lt.stalls.is_empty() {
+            self.x0_fetch_dots()
+        } else {
+            0
+        };
         if reg == 0x43 && t + DISCARD_LEAD - held <= first_pixel {
             let start = i32::from(lt.mode3) + 12;
             let w = (t - start + DISCARD_LEAD - held).max(0);
