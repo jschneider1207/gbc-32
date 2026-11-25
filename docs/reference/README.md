@@ -15,6 +15,7 @@ Rules:
 - Pan Docs: https://gbdev.io/pandocs/
 - Game Boy: Complete Technical Reference (Gekkio): https://gekkio.fi/files/gb-docs/gbctr.pdf
 - SameBoy source (behavior reference): https://github.com/LIJI32/SameBoy
+  (`mode3-oracle.md`: its mode-3 loop as a test-only oracle)
 - Test suite how-tos: `test-roms/<suite>/game-boy-test-roms-howto.md`
 - STM32H742/743/750/753 reference manual RM0433 (Stage 2)
 - X-NUCLEO-GFX02Z1 user manual (Stage 2)

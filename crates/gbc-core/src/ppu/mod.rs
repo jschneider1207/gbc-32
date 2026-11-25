@@ -86,6 +86,10 @@ mod objects;
 mod render;
 mod stalls;
 
+/// Test-only: the dot-stepped mode-3 oracle and its differential test.
+#[cfg(test)]
+mod mode3_oracle;
+
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
 
