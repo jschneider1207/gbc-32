@@ -3612,23 +3612,24 @@ pub(crate) fn object_penalty(xs: &[u8], scx: u8, window: Option<u8>) -> u32 {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use super::fetch_tests::{fetch_rig, write_fetch_reg};
     use super::*;
     use std::boxed::Box;
     use std::vec;
     use std::vec::Vec;
 
     /// A PPU with its own memory and frame, driven like the bus drives it.
-    struct Rig {
-        ppu: Ppu,
-        mem: Box<Memory>,
-        frame: Box<Frame>,
-        iflags: u8,
+    pub(super) struct Rig {
+        pub(super) ppu: Ppu,
+        pub(super) mem: Box<Memory>,
+        pub(super) frame: Box<Frame>,
+        pub(super) iflags: u8,
     }
 
     impl Rig {
         /// LCD off at clock 0, then on at `on` with STAT selects `select`
         /// and LYC `lyc`.
-        fn on_at(on: u64, select: u8, lyc: u8) -> Self {
+        pub(super) fn on_at(on: u64, select: u8, lyc: u8) -> Self {
             let mut r = Self {
                 ppu: Ppu::new(),
                 mem: Box::new(Memory::new()),
@@ -3643,19 +3644,19 @@ mod tests {
             r
         }
 
-        fn sync(&mut self, now: u64) -> Events {
+        pub(super) fn sync(&mut self, now: u64) -> Events {
             let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
             p.sync(now, m, f, &mut self.iflags, Speed::Normal)
         }
 
         /// Runs every deadline up to `until`: the clocks at which IF bits
         /// were requested, with the bits.
-        fn irqs(&mut self, until: u64) -> Vec<(u64, u8)> {
+        pub(super) fn irqs(&mut self, until: u64) -> Vec<(u64, u8)> {
             self.irqs_at_speed(until, Speed::Normal)
         }
 
         /// [`Self::irqs`] in single or double speed.
-        fn irqs_at_speed(&mut self, until: u64, double: Speed) -> Vec<(u64, u8)> {
+        pub(super) fn irqs_at_speed(&mut self, until: u64, double: Speed) -> Vec<(u64, u8)> {
             let mut out = Vec::new();
             loop {
                 let at = self.ppu.next_event(double);
@@ -3672,23 +3673,23 @@ mod tests {
             out
         }
 
-        fn sync_at_speed(&mut self, now: u64, double: Speed) {
+        pub(super) fn sync_at_speed(&mut self, now: u64, double: Speed) {
             let (p, m, f) = (&mut self.ppu, &mut *self.mem, &mut *self.frame);
             p.sync(now, m, f, &mut self.iflags, double);
         }
 
-        fn stat(&self, now: u64) -> u8 {
+        pub(super) fn stat(&self, now: u64) -> u8 {
             self.ppu.stat(now, Speed::Normal)
         }
 
-        fn ly(&self, now: u64) -> u8 {
+        pub(super) fn ly(&self, now: u64) -> u8 {
             self.ppu.ly(now, Speed::Normal)
         }
     }
 
     /// The clock of frame position `p` in the first frame of a rig turned
     /// on at `on`, and in the frames after it.
-    fn clock(on: u64, frame: u64, p: u32) -> u64 {
+    pub(super) fn clock(on: u64, frame: u64, p: u32) -> u64 {
         on - u64::from(ON_POS) + frame * u64::from(FRAME) + u64::from(p)
     }
 
@@ -5112,11 +5113,22 @@ mod tests {
         // Too late (`WINDOW_ON_LEAD`: the stall would begin at dot 160).
         assert_eq!(run(160), (1, 1, 1));
     }
+}
+
+/// Mode 3 as the fetcher runs it: register writes inside the line, the
+/// window's start, and the object stalls.
+#[cfg(test)]
+mod fetch_tests {
+    extern crate std;
+    use super::tests::{Rig, clock};
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
 
     /// A rig in DMG compatibility mode with BG color 0 = 1 and color 3 = 4,
     /// tile 0 color 0 and tile 1 color 3 (LCDC.4 = 1), map 9800 all tile 0
     /// and map 9C00 all tile 1.
-    fn fetch_rig(on: u64) -> Rig {
+    pub(super) fn fetch_rig(on: u64) -> Rig {
         let mut r = Rig::on_at(on, 0, 0xFF);
         let dmg = DmgPalettes {
             bg: [1, 2, 3, 4],
@@ -5132,7 +5144,7 @@ mod tests {
 
     /// A mid-line LCDC or SCX write at clock `now`, as `Ctx::write_ppu`
     /// does it.
-    fn write_fetch_reg(r: &mut Rig, now: u64, reg: usize, value: u8) {
+    pub(super) fn write_fetch_reg(r: &mut Rig, now: u64, reg: usize, value: u8) {
         r.sync(now);
         r.ppu.flush(now, &mut r.mem, &mut r.frame);
         r.ppu.hold_fetch(now, &r.mem, reg, value, false);
@@ -6130,8 +6142,16 @@ mod tests {
         // In the window (WX = 7: window x 0), SCX doesn't matter.
         assert_eq!(object_penalty(&[8], 3, Some(7)), 11);
     }
+}
 
-    // --- OAM DMA as the PPU sees it ---
+/// OAM DMA as the PPU sees it.
+#[cfg(test)]
+mod oam_dma_tests {
+    extern crate std;
+    use super::tests::{Rig, clock};
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
 
     /// A Rig with the LCD on at 1000, synced to the start of line 5, and
     /// objects at OAM entries 0 and 20 covering line 5 (OAM and the
