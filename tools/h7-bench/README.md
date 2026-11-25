@@ -41,25 +41,48 @@ it.
 Every image also has the board feature (`h753` or `h755`); `build.sh`
 passes it with `--no-default-features`.
 
-The ROMs are built in: the four synthetic ones from the bench's generator
+The ROMs are built in: fourteen synthetic ones from the bench's generator
 (`tools/bench/src/synth.rs`, compiled into `build.rs`) and blargg's
 `cpu_instrs.gb`, read at build time from `H7_BENCH_CPU_INSTRS` (default: the
 repo's `test-roms/`). The build fails with a message if it is missing.
 
+### Workloads
+
+Fifteen, in report order (`src/workload.rs`, `expected-hashes.txt`). Each
+makes `calls` frame-sized `run_until` calls as `run_emulation` in
+`tools/bench` does, on the ROM `synth::build(name)` returns (`synth:<name>`
+there), so the ROM bytes are the bench's. 120 calls are about 2 emulated
+seconds, the duration `scripts/check-bench.sh` uses for all of them but
+`dma-storm` (3 s) and `halt-irq` (10 s); here those two also get 120 calls.
+
+| Workload | Calls | Kind |
+|---|---:|---|
+| `worst-case`, `cgb-raster`, `dmg-raster`, `event-storm` | 120 | the bound (the original four) |
+| `cpu_instrs` | 600 | blargg, from `H7_BENCH_CPU_INSTRS` |
+| `dma-storm`, `halt-irq`, `apu-writes`, `oam-lines` | 120 | `BENCHES` of `check-bench.sh`, added 2026-11-25 |
+| `storm-control`, `storm-apu`, `storm-spsw`, `storm-div`, `storm-gdma`, `storm-ppu` | 120 | `synth::NAMES`' storms, **outside the bound**, for context (docs/perf.md "Outside the bound"); the default variant of each. `storm-io` has no default (it needs `@<hex reg>`), so it is not run |
+
+The storms cost 2 to 22 M x86 instructions a frame (docs/perf.md), so at
+64 MHz each should run for roughly a minute (an estimate from those
+counts, not measured): the whole report will take several minutes, not one. On the host, `host/` prints all fifteen lines in
+2 s, and QEMU runs the whole report in 18 s.
+
 ### Placements and sizes
 
-Built 2026-11-24 for the H755 (bytes; `build.sh` prints the current
-figures; at `main` 74e7dc3 for the H753 the bench `.bin`s are about 380 KB,
-and the ITCM image holds 102 gbc-core functions, 60,632 B):
+Built 2026-11-25 for the H753 with all fifteen workloads (bytes; `build.sh`
+prints the current figures; with the first five workloads the bench `.bin`s
+were 381,176, 381,352 and 382,432 B and `.rodata` 202,072 and 199,768 B; the
+H755 images are 80 B larger). The ITCM image holds 102 gbc-core functions,
+60,632 B:
 
 | Image | `.bin` | `.itcm` | `.text` (flash) | `.rodata` | DTCM (`.dtcm_rodata` + `.bss`) | AXI SRAM |
 |---|---|---|---|---|---|---|
-| `selftest` | 9,560 | - | 7,588 | 1,308 | - | 4 |
-| `bench-flash-axi` | 329,328 | - | 126,716 | 201,944 | - | 50,996 + 58,368 |
-| `bench-flash-dtcm` | 329,504 | - | 126,892 | 199,640 | 2,304 + 50,996 | 58,368 |
-| `bench-itcm-dtcm` | 330,552 | 64,664 | 63,280 | 199,640 | 2,304 + 50,996 | 58,368 |
+| `selftest` | 9,520 | - | 7,572 | 1,284 | - | 4 |
+| `bench-flash-axi` | 709,208 | - | 127,476 | 530,048 | - | 51,020 + 58,368 |
+| `bench-flash-dtcm` | 709,384 | - | 127,652 | 527,744 | 2,304 + 51,020 | 58,368 |
+| `bench-itcm-dtcm` | 710,464 | 64,024 | 64,712 | 527,744 | 2,304 + 51,020 | 58,368 |
 
-`.rodata` is mostly the five ROM images (192 KiB). The stack starts at the
+`.rodata` is mostly the fifteen ROM images (fourteen of 32 KiB and cpu_instrs at 64 KiB: 512 KiB). The `.bin` is 34% of the H753's 2 MiB flash and 68% of the H755's 1 MiB bank 1, so both still fit. The stack starts at the
 top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
 use measured is 2,952 B (the `stack used=` line).
 
@@ -167,7 +190,7 @@ h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
 
 `cycles=` is 8,000,008 to 8,000,020 on this board, at both clocks.
 
-Expected, bench (the workloads run once, about a minute at 64 MHz; then the
+Expected, bench (the workloads run once, several minutes at 64 MHz (the storms dominate); then the
 whole report repeats every 3 s forever):
 
 ```
@@ -359,7 +382,7 @@ cannot connect, `FAIL.TXT` on the drive):
 ## Results
 
 CPU cycles per frame-sized `run_until` call, mean / max over the calls of
-each workload (120; cpu_instrs 600).
+each workload (see "Workloads"; the 2026-11-24 and 2026-11-25 results below are the first five).
 
 ### NUCLEO-H755ZI-Q, 2026-11-24
 
