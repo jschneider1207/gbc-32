@@ -19,7 +19,7 @@
 //! ROMs finish within seconds and then spin): the synthetic programs
 //! (timer and serial storm in double speed, OAM DMA, HALT with interrupts,
 //! all four APU channels with raster writes, palette raster with HDMA, APU
-//! register writes, DMG-mode raster), cgb-acid2 (halted, STAT interrupts
+//! register writes, DMG-mode raster, OAM rewritten in every HBlank), cgb-acid2 (halted, STAT interrupts
 //! every frame), cpu_instrs, cgb_sound and the MBC3 RTC test (the RTC
 //! counts 30 minutes).
 
@@ -46,6 +46,7 @@ const WORKLOADS: &[(&str, bool)] = &[
     ("synth:cgb-raster", true),
     ("synth:apu-writes", true),
     ("synth:dmg-raster", true),
+    ("synth:oam-lines", true),
     // (It turns the LCD off while it sets up.)
     ("cgb-acid2/cgb-acid2.gbc", false),
     ("blargg/cpu_instrs/cpu_instrs.gb", false),
@@ -59,36 +60,62 @@ struct Outcome {
     samples: u64,
     wall: f64,
     /// For a workload whose frames are checked: the clock after the call
-    /// that reported the first `FRAME_READY`, and the largest deviation
-    /// of a later frame from its due clock.
-    frame_check: Option<(u64, u64)>,
+    /// that reported the first `FRAME_READY`, and the lowest and highest
+    /// offset of a frame from its due clock ([`FrameCheck`]).
+    frame_check: Option<(u64, i64, i64)>,
 }
 
-/// How far after the frame boundary a run call that reports `FRAME_READY`
-/// can end, in base clocks. The core does not report the boundary's
-/// clock: the PPU raises the event when the M-cycle that reaches VBlank
-/// (line 144, dot 5) ends, at most 3 clocks after that dot, and the event
-/// ends the call after the current step (`Ctx::raise`, `Ctx::end_run`:
-/// "the run call ends after the current instruction"), i.e. after at most
-/// 5 more M-cycles of the longest step (a 6 M-cycle instruction, `CALL`;
-/// an interrupt dispatch is 5; an idle or a VRAM DMA stall M-cycle is 1).
-/// 3 + 5 * 4 = 23 in single speed, less in double speed.
-const FRAME_JITTER: u64 = 23;
+/// How far after the frame boundary (line 144, dot 5) a run call that
+/// reports `FRAME_READY` can end, in base clocks: 31 (single speed). The
+/// core does not report the boundary's clock. The PPU's VBlank deadline
+/// runs at the first M-cycle end at or after the dot (`Ctx::tick`,
+/// `Ctx::boundary`; a clock skip, `Ctx::skip_clocks`, also ends on an
+/// M-cycle end): up to 3 clocks later (1 in double speed). Its event ends
+/// the call (`Ctx::raise` -> `Ctx::end_run`) only where the CPU looks at
+/// `Bus::run_done`: after an instruction (`Cpu::run`), or after a checked
+/// step that is no instruction (`Cpu::checked_fetch`). The longest run of
+/// M-cycles with no look after the one that crossed the dot is in
+/// `Cpu::step_not_running`, `Mode::Stopped`: STOP mode's wake-up idles
+/// two M-cycles, then `Cpu::attend` goes on, with IME off, to the opcode
+/// fetch and `Cpu::execute` of a 6 M-cycle instruction (`CALL`), so the
+/// dot in the first idle leaves 1 + 6 M-cycles to run: 3 + 7 * 4 = 31.
+/// The others are shorter: HALT's and the speed-switch halt's single
+/// wake-up idle, then an instruction, 3 + 6 * 4 = 27 (a dispatch, 5
+/// M-cycles, instead: 23); an instruction or a dispatch alone, 3 + 5 * 4
+/// = 23; a halted skip (`Bus::idle_halted`) or a VRAM DMA stall stops at
+/// the event's M-cycle (`vdma_turn`). In double speed: 1 + 7 * 2 = 15.
+const OVERSHOOT: i64 = 31;
+
+/// The tolerance of the check before this one (`|offset| <= 23` around
+/// the first frame, from a bound that missed the wake-up paths of
+/// [`OVERSHOOT`]). Kept so that no run that check rejected passes.
+const ANCHOR_TOLERANCE: i64 = 23;
+
+/// The latest clock the first frame may end its call at: within three
+/// frames of power-on. Setup with the LCD off is allowed, a core that
+/// loses the first frames is not (`synth:dmg-raster`, the latest, at
+/// 194,844).
+const FIRST_FRAME_LIMIT: u64 = 3 * FRAME_CLOCKS as u64;
 
 /// The frame check of a workload that keeps the LCD on: counted from the
-/// first completed frame (the LCD may be off before it), frame `k` must
-/// end its call at `first + k * FRAME_CLOCKS`, within [`FRAME_JITTER`]
-/// either way (`first` itself is up to that late). Each frame is checked
-/// as it arrives, against the first, so a lost, extra or delayed frame
-/// fails at once and nothing can drift. At the end, the run must not have
-/// gone past the next frame's due clock: frames stopping fails too.
+/// first completed frame (the LCD may be off before it, up to
+/// [`FIRST_FRAME_LIMIT`]). Frame `k`'s offset is `clock - (first + k *
+/// FRAME_CLOCKS)`, `first` being frame 0's clock (offset 0); every
+/// frame's call ends between the boundary and [`OVERSHOOT`] after it, so
+/// the offsets span at most [`OVERSHOOT`] (frame 0's own overshoot
+/// cancels). Each frame is checked as it arrives, against the first, so
+/// a lost, extra or delayed frame fails at once and nothing can drift. At
+/// the end, the run must not have reached the next frame's boundary:
+/// frames stopping fails too.
 struct FrameCheck {
     /// The clock after the call that reported the first frame.
     first: Option<u64>,
     /// The clock after the call that reported the latest frame.
     last: u64,
     frames: u64,
-    max_dev: u64,
+    /// The lowest and highest offset so far.
+    lo: i64,
+    hi: i64,
 }
 
 impl FrameCheck {
@@ -97,53 +124,72 @@ impl FrameCheck {
             first: None,
             last: 0,
             frames: 0,
-            max_dev: 0,
+            lo: 0,
+            hi: 0,
         }
     }
 
     /// The call that ended at `clock` reported `FRAME_READY`.
     fn frame(&mut self, clock: u64) -> Result<(), String> {
-        let first = *self.first.get_or_insert(clock);
+        let first = match self.first {
+            Some(f) => f,
+            None if clock > FIRST_FRAME_LIMIT => {
+                return Err(format!(
+                    "first frame at clock {clock}, later than {FIRST_FRAME_LIMIT} \
+                     (three frames)"
+                ));
+            }
+            None => *self.first.insert(clock),
+        };
         let due = first + self.frames * u64::from(FRAME_CLOCKS);
-        let dev = clock.abs_diff(due);
-        if dev > FRAME_JITTER {
+        // Both below 2^63 for any run length this tool takes.
+        let off = clock as i64 - due as i64;
+        let (lo, hi) = (self.lo.min(off), self.hi.max(off));
+        if hi - lo > OVERSHOOT || off.abs() > ANCHOR_TOLERANCE {
             return Err(format!(
-                "frame {} at clock {clock}, due at {due} (frame 0 at {first}, \
-                 previous at {}, {} clocks before; tolerance {FRAME_JITTER})",
+                "frame {} at clock {clock}, due at {due}: offset {off}, offsets \
+                 now {lo}..{hi} (spread at most {OVERSHOOT}, each within \
+                 \u{b1}{ANCHOR_TOLERANCE}; frame 0 at {first}, previous at {}, {} \
+                 clocks before)",
                 self.frames,
                 self.last,
                 clock - self.last
             ));
         }
-        self.max_dev = self.max_dev.max(dev);
+        (self.lo, self.hi) = (lo, hi);
         self.last = clock;
         self.frames += 1;
         Ok(())
     }
 
     /// The run ended at `clock`.
-    fn end(&self, clock: u64) -> Result<(u64, u64), String> {
+    fn end(&self, clock: u64) -> Result<(u64, i64, i64), String> {
         let Some(first) = self.first else {
             return Err(format!("no frame in {clock} clocks"));
         };
         let span = u64::from(FRAME_CLOCKS);
-        // Implied by `frame`; stated as the end-of-run invariant.
-        let want = 1 + (self.last + FRAME_JITTER - first) / span;
+        // Implied by `frame` (offsets within one `OVERSHOOT` of 0); stated
+        // as the end-of-run invariant.
+        let want = 1 + (self.last + OVERSHOOT as u64 - first) / span;
         if self.frames != want {
             return Err(format!(
                 "{} frames from clock {first} to {}, expected {want}",
                 self.frames, self.last
             ));
         }
+        // Frame n's boundary is at or before `next` (frame 0's call ended
+        // at or after its own). Had the run reached it, the M-cycle
+        // ending there (the run ends on an M-cycle end) would have raised
+        // frame n: a run that ends at or past `next` lost it.
         let next = first + self.frames * span;
-        if clock > next + FRAME_JITTER {
+        if clock >= next {
             return Err(format!(
                 "frames stopped: {} frames, the last at clock {}; the run \
-                 ended at {clock}, past frame {} (due at {next})",
+                 ended at {clock}, past frame {} (due by {next})",
                 self.frames, self.last, self.frames
             ));
         }
-        Ok((first, self.max_dev))
+        Ok((first, self.lo, self.hi))
     }
 }
 
@@ -251,9 +297,10 @@ pub fn main(args: &[String]) -> ExitCode {
                 "ok    {src}: {} clocks, {} frames{}, {} samples, {:.1} s",
                 o.clocks,
                 o.frames,
-                o.frame_check.map_or(String::new(), |(first, dev)| format!(
-                    " (from clock {first}, every {FRAME_CLOCKS} \u{b1}{dev})"
-                )),
+                o.frame_check
+                    .map_or(String::new(), |(first, lo, hi)| format!(
+                        " (from clock {first}, every {FRAME_CLOCKS}, offsets {lo}..{hi})"
+                    )),
                 o.samples,
                 o.wall
             ),

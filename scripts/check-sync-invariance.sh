@@ -23,7 +23,10 @@
 # cache nor leave a feature-built `bench` where a measured one is expected.
 # Each build must have compiled gbc-core with exactly its features (none
 # for the product and long-run builds), as cargo reports them, or the
-# check fails before any run.
+# check fails before any run. So must its rustc flags (`bench --rustflags`),
+# exactly those of .cargo/config.toml (scripts/lib/rustflags.sh): a
+# RUSTFLAGS-style variable replaces them and can turn on a cfg (e.g.
+# feature="eager-sync") that cargo does not report as a feature.
 # Test ROMs: $TEST_ROMS (default test-roms/). About 4.5 minutes; --long adds
 # about 1. Heavy (8 threads): run it alone.
 #
@@ -33,6 +36,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+source scripts/lib/rustflags.sh
 
 # Known sync-placement differences: `<run>|<diagnosis>`, one per line.
 # Adding one is a decision, not a fix: say what state depends on when the
@@ -71,6 +75,7 @@ fail=0
 
 # build <tag> <cargo args...>: builds bench, keeps cargo's JSON messages in
 # $tmp/<tag>.json, checks the gbc-core features (expect_core_features) and
+# its rustc flags (expect_rustflags) and
 # prints the path of the binary cargo just built (never a hard-coded,
 # possibly stale, path).
 build() {
@@ -81,7 +86,25 @@ build() {
   expect_core_features "$tag" "$want"
   bin=$(sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' "$tmp/$tag.json" | tail -n 1)
   [ -n "$bin" ] && [ -x "$bin" ] || { echo "check-sync-invariance: cannot find the bench binary cargo built ($*)" >&2; exit 2; }
+  expect_rustflags "$tag" "$bin"
   echo "$bin"
+}
+
+# expect_rustflags <tag> <binary>: fails unless build <tag> was compiled
+# with exactly the rustc flags of .cargo/config.toml ($GBC_RUSTFLAGS), as
+# the binary reports them (tools/bench/build.rs: CARGO_ENCODED_RUSTFLAGS,
+# the flags of every unit of the build, gbc-core included). RUSTFLAGS,
+# CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS and
+# CARGO_TARGET_<triple>_RUSTFLAGS replace them; with
+# RUSTFLAGS='--cfg feature="eager-sync"' the product build would be an
+# eager one while cargo reports no feature.
+expect_rustflags() {
+  local tag=$1 bin=$2 got
+  got=$("$bin" --rustflags)
+  if [ "$got" != "$GBC_RUSTFLAGS" ]; then
+    echo "FAIL: the $tag build has rustc flags '$got', expected exactly '$GBC_RUSTFLAGS' (.cargo/config.toml); unset RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS / CARGO_BUILD_RUSTFLAGS / CARGO_TARGET_*_RUSTFLAGS" >&2
+    exit 1
+  fi
 }
 
 # expect_core_features <tag> <features>: fails unless the one gbc-core

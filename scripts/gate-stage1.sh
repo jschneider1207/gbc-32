@@ -13,6 +13,16 @@ cd "${ROOT}"
 # fetches into test-roms/ below (pinned zip hash; the desktop step and
 # romtest read test-roms/ too), so an exported override must not reach it.
 unset CODE_SIZE_BUDGETS_FILE ITCM_SET_FILE TEST_ROMS
+# Likewise the rustc-flag variables: each replaces the flags of
+# .cargo/config.toml (its `[build] rustflags`, ADR 0008's LLVM option,
+# which every gate build relies on) and can turn on a cfg such as
+# feature="eager-sync" that cargo does not report. Unsetting them cannot
+# drop a flag the gate needs: the config supplies the host builds' flags,
+# and the scripts that need others set their own (scripts/lib/rustflags.sh).
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS
+for v in $(compgen -e); do
+  case $v in CARGO_TARGET_*_RUSTFLAGS) unset "$v" ;; esac
+done
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nGATE FAILED: %s\n' "$*" >&2; exit 1; }

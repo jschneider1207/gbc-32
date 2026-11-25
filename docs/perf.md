@@ -1627,31 +1627,42 @@ is the small version.
 
 ### Long run (`--long`)
 
-`bench --long [--minutes N] [--root DIR]` runs eleven workloads that keep
-working (the seven synthetic programs, cgb-acid2, cpu_instrs, cgb_sound and
+`bench --long [--minutes N] [--root DIR]` runs twelve workloads that keep
+working (the eight synthetic programs, cgb-acid2, cpu_instrs, cgb_sound and
 rtc3test) from power-on for 30 emulated minutes, 7,549,747,200 clocks,
 past 2^32 (17 min 4 s), in frame-sized calls with an audio buffer. The
-script builds it with the `checked` profile and no feature (the product's
-code with overflow checks and debug assertions). It fails on a panic, a
-call that makes no progress, a sample count other than one per 128 clocks,
-or (for the workloads that keep the LCD on from their first frame to the
-end) a frame that is not where one per 70,224 clocks puts it. That frame
-check counts from the first completed frame, so setup with the LCD off
-(`synth:dmg-raster`: first frame at clock 194,844) costs nothing: frame k
-must end its run call at `first + k * 70,224`, checked as each frame
-arrives (the failure names the frame, its clock, the due clock and the
-previous frame's clock), so a lost, extra or late frame fails at once and
-nothing can drift. The tolerance is 23 clocks either way, because the core
-does not report the boundary's own clock: the `FRAME_READY` call ends after
-the step in progress, up to 3 clocks of M-cycle rounding plus 5 M-cycles of
-the longest step (`FRAME_JITTER` in `tools/bench/src/long.rs`; seen: 0 to
-16). At the end the count must equal `1 + (last - first + 23) / 70,224`,
-the run must not end past the next frame's due clock (frames that stop
-fail), and a workload with no frame fails. Before 2026-11-24 the check was
-a count within one of `clocks / 70,224`, which failed dmg-raster's setup
-(two short) and hid a lost frame elsewhere. 60.5 s wall for the ten before dmg-raster in
-parallel (2026-11-24, 8 threads; the slowest, `synth:worst-case`,
-alone). It complements the
+script builds it with the `checked` profile, no feature and exactly the
+rustc flags of `.cargo/config.toml` (every build of the script is checked
+with `bench --rustflags`: a RUSTFLAGS-style variable could turn on
+`--cfg feature="eager-sync"` while cargo reports no feature). It fails on
+a panic, a call that makes no progress, a sample count other than one per
+128 clocks, or (for the workloads that keep the LCD on from their first
+frame to the end) a frame that is not where one per 70,224 clocks puts it.
+
+That frame check (`FrameCheck` in `tools/bench/src/long.rs`) counts from
+the first completed frame, so setup with the LCD off costs nothing, but
+the first frame must end its call within three frames of power-on
+(210,672 clocks; seen: 70,060 to 194,844, `synth:dmg-raster` the latest).
+Frame k's offset is `clock - (first + k * 70,224)`, checked as each frame
+arrives (the failure names the frame, its clock, the due clock, the
+offsets so far and the previous frame's clock), so a lost, extra or late
+frame fails at once and nothing can drift. The core does not report the
+boundary's own clock: the `FRAME_READY` call ends at the first point where
+the CPU looks at the run's end, up to `OVERSHOOT` = 31 clocks after the
+boundary (3 clocks of M-cycle rounding, then STOP mode's second wake-up
+idle and a 6 M-cycle instruction; the derivation, with the functions, is
+at the constant). Frame 0's own overshoot cancels in the spread: the
+offsets must span at most 31 clocks, and (kept from the earlier check, so
+that nothing it rejected passes) each must be within 23 of 0. Seen: spread
+0 to 16. At the end the count must equal `1 + (last - first + 31) /
+70,224`, the run must not reach the next frame's boundary (`first + n *
+70,224`; frames that stop fail), and a workload with no frame fails.
+Before 2026-11-24 the check was a count within one of `clocks / 70,224`,
+which failed dmg-raster's setup (two short) and hid a lost frame
+elsewhere.
+
+60.5 s wall for the ten before dmg-raster in parallel (2026-11-24, 8
+threads; the slowest, `synth:worst-case`, alone). It complements the
 offset check: that one covers the whole corpus near four boundaries, this
 one covers state that has actually lived for 2^32 clocks.
 
