@@ -40,7 +40,7 @@ let important state exist only in the conversation.
 
 **Decide yourself** (record it in an ADR if it isn't obvious): internal
 architecture and APIs, data structures, algorithms, refactors, test
-strategy, dependencies for `gbc-desktop` and `tools/*`, debugging and
+strategy, dependencies for `gbc-desktop`, `gbc-nucleo-h753` and `tools/*`, debugging and
 tooling, task ordering within a milestone, and adding tasks the plan
 missed. Also, recording each one in the session log (and in an ADR if the
 reason isn't obvious):

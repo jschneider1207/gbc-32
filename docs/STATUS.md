@@ -24,17 +24,22 @@
   work. Subagents run on whatever model the main (Fable) session judges
   best for each task.
 
-## Next up: Stage 2 plan
+## Next up: Stage 2 M0 (480 MHz measurement)
 
-1. Draft `docs/plan/stage-2.md` (milestones, gates, in the shape of
-   `stage-1.md`) from `README.md` §2, `docs/architecture.md` "Targets",
-   `docs/perf.md` (dev-board ITCM placement), `tools/h7-bench/README.md`,
-   and the Stage-2-deferred items (stage-1 plan: E5/D11 CPU fetch rework;
-   B4 u32 clocks; E1 dot-stepped mode 3). Scope is the human's: present the
-   draft for approval before starting work.
-2. Early in Stage 2: bring h7-bench up at 480 MHz (VOS0) and measure the
-   worst case against the 50% bar.
-3. Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
+The Stage 2 plan is `docs/plan/stage-2.md`, approved by the human on
+2026-11-25. Decisions D1-D10 are in its "Decisions" section. Key points:
+- The dev-board performance vs the 50% bar is **report-only**. The README
+  target now applies to the H735 at 550 MHz. Gated: real time at 480 MHz
+  and the +3% cycle ratchet.
+- Input: the shield joystick is the D-pad; all 8 buttons can also come
+  from the PC over serial. Saves travel PC <-> board over serial (no QSPI
+  saves).
+- Crates are per board: `gbc-nucleo-h753` (Stage 2), later `gbc-handheld`.
+  Shared logic lives in `gbc-platform` (ADR 0005 amendment).
+
+1. M0: bring h7-bench up at 480 MHz (VOS0 + ODEN) and measure every
+   placement (see the plan).
+2. Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
    unplayed checklist rows (Pokémon Crystal, Alone in the Dark) were not
    required for the sign-off.
 

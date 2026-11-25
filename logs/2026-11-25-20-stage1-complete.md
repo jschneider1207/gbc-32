@@ -15,3 +15,8 @@
 
 ## Left open
 - No Stage 2 plan yet. Next: draft `docs/plan/stage-2.md` for the human.
+- Stage 2 plan drafted (`docs/plan/stage-2.md`) and approved by the human
+  with changes: dev-board perf report-only (README target moved to the
+  H735 at 550 MHz), joystick + PC-serial input, saves over serial,
+  per-board crates (`gbc-nucleo-h753`, `gbc-platform`; ADR 0005
+  amendment), AGENTS.md dependency rule extended to `gbc-nucleo-h753` (D9).

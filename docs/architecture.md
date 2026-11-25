@@ -16,7 +16,8 @@ rust-toolchain.toml        pinned stable toolchain + thumbv7em-none-eabihf
 crates/
   gbc-core/                #![no_std], no alloc. All emulation logic.
   gbc-desktop/             std front end (Stage 1 only): window, audio, input, saves
-  gbc-stm32/               (Stage 2, not yet created) bare-metal platform layer(s); see Targets
+  gbc-platform/            (Stage 2, not yet created) #![no_std] host-tested front-end logic shared by all boards: converter/scaler, pacing, serial protocol, player loop, input mapping
+  gbc-nucleo-h753/         (Stage 2, not yet created) firmware bin for the NUCLEO-H753ZI: PAC, clocks, drivers, memory.x; a Stage 3 board gets its own crate (gbc-handheld); see Targets
 tools/
   romtest/                 acceptance runner (contract: acceptance/README.md)
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
