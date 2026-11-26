@@ -125,13 +125,13 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0038).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0039).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None.
+- Session 24 (2026-11-25): M3 started. Branch `m3-scaler` (RGB555->RGB565 1.5x scaler in gbc-firmware, host tests) and `m3-lcd-probe` (FMC + ILI9341V driver, `lcd-probe` bin, board) in scratch worktrees; not merged yet.
 
 ## Needs human
 
