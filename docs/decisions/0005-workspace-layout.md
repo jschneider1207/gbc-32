@@ -39,3 +39,5 @@ Crates (human-approved 2026-11-25), each with one role:
 
 Rule: `gbc-firmware` does not depend on `gbc-link`. The board crate wires
 the two together.
+
+Build details, the board boundary and when each crate is created: ADR 0036.
