@@ -270,13 +270,14 @@ impl Board {
         let _ = writeln!(
             out,
             "{p} clock rcc_cr={:#010x} cfgr={:#010x} d1cfgr={:#010x} d2cfgr={:#010x} \
-             d3cfgr={:#010x} flash_acr={acr:#04x} rsr={:#010x}\r",
+             d3cfgr={:#010x} flash_acr={acr:#04x} rsr={:#010x} cccsr={:#010x}\r",
             rcc.cr.read().bits(),
             rcc.cfgr.read().bits(),
             rcc.d1cfgr.read().bits(),
             rcc.d2cfgr.read().bits(),
             rcc.d3cfgr.read().bits(),
-            rcc.rsr.read().bits()
+            rcc.rsr.read().bits(),
+            syscfg.cccsr.read().bits()
         );
         let _ = writeln!(
             out,

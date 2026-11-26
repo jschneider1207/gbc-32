@@ -216,6 +216,7 @@ in "Facts" above; DS12117 Rev 10; RM0433 Rev 9; ES0392):
 | 0x6B (1-1-4, 8 dummy) | up to 133 MHz, no configuration; but 8 + 24 + 8 + 64 = 104 clocks per 32-byte line, against 84 for 0xEB, and no enhance mode (SIOO needs one) | Table 7 |
 | DTR (0xED etc.), QPI (4-4-4) | **no** (not in the part) | BFPT dwords 1 and 5, Table 4 |
 | STM32 pins, SDR | 133 MHz at 2.7 to 3.6 V, CL 20 pF, OSPEEDR 11 (the driver sets very high speed on all six pins, `gpio::pin_af`); ts(IN) 2 ns, th(IN) 1 ns | DS12117 Table 170 |
+| I/O compensation cell | **on** in every image from M7 (`clock::clock_up`: CSION, CSIRDY, SYSCFG_CCCSR.EN, READY bounded; banner `clock ... cccsr=`, READY is bit 8). Table 170 and Table 149 note 5 assume it activated; before M7 it was off, so the M6 figures were measured without it. HSLV not set (VDD 3.3 V; only below 2.7 V). CSI cost 23 uA typ | DS12117 Tables 170, 149, 134; RM0433 11.3.11, 12.3.7 |
 | Kernel clock | rcc_hclk3 (236 MHz: even factors give 118 or 59 MHz only), pll1_q_ck, pll2_r_ck, per_ck (QSPISEL) | RM0433 8.7.19 |
 | Divider | even division factors only (PRESCALER odd): an odd one is not 50% duty, the NOR needs tCH, tCL >= 45% | RM0433 23.5.1, DS12117 Table 170 note, ES0392 2.7.6 |
 | SSHIFT | kept (sample half a cycle later; SDR only) | RM0433 23.3.10 |

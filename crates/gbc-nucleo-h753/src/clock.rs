@@ -242,6 +242,27 @@ pub(crate) fn clock_up(
     if !wait_for(TRIES, || rcc.cfgr.read().sws().is_pll1()) {
         return Err("switch to pll1");
     }
+    // The I/O compensation cell (M7 review), before any pin is driven
+    // fast: QUADSPI runs at 99.2 MHz and FMC/GPIO at OSPEEDR very high,
+    // and DS12117 Rev 10 Table 170 (QUADSPI timing) and Table 149 note 5
+    // (I/O AC characteristics) hold only with the cell activated. RM0433
+    // section 11.3.11: 1. the CSI on (RCC_CR.CSION, section 8.7.2; CSIRDY
+    // waited for: SYSCFG_CCCSR.READY never sets without the CSI, section
+    // 12.3.7); 2. the SYSCFG clock (on since the VOS0 ramp above); 3.
+    // CCCSR.EN; then READY. CS stays 0 (the cell's own code, not
+    // SYSCFG_CCCR's) and HSLV stays 0: it is for VDD below 2.7 V only and
+    // "might be destructive" above (section 12.3.7); VDD is 3.3 V here.
+    // The CSI then runs for good (nothing in this crate clears CSION; it
+    // stops only in Stop/Standby, which no image uses): DS12117 Table 134,
+    // 23 uA typical, 30 uA max.
+    rcc.cr.modify(|_, w| w.csion().set_bit());
+    if !wait_for(TRIES, || rcc.cr.read().csirdy().bit_is_set()) {
+        return Err("csi ready");
+    }
+    syscfg.cccsr.modify(|_, w| w.en().set_bit());
+    if !wait_for(TRIES, || syscfg.cccsr.read().ready().bit_is_set()) {
+        return Err("io compensation ready");
+    }
     Ok(())
 }
 
