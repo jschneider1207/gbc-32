@@ -146,7 +146,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: merged gbc-pc `load --sav`/`dump`/`play` (b303636; `play` reads keys with GetAsyncKeyState, so keys pressed in other windows count, incl. Esc) and the paced-loop smoothing (cf86d75: skips 27% -> 7%). Running: `m5-link` (board link session: UART RX, input, save load/dump, `link-probe`, save round trip).
+- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS). Running: `m5-player` (player image, `scripts/play-on-board.sh`). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
 
