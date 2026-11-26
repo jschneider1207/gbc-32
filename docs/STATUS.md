@@ -134,7 +134,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None.
+- Session 24: M4 started. Branches `m4-audio-fw` (DC blocker, 12-bit conversion, SPSC sample ring in gbc-firmware) and `m4-dac` (DAC1 + TIM6 + DMA1 driver, `dac-probe`, board) in scratch worktrees.
 
 ## Needs human
 
