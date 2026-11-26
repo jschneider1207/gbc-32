@@ -38,8 +38,12 @@
 //! joystick and PC are ignored, the UART stays at 115200 and the link is
 //! off, and the core keeps its default DMG palette, so the run's `paced `
 //! lines must equal the host's `headless --paced` (same ROM, script and
-//! frames). The run's lines and the `stats display paced`, `stats dac` and
-//! `stats player` lines are re-sent in the `paced` image's framed report,
+//! frames). The script is either the frame format (`gbc_firmware::input`)
+//! or a `clocks v1` table (`gbc_firmware::replay`: an `acceptance/*.toml`
+//! `input` converted by `tools/replay-input table`, its changes scheduled
+//! at their own clocks as romtest does; a `stats input` line follows the
+//! run's lines). The run's lines and the `stats display paced`, `stats dac`
+//! and `stats player` lines are re-sent in the `paced` image's framed report,
 //! so `run-paced.sh out/player-script.bin <rom>` checks it (after the
 //! loader put `<rom>` in the NOR).
 #![no_std]
@@ -53,9 +57,10 @@ use gbc_core::{Config, Emulator, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, Ste
 use gbc_firmware::audio::{FeedRing, FeedTap};
 use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Shared};
 use gbc_firmware::headless::{Buffers, MIN_AUDIO_SLOTS};
-use gbc_firmware::input::{self, Press, Script};
+use gbc_firmware::input::{self, InputSource, Press, Script};
 use gbc_firmware::paced::{self, Feed, FrameCycles, Hooks, Idle, Service, Serviced};
 use gbc_firmware::player::{COMPAT_PALETTE, Window, frame_budget};
+use gbc_firmware::replay::{self, Change, ClockScript};
 use gbc_firmware::rom_image::{self, ImageHeader};
 use gbc_firmware::save::{self, Image, Layout};
 use gbc_link::{MAX_FRAME, Message};
@@ -104,6 +109,8 @@ const INPUT: &str = include_str!(concat!(env!("OUT_DIR"), "/headless-input.txt")
 const FRAMES: &str = env!("GBC_HEADLESS_FRAMES");
 const DEFAULT_FRAMES: u32 = 35_837;
 const MAX_PRESSES: usize = 256;
+/// Clock-table entries (16 bytes each, on the stack).
+const MAX_CHANGES: usize = 256;
 /// Live mode starts the run this many DAC refills before the end of the
 /// start ramp (187 ms; `paced_board::start_dac`). Scripted mode uses
 /// [`RAMP_LEFT`] (4) as the `paced` image, so its speed figure stays
@@ -735,16 +742,33 @@ fn main() -> ! {
 
     // Scripted mode (module docs).
     let mut presses = [Press::NONE; MAX_PRESSES];
-    let (count, end) = match input::parse(INPUT, &mut presses) {
-        Ok(p) => (p.presses, p.end),
-        Err(e) => panic!("input error line={} kind={:?}", e.line, e.kind),
+    let mut changes = [Change::NONE; MAX_CHANGES];
+    let clocked = replay::is_clock_table(INPUT);
+    let (count, end) = if clocked {
+        match replay::parse(INPUT, &mut changes) {
+            Ok(p) => (p.changes, p.end),
+            Err(e) => panic!("clock input error line={} kind={:?}", e.line, e.kind),
+        }
+    } else {
+        match input::parse(INPUT, &mut presses) {
+            Ok(p) => (p.presses, p.end),
+            Err(e) => panic!("input error line={} kind={:?}", e.line, e.kind),
+        }
     };
     let frames = FRAMES.parse().ok().or(end).unwrap_or(DEFAULT_FRAMES);
     let _ = writeln!(
         board.uart,
-        "{PREFIX} {IMAGE} running rom_bytes={} presses={count} frames={frames}\r",
-        rom.len()
+        "{PREFIX} {IMAGE} running rom_bytes={} {}={count} frames={frames}\r",
+        rom.len(),
+        if clocked { "clock_changes" } else { "presses" },
     );
+    let mut frame_script = Script::new(&presses[..count.min(MAX_PRESSES)]);
+    let mut clock_script = ClockScript::new(&changes[..count.min(MAX_CHANGES)]);
+    let source: &mut dyn InputSource = if clocked {
+        &mut clock_script
+    } else {
+        &mut frame_script
+    };
     let mut cap: Capture<'_, CAPTURE_BYTES> = Capture {
         buf: capture.expect("scripted mode"),
         len: 0,
@@ -754,7 +778,7 @@ fn main() -> ! {
     let _ = start_dac(&mut dac, RAMP_LEFT);
     let _ = paced::run_with(
         rom,
-        &mut Script::new(&presses[..count]),
+        source,
         frames,
         bufs,
         feed,
@@ -770,6 +794,9 @@ fn main() -> ! {
         &mut player,
         &mut cap,
     );
+    if clocked {
+        let _ = clock_script.report(&mut cap);
+    }
     let stop = dac.stop();
     cap.live = None;
     let _ = display.borrow_mut().report(&mut cap);
