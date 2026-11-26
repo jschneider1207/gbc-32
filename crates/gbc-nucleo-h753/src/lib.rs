@@ -30,6 +30,8 @@ pub mod audio_dac;
 mod baud;
 pub mod clock;
 pub mod clockcheck;
+#[cfg(feature = "headless")]
+pub mod display;
 mod fault;
 mod gpio;
 pub mod image;
@@ -41,6 +43,7 @@ pub mod link_session;
 pub mod link_uart;
 pub mod loader;
 pub mod mpu;
+pub mod paced_board;
 pub mod power;
 pub mod qspi;
 pub mod stack;
