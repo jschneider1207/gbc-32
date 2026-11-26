@@ -49,7 +49,7 @@
 
 ## Next up: Stage 2 M5 (input and the player loop)
 
-Done: `gbc_firmware::{buttons,save}` and `paced::run_with` (`InputSource`,
+Done: gbc-pc side (b303636, `docs/reference/link-protocol.md`), display pending-frame replace (cf86d75), `gbc_firmware::{buttons,save}` and `paced::run_with` (`InputSource`,
 `Service` hooks), 6c2bcee. In flight: `tools/gbc-pc` live input + save
 load/dump. Next: the `player` image (ROM from QSPI, display with the
 pending-frame replace (M4 P-7), audio, joystick + PC input, saves over the
@@ -146,7 +146,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: branch `m5-pc` (gbc-pc live input + save load/dump) in a scratch worktree.
+- Session 25: merged gbc-pc `load --sav`/`dump`/`play` (b303636; `play` reads keys with GetAsyncKeyState, so keys pressed in other windows count, incl. Esc) and the paced-loop smoothing (cf86d75: skips 27% -> 7%). Running: `m5-link` (board link session: UART RX, input, save load/dump, `link-probe`, save round trip).
 
 ## Needs human
 
