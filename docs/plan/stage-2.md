@@ -282,6 +282,20 @@ b, an SAI/I2S driver partly would).
 - [x] (f3187ad) `player` image: ROM from QSPI, display, audio and input all running, per-frame statistics over UART every N s (core cycles min/mean/max/p99 per frame, front-end cycles, slack, frames over budget, underruns, display skips)
 - [x] (ad690b8) An "input test" screen or UART echo of button state for the human's button check
 - [x] (d1aaae6) DMG-mode games: one default compatibility palette (romtest's common palette); per-title palettes are not needed on the dev board
+- [x] (ce38bea) M5 review T-1: run-replay.sh treats any run-paced.sh exit other than 0/1 as a tool error
+- [x] (ce38bea) M5 review T-3: the soak's +-0.1% bound is the entry's `max_ppm=1000` in soak-set.txt; env can only tighten
+- [x] (ce38bea) M5 review T-7: a group entry's explicit frame count must equal the table's end
+- [x] (1c1f3aa) M5 review T-6: m5-evidence.md cites commits on main
+- [x] (1c1f3aa) M5 review P-3: link-protocol.md: the player's save buffer is 64 KiB + 64 (128 KiB + 64 is link-probe's)
+- [ ] M5 review T-4 (low): player over-budget is counted at the next service call, so the last frame is never counted (frames=35836 of 35,837)
+- [ ] M5 review T-5 (low): run-player-save.sh and run-save-roundtrip.sh don't check the flashed image cksum, only image=player
+- [ ] M5 review T-8 (low): .gitignore `!tools/gbc-pc/tests/fixtures/*.sav` exception; mitigated by the generator test in crates/gbc-firmware/tests/save.rs
+- [ ] M5 review P-2 (low): the 64 KiB player save limit comes from section order; putting the 128 KiB-aligned panel BUF first frees room for a 128 KiB + 64 save buffer; also a too-big save's dump answers Nak UnexpectedType, OutOfRange would be clearer
+- [ ] M5 review P-4 (low): link_uart read() can't detect a ring lap > 4 KiB between polls or a dead RX stream (RX TEIF never read)
+- [ ] M5 review P-5 (low): player.rs ~443-446 drops a Stats report silently on encode error; count it or assert the worst case vs MAX_STATS_EXTRA 1016
+- [ ] M5 review P-6 (low): link_session.rs ~292 keeps the stored reply after a chord dump drops a load; clear last_req_len in start_dump
+- [ ] M5 review P-7 (low): B1 active-high polarity assumed; open until the human's button check
+- [ ] M5 review gate note (low): proposed B3 wants display readback 0 mismatches; player-script does no readback and run-paced.sh doesn't check it
 
 **Acceptance:** the `player` image in scripted mode with display and
 audio running gives frame-hash and DAC-feed-hash lists equal to the
