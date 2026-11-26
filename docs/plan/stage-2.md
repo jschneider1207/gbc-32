@@ -160,7 +160,7 @@ of M3.
 - [ ] QEMU (`mps2-an500`) smoke of the `headless` frame loop: same hash lines as the host (h7-bench's `qemu` mode, extended)
 - [ ] `scripts/gate-stage2.sh` host part (below), and fmt/clippy/build for `tools/h7-bench`, `tools/h7-bench/host` and `gbc-nucleo-h753` (Stage 1 C-T6, stricter)
 - [x] (1bbd37e; `scripts/lib/board-lock.sh`, `${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock}`, ADR 0036; not yet exercised by a real flash) Board lock: one `flock` file (e.g. `target/board.lock`) taken by every flash/serial script, so two agents never drive the board at once
-- [ ] Panic-location strings embed the absolute checkout path, so firmware `.bin`s differ between worktrees (fb33d98 finding): add `--remap-path-prefix` to the firmware and h7-bench rustflags so images are path-independent (check it does not change root-workspace Ir numbers)
+- [x] (afe079e: `--remap-path-prefix` passed by both build.sh files; same sha256 from two checkout paths) Panic-location strings embed the absolute checkout path, so firmware `.bin`s differ between worktrees (fb33d98 finding): add `--remap-path-prefix` to the firmware and h7-bench rustflags so images are path-independent (check it does not change root-workspace Ir numbers)
 
 **Acceptance:** `gate-stage2.sh --host-only` passes. On the board, the
 `headless` image's frame-hash and audio-hash lines for `cpu_instrs` and
