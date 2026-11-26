@@ -1,0 +1,19 @@
+[package]
+name = "gbc-pc"
+description = "PC companion for the dev board: loads a ROM into QSPI NOR over the ST-LINK VCP (Stage 2 M2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gbc-link = { path = "../../crates/gbc-link" }
+
+# Direct Win32 COM-port access (plan D9: windows-sys, MIT/Apache-2.0; not
+# the MPL-2.0 `serialport` crate).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_Communication", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
