@@ -1,0 +1,27 @@
+run-paced.sh: host: <repo>/crates/gbc-nucleo-h753/../../target/release/headless <scratch>/worst-case.gb --frames 35837 --paced
+flash.sh: copying <scratch>/paced-worst-case.bin (270536 bytes) to E: (NOD_H753ZI)
+flash.sh: copied; no FAIL.TXT after 25 s. Read the board with tools/h7-bench/read-serial.sh
+flash.sh: the first lines read may still be the previous image's (the VCP buffers them)
+run-paced.sh: reading the serial port for 660 s
+run-paced.sh: read in 693 s (flash included unless RUN_PACED_NO_FLASH)
+run-paced.sh: 72 complete report(s), 0 incomplete; checking the last
+gbc-nucleo-h753 paced report n=7 rom=worst-case frames=35837 image_bytes=270536 image_cksum=2304384154
+stats paced core min=785639 mean=3328804 max=3350486 max_frame=579 hz=472000000
+stats paced frontend push_mean=35763 push_max=36210 hash_mean=184960 hash_max=186081 sink_mean=147238 sink_max=205255
+stats paced idle calls=70639 drain_calls=9
+stats paced ring min_fill=1243 max_fill=2047 underrun_events=0 underrun_frames=0 overrun_events=0 overrun_frames=0
+stats paced drain underrun_events=1 underrun_frames=30
+stats paced speed elapsed=283183019296 ppm=+71 steady_ppm=+18
+stats display paced presented=25924 skipped=9912 transfers=25924 transfer_errors=0 stuck=0 aborts=0 te_edges=35916 scale_mean=202786 scale_max=204548 present_mean=325 present_max=488
+stats dac refills=76872 late=0 spurious=0 te=0 dme=0 fe=0 udr1=0 udr2=0 restarts=0 isr_min=572 isr_max=8326 stop=ok
+stats paced board run_cycles=283234437201 run_refills=76810 dac_rate_millihz=32768282 ramp_wait=95881017 stack_used=8456/69228 dbgmcu_cr_boot=0x00000001 sleep_gate_te=164 sleep_keep_te=7899477
+gbc-nucleo-h753 paced report-end n=7 rom=worst-case bytes=1226 cksum=588879401 overflow=0
+run-paced.sh: image matched: image_bytes=270536 image_cksum=2304384154
+run-paced.sh: EQUAL: the board's 3 paced lines match the host's
+paced v1 rom_bytes=32768 rom_fnv=8813cb5d7ea113b3 input_fnv=cbf29ce484222325 frames=35837
+paced end frames=35837 clock=2516611398 ready=35836 fbs=329470c6bc19a93f feed_frames=19661026 feed=4b3d013ebbd78714
+paced drain feed_frames=19661026 feed=4b3d013ebbd78714
+run-paced.sh: ring underruns=0/0 overruns=0/0 fill=1243..2047; drain underrun=1/30 (not checked)
+run-paced.sh: speed ppm=+71 (bound 1000) steady_ppm=+18 elapsed=283183019296
+run-paced.sh: display presented=25924 skipped=9912 transfers=25924 errors=0
+run-paced.sh: PASS

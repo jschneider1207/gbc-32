@@ -1,0 +1,14 @@
+gbc-nucleo-h753 paced report n=69 rom=cgb_sound frames=35837 image_bytes=303304 image_cksum=3479776390
+paced v1 rom_bytes=65536 rom_fnv=228d75ac28477026 input_fnv=cbf29ce484222325 frames=35837
+paced end frames=35837 clock=2516614644 ready=35834 fbs=ffe7f333d13ab726 feed_frames=19661051 feed=a42b9bdd2e459ea5
+paced drain feed_frames=19661051 feed=a42b9bdd2e459ea5
+stats paced core min=673652 mean=747421 max=2461353 max_frame=54 hz=472000000
+stats paced frontend push_mean=35053 push_max=36441 hash_mean=185050 hash_max=186389 sink_mean=141163 sink_max=196148
+stats paced idle calls=107828 drain_calls=10
+stats paced ring min_fill=1243 max_fill=2047 underrun_events=0 underrun_frames=0 overrun_events=0 overrun_frames=0
+stats paced drain underrun_events=1 underrun_frames=5
+stats paced speed elapsed=283180289964 ppm=+82 steady_ppm=+9
+stats display paced presented=26006 skipped=9828 transfers=26006 transfer_errors=0 stuck=0 aborts=0 te_edges=35921 scale_mean=193871 scale_max=195559 present_mean=303 present_max=334
+stats dac refills=76872 late=0 spurious=0 te=0 dme=0 fe=0 udr1=0 udr2=0 restarts=0 isr_min=580 isr_max=8286 stop=ok
+stats paced board run_cycles=283234355791 run_refills=76810 dac_rate_millihz=32768291 ramp_wait=95880997 stack_used=8456/69228 dbgmcu_cr_boot=0x00000001 sleep_gate_te=164 sleep_keep_te=7897434
+gbc-nucleo-h753 paced report-end n=69 rom=cgb_sound bytes=1224 cksum=4003972414 overflow=0

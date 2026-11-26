@@ -74,3 +74,22 @@ stats dac refills=76872 late=0 spurious=0 te=0 dme=0 fe=0 udr1=0 udr2=0 isr_min=
 
 The `drain` hash is the stream as the DAC ISR wrote it into the DMA half
 buffer (consumer side), not a read of the DAC output.
+
+## Final run after the M4 review fixes (c0de0b5, the `stage2-m4` tag)
+
+The images were rebuilt from c0de0b5 (MDMA abort waits for CTCIF, DAC
+watchdog with `restarts=`, M4 review P-1/P-2) with `./build.sh
+paced-cgb_sound paced-worst-case` and run through the same
+`run-paced.sh` invocations (with `RUN_PACED_SAVE`). Both exit 0 (`PASS`).
+Files: `m4-evidence/final-report-<rom>.txt` (the last complete report,
+cut at the script's framing) and `final-run-paced-<rom>.log`.
+
+| | cgb_sound | worst-case |
+|---|---|---|
+| image bytes / cksum | 303,304 / 3479776390 | 270,536 / 2304384154 |
+| `paced` lines vs host | EQUAL (same hashes as above) | EQUAL (same hashes as above) |
+| underruns / overruns | 0 / 0 | 0 / 0 |
+| ppm / steady_ppm | +82 / +9 | +71 / +18 |
+| display presented / skipped | 26,006 / 9,828 | 25,924 / 9,912 |
+| DAC late / udr / restarts | 0 / 0 / 0 | 0 / 0 / 0 |
+| core mean / max (worst-case) | | 3,328,804 / 3,350,486 |
