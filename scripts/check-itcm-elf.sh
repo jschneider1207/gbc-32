@@ -25,13 +25,19 @@
 #
 # Fails (exit 1):
 #   - a function of a kept tier that the link kept outside [0, 0x1_0000);
+#     when the ELF has several function symbols of that name (a duplicate
+#     local copy in flash), every copy must be inside it;
+#   - a kept tier none of whose functions is in the link at all (a tier
+#     wholly absent is a stale plan or a link that dropped it, not a pass;
+#     only a --drop tier may be absent);
 #   - a function of a --drop tier inside it (--drop disagrees with the link,
 #     so the dropped-tier report would be false);
 #   - a glob that matches no function section of the rlib (stale: renamed,
 #     or inlined by rustc; check-itcm-set.sh fails the same list);
 #   - no `.itcm` section, or one over 64 KiB, or no kept function in it.
 # Reported, exit 0: functions the rlib has and the ELF lacks (garbage-
-# collected as unused, or inlined into their callers under LTO), and the
+# collected as unused, or inlined into their callers under LTO) as long as
+# their tier has another function in the link, and the
 # long-branch thunk (veneer) count by direction.
 # Exit 2: tool error (bad arguments, missing ELF/rlib/tools, not ARM).
 set -uo pipefail
@@ -116,7 +122,7 @@ loc() { if [ $(( (16#$1) & ~1 )) -lt "$ITCM_END" ]; then echo itcm; else echo fl
 
 fail=0
 nkept=0; ndrop=0; nin=0; inbytes=0; nflash_ok=0; nabsent=0
-declare -A tiers_dropped=()
+declare -A tiers_dropped=() tier_present=()
 : > "$work/absent"
 while IFS='|' read -r tier glob name; do
   pat=${glob#.text.}
@@ -137,13 +143,16 @@ while IFS='|' read -r tier glob name; do
   done < "$work/elfsyms"
   sort -u -o "$work/want" "$work/want"
   isdrop=0
-  if dropped "$tier"; then isdrop=1; ndrop=$((ndrop + 1)); tiers_dropped["$tier"]=1; else nkept=$((nkept + 1)); fi
+  if dropped "$tier"; then isdrop=1; ndrop=$((ndrop + 1)); tiers_dropped["$tier"]=1; else nkept=$((nkept + 1)); tier_present["$tier"]=${tier_present["$tier"]:-0}; fi
   while IFS= read -r sym; do
-    line=$(awk -v s="$sym" '$3 == s {print $1, $2; exit}' "$work/elfsyms")
-    if [ -z "$line" ]; then
+    # Every copy: a duplicate local symbol of the same name must not hide
+    # behind the first one.
+    copies=$(awk -v s="$sym" '$3 == s {print $1, $2}' "$work/elfsyms")
+    if [ -z "$copies" ]; then
       nabsent=$((nabsent + 1)); echo "$sym" >> "$work/absent"; continue
     fi
-    read -r addr sz <<< "$line"
+    [ "$isdrop" -eq 1 ] || tier_present["$tier"]=$((tier_present["$tier"] + 1))
+    while read -r addr sz; do
     where=$(loc "$addr")
     if [ "$isdrop" -eq 0 ] && [ "$where" = flash ]; then
       printf 'FAIL: kept-tier function in flash at 0x%s, not in ITCM: %s\n  glob %s (%s)\n' "$addr" "$(demangle <<< "$sym")" "$glob" "$tier" >&2
@@ -156,6 +165,7 @@ while IFS='|' read -r tier glob name; do
     else
       nflash_ok=$((nflash_ok + 1))
     fi
+    done <<< "$copies"
   done < "$work/want"
 done < "$work/globs"
 
@@ -169,6 +179,11 @@ if [ "$nabsent" -gt 0 ]; then
   echo "not in the link ($nabsent; unused and garbage-collected, or inlined under LTO; report only):"
   sort -u "$work/absent" | demangle | sed 's/^/  /'
 fi
+for t in "${!tier_present[@]}"; do
+  if [ "${tier_present[$t]}" -eq 0 ]; then
+    echo "FAIL: kept tier has no function in the link at all (not in --drop): $t" >&2; fail=1
+  fi
+done
 if [ "$nin" -eq 0 ]; then
   echo "FAIL: no kept function of $SETFILE is in ITCM" >&2; fail=1
 fi
