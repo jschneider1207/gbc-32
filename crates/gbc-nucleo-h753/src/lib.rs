@@ -230,7 +230,7 @@ impl Board {
             out,
             " baud={} d3cr={d3cr:#010x} syscfg_pwrcr={pwrcr:#010x} oden={} flash_acr={acr:#04x} \
              icache={} dcache={} mpu={} cyccnt={} image_bytes={} image_cksum={}\r",
-            uart::BAUD,
+            uart::baud(),
             pwrcr & 1,
             u8::from(SCB::icache_enabled()),
             u8::from(SCB::dcache_enabled()),
