@@ -24,6 +24,15 @@ cd "$(dirname "$0")"
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 TARGET=thumbv7em-none-eabihf
+
+# Path-independent images: the panic-location strings and debug info embed
+# the checkout path, the cargo registry and the toolchain sources, so the
+# same source gave different .bins in different worktrees. cargo's
+# `trim-paths` is unstable on 1.100.0 and a cargo config cannot expand $PWD,
+# so the prefixes are remapped here with --config: its rustflags array is
+# appended to the one in .cargo/config.toml (CodeGenPrepare flag kept).
+ROOT=$(cd ../.. && pwd)
+REMAP=(--config "target.$TARGET.rustflags=['--remap-path-prefix=$ROOT=/gbc-32','--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry/src=/cargo-registry','--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup']")
 BOARD=${H7_BENCH_BOARD:-h753}
 case "$BOARD" in
   h753) MAX_BIN=$((2048 * 1024)) ;;  # both flash banks (single core)
@@ -63,7 +72,7 @@ in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 image() {
   local name=$1 features=$2 ram_lo=$3 ram_hi=$4
   echo "== $name (features: ${features:-none})"
-  locked cargo build --release --no-default-features --features "$BOARD${features:+,$features}"
+  locked cargo build --release --no-default-features --features "$BOARD${features:+,$features}" "${REMAP[@]}"
   cp "target/$TARGET/release/h7-bench" "$OUT/$name.elf"
   objcopy -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
@@ -154,7 +163,7 @@ echo "== host: expected lines (calls, frames, clocks, hash) against expected-has
 # compare its report with expected-hashes.txt.
 qemu() {
   echo "== QEMU mps2-an500: $1 (features: $2)"
-  locked cargo build --release --no-default-features --features "$BOARD,$2"
+  locked cargo build --release --no-default-features --features "$BOARD,$2" "${REMAP[@]}"
   cp "target/$TARGET/release/h7-bench" "$OUT/$1.elf"
   locked timeout 900 qemu-system-arm -M mps2-an500 -cpu cortex-m7 -display none -monitor none \
     -serial none -semihosting-config enable=on,target=native -kernel "$OUT/$1.elf" \

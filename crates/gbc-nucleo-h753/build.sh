@@ -21,6 +21,15 @@ cd "$(dirname "$0")"
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 TARGET=thumbv7em-none-eabihf
+
+# Path-independent images: the panic-location strings and debug info embed
+# the checkout path, the cargo registry and the toolchain sources, so the
+# same source gave different .bins in different worktrees. cargo's
+# `trim-paths` is unstable on 1.100.0 and a cargo config cannot expand $PWD,
+# so the prefixes are remapped here with --config: its rustflags array is
+# appended to the one in .cargo/config.toml (CodeGenPrepare flag kept).
+ROOT=$(cd ../.. && pwd)
+REMAP=(--config "target.$TARGET.rustflags=['--remap-path-prefix=$ROOT=/gbc-32','--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry/src=/cargo-registry','--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup']")
 OUT=out
 BINS=(boot)
 MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
@@ -48,7 +57,7 @@ sym() { awk -v n="$2" '$8 == n {print $2; exit}' <<< "$1"; }
 # in_range <hex> <lo> <hi>: lo <= value <= hi
 in_range() { [ -n "$1" ] && [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 
-locked cargo build --release --bins
+locked cargo build --release --bins "${REMAP[@]}"
 
 for name in "${BINS[@]}"; do
   echo "== $name"
