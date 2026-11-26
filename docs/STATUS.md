@@ -26,21 +26,23 @@
 
 ## Next up: Stage 2 M1 (firmware skeleton, link-time placement, host-side gate)
 
-Tasks (details and acceptance in `docs/plan/stage-2.md` M1):
-1. **First: the crate-layout ADR** (next free number **0036**): per-board
-   firmware crates (`gbc-nucleo-h753`, later `gbc-handheld`), `gbc-firmware`
-   shared logic, `gbc-link` serial protocol, PAC-only, one `memory.x` from
-   `perf/itcm-sections.txt`, board module boundary.
-2. `gbc-nucleo-h753` boots at 472 MHz, MPU, I/D-cache on, fault handler with
-   UART report; banner prints the LSE-measured clock (D11).
-3. `headless` image (core in the M6-target placement, ROM from internal
-   flash, scripted input, per-frame video hash + audio hash over UART) and
-   its host counterpart in `tools/`; QEMU (`mps2-an500`) smoke of the same.
-4. `scripts/check-itcm-elf.sh` (post-link ITCM check, mutation-checked);
-   settle the provisional size gate on the firmware link (changing 122,880 B
-   needs the human); name the ~1.7 KB anonymous `.rodata` (C-P7).
-5. `scripts/gate-stage2.sh` host part, plus fmt/clippy/build for
-   `tools/h7-bench`, its `host/`, and `gbc-nucleo-h753` (C-T6); board lock.
+Session 22 (2026-11-25) progress; ticks with commits in `docs/plan/stage-2.md` M1:
+- Done: ADR 0036 (crate layout; 20300b4), `tools/memory-x` (shared memory.x
+  generator, 7d10abd; `firmware_memory_x` 3d786fc), `check-itcm-elf.sh`
+  (e9b440c), C-P7 rodata (fb33d98: 128 B hot cst pools to DTCM), board lock
+  `scripts/lib/board-lock.sh` (1bbd37e; first real use is the headless run),
+  `gbc-firmware` + host `tools/headless` with expected lines for cpu_instrs
+  and cgb-acid2 (4ee66e1), `gbc-nucleo-h753` lib + `boot` image verified on
+  the board (34d7fab; `lse_cpu_hz=473532048`), path-independent firmware
+  images (afe079e).
+- Remaining, in order: (1) `headless` board image, byte-equal to
+  `tools/headless/expected/*` (in flight, branch `m1-headless`); (2) h7-bench
+  switch-over onto the `gbc-nucleo-h753` lib (ADR 0036: drop `h755`, 392 MHz
+  and HSI-64 images; re-check bench hashes on the board); (3) QEMU smoke of
+  the headless loop; (4) C-P5 size-gate measurement on the firmware link
+  (changing 122,880 B needs the human); (5) `gate-stage2.sh --host-only`
+  (first version needs the human's approval) incl. C-T6 fmt/clippy and the
+  rustflags/lockfile-pin checks from ADR 0036.
 
 Key plan points: board performance vs the 50% bar is report-only (the README
 target applies to the H735 at 550 MHz); gated are real time and the +3%
@@ -110,9 +112,15 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None.
+- `headless` board image (branch `m1-headless`, scratch worktree `wt-headless`).
 
 ## Needs human
+
+Open (session 22, 2026-11-25):
+- FYI, no answer needed unless you object: ADR 0036 drops h7-bench's `h755`
+  feature and its 392 MHz and HSI-64 images when h7-bench moves onto the
+  `gbc-nucleo-h753` bring-up lib (the H755 is retired; D8, D11). Sources and
+  numbers stay in git history and `docs/perf.md`; `m4-stub/` is no longer built.
 
 Open (session 21, 2026-11-25):
 - **NUCLEO-H753ZI** (X-NUCLEO-GFX02Z1 shield; E: / COM5): standing
