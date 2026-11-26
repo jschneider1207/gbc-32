@@ -67,7 +67,7 @@
 //! # TE (PE13)
 //!
 //! PE13 input without pull (set up by [`Lcd::init`]); SYSCFG_EXTICR4
-//! EXTI13 = 0100 (port E, RM0433 11.3.5), EXTI_RTSR1 bit 13 (rising edge),
+//! EXTI13 = 0100 (port E, RM0433 12.3.5), EXTI_RTSR1 bit 13 (rising edge),
 //! EXTI_CPUIMR1 bit 13 (unmasked for the CPU), cleared in EXTI_CPUPR1
 //! (RM0433 20.6); NVIC interrupt 40, EXTI15_10. The image defines the
 //! vector and calls [`on_te`] from it:
@@ -274,7 +274,7 @@ impl LcdDma {
 
         // TE: PE13 on EXTI13, rising edge only, unmasked for the CPU.
         // SAFETY: SYSCFG's clock is on (above); EXTICR4 EXTI13 = 4, port E
-        // (RM0433 11.3.5); the other lines' fields are kept.
+        // (RM0433 12.3.5); the other lines' fields are kept.
         let syscfg = unsafe { &*pac::SYSCFG::ptr() };
         // SAFETY: as above.
         syscfg
