@@ -11,6 +11,10 @@
 //! `seq` fails a dump; the rest are counted and ignored. A dump the board
 //! starts on its own (a `SaveBegin` while none was asked for, e.g. its
 //! button combo) is received the same way.
+//!
+//! With [`PlayOptions::audio`] the loop first asks for the audio stream
+//! (`AudioStart`, answered `Ack`; ADR 0041), hands each `Audio` message
+//! to the caller as [`PlayEvent::Audio`] and sends `AudioStop` at the end.
 
 use std::io;
 use std::path::PathBuf;
@@ -43,6 +47,8 @@ pub struct PlayOptions {
     /// written ([`crate::rtc::from_dump`]); `None` (`--raw-save`) writes
     /// it as received.
     pub clock: Option<WallClock>,
+    /// Ask for the board's audio stream (`--audio-wav`).
+    pub audio: bool,
 }
 
 impl Default for PlayOptions {
@@ -53,6 +59,7 @@ impl Default for PlayOptions {
             poll: Duration::from_millis(10),
             refresh: REFRESH,
             clock: None,
+            audio: false,
         }
     }
 }
@@ -78,6 +85,12 @@ pub enum PlayEvent {
     WriteFailed(String),
     /// F5 or a board dump without `--sav-out`.
     NoSavOut,
+    /// An `Audio` message (only with [`PlayOptions::audio`]).
+    Audio {
+        first: u32,
+        held: u16,
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +108,8 @@ pub struct PlayReport {
     pub dumps_failed: u32,
     /// `Nak`s that did not answer the dump request, ignored.
     pub ignored_naks: u32,
+    /// `Audio` messages received.
+    pub audio: u32,
 }
 
 struct Job {
@@ -124,7 +139,18 @@ pub fn play<T: Transport>(
         saves: 0,
         dumps_failed: 0,
         ignored_naks: 0,
+        audio: 0,
     };
+    if opts.audio {
+        match client.request(&Message::AudioStart)? {
+            crate::client::Reply::Ack => {}
+            r => {
+                return Err(Error::Io(io::Error::other(format!(
+                    "AudioStart answered {r:?}, not Ack"
+                ))));
+            }
+        }
+    }
     loop {
         let t = now();
         if opts
@@ -175,6 +201,16 @@ pub fn play<T: Transport>(
                     cycles_max: *cycles_max,
                     extra: extra.clone(),
                 }),
+                Incoming::Audio { first, held, data } => {
+                    if opts.audio {
+                        report.audio += 1;
+                        event(PlayEvent::Audio {
+                            first: *first,
+                            held: *held,
+                            data: data.clone(),
+                        });
+                    }
+                }
                 Incoming::Nak(_) => match &mut job {
                     Some(j) if j.rx.seq() == Some(*seq) => step = j.rx.on_received(&r),
                     _ => report.ignored_naks += 1,
@@ -245,6 +281,10 @@ pub fn play<T: Transport>(
                 }
             }
         }
+    }
+    if opts.audio {
+        // Not waited for: the board also stops 1.5 s after the last frame.
+        client.send(&Message::AudioStop)?;
     }
     client.send(&Message::Input { buttons: 0 })?;
     report.inputs += 1;

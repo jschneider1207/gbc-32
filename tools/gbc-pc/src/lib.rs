@@ -9,6 +9,7 @@
 //! keyboard, [`keyboard`], are Windows-specific: the tool ships as a
 //! native Windows `.exe` because WSL has poor COM-port access.
 
+pub mod audio;
 pub mod client;
 pub mod fnv;
 pub mod input;

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use windows_sys::Win32::Devices::Communication::{
     COMMTIMEOUTS, DCB, GetCommState, NOPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR,
-    PURGE_TXABORT, PURGE_TXCLEAR, PurgeComm, SetCommState, SetCommTimeouts,
+    PURGE_TXABORT, PURGE_TXCLEAR, PurgeComm, SetCommState, SetCommTimeouts, SetupComm,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
@@ -26,6 +26,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use crate::transport::Transport;
 
 const MAXDWORD: u32 = u32::MAX;
+/// `SetupComm`'s receive queue size.
+const RX_QUEUE_BYTES: u32 = 256 * 1024;
 /// How long one `WriteFile` may take: far more than a largest frame
 /// (1,040 bytes, ~90 ms at 115,200 baud) needs.
 const WRITE_TIMEOUT_MS: u32 = 10_000;
@@ -91,6 +93,11 @@ impl ComPort {
         // SAFETY: as above; the DCB is only read.
         check(unsafe { SetCommState(port.h, &dcb) }, "SetCommState")?;
         port.set_read_timeout(1000)?;
+        // A driver receive queue of 1 s of audio at 2 Mbit/s (ADR 0041), a
+        // hint the driver may round or ignore: `play` reads every 10 ms.
+        // SAFETY: `port.h` is an open comm handle.
+        let ok = unsafe { SetupComm(port.h, RX_QUEUE_BYTES, 4096) };
+        check(ok, "SetupComm")?;
         let all = PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR;
         // SAFETY: `port.h` is an open comm handle; the flags are valid
         // PURGE_* values.

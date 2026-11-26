@@ -3,7 +3,7 @@
 //! ```text
 //! gbc-pc load <rom> [--sav <file.sav>] [--raw-save] [link options]
 //! gbc-pc dump <out.sav>                [--raw-save] [link options]
-//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]
+//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio-wav <file.wav>] [link options]
 //! gbc-pc hello                         [link options]
 //! link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 //! ```
@@ -34,7 +34,7 @@ use gbc_pc::{Client, Config, LoadOutcome, Transport};
 const USAGE: &str = "usage:
   gbc-pc load <rom> [--sav <file.sav>]                [--raw-save] [link options]
   gbc-pc dump <out.sav>                               [--raw-save] [link options]
-  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [--raw-save] [link options]
+  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [--raw-save] [--audio-wav <file.wav>] [link options]
   gbc-pc hello                                        [link options]
 --raw-save: no RTC sync on load, no restamp on dump (byte-exact saves)
 link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]";
@@ -48,6 +48,7 @@ enum Command {
     Play {
         sav_out: Option<String>,
         seconds: Option<u64>,
+        audio_wav: Option<String>,
     },
     Hello,
 }
@@ -71,6 +72,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         Some("play") => Command::Play {
             sav_out: None,
             seconds: None,
+            audio_wav: None,
         },
         Some("hello") => Command::Hello,
         Some(c) => return Err(format!("unknown command {c:?}")),
@@ -103,6 +105,10 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--sav-out" => match &mut args.cmd {
                 Command::Play { sav_out, .. } => *sav_out = Some(value("--sav-out")?),
                 _ => return Err("--sav-out is a play option".into()),
+            },
+            "--audio-wav" => match &mut args.cmd {
+                Command::Play { audio_wav, .. } => *audio_wav = Some(value("--audio-wav")?),
+                _ => return Err("--audio-wav is a play option".into()),
             },
             "--raw-save" => match args.cmd {
                 Command::Hello => return Err("--raw-save is a load, dump or play option".into()),
@@ -237,9 +243,20 @@ fn run<T: Transport>(port: T, args: &Args, rom: Option<&[u8]>, sav: Option<&[u8]
     let result = match (&args.cmd, rom) {
         (Command::Load { .. }, Some(rom)) => load(&mut client, rom, sav),
         (Command::Dump(out), _) => dump(&mut client, Path::new(out), clock),
-        (Command::Play { sav_out, seconds }, _) => {
-            play(&mut client, sav_out.as_deref(), *seconds, clock)
-        }
+        (
+            Command::Play {
+                sav_out,
+                seconds,
+                audio_wav,
+            },
+            _,
+        ) => play(
+            &mut client,
+            sav_out.as_deref(),
+            *seconds,
+            audio_wav.as_deref(),
+            clock,
+        ),
         _ => client.hello().map(|info| {
             println!(
                 "HelloReply: protocol {}, max_chunk {}, flash_len {} ({} KiB)",
@@ -288,9 +305,14 @@ fn play<T: Transport>(
     client: &mut Client<T>,
     sav_out: Option<&str>,
     seconds: Option<u64>,
+    audio_wav: Option<&str>,
     clock: Option<gbc_pc::rtc::WallClock>,
 ) -> Result<(), gbc_pc::Error> {
+    let mut capture = gbc_pc::audio::Capture::new();
+    let mut audio_span: Option<(Instant, Instant)> = None;
+    let mut last_extra = String::new();
     let opts = PlayOptions {
+        audio: audio_wav.is_some(),
         duration: seconds.map(Duration::from_secs),
         sav_out: sav_out.map(PathBuf::from),
         clock,
@@ -310,7 +332,15 @@ fn play<T: Transport>(
         } if extra.is_empty() => {
             println!("stats: frames {frames}, cycles mean {cycles_mean}, max {cycles_max}")
         }
-        PlayEvent::Stats { extra, .. } => println!("stats: {extra}"),
+        PlayEvent::Stats { extra, .. } => {
+            println!("stats: {extra}");
+            last_extra = extra;
+        }
+        PlayEvent::Audio { first, held, data } => {
+            let t = Instant::now();
+            audio_span = Some(audio_span.map_or((t, t), |(a, _)| (a, t)));
+            capture.on_audio(first, held, &data);
+        }
         PlayEvent::DumpStarted => println!("dump: started"),
         PlayEvent::DumpRetry(f) => println!("dump: retrying ({f})"),
         PlayEvent::DumpFailed(f) => eprintln!("dump: failed ({f})"),
@@ -320,7 +350,9 @@ fn play<T: Transport>(
         PlayEvent::WriteFailed(e) => eprintln!("dump: cannot write {e}"),
         PlayEvent::NoSavOut => eprintln!("dump: no --sav-out given, nothing written"),
     };
+    let (t0, rx0) = (Instant::now(), client.rx_bytes);
     let r = gbc_pc::play::play(client, &mut *kb, &opts, &mut Instant::now, &mut event)?;
+    let rx_rate = (client.rx_bytes - rx0) as f64 / t0.elapsed().as_secs_f64().max(1e-9);
     println!(
         "play: {} ({} Input frames, {} saves, {} failed dumps, {} other Naks ignored)",
         match r.exit {
@@ -332,7 +364,56 @@ fn play<T: Transport>(
         r.dumps_failed,
         r.ignored_naks
     );
+    if let Some(path) = audio_wav {
+        println!("audio: link received {rx_rate:.0} B/s over the whole play");
+        audio_summary(&capture, audio_span, &last_extra);
+        let wav = capture.wav();
+        match std::fs::write(path, &wav) {
+            Ok(()) => println!("audio: wrote {path} ({} B)", wav.len()),
+            Err(e) => {
+                return Err(gbc_pc::Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{path}: {e}"),
+                )));
+            }
+        }
+    }
     Ok(())
+}
+
+/// The `--audio-wav` report: frames, gaps, rate, and the board's own
+/// `audio_*` counters from its last `Stats`.
+fn audio_summary(c: &gbc_pc::audio::Capture, span: Option<(Instant, Instant)>, board_extra: &str) {
+    let s = c.stats;
+    let secs = span.map_or(0.0, |(a, b)| b.duration_since(a).as_secs_f64());
+    let fps = if secs > 0.0 {
+        s.frames as f64 / secs
+    } else {
+        0.0
+    };
+    println!(
+        "audio: first_frame={} frames={} messages={} gaps={} missing={} filled={} held={} span={secs:.2}s frames_per_s={fps:.1} data_bytes_per_s={:.0}",
+        s.first_frame.map_or("-".to_string(), |f| f.to_string()),
+        s.frames,
+        s.messages,
+        s.gaps,
+        s.missing,
+        s.filled,
+        s.held,
+        fps * 3.0,
+    );
+    let board: Vec<&str> = board_extra
+        .split(' ')
+        .filter(|f| f.starts_with("audio_"))
+        .collect();
+    println!(
+        "audio: board {}",
+        if board.is_empty() {
+            "-".to_string()
+        } else {
+            board.join(" ")
+        }
+    );
 }
 
 fn load<T: Transport>(
@@ -450,14 +531,22 @@ mod tests {
         let a = parse("play --sav-out g.sav --seconds 2").unwrap();
         assert!(matches!(
             a.cmd,
-            Command::Play { sav_out: Some(ref p), seconds: Some(2) } if p == "g.sav"
+            Command::Play { sav_out: Some(ref p), seconds: Some(2), audio_wav: None } if p == "g.sav"
         ));
+        let a = parse("play --audio-wav a.wav --seconds 3").unwrap();
+        assert!(matches!(
+            a.cmd,
+            Command::Play { audio_wav: Some(ref w), seconds: Some(3), sav_out: None } if w == "a.wav"
+        ));
+        assert!(parse("dump x --audio-wav a.wav").is_err());
+        assert!(parse("play --audio-wav").is_err());
         let a = parse("play").unwrap();
         assert!(matches!(
             a.cmd,
             Command::Play {
                 sav_out: None,
-                seconds: None
+                seconds: None,
+                audio_wav: None
             }
         ));
     }

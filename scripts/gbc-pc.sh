@@ -3,7 +3,7 @@
 #
 #   scripts/gbc-pc.sh load <rom> [--sav <file.sav>] [--raw-save] [link options]
 #   scripts/gbc-pc.sh dump <out.sav> [--raw-save] [link options]
-#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]
+#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio-wav <file.wav>] [link options]
 #   scripts/gbc-pc.sh hello                                     [link options]
 #   link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 #
@@ -34,7 +34,7 @@ root=$PWD
 usage() {
   echo "usage: $0 load <rom> [--sav <file.sav>] [--raw-save] [link options]" >&2
   echo "       $0 dump <out.sav> [--raw-save] [link options]" >&2
-  echo "       $0 play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]" >&2
+  echo "       $0 play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio-wav <file.wav>] [link options]" >&2
   echo "       $0 hello [link options]" >&2
   echo "link options: [--port COM5|null] [--baud N] [--retries N] [--timeout-ms N]" >&2
   exit 2
@@ -59,6 +59,7 @@ case $cmd in
 esac
 
 sav=""
+wav=""
 null_port=0
 rest=()
 while [ $# -gt 0 ]; do
@@ -71,6 +72,11 @@ while [ $# -gt 0 ]; do
     --sav-out)
       [ $# -ge 2 ] || usage
       out=$2; shift 2
+      ;;
+    --audio-wav)
+      [ $# -ge 2 ] || usage
+      wav=$2; shift 2
+      [ -d "$(dirname "$wav")" ] || { echo "gbc-pc.sh: no such directory for $wav" >&2; exit 2; }
       ;;
     --port)
       [ $# -ge 2 ] || usage
@@ -114,6 +120,8 @@ if [ -n "$out" ]; then
     play) args+=(--sav-out "$win_out") ;;
   esac
 fi
+# The WAV is written in the Windows scratch dir, then copied out.
+[ -z "$wav" ] || args+=(--audio-wav "$(wslpath -w "$scratch")\\audio.wav")
 args+=("${rest[@]}")
 
 run_exe() { (cd "$scratch" && ./gbc-pc.exe "${args[@]}"); }
@@ -129,6 +137,10 @@ set -e
 if [ -n "$out" ] && [ -f "$scratch/out.sav" ]; then
   cp "$scratch/out.sav" "$out.part" && mv "$out.part" "$out"
   echo "gbc-pc.sh: save written to $out"
+fi
+if [ -n "$wav" ] && [ -f "$scratch/audio.wav" ]; then
+  cp "$scratch/audio.wav" "$wav.part" && mv "$wav.part" "$wav"
+  echo "gbc-pc.sh: audio written to $wav"
 fi
 echo "gbc-pc.sh: exit code $code"
 exit "$code"

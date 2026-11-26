@@ -84,6 +84,14 @@ pub struct SimBoard {
     pub dump_faults: Vec<(u32, DumpFault)>,
     /// Every `Input` bitmap received, in order.
     pub inputs: Vec<u8>,
+    /// `AudioStart` is answered `Ack` (else `Nak UnexpectedType`, as an
+    /// older board).
+    pub audio_capable: bool,
+    /// The audio stream is on (ADR 0041).
+    pub audio_on: bool,
+    /// `Audio` messages `(first, held, DAC words)` sent once the stream
+    /// is on, right after the answer that turned it on.
+    pub audio_script: Vec<(u32, u16, Vec<u32>)>,
     /// The save load in progress: length, hash, bytes so far.
     save_load: Option<(u32, u64, Vec<u8>)>,
     state: State,
@@ -109,6 +117,9 @@ impl SimBoard {
             dump_chunk: gbc_link::MAX_CHUNK,
             dump_faults: Vec::new(),
             inputs: Vec::new(),
+            audio_capable: true,
+            audio_on: false,
+            audio_script: Vec::new(),
             save_load: None,
             state: State::Idle,
             raw: Vec::new(),
@@ -132,6 +143,21 @@ impl SimBoard {
             cycles_mean,
             cycles_max,
             extra: extra.as_bytes(),
+        };
+        self.out.extend(encode(&m, 0));
+    }
+
+    /// Queues an `Audio` message of the DAC words `frames` (whatever
+    /// [`SimBoard::audio_on`] says: the test decides).
+    pub fn push_audio(&mut self, first: u32, held: u16, frames: &[u32]) {
+        let data: Vec<u8> = frames
+            .iter()
+            .flat_map(|&w| gbc_link::audio::pack(w))
+            .collect();
+        let m = Message::Audio {
+            first,
+            held,
+            data: &data,
         };
         self.out.extend(encode(&m, 0));
     }
@@ -202,14 +228,24 @@ impl SimBoard {
         let wire = encode(&reply.as_message(), seq);
         self.out.extend(wire.iter().copied());
         self.last = Some((frame.to_vec(), wire));
+        if self.audio_on {
+            for (first, held, frames) in std::mem::take(&mut self.audio_script) {
+                self.push_audio(first, held, &frames);
+            }
+        }
     }
 
     fn answer(&mut self, msg: Req) -> Ans {
         let nak = |code| Ans::Nak(code);
         let cap = (self.flash.len() as u64).saturating_sub(u64::from(IMAGE_HEADER_LEN));
         match msg {
+            Req::Audio(on) if self.audio_capable => {
+                self.audio_on = on;
+                Ans::Ack
+            }
             Req::Hello => {
                 self.work.hellos += 1;
+                self.audio_on = false;
                 self.state = State::Idle;
                 Ans::HelloReply {
                     protocol: self.protocol,
@@ -314,7 +350,9 @@ impl SimBoard {
                 self.save = Some(buf);
                 Ans::Ack
             }
-            Req::Input { .. } | Req::SaveDumpRequest | Req::Other => nak(NakCode::UnexpectedType),
+            Req::Input { .. } | Req::SaveDumpRequest | Req::Audio(_) | Req::Other => {
+                nak(NakCode::UnexpectedType)
+            }
         }
     }
 
@@ -390,6 +428,7 @@ enum Req {
     SaveChunk { offset: u32, data: Vec<u8> },
     SaveDumpRequest,
     Input { buttons: u8 },
+    Audio(bool),
     Other,
 }
 
@@ -409,6 +448,8 @@ fn owned(m: &Message<'_>) -> Req {
         },
         Message::SaveDumpRequest => Req::SaveDumpRequest,
         Message::Input { buttons } => Req::Input { buttons },
+        Message::AudioStart => Req::Audio(true),
+        Message::AudioStop => Req::Audio(false),
         _ => Req::Other,
     }
 }
