@@ -152,6 +152,8 @@ H7_BENCH_QEMU=1 ./build.sh      # also the QEMU smoke run (qemu-system-arm)
 H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
 ```
 
+`flash.sh` and `read-serial.sh` take the board lock (`scripts/lib/board-lock.sh`, `${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock}`, ADR 0036); it is re-entrant and separate from `H7_BENCH_LOCK`.
+
 Needs only the pinned toolchain (`rust-objcopy` ships inside it) and
 binutils' `readelf`. The script prints the section sizes of each ELF, the
 first two vector words of each `.bin`, and checks: the initial SP is in RAM

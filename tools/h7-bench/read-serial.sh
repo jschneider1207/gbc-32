@@ -9,6 +9,10 @@
 #            Manager; the H755 board was COM3)
 set -euo pipefail
 
+# One flash or serial session at a time (ADR 0036); re-entrant.
+. "$(dirname "$(readlink -f "$0")")/../../scripts/lib/board-lock.sh"
+board_lock_reexec "$@"
+
 secs=${1:-10}
 port=${H7_COM:-COM5}
 case "$secs" in ''|*[!0-9]*) echo "usage: read-serial.sh [seconds]" >&2; exit 2;; esac

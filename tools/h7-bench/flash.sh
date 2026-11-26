@@ -19,6 +19,10 @@
 # STM32CubeProgrammer for 0x0810_0000).
 set -euo pipefail
 
+# One flash or serial session at a time (ADR 0036); re-entrant.
+. "$(dirname "$(readlink -f "$0")")/../../scripts/lib/board-lock.sh"
+board_lock_reexec "$@"
+
 img=${1:?usage: flash.sh <image.bin>}
 BOARD=${H7_BENCH_BOARD:-h753}
 case "$BOARD" in
