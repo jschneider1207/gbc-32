@@ -131,9 +131,26 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 24 (2026-11-25): M3 started. Branch `m3-scaler` (RGB555->RGB565 1.5x scaler in gbc-firmware, host tests) and `m3-lcd-probe` (FMC + ILI9341V driver, `lcd-probe` bin, board) in scratch worktrees; not merged yet.
+- Session 24 (2026-11-25): M3. Merged: scaler (`gbc-firmware::video`,
+  b943740) and the FMC LCD driver + `lcd-probe` (d9d5655..81548ae).
+  Running: branch `m3-lcd-dma` (MDMA transfer on TE, `lcd-dma-probe`,
+  ADR 0039) in a scratch worktree.
 
 ## Needs human
+
+Open (session 24, 2026-11-25):
+- **The shield's panel is an ST7789V, not the ILI9341V** (RDDID 85 85 52,
+  TE 60 Hz; UM2905 §6.2: variant XNGFX02Z1$AZ2 has the ST7789V, $AZ1 the
+  ILI9341V). Please read the shield sticker to confirm `$AZ2`. Plan and
+  architecture wording was corrected (chip name and commands only).
+- **Look at the panel** (sign-off item 1 early check): the image left on
+  it should show 8 vertical colour bars; with MADCTL BGR as planned the
+  first bar should be blue and the third red, and a marker top-left.
+  If red/blue are swapped or the marker isn't top-left as you hold the
+  board, say so (MADCTL changes; `docs/reference/lcd-panel.md`).
+- The ST7789V datasheet (Sitronix V1.3) is not in
+  `../gbc-32-hardware/datasheets/`; URL and sha256 are in
+  `docs/reference/lcd-panel.md` if you want to add it (agents can't).
 
 Open (session 22, 2026-11-25):
 - **H735 ITCM reserve (C-P5, no answer needed now):** measured on the firmware
