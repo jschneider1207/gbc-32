@@ -420,6 +420,11 @@ The headless loop on `cgb-acid2` with the panel (src/bin/headless.rs
   include the interrupt's entry
   latency, which an FMC read in progress can delay by about a byte read,
   0.6 µs), wider than the ±10 µs seen over 120 periods.
+- Since M3 review T-2 the window is overwritten with the inverse of
+  each frame by the CPU before its transfer, so a missed or short
+  transfer shows as mismatches even when the frame repeats (docs/perf.md
+  "Stricter self-test"); the panel can show the inverse briefly each
+  frame while the test runs.
 
 ### Test image
 

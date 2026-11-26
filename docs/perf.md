@@ -1257,6 +1257,35 @@ that phase: TE came on average 0.77 M cycles after `present`, after the
 core's frame (0.68 M) had mostly finished, so `te` overlaps little; that
 is why `te-wait` is the measured mode.
 
+**Stricter self-test (M3 review T-1, T-2; branch `m3-review-fixes`).**
+Before, the GRAM was cleared only at init, and 586 of cgb-acid2's 600
+frames equal the one before, so a dropped, short or misplaced transfer
+left the right picture and read back 0 mismatches: with one transfer cut
+to half its length (BNDT halved, the 301st `present`) the old self-test
+still reported `mismatches=0`. Now, between `scale_frame` and `present`,
+the CPU writes the bitwise inverse of the frame about to be sent into the
+window (`lcd_dma::write_inverse`; every readback byte of an inverted pixel
+differs under the 0xFC mask, a const assertion over all 65,536 values), so
+every pixel the transfer misses reads back wrong: the same cut transfer
+gave `mismatches=25920` (exactly half the window, first at row 108) and
+run-headless.sh exit 1. The sentinel takes 3.83 M cycles (8.1 ms, the
+FMC's write speed, as the MDMA) plus a 20 µs drain, timed on its own
+(`stats display waits ... sentinel_*`) and kept out of `setup` and the 5%
+figure (with a DSB alone `present` measured 1,586 cycles, the write FIFO
+still emptying). And run-headless.sh now checks the verdict for a display
+image (detected from the file name, the `stats display start=` text in
+the .bin, or a `stats display` line; any one): exactly one
+`stats display start=` and one `stats display cpu` line, `frames`,
+`transfers` and `readbacks` each equal to the compared lines' FRAME_READY
+count, `mismatches=0`, `control_mismatches=2`, `transfer_errors=0`,
+`start_timeouts=0`, `dead=0`, `ok=1`; otherwise exit 1 (so an `off`
+image now exits 1 too). Runs with it (`te-wait`, 2026-11-25): cgb-acid2
+587 readbacks, 0 mismatches, control 2, core 680,822 / 753,476,
+`scale_frame` + `present` at most 196,480 (`present` 292 to 368);
+dmg-acid2 592 readbacks, 0 mismatches, core 683,981 / 752,329. The
+readback is unchanged (42.63 M cycles); the loop is about 8 ms a frame
+longer (run_ms 68,856 instead of 59,070).
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed
