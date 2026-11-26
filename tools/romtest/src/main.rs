@@ -11,16 +11,7 @@ compile_error!(
      it catches emulator panics per ROM"
 );
 
-mod app;
-mod checks;
-mod cli;
-mod gambatte;
-mod glob;
-mod integrity;
-mod machine;
-mod manifest;
-mod panics;
-mod report;
+use romtest::{app, panics};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

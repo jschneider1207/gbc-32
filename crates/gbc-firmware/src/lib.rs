@@ -12,6 +12,9 @@
 //! - [`input`]: scripted button input, a `&[Press]` table and a no-alloc
 //!   parser for the text format of `scripts/inputs/*.txt`; [`input::InputSource`],
 //!   the per-frame input of the paced loop (M5).
+//! - [`replay`]: clock-scheduled input (M5 scripted mode): an
+//!   `acceptance/*.toml` `input` script as romtest's clock table, handed to
+//!   the core the way romtest's run loop does.
 //! - [`buttons`]: live input (M5): the board's joystick and B1 debounced and
 //!   mapped to the D-pad and Start, the PC's 8-button bitmap, the OR-merge
 //!   and the save-dump chord.
@@ -40,6 +43,7 @@ pub mod headless;
 pub mod input;
 pub mod paced;
 pub mod player;
+pub mod replay;
 pub mod rom_image;
 pub mod save;
 pub mod video;

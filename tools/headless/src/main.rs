@@ -16,6 +16,13 @@
 //! `WFI`. The `stats paced speed` line is meaningless here (no real-time
 //! consumer).
 //!
+//! With `--paced`, `--input` may also be a `clocks v1` table
+//! (`gbc_firmware::replay`: an `acceptance/*.toml` `input` script as
+//! romtest's clock list, from `tools/replay-input table`): its changes are
+//! scheduled at their own clocks, as romtest does, and a report-only
+//! `stats input clock_changes=<n> handed=<k> late=<l>` line follows the
+//! `paced` output (the `player-script` image prints the same).
+//!
 //! `--frames` defaults to the script's `end <frames>` line. The `stats`
 //! lines time each `run_frame` call with the host's monotonic clock in
 //! nanoseconds (`hz=1000000000`); compare runs with `grep '^headless '`.
@@ -35,7 +42,8 @@ use gbc_firmware::audio::{DMA_HALF_FRAMES, FeedRing, FeedTap};
 use gbc_firmware::headless::NoSink;
 use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};
-use gbc_firmware::paced::{self, Feed, Hooks, Idle};
+use gbc_firmware::paced::{self, Feed, Hooks, Idle, NoService};
+use gbc_firmware::replay::{self, Change, ClockScript};
 
 /// Nanoseconds since start, wrapping (about 4.3 s per wrap; a `run_frame`
 /// call takes milliseconds).
@@ -124,8 +132,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (presses, end) = match &args.input {
-        None => (Vec::new(), None),
+    let (presses, changes, end) = match &args.input {
+        None => (Vec::new(), None, None),
         Some(path) => match read_script(path) {
             Ok(s) => s,
             Err(e) => {
@@ -134,6 +142,10 @@ fn main() -> ExitCode {
             }
         },
     };
+    if changes.is_some() && !args.paced {
+        eprintln!("headless: a `clocks v1` input needs --paced\n{USAGE}");
+        return ExitCode::from(2);
+    }
     let Some(frames) = args.frames.or(end) else {
         eprintln!("headless: give --frames (or an input script with an `end` line)\n{USAGE}");
         return ExitCode::from(2);
@@ -180,9 +192,26 @@ fn main() -> ExitCode {
             ring: &ring,
             tap: &tap,
         };
-        paced::run(&rom, script, frames, bufs, feed, hooks, &mut out)
-            .map(drop)
-            .map_err(|e| format!("{e:?}"))
+        match &changes {
+            None => paced::run(&rom, script, frames, bufs, feed, hooks, &mut out)
+                .map(drop)
+                .map_err(|e| format!("{e:?}")),
+            Some(c) => {
+                let mut cs = ClockScript::new(c);
+                let r = paced::run_with(
+                    &rom,
+                    &mut cs,
+                    frames,
+                    bufs,
+                    feed,
+                    hooks,
+                    &mut NoService,
+                    &mut out,
+                );
+                let _ = cs.report(&mut out);
+                r.map(drop).map_err(|e| format!("{e:?}"))
+            }
+        }
     } else {
         headless::run(&rom, script, frames, bufs, &clock, &mut out)
             .map(drop)
@@ -202,13 +231,24 @@ fn main() -> ExitCode {
     }
 }
 
-/// Reads and parses an input program (`gbc_firmware::input` docs).
-fn read_script(path: &str) -> Result<(Vec<Press>, Option<u32>), String> {
+/// A frame program's presses, or a clock table's changes, and the `end`.
+type ReadScript = (Vec<Press>, Option<Vec<Change>>, Option<u32>);
+
+/// Reads and parses an input program (`gbc_firmware::input` docs) or a
+/// clock table (`gbc_firmware::replay` docs).
+fn read_script(path: &str) -> Result<ReadScript, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if replay::is_clock_table(&text) {
+        let mut changes = vec![Change::NONE; text.lines().count()];
+        let p = replay::parse(&text, &mut changes)
+            .map_err(|e| format!("line {}: {:?}", e.line, e.kind))?;
+        changes.truncate(p.changes);
+        return Ok((Vec::new(), Some(changes), p.end));
+    }
     // One press per line at most.
     let mut presses = vec![Press::NONE; text.lines().count()];
     let p =
         input::parse(&text, &mut presses).map_err(|e| format!("line {}: {:?}", e.line, e.kind))?;
     presses.truncate(p.presses);
-    Ok((presses, p.end))
+    Ok((presses, None, p.end))
 }

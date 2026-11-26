@@ -1592,6 +1592,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "replay-input"
+version = "0.1.0"
+dependencies = [
+ "gbc-core",
+ "gbc-firmware",
+ "romtest",
+]
+
+[[package]]
 name = "ringbuf"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -397,13 +397,11 @@ where
             // `eject` released every button.
             held = Buttons::EMPTY;
         }
-        // `set_buttons` between calls is `set_buttons_at` the frame's start
-        // clock (gbc-core).
-        let b = input.buttons(n);
-        if b != held {
-            emu.set_buttons(b);
-            held = b;
-        }
+        // A frame-sampled source applies its set with `set_buttons`, which
+        // between calls is `set_buttons_at` the frame's start clock
+        // (gbc-core); a clock script schedules its changes at their own
+        // clocks ([`InputSource::apply`]).
+        input.apply(n, &mut emu, &mut held);
         let t0 = clock.now();
         let r = emu.run_frame(frame, audio);
         let t1 = clock.now();

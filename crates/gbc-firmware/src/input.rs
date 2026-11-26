@@ -27,7 +27,7 @@
 //! `n`, so it is on the frame grid, not the clock grid of romtest's
 //! `input` (`acceptance/README.md`), and needs no scheduling queue.
 
-use gbc_core::Buttons;
+use gbc_core::{Buttons, Emulator};
 
 /// One press: `buttons` held for frames `frame .. frame + hold`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +118,21 @@ pub trait InputSource {
     /// script. A live source has no table to hash and returns
     /// [`LIVE_INPUT_FNV`]; its compared lines are not reproducible anyway.
     fn fnv(&self) -> u64;
+    /// Hands frame `n`'s input to the emulator, right before run call `n`
+    /// (the loops call this, not [`InputSource::buttons`]). `held` is the
+    /// set applied last (`Buttons::EMPTY` after a load). The default
+    /// samples [`InputSource::buttons`] and, if it changed, applies it at
+    /// the call's start clock with `set_buttons`. A clock-scheduled script
+    /// ([`crate::replay::ClockScript`]) schedules its changes at their own
+    /// clocks instead.
+    #[inline]
+    fn apply(&mut self, frame: u32, emu: &mut Emulator<'_>, held: &mut Buttons) {
+        let b = self.buttons(frame);
+        if b != *held {
+            emu.set_buttons(b);
+            *held = b;
+        }
+    }
 }
 
 /// The header's `input_fnv=` for live input (no table to hash).
@@ -162,6 +177,8 @@ pub enum ParseErrorKind {
     TooMany,
     /// A second `end` line.
     DuplicateEnd,
+    /// A clock not after the previous one ([`crate::replay`] format).
+    Order,
 }
 
 /// Parses the text format (module docs) into `out`, without allocating.
@@ -217,8 +234,16 @@ fn number(s: &str) -> Option<u32> {
     s.parse().ok()
 }
 
+/// A decimal `u64`: digits only (no sign, no `_`).
+pub(crate) fn number_u64(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
 /// `a+b+start` to buttons.
-fn buttons(s: &str) -> Option<Buttons> {
+pub(crate) fn buttons(s: &str) -> Option<Buttons> {
     let mut b = Buttons::EMPTY;
     for name in s.split('+') {
         b |= match name {

@@ -1,0 +1,16 @@
+[package]
+name = "replay-input"
+description = "Converts an acceptance manifest group's input to the firmware's clock table (romtest's own conversion) and checks the firmware's replay loop against romtest's run loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gbc-core = { path = "../../crates/gbc-core" }
+gbc-firmware = { path = "../../crates/gbc-firmware" }
+romtest = { path = "../romtest" }
