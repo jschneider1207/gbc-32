@@ -11,23 +11,23 @@
 # `selftest n=<n>` line a second from n=0 at reset.
 #
 # Which lines are judged (the new image's, never the previous one's that
-# the VCP buffered): the current boot starts at the last `selftest` line
-# whose n is 0 or does not follow the `selftest` line before it; the
-# window runs from the first banner after the previous boot's last
-# `selftest` line (any banner, so a stale banner of another image there
-# fails the image check), or from the boot's first `selftest` line if that
-# comes first, to the end of the capture. Everything before it is ignored.
+# the VCP buffered): the current run, from the last `selftest` line whose
+# n is 0 or does not follow the `selftest` line before it, to the end of
+# the capture. Everything before it is ignored: the previous boot, and the
+# junction where the ST-LINK's VCP lost bytes (it buffers the board's
+# output while the port is closed, then drops a stretch when the port
+# opens: seen 2026-11-26, a banner cut off and n=16..24 missing). A last
+# line without its newline (the read stopped inside it) is dropped too.
 #
-# Tool errors (exit 2): no `selftest` line or no banner after the
-# previous boot; in the window, a line that is not blank and not one of the
-# kinds above, a line of a kind that does not match its format, lines of
-# one kind (other than `selftest`) that are not all identical (a byte lost
-# on the link), fewer than 2 banner blocks (each kind at least twice) or
-# fewer than 16 `selftest` lines in the current boot; the window's banner's
-# `image_bytes=<n> image_cksum=<crc>` not `cksum` of <image.bin> (the board
-# is not running the image given).
+# Tool errors (exit 2): no `selftest` line; in the judged lines, a line
+# that is not blank and not one of the kinds above, a line of a kind that
+# does not match its format, lines of one kind (other than `selftest`)
+# that are not all identical (a byte lost on the link), fewer than 2
+# banner blocks (each kind at least twice) or fewer than 16 `selftest`
+# lines; the banner's `image_bytes=<n> image_cksum=<crc>` not `cksum` of
+# <image.bin> (the board is not running the image given).
 #
-# Checks (exit 1), on the window:
+# Checks (exit 1), on the judged lines:
 #   - no `FAULT` line;
 #   - banner: board=NUCLEO-H753ZI clock=pll472 cpu_hz=472000000
 #     d3cr=0x0000e000 (VOS0: VOS = 11 and VOSRDY) syscfg_pwrcr=0x00000081
@@ -52,7 +52,12 @@ cap=$1 img=$2
 [ -f "$img" ] || die "$img: no such file"
 read -r crc bytes < <(cksum < "$img")
 
-tr -d '\000\r' < "$cap" | awk -v want_img="image_bytes=$bytes image_cksum=$crc" '
+# partial_end: the input without a last line that has no newline.
+partial_end() { awk '{ if (NR > 1) print prev; prev = $0 } END { if (NR && !partial) print prev }' partial="$1"; }
+partial=0
+# ($(...) drops a trailing newline: empty means the capture ends with one.)
+[ -z "$(tr -d '\000\r' < "$cap" | tail -c 1)" ] || partial=1
+tr -d '\000\r' < "$cap" | partial_end "$partial" | awk -v want_img="image_bytes=$bytes image_cksum=$crc" '
   function err(m) { print "ERR " m; exit 2 }
   function bad(m) { print "BAD " m; nbad++ }
   function field(line, k,   i, n, a) {
@@ -71,9 +76,6 @@ tr -d '\000\r' < "$cap" | awk -v want_img="image_bytes=$bytes image_cksum=$crc" 
       prev = n; lastst = i
     }
     if (!s) err("no selftest line in the capture")
-    w = 0
-    for (i = p + 1; i <= N; i++) if (L[i] ~ /^h7bench v1 banner /) { w = i; break }
-    if (!w) err("no banner after the previous boot")
     fmt["banner"] = "^h7bench v1 banner image=selftest placement=[a-z-]+ board=[A-Z0-9-]+ clock=[a-z0-9]+ cpu_hz=[0-9]+ lse_cpu_hz=([0-9]+|unmeasured|fail) baud=[0-9]+ d3cr=0x[0-9a-f]{8} syscfg_pwrcr=0x[0-9a-f]{8} oden=[01] flash_acr=0x[0-9a-f]+ icache=[01] dcache=[01] mpu=[01] cyccnt=[01] image_bytes=[0-9]+ image_cksum=[0-9]+$"
     fmt["power"] = "^h7bench v1 power cr3=0x[0-9a-f]{8} csr1=0x[0-9a-f]{8} d3cr=0x[0-9a-f]{8} actvosrdy=[01] supply=[a-z-]+$"
     fmt["clock"] = "^h7bench v1 clock rcc_cr=0x[0-9a-f]{8} cfgr=0x[0-9a-f]{8} d1cfgr=0x[0-9a-f]{8} d2cfgr=0x[0-9a-f]{8} d3cfgr=0x[0-9a-f]{8} flash_acr=0x[0-9a-f]+ rsr=0x[0-9a-f]{8}$"
@@ -84,9 +86,9 @@ tr -d '\000\r' < "$cap" | awk -v want_img="image_bytes=$bytes image_cksum=$crc" 
     fmt["tcmprobe"] = "^h7bench v1 tcmprobe want=0x[0-9a-f]+ itcm=0x[0-9a-f]+ dtcm=0x[0-9a-f]+$"
     fmt["selftest"] = "^h7bench v1 selftest n=[0-9]+ delay=[0-9]+ cycles=[0-9]+ cyccnt=[0-9]+ stack_used=[0-9]+$"
     nst = 0; cyc = ""; vary = 0
-    # From the banner of the boot, or from its first selftest line when it was
-    # read without its banner (a run that starts after a lost line).
-    for (i = (s < w) ? s : w; i <= N; i++) {
+    # From the first line of the current run: the lines before it (the
+    # previous boot, or where the VCP lost bytes) are not judged.
+    for (i = s; i <= N; i++) {
       l = L[i]
       if (l ~ /^[ \t]*$/) continue
       if (l ~ /^h7bench v1 FAULT/) { bad("the board faulted: " l); continue }
@@ -126,7 +128,7 @@ tr -d '\000\r' < "$cap" | awk -v want_img="image_bytes=$bytes image_cksum=$crc" 
     if (field(first["vos0"], "oden") != "1") bad("vos0 oden=" field(first["vos0"], "oden") " (want 1)")
     tp = first["tcmprobe"]
     if (field(tp, "itcm") != field(tp, "want") || field(tp, "dtcm") != field(tp, "want")) bad("tcmprobe not equal: " tp)
-    print "INFO window from line " w ", current boot from line " s " (" nst " selftest lines, " cnt["banner"] " banners)"
+    print "INFO judged from line " s " (the current run: " nst " selftest lines, " cnt["banner"] " banners)"
     print "INFO banner " got_img " = the image; clock=" field(b, "clock") " cpu_hz=" field(b, "cpu_hz") " lse_cpu_hz=" lse " flash_acr=" field(b, "flash_acr") " oden=" field(b, "oden")
     print "INFO power actvosrdy=" field(first["power"], "actvosrdy") " supply=" field(first["power"], "supply") "; tcmprobe " tp
     print "INFO selftest cycles=" cyc " (after n=0) delay=8000000 stack_used=" su

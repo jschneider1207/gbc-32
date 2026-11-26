@@ -63,8 +63,16 @@ mk "" 21 50; run "a boot read from n=21 (no n=0) passes" 0 "$C"
 { boot 30 45; boot 0 40; } | vcp > "$C"; run "a stale boot of the same image first: the new boot is judged" 0 "$C"
 { boot 30 45 "image_bytes=1 image_cksum=2" | sed 's/cycles=8000019/cycles=8000500/'; boot 0 40; } | vcp > "$C"
 run "a stale boot of another image first (bad cycles): ignored" 0 "$C"
-[[ $last == *"current boot from line"* ]] && ok "window named" || bad "window not named"
+[[ $last == *"judged from line"* ]] && ok "judged lines named" || bad "judged lines not named"
 
+# The VCP dropping a stretch where the port opened (2026-11-26 board
+# capture): a banner cut short, n=16..24 missing; the run after it is judged.
+{ boot 0 15; boot 16 16 | sed -n 2p | cut -c1-200; boot 25 56; } | vcp > "$C"
+run "a cut banner and lost lines at the port opening: the run after them is judged" 0 "$C"
+{ boot 0 40; printf 'h7bench v1 selftest n=41 delay=80'; } | sed 's/$/\r/' > "$C"
+run "a last line cut by the end of the read is dropped" 0 "$C"
+{ boot 0 40; printf 'h7bench v1 selftest n=41 delay=80\r\n'; } > "$C"
+run "a cut line with its newline is still a tool error" 2 "$C"
 # --- check failures: rc 1 ---
 mk 's/ clock=pll472 / clock=pll480 /'; run "banner clock=pll480 fails" 1 "$C"
 mk 's/ cpu_hz=472000000 / cpu_hz=480000000 /'; run "banner cpu_hz=480000000 fails" 1 "$C"
@@ -104,7 +112,7 @@ mk '/selftest n=19 /s/cycles=/cycls=/'; run "a garbled selftest line: rc 2" 2 "$
 mk '/selftest n=19 /s/^h7bench v1 /h7bnch v1 /'; run "a garbled line before the last 16: the lines after it are judged" 0 "$C"
 mk '/selftest n=40 /{n;s/^h7bench v1 /h7bnch v1 /}'; run "a garbled probe line in the window: rc 2" 2 "$C"
 mk '/selftest n=38 /{n;s/^h7bench v1 /h7bnch v1 /}'; run "a garbled line just before the last banner: rc 2" 2 "$C"
-mk '0,/vos0 /s/polls_low=5/polls_low=6/'; run "banner blocks that differ: rc 2" 2 "$C"
+mk '/selftest n=39 /,$ s/polls_low=5/polls_low=6/'; run "banner blocks that differ: rc 2" 2 "$C"
 mk '/selftest n=20 /a h7bench v1 mystery x=1'; run "an unknown line kind: rc 2" 2 "$C"
 mk '/selftest n=33 /d' 0 50; run "a lost selftest line early: the 17 lines after it are judged" 0 "$C"
 mk '/selftest n=40 /d' 0 50; run "a lost selftest line leaves 10 after it: rc 2" 2 "$C"
