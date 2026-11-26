@@ -49,7 +49,11 @@ request is answered from the stored reply. `Hello` is always handled anew.
 `src/bin/loader.rs`), chosen from measurements (`docs/reference/loader.md`).
 The banner goes out at 115200 at reset, then the loader switches. The PC is
 told the same rate with `gbc-pc --baud`. A protocol-level switch would need
-gbc-link v2.
+gbc-link v2. (Factual correction, 2026-11-25, M2 review H-1: the first
+chosen rate, "4,000,000, exact", was really 4,068,966 bit/s, +1.72%: the
+8x BRR cannot hold an odd USARTDIV. With the math fixed no setting gives
+4 M exactly, and the default is 2,000,000, which is exact; the decision,
+a build-time constant, is unchanged.)
 
 ## Consequences
 - The board logic and the simulated board in `gbc_pc::sim` are both tested
@@ -60,5 +64,5 @@ gbc-link v2.
 - A load of an image that is not already stored always starts by
   destroying the stored one, even if the new load then fails.
 - Changing the loader's rate means rebuilding the image and telling
-  `gbc-pc` (its `--baud` default is the loader's, 4,000,000) and
+  `gbc-pc` (its `--baud` default is the loader's, 2,000,000) and
   `read-serial.sh` (`H7_BAUD`) the new rate.

@@ -39,11 +39,13 @@ use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led};
 const PREFIX: &str = "gbc-nucleo-h753";
 const IMAGE: &str = "loader";
 
-/// The serving rate without `GBC_LOADER_BAUD`: 4 Mbit/s (16x would need
-/// USARTDIV 29.5, so 8x with USARTDIV 59, exact at 118 MHz), the fastest
-/// rate tried, clean over two full 4 MiB loads with no resend
-/// (`docs/reference/loader.md`).
-const DEFAULT_BAUD: u32 = 4_000_000;
+/// The serving rate without `GBC_LOADER_BAUD`: 2 Mbit/s, 16x with
+/// USARTDIV 59, exact at 118 MHz, so the receivers' whole tolerance
+/// (3.33%) is left for the ST-LINK, whose own rate error is not known.
+/// 4 Mbit/s cannot be exact (29.5 clocks per bit: -1.67% at best) and was
+/// not chosen although its loads were clean (`docs/reference/loader.md`
+/// "Baud rate").
+const DEFAULT_BAUD: u32 = 2_000_000;
 
 /// The rate the protocol is served at.
 const LOADER_BAUD: u32 = parse_baud(option_env!("GBC_LOADER_BAUD"), DEFAULT_BAUD);

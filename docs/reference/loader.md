@@ -12,13 +12,13 @@ erase/program and 59 MHz (0xEB) for window reads.
 ```
 crates/gbc-nucleo-h753/flash.sh crates/gbc-nucleo-h753/out/loader.bin
 scripts/gbc-pc.sh hello
-scripts/gbc-pc.sh load <rom>          # gbc-pc defaults to --baud 4000000
-H7_BAUD=4000000 tools/h7-bench/read-serial.sh 15 | tr -d '\000' | grep 'loader status'
+scripts/gbc-pc.sh load <rom>          # gbc-pc defaults to --baud 2000000
+H7_BAUD=2000000 tools/h7-bench/read-serial.sh 15 | tr -d '\000' | grep 'loader status'
 ```
 
 At reset the image prints the banner at 115200 and a `boot` line (the
 stored image as `rom_image::validate` sees it), then serves at
-`GBC_LOADER_BAUD` (build time; default 4,000,000). While idle it repeats the
+`GBC_LOADER_BAUD` (build time; default 2,000,000). While idle it repeats the
 banner and a `status` line every 10 s at the serving rate: the stored
 header now, the boot validation, the load in progress, counters, UART
 errors, `exit_fallbacks` and the slowest answer per request type.
@@ -37,16 +37,37 @@ corrupt`) and the board's (`overruns`, `framing`, `noise`,
 | 115,200 | yes (1 load) | 403.11 s, 10,405 B/s | (AlreadyLoaded) | all 0 | all 0 |
 | 921,600 | yes | 75.68 s, 55,423 B/s | 75.60 s, 55,477 B/s | all 0 | all 0 |
 | 2,000,000 | yes | 50.61 s, 82,874 B/s | 50.54 s, 82,982 B/s | all 0 | all 0 |
-| 4,000,000 | yes | 39.70 s, 105,652 B/s | 39.67 s, 105,738 B/s | all 0 | all 0 |
+| 4,000,000 (really 4,068,966, +1.72%) | yes | 39.70 s, 105,652 B/s | 39.67 s, 105,738 B/s | all 0 | all 0 |
 
-**Chosen: 4,000,000** (8x oversampling, USARTDIV 59, exact at the 118 MHz
-kernel clock; `qspi-nor.md` "UART"). It was the fastest rate tried and
-clean over both loads with zero resends, so by the rule set for this
-measurement it is used as is rather than one step lower. Rates above 4 M
-were not tried: 6 M is 0.85% off at 8x (its tolerance budget is 2-2.5%),
-8 M and 12 M are over it.
+**Correction (M2 review H-1, 2026-11-25).** The "4,000,000" row ran at
+8x with BRR 0x35, which the hardware reads as USARTDIV 58, not 59:
+4,068,966 bit/s, +1.72% (`qspi-nor.md` "UART"; `uart::baud_setting`
+computed the rate from the odd divisor BRR cannot hold). The other rows
+were 16x and are as stated. After the fix, 4 M is 16x with USARTDIV 30,
+3,933,333 bit/s (-1.67%); no setting gives it exactly (29.5 kernel clocks
+per bit). Re-measured with `run-loader-roundtrip.sh` (two variants each,
+each load over a different image, so each is a full erase and
+program; `docs/reference/m2-evidence.md`):
 
-Where the time goes at 4 M (39.7 s for 4,096 chunks, 9.7 ms each): the
+| Rate (actual) | Clean | Variant 1 | Variant 2 | gbc-pc counters | Board counters |
+|---|---|---|---|---|---|
+| 4,000,000 (3,933,333, -1.67%) | yes | 38.94 s, 107,719 B/s | 39.44 s, 106,352 B/s | all 0 | all 0 |
+| 2,000,000 (exact) | yes | 50.04 s, 83,827 B/s | 49.98 s, 83,927 B/s | all 0 | all 0 |
+
+**Chosen: 2,000,000** (16x, USARTDIV 59, exact at the 118 MHz kernel
+clock). The rule: 4 M only if its loads are clean *and* the combined error
+budget can be stated. The loads were clean, but the budget cannot be: the
+receiver tolerance at 16x with BRR[3:0] != 0 is 3.33% for both ends
+together (RM0433 Tables 406/407), the board takes 1.67% of it at 4 M, and
+the ST-LINK/V3E's own rate error and receiver tolerance at 4,000,000 are
+not documented anywhere local (UM2407 says nothing about VCP rates; ST's
+UM2448/TN1235 could not be fetched). At 2 M the board's error is 0, so the
+whole 3.33% is the ST-LINK's. The cost is about 11 s per 4 MiB load
+(about 0.2 s for a 64 KiB ROM). Rates above 4 M: 6 M is 5,900,000 at 16x
+(-1.67%, the same budget question as 4 M), 8 M and 12 M need 8x, where
+-1.67% leaves 0.33% of a 2% budget.
+
+Where the time goes at the old 4 M setting (4,068,966; 39.7 s for 4,096 chunks, 9.7 ms each): the
 wire time of a 1,040-byte frame is 2.6 ms; four page programs ~1.4 ms
 (`qspi-nor.md`); the 64 erases of 64 KiB (about 0.31 s each, ~20 s) are
 about half the total; the rest is USB and turnaround. A faster link would
@@ -116,7 +137,7 @@ ROM, one changed hash digit and a report without the fields all exit 2).
 ROM hash matched, `exit_fallbacks=0` (the image never leaves
 memory-mapped mode). Boot `validate`: 1,051,582 cycles for cpu_instrs
 (64 KiB, 2.23 ms, ~29.4 MB/s), 527,294 for cgb-acid2 (32 KiB). Loads at
-4 Mbit/s: 64 KiB in 0.82 s, 32 KiB in 0.46 s. Cycles per frame:
+the old 4 M setting (4,068,966 bit/s): 64 KiB in 0.82 s, 32 KiB in 0.46 s. Cycles per frame:
 `docs/perf.md`, "`headless` image on the board".
 
 ## Several ROMs in one image: the bench pack (plan Stage 2 M2)

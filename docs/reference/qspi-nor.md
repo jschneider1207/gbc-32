@@ -320,33 +320,52 @@ cleared on every read). The fault handler re-initialises the UART at
 the current rate, so a fault report after `set_baud` reaches a host
 that has switched.
 
-| Rate | Oversampling | BRR | Actual | Error | Within 2% |
-|---|---|---|---|---|---|
-| 115,200 | 16 | 1024 (0x400) | 115,234 | +0.03% | yes |
-| 230,400 | 16 | 512 | 230,469 | +0.03% | yes |
-| 460,800 | 16 | 256 | 460,938 | +0.03% | yes |
-| 921,600 | 16 | 128 | 921,875 | +0.03% | yes |
-| 1,000,000 | 16 | 118 | 1,000,000 | 0 | yes |
-| 2,000,000 | 16 | 59 | 2,000,000 | 0 | yes |
-| 3,000,000 | 16 | 39 | 3,025,641 | +0.85% | yes |
-| 4,000,000 | 8 | 0x35 (USARTDIV 59) | 4,000,000 | 0 | yes |
-| 6,000,000 | 8 | 0x23 (USARTDIV 39) | 6,051,282 | +0.85% | yes |
-| 8,000,000 | 8 | 0x17 (USARTDIV 29) | 7,866,667 | -1.67% | yes, but over the 8x tolerance budget |
-| 12,000,000 | 8 | 0x12 (USARTDIV 20) | 11,800,000 | -1.67% | as 8 M |
+`uart::baud_setting` (pure, `src/baud.rs`) computes the rate from the
+divisor decoded back out of BRR. RM0433 48.5.7: with OVER8 = 1, BRR[2:0] =
+USARTDIV[3:0] >> 1 and BRR[3] = 0, so USARTDIV's bit 0 is lost and only
+even values exist; an even USARTDIV 2k at 8x gives fck / k, the same rate
+as k at 16x. A bit is always a whole number of 118 MHz clocks (8.47 ns),
+so 8x adds reach (k >= 8 instead of 16), never resolution, and the rule
+above picks 16x for every rate up to 7.375 M. Before the M2 review
+(finding H-1) the 8x rates were computed from the odd USARTDIV that BRR
+cannot hold: 4 M was listed as exact at BRR 0x35, whose real divisor 58
+gives 4,068,966 (+1.72%), and 6 M and 8 M were really +3.5% and +5.4%.
+Checked on the host by `tools/gbc-pc/tests/uart_baud.rs`.
 
-The receiver's whole tolerance for 8N1 is 3.75% or 3.33% at 16x and
-2.50% or 2% at 8x (RM0433 48.5.8, Tables 406 and 407: BRR[3:0] zero or
-not). It covers both ends' errors, so 8 M and 12 M are not usable.
+| Rate | Oversampling | BRR | Actual | Error | Receiver tolerance (both ends) | `set_baud` |
+|---|---|---|---|---|---|---|
+| 115,200 | 16 | 1024 (0x400) | 115,234 | +0.03% | 3.75% | accepts |
+| 230,400 | 16 | 512 (0x200) | 230,469 | +0.03% | 3.75% | accepts |
+| 460,800 | 16 | 256 (0x100) | 460,938 | +0.03% | 3.75% | accepts |
+| 921,600 | 16 | 128 (0x80) | 921,875 | +0.03% | 3.75% | accepts |
+| 1,000,000 | 16 | 118 (0x76) | 1,000,000 | 0 | 3.33% | accepts |
+| 2,000,000 | 16 | 59 (0x3B) | 2,000,000 | 0 | 3.33% | accepts |
+| 3,000,000 | 16 | 39 (0x27) | 3,025,641 | +0.85% | 3.33% | accepts |
+| 4,000,000 | 16 | 30 (0x1E) | 3,933,333 | -1.67% | 3.33% | accepts |
+| 6,000,000 | 16 | 20 (0x14) | 5,900,000 | -1.67% | 3.33% | accepts |
+| 8,000,000 | 8 | 0x17 (USARTDIV 30) | 7,866,667 | -1.67% | 2% | accepts, 0.33% left for the other end |
+| 12,000,000 | 8 | 0x12 (USARTDIV 20) | 11,800,000 | -1.67% | 2% | as 8 M |
+
+29.5 clocks per bit at 4 M: the neighbours are 30 (-1.67%) and 29
+(+1.72%); no setting is exact. The receiver's whole tolerance for 8N1 is
+3.75% or 3.33% at 16x and 2.50% or 2% at 8x (RM0433 48.5.8, Tables 406 and
+407: BRR[3:0] zero or not). It covers both ends' errors, so whatever the
+board's error leaves is all the ST-LINK may add, and 8 M and 12 M are not
+usable. The 2% acceptance limit is the same for 8x, where it leaves almost
+nothing; no image uses 8x.
+
 Which rates the ST-LINK/V3's VCP can produce on its side is
 **unverified** (its user manual is not local). The loader's full-load
-measurements at 115,200 to 4,000,000 (all clean; 4 M chosen) are in
-`loader.md`.
+measurements at 115,200 to 4,000,000 (all clean; 2 M chosen, since
+its error is 0 and the ST-LINK's is unknown) are in `loader.md` "Baud
+rate".
 
 **Verified on the board (2026-11-25)** with a PowerShell
 `System.IO.Ports.SerialPort` on COM5, under the board lock: a 23-byte
 and a 2,000-byte echo at 115200, then a switch with `~<digit>` and
-2,000-byte echoes at 921,600, 2,000,000 and 4,000,000 (8x), and back to
-115200: every byte echoed, 0 framing and noise errors. The overrun check
+2,000-byte echoes at 921,600, 2,000,000 and 4,000,000 (8x; that build's
+BRR 0x35 was really 4,068,966, +1.72%, see above), and back to 115200:
+every byte echoed, 0 framing and noise errors. The overrun check
 (`~!`: the image stops reading for 50 ms while 300 bytes arrive) gave 1
 byte kept with the FIFOs off (RDR) and 17 with them on (16 in the FIFO
 plus one), and the overrun count rose by one each time.
