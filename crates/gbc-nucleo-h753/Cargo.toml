@@ -31,6 +31,13 @@ name = "qspi-probe"
 test = false
 bench = false
 
+# The NOR in memory-mapped mode: checks against indirect reads, latency,
+# and the MPU fault test (plan Stage 2 M2); built as `boot`.
+[[bin]]
+name = "qspi-mmap"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
