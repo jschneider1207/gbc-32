@@ -39,8 +39,11 @@ use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led};
 const PREFIX: &str = "gbc-nucleo-h753";
 const IMAGE: &str = "loader";
 
-/// The serving rate without `GBC_LOADER_BAUD`.
-const DEFAULT_BAUD: u32 = 115_200;
+/// The serving rate without `GBC_LOADER_BAUD`: 4 Mbit/s (16x would need
+/// USARTDIV 29.5, so 8x with USARTDIV 59, exact at 118 MHz), the fastest
+/// rate tried, clean over two full 4 MiB loads with no resend
+/// (`docs/reference/loader.md`).
+const DEFAULT_BAUD: u32 = 4_000_000;
 
 /// The rate the protocol is served at.
 const LOADER_BAUD: u32 = parse_baud(option_env!("GBC_LOADER_BAUD"), DEFAULT_BAUD);
