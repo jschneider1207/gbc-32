@@ -2,13 +2,11 @@
 # Builds every h7-bench image into out/ (ELF and .bin), prints section sizes
 # and checks what can be checked without the board. README.md "Build".
 #
-#   ./build.sh            selftest, clockcheck, the three placements, the host
-#                         expected-hash test (and the M4 stub for h755)
-#   H7_BENCH_BOARD        h753 (default: NUCLEO-H753ZI) or h755
-#                         (NUCLEO-H755ZI-Q); images go to out/<board>/
-#   H7_BENCH_PLL=1        also the phase B (PLL, 392 MHz) variants
-#   H7_BENCH_PLL480=1     also the phase C (PLL, 472 MHz, VOS0)
-#                         variants, *-pll480; h753 only
+#   ./build.sh            the NUCLEO-H753ZI images, all at the lib's 472 MHz
+#                         HSI clock (plan D11) and named *-pll480 as the
+#                         figures in README.md are: selftest, clockcheck,
+#                         the three placements; then the host expected-hash
+#                         test. Images go to out/h753/.
 #   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
 #   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under
 #                         `flock -x <file>` (agents: the shared build lock)
@@ -16,6 +14,12 @@
 #                         (default "plain tile path"; build.rs)
 #   H7_BENCH_CPU_INSTRS   path of blargg's cpu_instrs.gb (default: the
 #                         repo's test-roms/)
+#
+# The H755 board, the 392 MHz (`pll`) and the 64 MHz HSI images are gone
+# (ADR 0036: the board bring-up is the gbc-nucleo-h753 lib's, which has
+# only the H753 at 472 MHz): H7_BENCH_BOARD other than h753 and
+# H7_BENCH_PLL are refused; H7_BENCH_PLL480 is accepted and changes
+# nothing. The m4-stub/ sources are kept, unbuilt.
 #
 # One target directory, images built one after the other (AGENTS.md
 # "Machine resources"); never pass -j.
@@ -34,14 +38,9 @@ TARGET=thumbv7em-none-eabihf
 ROOT=$(cd ../.. && pwd)
 REMAP=(--config "target.$TARGET.rustflags=['--remap-path-prefix=$ROOT=/gbc-32','--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry/src=/cargo-registry','--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup']")
 BOARD=${H7_BENCH_BOARD:-h753}
-case "$BOARD" in
-  h753) MAX_BIN=$((2048 * 1024)) ;;  # both flash banks (single core)
-  h755) MAX_BIN=$((1024 * 1024)) ;;  # flash bank 1; bank 2 is the Cortex-M4's
-  *) echo "FAIL: H7_BENCH_BOARD=$BOARD: not h753 or h755" >&2; exit 1 ;;
-esac
-if [ -n "${H7_BENCH_PLL480:-}" ] && [ "$BOARD" != h753 ]; then
-  echo "FAIL: H7_BENCH_PLL480 needs H7_BENCH_BOARD=h753 (VOS0 needs the LDO supply)" >&2; exit 1
-fi
+[ "$BOARD" = h753 ] || { echo "FAIL: H7_BENCH_BOARD=$BOARD: only h753 is built (the H755 is retired, ADR 0036)" >&2; exit 1; }
+[ -z "${H7_BENCH_PLL:-}" ] || { echo "FAIL: H7_BENCH_PLL: the 392 MHz images are gone (ADR 0036); every image runs at 472 MHz" >&2; exit 1; }
+MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
 OUT=out/$BOARD
 echo "== board $BOARD; images in $OUT"
 
@@ -72,7 +71,7 @@ in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 image() {
   local name=$1 features=$2 ram_lo=$3 ram_hi=$4
   echo "== $name (features: ${features:-none})"
-  locked cargo build --release --no-default-features --features "$BOARD${features:+,$features}" "${REMAP[@]}"
+  locked cargo build --release --features "board${features:+,$features}" "${REMAP[@]}"
   cp "target/$TARGET/release/h7-bench" "$OUT/$name.elf"
   objcopy -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
@@ -89,10 +88,18 @@ image() {
   [ $((16#$sp % 8)) -eq 0 ] || bad "$name: initial SP 0x$sp not 8-byte aligned"
   in_range "$reset" 0x08000000 $((0x08000000 + size)) || bad "$name: reset vector 0x$reset outside the image"
   [ $((16#$reset & 1)) -eq 1 ] || bad "$name: reset vector 0x$reset lacks the Thumb bit"
-  # The supply configuration must be the first code after reset.
-  local syms
+  # The supply configuration must be the first code after reset, and the
+  # fault handlers the lib's: cortex-m-rt PROVIDEs its defaults when an
+  # image does not link them.
+  local syms f d
   syms=$(readelf -sW "$OUT/$name.elf")
   grep -q ' FUNC .* __pre_init$' <<< "$syms" || bad "$name: no __pre_init function"
+  for f in HardFault DefaultHandler; do
+    grep -q " FUNC .* $f\$" <<< "$syms" || bad "$name: no $f function"
+  done
+  for d in DefaultPreInit HardFault_ DefaultHandler_; do
+    ! grep -q " $d\$" <<< "$syms" || bad "$name: cortex-m-rt's default $d is linked"
+  done
   # What the startup code zeroes, copies and paints must be inside RAM and
   # in order (a section inserted after .bss in another region broke this).
   local sbss ebss send sstart sdata edata v
@@ -106,6 +113,17 @@ image() {
   { [ $((16#$sdata)) -le $((16#$edata)) ] && [ $((16#$edata)) -le $((16#$sbss)) ] &&
     [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
+  # The fault stack the lib's HardFault moves to: in AXI SRAM, 8-byte
+  # aligned, its full size above the end of the `.axisram` buffers.
+  local ftop axi_end
+  ftop=$(sym "$syms" __fault_stack_top)
+  axi_end=$(readelf -SW "$OUT/$name.elf" | sed -n 's/^ *\[ *[0-9]*\] *//p' |
+    awk '$1 == ".axisram" {printf "%08x", strtonum("0x" $3) + strtonum("0x" $5)}')
+  echo "  fault stack top 0x$ftop; .axisram ends 0x${axi_end:-none}"
+  [ -n "$ftop" ] && in_range "$ftop" "$AXI_LO" "$AXI_HI" || bad "$name: __fault_stack_top 0x$ftop outside AXI SRAM"
+  [ -n "$ftop" ] && [ $((16#$ftop % 8)) -eq 0 ] || bad "$name: __fault_stack_top 0x$ftop not 8-byte aligned"
+  [ -n "$axi_end" ] && [ -n "$ftop" ] && [ $((16#$ftop - 16#$axi_end)) -ge "$FAULT_STACK_BYTES" ] ||
+    bad "$name: fewer than $FAULT_STACK_BYTES B between .axisram and __fault_stack_top"
 }
 
 # itcm_check <name>: the post-link ITCM check (scripts/check-itcm-elf.sh,
@@ -119,41 +137,14 @@ itcm_check() {
 }
 
 AXI_LO=0x24000000 AXI_HI=0x24080000 DTCM_LO=0x20000000 DTCM_HI=0x20020000
+FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
 
-image selftest selftest "$AXI_LO" "$AXI_HI"
-image clockcheck clockcheck "$AXI_LO" "$AXI_HI"
-image bench-flash-axi "" "$AXI_LO" "$AXI_HI"
-image bench-flash-dtcm dtcm "$DTCM_LO" "$DTCM_HI"
-image bench-itcm-dtcm itcm "$DTCM_LO" "$DTCM_HI"
-itcm_check bench-itcm-dtcm
-if [ -n "${H7_BENCH_PLL:-}" ]; then
-  image selftest-pll selftest,pll "$AXI_LO" "$AXI_HI"
-  image clockcheck-pll clockcheck,pll "$AXI_LO" "$AXI_HI"
-  image bench-flash-axi-pll pll "$AXI_LO" "$AXI_HI"
-  image bench-flash-dtcm-pll dtcm,pll "$DTCM_LO" "$DTCM_HI"
-  image bench-itcm-dtcm-pll itcm,pll "$DTCM_LO" "$DTCM_HI"
-  itcm_check bench-itcm-dtcm-pll
-fi
-if [ -n "${H7_BENCH_PLL480:-}" ]; then
-  image selftest-pll480 selftest,pll480 "$AXI_LO" "$AXI_HI"
-  image clockcheck-pll480 clockcheck,pll480 "$AXI_LO" "$AXI_HI"
-  image bench-flash-axi-pll480 pll480 "$AXI_LO" "$AXI_HI"
-  image bench-flash-dtcm-pll480 dtcm,pll480 "$DTCM_LO" "$DTCM_HI"
-  image bench-itcm-dtcm-pll480 itcm,pll480 "$DTCM_LO" "$DTCM_HI"
-  itcm_check bench-itcm-dtcm-pll480
-fi
-
-# The H753 has no Cortex-M4: no stub.
-if [ "$BOARD" = h755 ]; then
-  echo "== m4-stub (optional Cortex-M4 image for 0x08100000)"
-  (cd m4-stub && locked cargo build --release)
-  cp "m4-stub/target/$TARGET/release/h7-m4-stub" "$OUT/m4-stub.elf"
-  objcopy -O binary "$OUT/m4-stub.elf" "$OUT/m4-stub.bin"
-  m4_reset=$(word "$OUT/m4-stub.bin" 1)
-  echo "  bin $(stat -c %s "$OUT/m4-stub.bin") bytes; vector[0] 0x$(word "$OUT/m4-stub.bin" 0); vector[1] (reset) 0x$m4_reset"
-  in_range "$m4_reset" 0x08100040 0x08100100 || bad "m4-stub: reset vector 0x$m4_reset"
-  [ $((16#$m4_reset & 1)) -eq 1 ] || bad "m4-stub: reset vector lacks the Thumb bit"
-fi
+image selftest-pll480 selftest "$AXI_LO" "$AXI_HI"
+image clockcheck-pll480 clockcheck "$AXI_LO" "$AXI_HI"
+image bench-flash-axi-pll480 "" "$AXI_LO" "$AXI_HI"
+image bench-flash-dtcm-pll480 dtcm "$DTCM_LO" "$DTCM_HI"
+image bench-itcm-dtcm-pll480 itcm "$DTCM_LO" "$DTCM_HI"
+itcm_check bench-itcm-dtcm-pll480
 
 echo "== host: expected lines (calls, frames, clocks, hash) against expected-hashes.txt"
 (cd host && locked cargo test --release)
@@ -163,7 +154,7 @@ echo "== host: expected lines (calls, frames, clocks, hash) against expected-has
 # compare its report with expected-hashes.txt.
 qemu() {
   echo "== QEMU mps2-an500: $1 (features: $2)"
-  locked cargo build --release --no-default-features --features "$BOARD,$2" "${REMAP[@]}"
+  locked cargo build --release --no-default-features --features "$2" "${REMAP[@]}"
   cp "target/$TARGET/release/h7-bench" "$OUT/$1.elf"
   locked timeout 900 qemu-system-arm -M mps2-an500 -cpu cortex-m7 -display none -monitor none \
     -serial none -semihosting-config enable=on,target=native -kernel "$OUT/$1.elf" \

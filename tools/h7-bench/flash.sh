@@ -5,18 +5,17 @@
 #
 #   ./flash.sh out/h753/selftest.bin
 #
-#   H7_BENCH_BOARD  h753 (default: NUCLEO-H753ZI) or h755 (NUCLEO-H755ZI-Q)
 #   H7_DRIVE        Windows drive letter of the ST-LINK drive (default E:)
-#   H7_LABEL        expected volume label (default NOD_H753ZI, or
-#                   NOD_H755ZIQ for h755)
+#   H7_LABEL        expected volume label (default NOD_H753ZI)
+#
+# Only the NUCLEO-H753ZI: the H755 is retired (ADR 0036), and
+# H7_BENCH_BOARD other than h753 is refused.
 #
 # Everything on the drive is done through cmd.exe, not a WSL mount: the
 # drvfs mount of a removable drive can go stale when the ST-LINK
 # re-enumerates, and remounting needs sudo. It refuses an image that does
 # not look like an M7 image built for this board (the board name is in
-# every image's banner), and a drive that is not the ST-LINK's. Never used
-# for the M4 stub: the drive only programs at 0x0800_0000 (use
-# STM32CubeProgrammer for 0x0810_0000).
+# every image's banner), and a drive that is not the ST-LINK's.
 set -euo pipefail
 
 # One flash or serial session at a time (ADR 0036); re-entrant.
@@ -25,11 +24,8 @@ board_lock_reexec "$@"
 
 img=${1:?usage: flash.sh <image.bin>}
 BOARD=${H7_BENCH_BOARD:-h753}
-case "$BOARD" in
-  h753) LABEL=${H7_LABEL:-NOD_H753ZI} NAME=NUCLEO-H753ZI ;;
-  h755) LABEL=${H7_LABEL:-NOD_H755ZIQ} NAME=NUCLEO-H755ZI-Q ;;
-  *) echo "flash.sh: H7_BENCH_BOARD=$BOARD: not h753 or h755" >&2; exit 1 ;;
-esac
+[ "$BOARD" = h753 ] || { echo "flash.sh: H7_BENCH_BOARD=$BOARD: only h753 (the H755 is retired, ADR 0036)" >&2; exit 1; }
+LABEL=${H7_LABEL:-NOD_H753ZI} NAME=NUCLEO-H753ZI
 letter=${H7_DRIVE:-E:}
 
 die() { echo "flash.sh: $*" >&2; exit 1; }
@@ -37,10 +33,9 @@ word() { od -An -tx4 -j $(($2 * 4)) -N4 "$1" | tr -d ' \n'; }
 
 [ -f "$img" ] || die "$img: no such file"
 case "$img" in *.bin) ;; *) die "$img: not a .bin (the drive takes raw binaries)";; esac
-case "$(basename "$img")" in m4-stub*) die "the M4 stub goes to 0x08100000 with STM32CubeProgrammer, not through the drive";; esac
 size=$(stat -c %s "$img")
 [ "$size" -ge 64 ] && [ "$size" -le $((2048 * 1024)) ] || die "$img: $size bytes is not a plausible image"
-grep -qaF "$NAME" "$img" || die "$img: not built for the $NAME (no board name in it; H7_BENCH_BOARD?)"
+grep -qaF "$NAME" "$img" || die "$img: not built for the $NAME (no board name in it)"
 sp=$((16#$(word "$img" 0)))
 reset=$((16#$(word "$img" 1)))
 { { [ "$sp" -ge $((0x20000000)) ] && [ "$sp" -le $((0x20020000)) ]; } ||

@@ -6,7 +6,7 @@
 #
 #   H7_COM   the Windows port (default COM5, the NUCLEO-H753ZI's
 #            "STMicroelectronics STLink Virtual COM Port" in Device
-#            Manager; the H755 board was COM3)
+#            Manager)
 set -euo pipefail
 
 # One flash or serial session at a time (ADR 0036); re-entrant.

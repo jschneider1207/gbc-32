@@ -105,6 +105,16 @@ name = "gbc-core"
 version = "0.1.0"
 
 [[package]]
+name = "gbc-nucleo-h753"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "memory-x",
+ "stm32h7",
+]
+
+[[package]]
 name = "h7-bench"
 version = "0.1.0"
 dependencies = [
@@ -112,6 +122,7 @@ dependencies = [
  "cortex-m-rt",
  "cortex-m-semihosting",
  "gbc-core",
+ "gbc-nucleo-h753",
  "memory-x",
  "stm32h7",
 ]

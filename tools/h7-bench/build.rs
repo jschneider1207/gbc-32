@@ -6,7 +6,15 @@
 //! - `memory.x` for the chosen placement, from the shared generator
 //!   (`tools/memory-x`, ADR 0036), with the `.itcm` input-section rules
 //!   generated from `perf/itcm-sections.txt` (docs/perf.md "ITCM
-//!   placement plan": one source of truth for the list).
+//!   placement plan": one source of truth for the list). The board images
+//!   get `firmware_memory_x`: the gbc-nucleo-h753 lib they link reads its
+//!   TCM and fault-stack symbols from every image. The QEMU image links no
+//!   lib and gets the plain map.
+//!
+//! The map goes on the link line through `rustc-link-search`. The lib's
+//! own `memory.x` (for its bins) is passed with `rustc-link-arg-bins` in
+//! its package and does not reach this link (ADR 0036; build.sh checks
+//! the placement-specific initial SP and startup symbols of every image).
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
@@ -42,19 +50,12 @@ fn feature(name: &str) -> bool {
     env::var_os(format!("CARGO_FEATURE_{}", name.to_uppercase())).is_some()
 }
 
-/// `memory.x` for the chosen board and placement (tools/memory-x). The
+/// `memory.x` for the chosen placement (tools/memory-x). The
 /// tiers of the set file left in flash come from `H7_BENCH_ITCM_DROP`,
 /// comma-separated substrings of their `# Tier ...` headers (empty: drop
 /// nothing; default `memory_x::ITCM_DROP_DEFAULT`); build.sh reads the same
 /// variable for its post-link check.
 fn generate_memory_x() -> String {
-    let chip = if feature("qemu") {
-        Chip::Qemu
-    } else if feature("h755") {
-        Chip::H755
-    } else {
-        Chip::H753
-    };
     let data = if feature("dtcm") {
         Data::Dtcm
     } else {
@@ -66,7 +67,11 @@ fn generate_memory_x() -> String {
             env::var("H7_BENCH_ITCM_DROP").unwrap_or_else(|_| memory_x::ITCM_DROP_DEFAULT.into());
         ItcmSet::parse(&text, &memory_x::drop_list(&drop))
     });
-    memory_x::memory_x(chip, data, set.as_ref())
+    if feature("qemu") {
+        memory_x::memory_x(Chip::Qemu, data, set.as_ref())
+    } else {
+        memory_x::firmware_memory_x(Chip::H753, data, set.as_ref())
+    }
 }
 
 fn main() {
@@ -79,21 +84,13 @@ fn main() {
 
     let (itcm, dtcm, qemu) = (feature("itcm"), feature("dtcm"), feature("qemu"));
     assert!(
-        feature("h753") != feature("h755"),
-        "exactly one board feature: h753 or h755 (build.sh: H7_BENCH_BOARD)"
+        qemu != feature("board"),
+        "exactly one of `board` (the default) and `qemu` (build with --no-default-features)"
     );
     assert!(!(itcm && !dtcm), "feature `itcm` needs `dtcm`");
     assert!(
-        !(qemu && (feature("selftest") || feature("pll") || feature("pll480"))),
-        "feature `qemu` excludes `selftest`, `pll` and `pll480`"
-    );
-    assert!(
-        !(feature("pll") && feature("pll480")),
-        "features `pll` and `pll480` exclude each other"
-    );
-    assert!(
-        !(feature("pll480") && feature("h755")),
-        "feature `pll480` needs the h753 board: VOS0 needs the LDO supply"
+        !(qemu && feature("selftest")),
+        "feature `qemu` excludes `selftest`"
     );
 
     fs::write(out.join("memory.x"), generate_memory_x()).expect("write memory.x");
