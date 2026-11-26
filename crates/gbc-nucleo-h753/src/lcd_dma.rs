@@ -606,6 +606,56 @@ pub fn readback(l: &mut Lcd, buf: &OutFrame) -> Readback {
     r
 }
 
+/// Writes the bitwise inverse of `buf` into the window by CPU stores (the
+/// display self-test's sentinel, M3 review T-2): called with the frame
+/// about to be transferred already in `buf`, so every pixel of the window
+/// then differs from what the transfer must write, and a transfer that
+/// drops, shortens or misplaces any part of it leaves pixels that
+/// [`readback`] counts as mismatches (without it, a frame equal to the
+/// previous one passes whatever the transfer did). Inverting every bit of
+/// a pixel changes every readback byte under [`lcd::READBACK_MASK`]
+/// (asserted below for all 65,536 values). Takes the panel and buffer
+/// from [`LcdDma::parts`] (no transfer may run). About 12 ms (25,920
+/// word stores through the FMC); not part of a real frame loop.
+pub fn write_inverse(l: &mut Lcd, buf: &OutFrame) {
+    l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
+    l.begin_pixels();
+    for row in buf.iter() {
+        for &w in row.iter() {
+            // The buffer's memory byte order is the wire order, as the
+            // MDMA sends it (module docs); a word store sends its bytes
+            // in memory order (`Lcd::write_data_u32`).
+            l.write_data_u32(!w);
+        }
+    }
+    // Let the stores finish here, so their drain is not charged to the
+    // caller's next timed step (`present`, the 5% budget figure): with a
+    // DSB alone `present` measured 1,586 cycles instead of about 335
+    // (the FMC's write FIFO still emptying at the panel's write speed);
+    // 20 µs is several times that.
+    cortex_m::asm::dsb();
+    lcd::delay_us(20);
+}
+
+/// Every pixel's inverse reads back different in all three bytes.
+const fn inverse_differs_everywhere() -> bool {
+    let mut p: u32 = 0;
+    while p <= 0xFFFF {
+        let a = lcd::expected_readback(p as u16);
+        let b = lcd::expected_readback(!(p as u16));
+        let mut j = 0;
+        while j < 3 {
+            if a[j] & lcd::READBACK_MASK == b[j] & lcd::READBACK_MASK {
+                return false;
+            }
+            j += 1;
+        }
+        p += 1;
+    }
+    true
+}
+const _: () = assert!(inverse_differs_everywhere());
+
 /// TE edge statistics since [`te_reset`], in CPU cycles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TeStats {

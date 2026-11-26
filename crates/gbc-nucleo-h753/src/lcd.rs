@@ -378,7 +378,7 @@ fn gpioe() -> &'static pac::gpioa::RegisterBlock {
 }
 
 /// Busy-waits `us` microseconds on the cycle counter.
-fn delay_us(us: u32) {
+pub(crate) fn delay_us(us: u32) {
     wait_since(cycles(), us * (CPU_HZ / 1_000_000));
 }
 

@@ -508,9 +508,15 @@ fn main() -> ! {
 /// 1. wait for frame `n - 1`'s transfer to finish, then read the window
 ///    back and compare it with the buffer, which still holds `n - 1`
 ///    ([`lcd_dma::readback`], ~70 ms);
-/// 2. `scale_frame` frame `n` into the buffer (timed) and queue it
-///    (`present`, timed: window commands and the MDMA registers);
-/// 3. depending on [`Start`]: wait until TE has started it, start it at
+/// 2. `scale_frame` frame `n` into the buffer (timed);
+/// 3. the sentinel (M3 review T-2): the bitwise inverse of frame `n`
+///    written into the window by the CPU ([`lcd_dma::write_inverse`],
+///    ~12 ms, timed separately: self-test overhead, not part of the 5%
+///    budget), so every pixel the transfer of `n` fails to write reads
+///    back as a mismatch, even when frame `n` equals frame `n - 1`;
+/// 4. queue frame `n` (`present`, timed: window commands and the MDMA
+///    registers);
+/// 5. depending on [`Start`]: wait until TE has started it, start it at
 ///    once, or return with it queued.
 ///
 /// So with `te-wait` and `now` the transfer of frame `n` (8.1 ms) runs
@@ -690,6 +696,8 @@ mod display {
         /// `te-wait`: from the end of `present` until TE started it.
         to_start: Range,
         readback: Range,
+        /// The sentinel's CPU writes ([`lcd_dma::write_inverse`]).
+        sentinel: Range,
     }
 
     /// Sets the panel up (FMC at `SPEC`, the Game Boy frame rate, all
@@ -722,6 +730,7 @@ mod display {
             wait: Range::new(),
             to_start: Range::new(),
             readback: Range::new(),
+            sentinel: Range::new(),
         }
     }
 
@@ -855,6 +864,7 @@ mod display {
             range(out, "wait", &self.wait)?;
             range(out, "to_start", &self.to_start)?;
             range(out, "readback", &self.readback)?;
+            range(out, "sentinel", &self.sentinel)?;
             writeln!(out)?;
 
             writeln!(
@@ -880,13 +890,18 @@ mod display {
             let t0 = cycles();
             scale_frame(frame, self.dma.buffer());
             let t1 = cycles();
+            // The sentinel (T-2): `finish` left no transfer running.
+            let (l, buf) = self.dma.parts();
+            lcd_dma::write_inverse(l, buf);
+            let ts = cycles();
             self.dma.present();
             if self.start == Start::Now {
                 self.dma.start_now();
             }
             let t2 = cycles();
             self.scale.add(t1.wrapping_sub(t0));
-            self.setup.add(t2.wrapping_sub(t1));
+            self.sentinel.add(ts.wrapping_sub(t1));
+            self.setup.add(t2.wrapping_sub(ts));
             self.queued = Some(n);
             if self.start == Start::TeWait {
                 if !self.dma.wait_started(TIMEOUT) {
