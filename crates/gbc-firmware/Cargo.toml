@@ -1,0 +1,15 @@
+[package]
+name = "gbc-firmware"
+description = "Board-independent firmware: headless frame loop, scripted input, hash lines (ADR 0036)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Only gbc-core (ADR 0036, D9); tests/hard_rules.rs enforces it.
+[dependencies]
+gbc-core = { path = "../gbc-core" }
