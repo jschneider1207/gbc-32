@@ -12,6 +12,7 @@
 //!   parser for the text format of `scripts/inputs/*.txt`.
 //! - [`fnv`]: 64-bit FNV-1a, the hash on every output line.
 //! - [`headless`]: the headless frame loop and its line format.
+//! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
 //!
 //! Display, audio-out and button traits arrive with their drivers (M3, M4,
 //! M5).
@@ -22,6 +23,7 @@
 pub mod fnv;
 pub mod headless;
 pub mod input;
+pub mod rom_image;
 
 /// A free-running cycle counter (on the MCU, the DWT's `CYCCNT`).
 ///
