@@ -65,7 +65,9 @@ use gbc_nucleo_h753::joystick::Joystick;
 use gbc_nucleo_h753::link_session::{Game, Session};
 use gbc_nucleo_h753::link_uart::{LinkUart, parse_baud};
 use gbc_nucleo_h753::pac::interrupt;
-use gbc_nucleo_h753::paced_board::{Capture, Dwt, dac_line, report, set_sleep_clock, start_dac};
+use gbc_nucleo_h753::paced_board::{
+    Capture, Dwt, RAMP_LEFT, dac_line, report, set_sleep_clock, start_dac,
+};
 use gbc_nucleo_h753::qspi::{self, NOR_BYTES, Qspi};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led, stack, wait_since};
 
@@ -102,6 +104,11 @@ const INPUT: &str = include_str!(concat!(env!("OUT_DIR"), "/headless-input.txt")
 const FRAMES: &str = env!("GBC_HEADLESS_FRAMES");
 const DEFAULT_FRAMES: u32 = 35_837;
 const MAX_PRESSES: usize = 256;
+/// Live mode starts the run this many DAC refills before the end of the
+/// start ramp (187 ms; `paced_board::start_dac`). Scripted mode uses
+/// [`RAMP_LEFT`] (4) as the `paced` image, so its speed figure stays
+/// comparable: a large ROM may then underrun at the start.
+const LIVE_RAMP_LEFT: u32 = 24;
 
 static RING: FeedRing = FeedRing::new();
 static TAP: FeedTap = FeedTap::new();
@@ -700,7 +707,10 @@ fn main() -> ! {
 
     if live {
         let mut input = LiveInput::<_, FRAME_SAMPLES>::new(Joystick::new(), &shared);
-        let _ = start_dac(&mut dac);
+        // The ring must be full before the ramp ends: the run first hashes
+        // the whole ROM for its header line (2 MiB from the NOR: about
+        // 60 ms, measured as 5 underruns at the start with RAMP_LEFT).
+        let _ = start_dac(&mut dac, LIVE_RAMP_LEFT);
         let _ = paced::run_with(
             rom,
             &mut input,
@@ -741,7 +751,7 @@ fn main() -> ! {
         overflow: false,
         live: Some(&mut board.uart),
     };
-    let _ = start_dac(&mut dac);
+    let _ = start_dac(&mut dac, RAMP_LEFT);
     let _ = paced::run_with(
         rom,
         &mut Script::new(&presses[..count]),

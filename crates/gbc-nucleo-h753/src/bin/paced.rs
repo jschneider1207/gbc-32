@@ -94,7 +94,7 @@ use gbc_nucleo_h753::audio_dac::{self, AudioDac};
 use gbc_nucleo_h753::display;
 use gbc_nucleo_h753::pac::interrupt;
 use gbc_nucleo_h753::paced_board::{
-    Capture, Dwt, dac_line, dbgmcu_cr, report, set_sleep_clock, start_dac,
+    Capture, Dwt, RAMP_LEFT, dac_line, dbgmcu_cr, report, set_sleep_clock, start_dac,
 };
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, lcd_dma, led, stack, wait_since};
 
@@ -315,7 +315,7 @@ fn main() -> ! {
     // and then idle through the ramp, which is 250 ms of real time with
     // no samples consumed in the speed figures (-417 ppm over 10 minutes,
     // -1.2% over 20 s: measured -8,630 ppm on a 1,200-frame run).
-    let ramp_wait = start_dac(&mut dac);
+    let ramp_wait = start_dac(&mut dac, RAMP_LEFT);
     let r0 = audio_dac::stats().refills;
     let c0 = clock.total();
     // The result is in the captured lines (`paced error ...`, or the lines

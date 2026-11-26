@@ -200,14 +200,16 @@ const _: () = assert!(RAMP_REFILLS == 30);
 /// steady state.
 pub const RAMP_LEFT: u32 = 4;
 
-/// Starts the DAC and waits until its start ramp is [`RAMP_LEFT`] refills
-/// from its end (at most 1 s): the paced loop starts then, so its speed
-/// figures do not count the ramp. Returns the cycles waited.
-pub fn start_dac(dac: &mut crate::audio_dac::AudioDac) -> u32 {
+/// Starts the DAC and waits until its start ramp is `left` refills from its
+/// end (at most 1 s): the paced loop starts then, so its speed figures do
+/// not count the ramp ([`RAMP_LEFT`] for a measured run). The loop must
+/// fill the ring within `left` refills (7.8 ms each), or the first pops
+/// underrun. Returns the cycles waited.
+pub fn start_dac(dac: &mut crate::audio_dac::AudioDac, left: u32) -> u32 {
     let ramp0 = audio_dac::stats().refills;
     let t0 = cycles();
     dac.start();
-    while audio_dac::stats().refills.wrapping_sub(ramp0) < RAMP_REFILLS - RAMP_LEFT
+    while audio_dac::stats().refills.wrapping_sub(ramp0) < RAMP_REFILLS.saturating_sub(left)
         && cycles().wrapping_sub(t0) < CPU_HZ
     {}
     cycles().wrapping_sub(t0)
