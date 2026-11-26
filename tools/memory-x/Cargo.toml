@@ -1,6 +1,6 @@
 [package]
 name = "memory-x"
-description = "Generates the firmware images' memory.x linker scripts (ADR 0036); a build-dependency of tools/h7-bench"
+description = "Generates the firmware images' memory.x linker scripts (ADR 0036); a build-dependency of crates/gbc-nucleo-h753 and tools/h7-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

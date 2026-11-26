@@ -247,6 +247,69 @@ ASSERT(__eitcm - __sitcm > 0x8000, \"the ITCM set is nearly empty: the globs no 
 /// The `memory.x` text for `chip` with the data in `data` and, if `itcm` is
 /// given, the hot set in ITCM. cortex-m-rt's `link.x` includes it.
 pub fn memory_x(chip: Chip, data: Data, itcm: Option<&ItcmSet>) -> String {
+    generate(chip, data, itcm, false)
+}
+
+/// Bytes reserved in AXI SRAM for the HardFault handler's stack
+/// (`.fault_stack`, [`firmware_memory_x`]). The handler formats one report
+/// line and never returns; 2 KiB is several times its depth.
+pub const FAULT_STACK_BYTES: u32 = 2048;
+
+/// The `memory.x` text for an image that links `gbc-nucleo-h753`'s lib
+/// (ADR 0036): [`memory_x`]'s map, plus what the lib reads from every
+/// image whatever its placement, so the lib needs no placement features:
+/// - `.fault_stack`, a NOLOAD reservation of [`FAULT_STACK_BYTES`] in AXI
+///   SRAM right after `.axisram`, with `__fault_stack_top` at its top
+///   (8-byte aligned, as a stack pointer must be); no placement puts
+///   anything else there, and the linker refuses an AXI region that
+///   overflows;
+/// - `__sitcm`, `__eitcm` and `__siitcm` without an ITCM set, and
+///   `__sdtcm_ro`, `__edtcm_ro` and `__sidtcm_ro` with the data in AXI
+///   SRAM: start = end, so the lib's TCM copy copies nothing. They are
+///   plain symbols rather than empty output sections, whose `LOADADDR` the
+///   linker may not define once it discards the empty section.
+pub fn firmware_memory_x(chip: Chip, data: Data, itcm: Option<&ItcmSet>) -> String {
+    generate(chip, data, itcm, true)
+}
+
+/// `.axisram` and `.fault_stack` in one block: a second `INSERT AFTER
+/// .axisram` would depend on the order in which the linker applies
+/// INSERT commands.
+fn axi_fault_section() -> String {
+    format!(
+        "
+SECTIONS {{
+  .axisram (NOLOAD) : ALIGN(32) {{
+    *(.axisram .axisram.*);
+    . = ALIGN(32);
+  }} > AXI
+  .fault_stack (NOLOAD) : ALIGN(8) {{
+    __fault_stack_bottom = .;
+    . += {FAULT_STACK_BYTES};
+    . = ALIGN(8);
+    __fault_stack_top = .;
+  }} > AXI
+}} INSERT AFTER .got;
+"
+    )
+}
+
+/// The TCM symbols of a placement that leaves a section out (see
+/// [`firmware_memory_x`]).
+const NO_ITCM_SYMBOLS: &str = "
+/* No ITCM set: an empty copy for the image's TCM code. */
+__sitcm = ORIGIN(ITCM);
+__eitcm = __sitcm;
+__siitcm = __sitcm;
+";
+const NO_DTCM_RODATA_SYMBOLS: &str = "
+/* Data in AXI SRAM: no DTCM tables, an empty copy. */
+__sdtcm_ro = ORIGIN(RAM);
+__edtcm_ro = __sdtcm_ro;
+__sidtcm_ro = __sdtcm_ro;
+";
+
+fn generate(chip: Chip, data: Data, itcm: Option<&ItcmSet>, firmware: bool) -> String {
     let mem = match chip {
         Chip::Qemu => MEM_QEMU.to_owned(),
         Chip::H753 | Chip::H755 => {
@@ -262,12 +325,21 @@ pub fn memory_x(chip: Chip, data: Data, itcm: Option<&ItcmSet>) -> String {
             format!("{flash}{ram}")
         }
     };
-    let mut s = format!("MEMORY {{\n{mem}}}\n{AXI_SECTION}");
-    if let Some(set) = itcm {
-        write_itcm(&mut s, set);
+    let axi = if firmware {
+        axi_fault_section()
+    } else {
+        AXI_SECTION.to_owned()
+    };
+    let mut s = format!("MEMORY {{\n{mem}}}\n{axi}");
+    match itcm {
+        Some(set) => write_itcm(&mut s, set),
+        None if firmware => s.push_str(NO_ITCM_SYMBOLS),
+        None => {}
     }
     if data == Data::Dtcm {
         s.push_str(DTCM_RODATA_SECTION);
+    } else if firmware {
+        s.push_str(NO_DTCM_RODATA_SYMBOLS);
     }
     s
 }
@@ -411,5 +483,56 @@ mod tests {
         assert!(s.contains("\"the ITCM set is nearly empty: the globs no longer match\""));
         // `.itcm` comes before `.dtcm_rodata`.
         assert!(s.find(".itcm :").unwrap() < s.find(".dtcm_rodata :").unwrap());
+    }
+
+    /// Every symbol the lib reads, in each placement.
+    const LIB_SYMBOLS: [&str; 7] = [
+        "__sitcm =",
+        "__eitcm =",
+        "__siitcm =",
+        "__sdtcm_ro =",
+        "__edtcm_ro =",
+        "__sidtcm_ro =",
+        "__fault_stack_top =",
+    ];
+
+    #[test]
+    fn firmware_map_always_defines_the_lib_symbols() {
+        let set = ItcmSet::parse(&set_text(40), &[]);
+        for (data, itcm) in [
+            (Data::AxiSram, None),
+            (Data::Dtcm, None),
+            (Data::Dtcm, Some(&set)),
+        ] {
+            let s = firmware_memory_x(Chip::H753, data, itcm);
+            for sym in LIB_SYMBOLS {
+                assert_eq!(s.matches(sym).count(), 1, "{sym} in {data:?} {itcm:?}");
+            }
+        }
+        // The plain map defines none of the fallbacks or the fault stack.
+        let plain = memory_x(Chip::H753, Data::AxiSram, None);
+        assert!(LIB_SYMBOLS.iter().all(|sym| !plain.contains(sym)));
+    }
+
+    #[test]
+    fn firmware_map_without_a_set_has_no_itcm_section() {
+        let s = firmware_memory_x(Chip::H753, Data::Dtcm, None);
+        assert!(!s.contains(".itcm :") && !s.contains("nearly empty"));
+        assert!(s.contains("__eitcm = __sitcm;"));
+        // The DTCM tables stay a real section in the DTCM placement.
+        assert!(s.contains(".dtcm_rodata :") && !s.contains("__edtcm_ro = __sdtcm_ro;"));
+    }
+
+    #[test]
+    fn fault_stack_follows_the_axi_buffers() {
+        let s = firmware_memory_x(Chip::H753, Data::Dtcm, None);
+        let axi = s.find(".axisram (NOLOAD)").unwrap();
+        let fault = s.find(".fault_stack (NOLOAD)").unwrap();
+        let insert = s.find("} INSERT AFTER .got;").unwrap();
+        assert!(axi < fault && fault < insert);
+        assert!(s.contains(&format!(". += {FAULT_STACK_BYTES};")));
+        assert_eq!(FAULT_STACK_BYTES % 8, 0);
+        // The rest of the map is the plain one's.
+        assert!(s.starts_with(&memory_x(Chip::H753, Data::Dtcm, None)[..60]));
     }
 }
