@@ -2,8 +2,8 @@
 //! checks, and a byte soup that must never panic.
 
 use gbc_link::{
-    DecodeError, EncodeError, FrameDecoder, MAX_CHUNK, MAX_ENCODED, MAX_FRAME, MAX_STATS_EXTRA,
-    Message, NakCode, crc32, encode, ty,
+    DecodeError, EncodeError, FrameDecoder, MAX_AUDIO_BYTES, MAX_AUDIO_FRAMES, MAX_BODY, MAX_CHUNK,
+    MAX_ENCODED, MAX_FRAME, MAX_STATS_EXTRA, Message, NakCode, audio, crc32, encode, ty,
 };
 
 fn frame(msg: &Message<'_>, seq: u8) -> Vec<u8> {
@@ -74,6 +74,18 @@ fn all_messages<'a>(big: &'a [u8], small: &'a [u8], extra: &'a [u8]) -> Vec<Mess
         Message::SaveDumpRequest,
         Message::Input { buttons: 0 },
         Message::Input { buttons: 0xA5 },
+        Message::AudioStart,
+        Message::AudioStop,
+        Message::Audio {
+            first: 0,
+            held: 0,
+            data: &[],
+        },
+        Message::Audio {
+            first: u32::MAX,
+            held: 256,
+            data: &big[..MAX_AUDIO_BYTES.min(big.len()) / 3 * 3],
+        },
         Message::Ack,
         Message::HelloReply {
             protocol: 1,
@@ -136,7 +148,7 @@ fn every_message_round_trips() {
         }
         types.insert(m.type_code());
     }
-    assert_eq!(types.len(), 14, "every message type covered");
+    assert_eq!(types.len(), 17, "every message type covered");
 }
 
 #[test]
@@ -322,6 +334,8 @@ fn wrong_body_length_is_bad_length() {
         (ty::SAVE_BEGIN, 12),
         (ty::SAVE_DUMP_REQUEST, 0),
         (ty::INPUT, 1),
+        (ty::AUDIO_START, 0),
+        (ty::AUDIO_STOP, 0),
         (ty::ACK, 0),
         (ty::NAK, 1),
         (ty::HELLO_REPLY, 8),
@@ -373,6 +387,77 @@ fn wrong_body_length_is_bad_length() {
             seq: 4
         })]
     );
+}
+
+#[test]
+fn audio_limits_and_packing() {
+    assert_eq!(MAX_AUDIO_BYTES, 1020);
+    assert_eq!(MAX_AUDIO_FRAMES, 340);
+    const { assert!(6 + MAX_AUDIO_BYTES <= MAX_BODY) };
+    // Whole frames only, up to MAX_AUDIO_BYTES.
+    for (len, ok) in [
+        (0, true),
+        (3, true),
+        (768, true),
+        (1020, true),
+        (1, false),
+        (767, false),
+        (1022, false),
+    ] {
+        let r = decode_one(&raw_frame(ty::AUDIO, 2, &vec![7; 6 + len]));
+        if ok {
+            let (_, m) = r.unwrap();
+            assert!(m.starts_with("Audio"), "{m}");
+        } else {
+            assert_eq!(
+                r,
+                Err(DecodeError::BadLength {
+                    ty: ty::AUDIO,
+                    seq: 2
+                }),
+                "{len}"
+            );
+        }
+    }
+    assert_eq!(
+        decode_one(&raw_frame(ty::AUDIO, 2, &[0; 5])),
+        Err(DecodeError::BadLength {
+            ty: ty::AUDIO,
+            seq: 2
+        })
+    );
+    let mut out = [0u8; MAX_FRAME];
+    for data in [&[0u8; 1023][..], &[0u8; 4][..]] {
+        let m = Message::Audio {
+            first: 0,
+            held: 0,
+            data,
+        };
+        assert_eq!(encode(&m, 0, &mut out), Err(EncodeError::BodyTooLarge));
+    }
+    // A 256-frame message (one DMA half) round trips.
+    let data: Vec<u8> = (0..256u32)
+        .flat_map(|i| audio::pack((i * 16) & 0xFFF | (4095 - i) << 16))
+        .collect();
+    let m = Message::Audio {
+        first: 0x1234_5678,
+        held: 3,
+        data: &data,
+    };
+    let f = frame(&m, 9);
+    let mut d = FrameDecoder::new();
+    let got = f
+        .iter()
+        .find_map(|&b| d.feed(b).map(|r| r.map(|(s, m)| (s, format!("{m:?}")))));
+    assert_eq!(got, Some(Ok((9, format!("{m:?}")))));
+    // Packing: every code in both channels, reserved bits dropped.
+    for c in 0..4096u32 {
+        let w = c | (4095 - c) << 16;
+        assert_eq!(audio::unpack(audio::pack(w)), w);
+        assert_eq!(audio::unpack(audio::pack(w | 0xF000_F000)), w);
+        assert_eq!(audio::codes(audio::pack(w)), (c as u16, (4095 - c) as u16));
+    }
+    assert_eq!(audio::pack(0x0ABC_0123), [0x23, 0xC1, 0xAB]);
 }
 
 #[test]

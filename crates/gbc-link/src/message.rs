@@ -1,7 +1,7 @@
 //! The v1 message set and its body codec. See the crate docs for the
 //! wire table.
 
-use crate::{DecodeError, EncodeError, MAX_CHUNK, MAX_STATS_EXTRA};
+use crate::{DecodeError, EncodeError, MAX_AUDIO_BYTES, MAX_CHUNK, MAX_STATS_EXTRA, audio};
 
 /// Message type codes. 0x01..=0x7F are PC -> board, 0x80..=0xFF board ->
 /// PC; within each half, groups of 16 by purpose leave room for later
@@ -17,12 +17,15 @@ pub mod ty {
     pub const SAVE_CHUNK: u8 = 0x21;
     pub const SAVE_DUMP_REQUEST: u8 = 0x22;
     pub const INPUT: u8 = 0x30;
+    pub const AUDIO_START: u8 = 0x40;
+    pub const AUDIO_STOP: u8 = 0x41;
     pub const ACK: u8 = 0x80;
     pub const NAK: u8 = 0x81;
     pub const HELLO_REPLY: u8 = 0x82;
     pub const ALREADY_LOADED: u8 = 0x90;
     pub const ROM_DONE: u8 = 0x91;
     pub const STATS: u8 = 0xA0;
+    pub const AUDIO: u8 = 0xB0;
 }
 
 /// Why the board refused a request. Codes 1..=8 are assigned; anything
@@ -108,6 +111,11 @@ pub enum Message<'a> {
     /// Held buttons ([`crate::buttons`]), bit layout as `gbc_core::Buttons` (M5): bit 0 A,
     /// 1 B, 2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down; 1 = pressed.
     Input { buttons: u8 },
+    /// Asks the board to stream its DAC feed as [`Message::Audio`]
+    /// (answered `Ack`; opt-in, ADR 0041).
+    AudioStart,
+    /// Stops the audio stream (answered `Ack`).
+    AudioStop,
     // --- board -> PC ---
     /// The request with this frame's `seq` was accepted.
     Ack,
@@ -132,6 +140,17 @@ pub enum Message<'a> {
         cycles_mean: u32,
         cycles_max: u32,
         extra: &'a [u8],
+    },
+    /// Frames the DAC was fed, after `AudioStart` (ADR 0041): `first` is
+    /// the index of `data`'s first frame among every real frame the DAC
+    /// has been fed since boot (wrapping), so a jump shows a gap; `data`
+    /// is [`audio::FRAME_BYTES`] bytes per frame ([`audio::pack`]), at most
+    /// [`MAX_AUDIO_BYTES`]; `held` is how many underrun filler frames (the
+    /// last frame repeated) the DAC played right after them.
+    Audio {
+        first: u32,
+        held: u16,
+        data: &'a [u8],
     },
 }
 
@@ -158,12 +177,15 @@ impl Message<'_> {
             Self::SaveChunk { .. } => ty::SAVE_CHUNK,
             Self::SaveDumpRequest => ty::SAVE_DUMP_REQUEST,
             Self::Input { .. } => ty::INPUT,
+            Self::AudioStart => ty::AUDIO_START,
+            Self::AudioStop => ty::AUDIO_STOP,
             Self::Ack => ty::ACK,
             Self::Nak { .. } => ty::NAK,
             Self::HelloReply { .. } => ty::HELLO_REPLY,
             Self::AlreadyLoaded => ty::ALREADY_LOADED,
             Self::RomDone { .. } => ty::ROM_DONE,
             Self::Stats { .. } => ty::STATS,
+            Self::Audio { .. } => ty::AUDIO,
         }
     }
 
@@ -176,6 +198,12 @@ impl Message<'_> {
                 Err(EncodeError::BodyTooLarge)
             }
             Self::Stats { extra, .. } if extra.len() > MAX_STATS_EXTRA => {
+                Err(EncodeError::BodyTooLarge)
+            }
+            Self::Audio { data, .. }
+                if data.len() > MAX_AUDIO_BYTES
+                    || !data.len().is_multiple_of(audio::FRAME_BYTES) =>
+            {
                 Err(EncodeError::BodyTooLarge)
             }
             _ => Ok(()),
@@ -193,7 +221,12 @@ impl Message<'_> {
                 s.put_all(&offset.to_le_bytes())?;
                 s.put_all(data)
             }
-            Self::RomEnd | Self::SaveDumpRequest | Self::Ack | Self::AlreadyLoaded => Ok(()),
+            Self::RomEnd
+            | Self::SaveDumpRequest
+            | Self::AudioStart
+            | Self::AudioStop
+            | Self::Ack
+            | Self::AlreadyLoaded => Ok(()),
             Self::Input { buttons } => s.put(buttons),
             Self::Nak { code } => s.put(code.to_u8()),
             Self::HelloReply {
@@ -216,6 +249,11 @@ impl Message<'_> {
                 s.put_all(&cycles_mean.to_le_bytes())?;
                 s.put_all(&cycles_max.to_le_bytes())?;
                 s.put_all(extra)
+            }
+            Self::Audio { first, held, data } => {
+                s.put_all(&first.to_le_bytes())?;
+                s.put_all(&held.to_le_bytes())?;
+                s.put_all(data)
             }
         }
     }
@@ -278,6 +316,8 @@ pub(crate) fn parse(t: u8, seq: u8, body: &[u8]) -> Result<Message<'_>, DecodeEr
         ty::ROM_END => Some(Message::RomEnd),
         ty::SAVE_DUMP_REQUEST => Some(Message::SaveDumpRequest),
         ty::INPUT => r.u8().map(|buttons| Message::Input { buttons }),
+        ty::AUDIO_START => Some(Message::AudioStart),
+        ty::AUDIO_STOP => Some(Message::AudioStop),
         ty::ACK => Some(Message::Ack),
         ty::NAK => r.u8().map(|c| Message::Nak {
             code: NakCode::from_u8(c),
@@ -298,6 +338,13 @@ pub(crate) fn parse(t: u8, seq: u8, body: &[u8]) -> Result<Message<'_>, DecodeEr
                 cycles_max: r.u32()?,
                 extra: r.rest(MAX_STATS_EXTRA)?,
             })
+        }),
+        ty::AUDIO => r.u32().and_then(|first| {
+            let held = r.u16()?;
+            let data = r.rest(MAX_AUDIO_BYTES)?;
+            data.len()
+                .is_multiple_of(audio::FRAME_BYTES)
+                .then_some(Message::Audio { first, held, data })
         }),
         _ => return Err(DecodeError::UnknownType { ty: t, seq }),
     };

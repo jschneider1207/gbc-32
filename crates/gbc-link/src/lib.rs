@@ -42,16 +42,20 @@
 //! | 0x21 | `SaveChunk`       | both | offset u32, data (load PC→B, dump B→PC; M5) | 4 + 0..=1024 |
 //! | 0x22 | `SaveDumpRequest` | PC→B | — (M5)                                      | 0 |
 //! | 0x30 | `Input`           | PC→B | buttons u8 (`gbc_core::Buttons` bits; M5; not answered) | 1 |
+//! | 0x40 | `AudioStart`      | PC→B | — (ADR 0041)                                | 0 |
+//! | 0x41 | `AudioStop`       | PC→B | — (ADR 0041)                                | 0 |
 //! | 0x80 | `Ack`             | B→PC | —                                           | 0 |
 //! | 0x81 | `Nak`             | B→PC | code u8 ([`NakCode`])                       | 1 |
 //! | 0x82 | `HelloReply`      | B→PC | protocol u16, max_chunk u16, flash_len u32  | 8 |
 //! | 0x90 | `AlreadyLoaded`   | B→PC | —                                           | 0 |
 //! | 0x91 | `RomDone`         | B→PC | hash u64 (of the image read back)           | 8 |
 //! | 0xA0 | `Stats`           | B→PC | frames u32, cycles_mean u32, cycles_max u32, extra | 12 + 0..=1016 |
+//! | 0xB0 | `Audio`           | B→PC | first u32, held u16, data (3 bytes per frame; ADR 0041) | 6 + 0..=1020, data a multiple of 3 |
 //!
 //! Code ranges: 0x00 invalid; 0x01..=0x0F session, 0x10..=0x1F ROM,
-//! 0x20..=0x2F save, 0x30..=0x3F input (PC→B); 0x80..=0x8F replies,
-//! 0x90..=0x9F ROM results, 0xA0..=0xAF stats (B→PC). The rest is free.
+//! 0x20..=0x2F save, 0x30..=0x3F input, 0x40..=0x4F audio (PC→B);
+//! 0x80..=0x8F replies, 0x90..=0x9F ROM results, 0xA0..=0xAF stats,
+//! 0xB0..=0xBF audio (B→PC). The rest is free.
 //! An unknown code is [`DecodeError::UnknownType`]; a known code with a
 //! body of the wrong length is [`DecodeError::BadLength`] (fixed-size
 //! bodies must match exactly). `Stats.extra` is room for later fields; a
@@ -81,6 +85,27 @@
 //!   (no `Ack`; the stop-and-wait rule does not apply). The PC sends it on
 //!   every change and every 500 ms without one, so the latest frame is the
 //!   state and a lost one is healed by the next.
+//!
+//! # Audio to the PC (ADR 0041)
+//!
+//! Opt-in: the board sends no audio until the PC asks.
+//!
+//! - `AudioStart` → `Ack`: the board streams every frame its DAC is fed
+//!   as `Audio` messages (any seq, never answered), one per DMA refill
+//!   (256 frames, 7.8 ms, on the player). `AudioStop` → `Ack` ends it; so
+//!   do `Hello` and 90 frames (1.5 s) without any frame from the PC
+//!   (`gbc-pc play` repeats `Input` every 500 ms). A board without audio
+//!   answers `Nak UnexpectedType`.
+//! - `Audio { first, held, data }`: `data` holds the **real** frames the
+//!   DAC was fed (not underrun filler), [`audio::FRAME_BYTES`] = 3 bytes
+//!   each ([`audio::pack`]: the two 12-bit DAC codes, left = DAC channel
+//!   1); `first` counts real frames since the board started (wrapping
+//!   u32), so the next message's `first` is this one's plus its frame
+//!   count unless frames were dropped; `held` is the number of filler
+//!   frames (the last frame repeated) the DAC played after them, 0 unless
+//!   the board underran. A board that cannot send fast enough drops whole
+//!   messages and counts them (the PC sees a jump in `first`); it never
+//!   stalls the DAC.
 //!
 //! `Nak` codes: 1 BadCrc, 2 BadFrame, 3 UnexpectedType, 4 OutOfRange,
 //! 5 FlashError, 6 HashMismatch, 7 Busy, 8 VersionMismatch; others decode
@@ -122,6 +147,35 @@ pub mod buttons {
     pub const UP: u8 = 1 << 6;
     pub const DOWN: u8 = 1 << 7;
 }
+/// `Message::Audio` frame packing (ADR 0041): one stereo frame of two
+/// 12-bit DAC codes in 3 bytes, little-endian bit order: bits 0..=11 the
+/// left code (DAC channel 1), bits 12..=23 the right (channel 2). Input
+/// and output are the board's DAC feed words (`DAC_DHR12RD` layout: left
+/// in bits 11:0, right in 27:16; `gbc_firmware::audio::pack`).
+pub mod audio {
+    /// Bytes per packed frame.
+    pub const FRAME_BYTES: usize = 3;
+
+    /// One `DAC_DHR12RD` word as 3 bytes (the reserved bits are dropped).
+    pub const fn pack(word: u32) -> [u8; FRAME_BYTES] {
+        let l = word & 0xFFF;
+        let r = (word >> 16) & 0xFFF;
+        let v = l | r << 12;
+        [v as u8, (v >> 8) as u8, (v >> 16) as u8]
+    }
+
+    /// 3 bytes back to the `DAC_DHR12RD` word.
+    pub const fn unpack(b: [u8; FRAME_BYTES]) -> u32 {
+        let v = b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16;
+        (v & 0xFFF) | (v >> 12) << 16
+    }
+
+    /// The left (channel 1) and right (channel 2) codes of a packed frame.
+    pub const fn codes(b: [u8; FRAME_BYTES]) -> (u16, u16) {
+        let w = unpack(b);
+        ((w & 0xFFF) as u16, (w >> 16) as u16)
+    }
+}
 mod crc;
 mod message;
 
@@ -133,6 +187,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Largest data length of a `RomChunk` or `SaveChunk`.
 pub const MAX_CHUNK: usize = 1024;
+
+/// Largest `Audio.data`: 340 frames, the most whole frames that fit
+/// [`MAX_BODY`] after its 6 bytes.
+pub const MAX_AUDIO_BYTES: usize = (MAX_BODY - 6) / audio::FRAME_BYTES * audio::FRAME_BYTES;
+/// Largest `Audio` frame count.
+pub const MAX_AUDIO_FRAMES: usize = MAX_AUDIO_BYTES / audio::FRAME_BYTES;
 
 /// Largest message body: a chunk's offset plus [`MAX_CHUNK`] data bytes.
 pub const MAX_BODY: usize = 4 + MAX_CHUNK;

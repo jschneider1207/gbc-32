@@ -230,6 +230,12 @@ pub enum Incoming {
         /// docs/reference/player.md; lossy UTF-8, empty from a v1 board).
         extra: String,
     },
+    /// `Audio` (ADR 0041): `data` is 3 bytes per frame.
+    Audio {
+        first: u32,
+        held: u16,
+        data: Vec<u8>,
+    },
     Other,
 }
 
@@ -264,6 +270,11 @@ impl Incoming {
                 cycles_mean,
                 cycles_max,
                 extra: String::from_utf8_lossy(extra).into_owned(),
+            },
+            Message::Audio { first, held, data } => Self::Audio {
+                first,
+                held,
+                data: data.to_vec(),
             },
             _ => Self::Other,
         }
@@ -300,6 +311,8 @@ pub struct Client<T: Transport> {
     rx_pos: usize,
     rx_len: usize,
     pub stats: Stats,
+    /// Bytes received from the transport (the `--audio-wav` rate).
+    pub rx_bytes: u64,
     /// The last `HelloReply`, once [`Client::hello`] has run.
     pub info: Option<BoardInfo>,
 }
@@ -316,6 +329,7 @@ impl<T: Transport> Client<T> {
             rx_pos: 0,
             rx_len: 0,
             stats: Stats::default(),
+            rx_bytes: 0,
             info: None,
         }
     }
@@ -373,6 +387,7 @@ impl<T: Transport> Client<T> {
             if n == 0 {
                 return Ok(Received::Timeout);
             }
+            self.rx_bytes += n as u64;
             self.rx_pos = 0;
             self.rx_len = n;
         }
@@ -550,6 +565,9 @@ fn msg_name(msg: &Message<'_>) -> &'static str {
         Message::SaveChunk { .. } => "SaveChunk",
         Message::SaveDumpRequest => "SaveDumpRequest",
         Message::Input { .. } => "Input",
+        Message::AudioStart => "AudioStart",
+        Message::AudioStop => "AudioStop",
+        Message::Audio { .. } => "Audio",
         Message::Ack => "Ack",
         Message::Nak { .. } => "Nak",
         Message::HelloReply { .. } => "HelloReply",
