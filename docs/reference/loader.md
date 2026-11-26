@@ -16,7 +16,8 @@ scripts/gbc-pc.sh load <rom>          # gbc-pc defaults to --baud 2000000
 H7_BAUD=2000000 tools/h7-bench/read-serial.sh 15 | tr -d '\000' | grep 'loader status'
 ```
 
-Saves and live input (M5: `load --sav`, `dump`, `play`): `link-protocol.md`.
+Saves and live input (M5: `load --sav`, `dump`, `play`): `link-protocol.md`
+(its "Board side" section: the `link-probe` image and `run-save-roundtrip.sh`).
 
 At reset the image prints the banner at 115200 and a `boot` line (the
 stored image as `rom_image::validate` sees it), then serves at
