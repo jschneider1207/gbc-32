@@ -1283,6 +1283,75 @@ nothing about the QSPI.
   with Pokemon Red (reloaded, hash 0x0bfa5d71919acbbc) for 60 s: 0 over
   budget, 0 display errors, core max 1,348,228 cycles.
 
+### M6 worst-case report (shipped placement)
+
+Plan Stage 2 M6 "Report". `bench-itcm-dtcm-pll480` (the shipped
+placement: ADR 0042 core-first layout, the ITCM tier default with the
+plain tile path dropped, QSPI 100 MHz + SIOO, no LTO, opt-level
+unchanged) built in the main checkout at main a6a2995, NUCLEO-H753ZI at
+472 MHz, bench pack in the NOR, two independent boots of one `.bin`
+(re-flashed in between), 2026-11-26. Both captures: `check-report.sh
+--qspi` OK (30 hashes equal `expected-hashes.txt`, `same_as_flash=1`,
+`qspi_hz=100000000`, `exit_fallbacks=0`). Boot 1 is the committed
+baseline (`tools/h7-bench/expected-cycles.txt`); boot 2 passes
+`check-cycles.sh` against it.
+
+**`synth:worst-case`, ROMs in QSPI (boot 1; boot 2 in brackets):**
+
+| | cycles per frame | % of 3,951,279 (50% line, report only) | % of 7,902,557 (real-time frame) |
+|---|---:|---:|---:|
+| mean | 3,345,102 (3,345,049) | 84.66% | 42.33% |
+| max | 3,382,280 (3,383,692) | 85.60% (85.64%) | 42.80% (42.82%) |
+
+The worst frame is 7.17 ms of a 16.74 ms frame. With ROMs in internal
+flash the same boot gives 3,304,254 / 3,342,450 (83.6% / 84.6% of the
+50% line): the QSPI costs +1.24% / +1.19%. The 50% figure is not met
+on the H753 at 472 MHz (85.6% of it) and is reported, not gated (plan
+M6). Real time is met with 57% of the frame to spare.
+
+**H735 at 550 MHz: a projection, not a measurement.** 50% line at
+550 MHz = 550e6 / 59.7275 / 2 = 4,604,244 cycles (a frame 9,208,489).
+Assuming the same cycle count as measured here (cycle counts did not
+change with frequency between 64, 392 and 480 MHz on the H753), the
+worst-case max 3,382,280 is **73.5% of the 50% line** (36.7% of a
+frame), mean 72.7%. What this leaves out: the H735 puts all of
+gbc-core in its 128 KiB ITCM (the plain tile path and the other dropped
+tiers too, so it should be faster than this); the Stage 3 ROM sits in
+HyperRAM over OCTOSPI, whose miss latency differs from this NOR's (419
+cycles a cold line here); and no front-end cost is in these figures.
+
+**Baseline (boot 1), cycles per frame, mean / max:**
+
+| Workload | internal flash | QSPI | QSPI vs internal |
+|---|---:|---:|---:|
+| worst-case | 3,304,254 / 3,342,450 | 3,345,102 / 3,382,280 | +1.24% / +1.19% |
+| cgb-raster | 2,635,867 / 2,675,407 | 2,637,614 / 2,677,953 | +0.07% / +0.10% |
+| dmg-raster | 1,919,939 / 1,942,189 | 1,921,382 / 1,944,534 | +0.08% / +0.12% |
+| event-storm | 2,033,459 / 2,047,485 | 2,035,011 / 2,049,749 | +0.08% / +0.11% |
+| cpu_instrs | 1,292,293 / 1,766,469 | 1,292,701 / 1,766,469 | +0.03% / +0.00% |
+| dma-storm | 3,109,414 / 3,116,796 | 3,111,419 / 3,119,581 | +0.06% / +0.09% |
+| halt-irq | 658,721 / 661,370 | 659,848 / 663,419 | +0.17% / +0.31% |
+| apu-writes | 897,106 / 919,017 | 897,965 / 919,759 | +0.10% / +0.08% |
+| oam-lines | 1,447,372 / 1,463,731 | 1,448,065 / 1,464,072 | +0.05% / +0.02% |
+| storm-control | 2,244,315 / 2,262,568 | 2,246,140 / 2,264,959 | +0.08% / +0.11% |
+| storm-apu | 23,871,038 / 24,082,808 | 23,871,482 / 24,083,232 | +0.00% / +0.00% |
+| storm-spsw | 14,892,990 / 15,028,915 | 14,891,391 / 15,027,829 | -0.01% / -0.01% |
+| storm-div | 16,727,299 / 16,873,763 | 16,727,675 / 16,874,179 | +0.00% / +0.00% |
+| storm-gdma | 2,872,118 / 2,897,745 | 3,089,290 / 3,332,817 | +7.56% / +15.01% |
+| storm-ppu | 28,678,019 / 28,977,195 | 28,678,407 / 28,978,104 | +0.00% / +0.00% |
+
+Boot to boot (all 60 mean and max figures): largest |delta| 0.047%
+(`qspi apu-writes` max, 430 cycles); worst-case QSPI max +0.04% (1,412
+cycles), every mean within 0.03%. The ratchet's +3% is about 60 times
+that spread. The storms (`storm-*`) are outside the bound by human
+decision; `storm-gdma` is the one QSPI-bound workload (+15% max), still
+under half a frame.
+
+After the runs the board went back to the `player` image (same commit)
+with Pokemon Red (loader hash 0x0bfa5d71919acbbc): 30 s, frames
+advancing, 0 over budget, 0 display errors, core max 1,350,123 cycles,
+busy max 1,804,527.
+
 ### Display in the loop (M3, `headless-display`, 472 MHz)
 
 Plan Stage 2 M3 "Measure": the `headless` loop on `cgb-acid2`, 600
