@@ -247,12 +247,51 @@ in enhance mode. So `Qspi::init` and `Mapped::exit` send
 `release_enhance`: one 0xEB read without instruction, mode byte 0xFF
 (which leaves the mode), address 0x7F_FFFF. In normal mode IO0 sees that
 as instruction 0xFF (not a command of the part) and NCS rises after 14
-clocks. **Seen on the board:** an image built before this change (no
-release) that boots while the NOR is in enhance mode panics in `init`
-with "QUADSPI busy after the ES0392 2.7.4 sequence" (three boots, two
-different old binaries). Any image of the new lib (here `qspi-probe`)
-clears it (a power cycle should too: unverified); after that the old binary ran
-normally. Images built from this lib are not affected.
+clocks. Both panic if the release fails (BUSY or no completion; M6 review
+T7), rather than hand back a NOR that would misparse the next command.
+
+**Old images panic at boot (M6 review T8).** Seen: an image built before
+c9c6d14 panics in `Qspi::init` with "QUADSPI busy after the ES0392
+2.7.4 sequence" once a c9c6d14-or-later image has run on the board
+(three boots, two old binaries, when first seen). This was first blamed
+on the NOR's enhance mode. That cannot be the mechanism (the step runs
+before any NOR command, with NCS high), and the board refutes it.
+Reproduced with `qspi-probe` from c9c6d14^ (no memory-mapped mode, so
+the panic is init's), with diagnostics added after the timed writes
+(2026-11-26):
+
+| Boot | NOR state | Result |
+|---|---|---|
+| old, after `player` (NOR in enhance mode) | enhance | panic |
+| current lib `qspi-probe`, next | enhance | OK: JEDEC c22017 |
+| old again, after that | normal (the current init released it, and its JEDEC read worked) | panic |
+
+In every old-image panic: SR = 0x20 (BUSY, FIFO empty), CR = 0xFF000000
+(disabled, PRESCALER 255), CCR = 0x20000000 (FRCM), and the window from
+the first CCR write to the CR = 0 store completing (DWT, DSB) was 42 CPU
+cycles, 21 kernel clocks at 236 MHz, far inside ES0392's 127. So it is
+neither the NOR's mode nor a missed workaround window. The current lib,
+booted in the same state, also reads BUSY = 1 right after its CR = 0
+(window 40 cycles), but BUSY then falls within the poll limit.
+
+What is known: old images (kernel clock rcc_hclk3, 236 MHz) panic after
+a current image has run, whatever the NOR's mode; the ST-LINK's reset
+after a flash does not clear it, and neither does the RCC QSPIRST pulse
+both inits give the peripheral. The earlier note that the old binary ran normally after a
+current image had run was not reproduced. Hypothesis, untested: state
+outside the
+QUADSPI register file that survives the post-flash reset, or a
+dependence of the 2.7.4 sequence on the kernel clock source (old: HCLK3;
+current: pll2_r_ck, which only the current lib starts). Telling these
+apart needs a power cycle (the human) and an old image built with
+QSPISEL = pll2_r_ck.
+
+Can current images hit it: not seen. Current-lib images boot through the
+same step after current images many times a session (the player, the
+bench, the probes; the boot above, with the NOR in enhance mode), and
+none has panicked there; with the mechanism unknown, that is evidence,
+not proof. If it ever happens, the panic names the step; what would
+clear it is not known.
 
 Measured with `qspi-mmap` (CPU 472 MHz; DWT cycles, median of 64, the NOR
 holding the bench pack, compare and unaligned checks all PASS):

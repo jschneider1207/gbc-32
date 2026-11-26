@@ -1280,8 +1280,11 @@ nothing about the QSPI.
 - SIOO adds about 0.2 points on the worst case and 1.1 on storm-gdma
   over the clock alone, for a lib-side cost: `Qspi::init` and
   `Mapped::exit` take the NOR out of enhance mode. Images built before
-  this change panic in `init` if they boot while the NOR is still in
-  enhance mode (seen; `qspi-nor.md` "Enhance mode and resets").
+  this change panic in `init` ("QUADSPI busy after the ES0392 2.7.4
+  sequence") once a current image has run, whatever the NOR's mode: the
+  M6 review (T8) reproduced it with the NOR in normal mode, so enhance
+  mode is not the cause; the mechanism is unknown (`qspi-nor.md` "Old
+  images panic at boot").
 - Also run on this build: `run-replay.sh` on cgb-acid2 (600 frames,
   `player-script`): PASS, hashes equal, 0 over budget; the `player` image
   with Pokemon Red (reloaded, hash 0x0bfa5d71919acbbc) for 60 s: 0 over
