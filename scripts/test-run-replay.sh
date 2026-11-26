@@ -17,7 +17,7 @@ real=$here/../docs/reference/m5-evidence/report-rtc3test-sub-second.txt
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GBC_BOARD_LOCK=$tmp/lock
-unset RUN_REPLAY_ONLY RUN_REPLAY_OUT RUN_REPLAY_RUN_PACED
+unset RUN_REPLAY_ONLY RUN_REPLAY_OUT RUN_REPLAY_RUN_PACED RUN_REPLAY_MAX_PPM
 fails=0
 ok()  { echo "ok: $*"; }
 bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
@@ -120,6 +120,22 @@ rtc3test/rtc3test.gb - h" 'PASS \(2 entries\)'
 unset RUN_REPLAY_RUN_PACED
 # A non-numeric frame count is a tool error, never a skipped entry.
 run "bad frames" 2 "rtc3test/rtc3test.gb 6x0 g" "is not a number"
+
+# The speed bound (the M5 soak runs with RUN_REPLAY_MAX_PPM=1000): the
+# committed 30 s report has ppm=+1139, inside the default (lifted) bound.
+entry g "$tmp/body"
+RUN_REPLAY_MAX_PPM=1000
+export RUN_REPLAY_MAX_PPM
+run "RUN_REPLAY_MAX_PPM=1000 fails ppm=+1139" 1 "$CLOCKED" 'g: FAIL'
+RUN_REPLAY_MAX_PPM=1200
+run "RUN_REPLAY_MAX_PPM=1200 passes ppm=+1139" 0 "$CLOCKED" 'g: PASS'
+RUN_REPLAY_MAX_PPM=1e3
+run "a malformed RUN_REPLAY_MAX_PPM" 2 "$CLOCKED" 'is not a number'
+unset RUN_REPLAY_MAX_PPM
+# A synthetic ROM entry (soak-set.txt) is named after the ROM, takes no group.
+entry worst-case "$tmp/b3"
+run "a synth: entry" 0 "synth:worst-case $frames" 'worst-case: PASS equal=yes'
+run "a synth: entry with a group" 2 "synth:worst-case - g" 'takes a frame count and no group'
 
 if [ "$fails" = 0 ]; then echo "test-run-replay.sh: all passed"; exit 0; fi
 echo "test-run-replay.sh: $fails FAILED"

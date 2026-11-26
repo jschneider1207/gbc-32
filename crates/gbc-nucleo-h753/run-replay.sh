@@ -12,6 +12,11 @@
 #   <rom under GBC_TEST_ROMS> <frames>            no input
 #   <rom under GBC_TEST_ROMS> - <stage1 group>    the group's `input` (and
 #                                                 its frame count)
+#   synth:<name> <frames>                         the bench's synthetic ROM
+#                                                 (`bench --write-synth
+#                                                 <name>`, as build.sh's
+#                                                 paced ROMs), no input;
+#                                                 the entry is named <name>
 #
 # For a group, `replay-input table` converts the group's input from
 # acceptance/stage1.toml with romtest's own code into a `clocks v1` table
@@ -36,7 +41,8 @@
 #      error/late/restart, report and image integrity. Its speed bound is
 #      lifted (RUN_PACED_MAX_PPM): a 10-60 s run's ppm is dominated by the
 #      initial ring fill (up to 62.5 ms ahead: +6,250 ppm at 600 frames),
-#      so speed stays the M4 10-minute criterion; ppm is printed.
+#      so speed stays the M4 10-minute criterion; ppm is printed
+#      (RUN_REPLAY_MAX_PPM sets the bound, for such a run).
 #   6. on top, from the lines run-paced.sh printed from that verified
 #      report: `stats player` total_over_budget=0 (exit 1 otherwise), and
 #      for a table `stats input` handed=clock_changes and late=0 (a late
@@ -58,6 +64,9 @@
 #                            <dir>/<name>.bin, .host and .serial (as saved
 #                            in RUN_REPLAY_OUT) and run only steps 5-6 on
 #                            them (RUN_PACED_CAPTURE); for tests
+#   RUN_REPLAY_MAX_PPM=<n>   run-paced.sh's speed bound (default: lifted,
+#                            see step 5); 1000 for a 10-minute run (the M4
+#                            +-0.1% criterion: soak-set.txt, the M5 soak)
 #   RUN_REPLAY_RUN_PACED=<script>  the checker (default: run-paced.sh next
 #                            to this script; for tests)
 #   GBC_TEST_ROMS=<dir>      test ROMs (default: the repo's test-roms/)
@@ -72,6 +81,8 @@ list=$(readlink -f "${1:-$here/replay-set.txt}")
 [ -f "$list" ] || die "$list: no such file"
 roms=${GBC_TEST_ROMS:-$root/test-roms}
 caps=${RUN_REPLAY_CAPTURES:-}
+max_ppm=${RUN_REPLAY_MAX_PPM:-999999999}
+case "$max_ppm" in ''|*[!0-9]*) die "RUN_REPLAY_MAX_PPM '$max_ppm' is not a number";; esac
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
 
 if [ -z "$caps" ]; then
@@ -151,7 +162,7 @@ check_entry() {
 # the list, is a tool error, never a pass).
 expected=$(awk -v only="${RUN_REPLAY_ONLY:-}" '
   $1 == "" || substr($1, 1, 1) == "#" { next }
-  { name = $1; sub(/.*\//, "", name); sub(/\.[^.]*$/, "", name); if ($3 != "") name = $3
+  { name = $1; sub(/^synth:/, "", name); sub(/.*\//, "", name); sub(/\.[^.]*$/, "", name); if ($3 != "") name = $3
     if (only == "" || index("," only ",", "," name ",")) n++ }
   END { print n + 0 }' "$list")
 run_paced=${RUN_REPLAY_RUN_PACED:-$here/run-paced.sh}
@@ -162,6 +173,9 @@ while read -r rom_rel frames group extra <&3; do
   case "$rom_rel" in ''|'#'*) continue;; esac
   [ -z "${extra:-}" ] || die "$list: too many fields: $rom_rel $frames $group $extra"
   name=$(basename "${rom_rel%.*}"); [ -n "${group:-}" ] && name=$group
+  synth=""
+  case "$rom_rel" in synth:*) synth=${rom_rel#synth:}; name=$synth
+    [ -z "${group:-}" ] && [ -n "$synth" ] || die "$list: $rom_rel: a synthetic ROM takes a frame count and no group";; esac
   if [ -n "${RUN_REPLAY_ONLY:-}" ] && ! [[ ",$RUN_REPLAY_ONLY," == *",$name,"* ]]; then continue; fi
   entries=$((entries + 1))
   echo "run-replay.sh: === $name ($rom_rel, frames ${frames}${group:+, stage1 group $group})"
@@ -173,8 +187,14 @@ while read -r rom_rel frames group extra <&3; do
     # A group's length comes from its table; here, from the host's header.
     [ "$frames" = - ] && frames=$(sed -n 's/^paced v1 .* frames=\([0-9]*\)$/\1/p' "$host")
   else
-    [ -f "$roms/$rom_rel" ] || die "$roms/$rom_rel: no such file"
-    rom=$out/$(basename "$rom_rel"); cp "$roms/$rom_rel" "$rom" || die "cannot copy $rom_rel"
+    if [ -n "$synth" ]; then
+      rom=$out/$synth.gb
+      (cd "$root" && locked cargo run -q --release -p bench -- --write-synth "$synth" "$rom") > "$out/$name.synth.log" 2>&1 ||
+        { tail -5 "$out/$name.synth.log" >&2; die "$name: bench --write-synth $synth failed"; }
+    else
+      [ -f "$roms/$rom_rel" ] || die "$roms/$rom_rel: no such file"
+      rom=$out/$(basename "$rom_rel"); cp "$roms/$rom_rel" "$rom" || die "cannot copy $rom_rel"
+    fi
     input_args=()
     if [ "$clocked" = 1 ]; then
       "$replay_input" table --manifest "$root/acceptance/stage1.toml" --group "$group" > "$out/$name.clocks" ||
@@ -200,10 +220,10 @@ while read -r rom_rel frames group extra <&3; do
   case "$frames" in ''|*[!0-9]*) die "$name: frames '$frames' is not a number";; esac
   secs=$((frames / 59 + 50))
   if [ -n "$caps" ]; then
-    RUN_PACED_CAPTURE=$serial RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=999999999 \
+    RUN_PACED_CAPTURE=$serial RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$max_ppm \
       bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   else
-    RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=999999999 RUN_PACED_READ_SECS=$secs \
+    RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$max_ppm RUN_PACED_READ_SECS=$secs \
       RUN_PACED_SAVE=$serial bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   fi
   rc=$?

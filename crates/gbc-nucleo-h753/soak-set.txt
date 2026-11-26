@@ -1,0 +1,7 @@
+# The Stage 2 M5 soak (plan stage-2.md M5 acceptance: "A 10-minute
+# `synth:worst-case` run has 0 frames over budget and 0 underruns"), for
+# run-replay.sh with RUN_REPLAY_MAX_PPM=1000 (docs/reference/m5-evidence.md):
+# the scripted `player` (no input) for 35,837 frames (10 minutes), its
+# `paced` lines against the host's, ring underruns 0, total_over_budget 0
+# and the M4 +-1000 ppm speed bound.
+synth:worst-case 35837
