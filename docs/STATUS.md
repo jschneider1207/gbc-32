@@ -39,7 +39,12 @@ Session 22 (2026-11-25) progress; ticks with commits in `docs/plan/stage-2.md` M
   (71b22ec, a1f5bdb; the M1 board acceptance is met).
 - Also done: h7-bench on the lib (0712e2d, d064d06; 15/15 hashes equal,
   cycles within +-2%), QEMU smoke (8d2d5b7), C-P5 size report (bb3fc2d).
-- Remaining: `gate-stage2.sh --host-only` first version (branch `m1-gate2`,
+- Gate: `gate-stage2.sh` first version merged (5904be4), human-approved
+  2026-11-25 ("I approve"); `--host-only` passed (exit 3, 595 s).
+- Remaining: the M1 milestone review (range `stage2-m0..HEAD`), fixes, tag
+  `stage2-m1`. Then M2 (QSPI) unless the human moves M3 (display) first
+  (asked 2026-11-25, no answer yet).
+- Superseded: (branch `m1-gate2`,
   drafted by an agent; needs the human's approval before main), then the M1
   milestone review and tag `stage2-m1`.
 - Old list, for reference: (2) h7-bench
@@ -118,7 +123,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- `gate-stage2.sh` draft (branch `m1-gate2`, scratch worktree `wt-gate2`); runs gate-stage1 in full, alone.
+- M1 milestone review (read-only reviewers).
 
 ## Needs human
 
