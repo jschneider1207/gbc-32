@@ -61,7 +61,7 @@ ADR 0036).
 | Code-size gate | none of its own: the H753 ITCM set's fit is reported (`scripts/check-itcm-set.sh`); this board may run slower (human, 2026-11-24) | gbc-core total `.text` <= 122,880 B (128 KiB minus an 8 KiB platform reserve; provisional), `scripts/check-code-size.sh` |
 | ROM source | Shield's QSPI NOR, memory-mapped | eMMC → copied at load into external HyperRAM on OCTOSPI, memory-mapped (human decision 2026-11-24; hardware ADR 0001 pending update) |
 | Saves | (Stage 2 choice) | eMMC |
-| Display | Shield's ILI9341V, 8-bit 8080 bus on FMC (stand-in only) | TBD by the hardware repo (FMC parallel or LTDC) |
+| Display | Shield's ST7789V (this board; ILI9341V on the other shield variant), 8-bit 8080 bus on FMC (stand-in only) | TBD by the hardware repo (FMC parallel or LTDC) |
 | Audio | (Stage 2 choice) | SAI → external DAC/amplifier |
 
 What carries over from Stage 2: proof that the core runs at full speed on a

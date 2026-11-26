@@ -96,7 +96,7 @@ gbc-core ◄── gbc-firmware ◄── gbc-nucleo-h753 ──► gbc-link ◄
   like `tools/h7-bench` (thumbv7em only, its own profile and rustflags).
   Everything chip- or board-specific lives here: PAC (`stm32h7`,
   `cortex-m`, `cortex-m-rt`, as h7-bench uses; no HAL, no async runtime),
-  `memory.x`, clocks, power, MPU, FMC/ILI9341, QUADSPI, DAC, GPIO and UART.
+  `memory.x`, clocks, power, MPU, FMC/LCD (ST7789V on this board), QUADSPI, DAC, GPIO and UART.
   It depends on `gbc-firmware`, `gbc-core`, `gbc-link`, `cortex-m`,
   `cortex-m-rt` and `stm32h7`, and it wires `gbc-link` to the UART.
   Dependency rule: see decision D9.
@@ -212,14 +212,14 @@ Carries over: the MPU/memory-mapped lessons and the measured miss cost
 the loader protocol framing. The NOR program/erase code does not carry
 over (Stage 3 loads from eMMC).
 
-## M3: Display (FMC → ILI9341V)
+## M3: Display (FMC → ST7789V; plan first written for the ILI9341V variant)
 
 - [ ] FMC bank 1 as SRAM/8-bit/write-enabled, asynchronous mode A; ADDSET/DATAST from twc 66 ns, twrl/twrh 15 ns at a 240 MHz HCLK (and a slower fallback); MPU region for the LCD as Device (no speculative reads, no write merging) or FMC BMAP remap; GPIO AF12 on the pins above (check each AF against DS12117)
-- [ ] ILI9341V init (reset timing §15.4, sleep out, COLMOD 16-bit, MADCTL for the chosen orientation; the BGR bit lets the core's R-low RGB555 order go out without a channel swap), window set (CASET/PASET), RAMWR
-- [ ] Converter/scaler in `gbc-firmware` (decision D3: 1.5x to 240x216 recommended): RGB555 → byte-swapped RGB565, nearest-neighbour 2→3; host unit tests against a naive reference over random frames; cycles per frame measured on the board
+- [x] Panel init (done in `lcd.rs`, session 24; ST7789V, commands common to both chips; reset timing §15.4, sleep out, COLMOD 16-bit, MADCTL for the chosen orientation; the BGR bit lets the core's R-low RGB555 order go out without a channel swap), window set (CASET/PASET), RAMWR
+- [ ] (host part done: `gbc-firmware::video`, b943740; board cycles pending) Converter/scaler in `gbc-firmware` (decision D3: 1.5x to 240x216 recommended): RGB555 → byte-swapped RGB565, nearest-neighbour 2→3; host unit tests against a naive reference over random frames; cycles per frame measured on the board
 - [ ] `Frame` in DTCM (Stage 1 B10/C5): after `FRAME_READY` the CPU converts it into an AXI SRAM output buffer (MPU non-cacheable, so the 100 KB of writes do not evict the ROM's D-cache lines), then MDMA streams the buffer to the FMC data address; no double-buffered `Frame` is needed (the core is not running while the conversion runs)
-- [ ] Tearing: TE (PE13) via EXTI; start the transfer on TE with rows written in the panel's native scan order (portrait 240-wide rows, so the write front stays ahead of the scan: 31.7 µs per 1.5x row vs ~44.6 µs per scanned row at 70 Hz); try FRMCTR1 near 59.7 Hz to remove 70-vs-59.73 Hz judder. ADR with what was measured
-- [ ] Readback self-test: after a frame, read a GRAM window back (RAMRD, byte reads, 18-bit format per ILI9341V) and compare with what was sent; mismatch count over UART
+- [ ] Tearing: TE (PE13) via EXTI; start the transfer on TE with rows written in the panel's native scan order (portrait 240-wide rows, so the write front stays ahead of the scan: 31.7 µs per 1.5x row vs ~44.6 µs per scanned row at 70 Hz); try the ST7789V FRCTRL2 (C6h) and porch settings near 59.7 Hz (default 60 Hz) to remove 70-vs-59.73 Hz judder. ADR with what was measured
+- [ ] Readback self-test: after a frame, read a GRAM window back (RAMRD, byte reads, 18-bit format; ST7789V readback expansion measured, docs/reference/lcd-panel.md) and compare with what was sent; mismatch count over UART
 - [ ] Measure: conversion cycles, DMA time per frame, and the core's cycles per frame with the display running (AXI/FMC contention), against M2's figures
 
 **Acceptance:** over 600 frames of `cgb-acid2` with the display running,
@@ -308,7 +308,7 @@ ITCM tiering does not carry over (the H735 puts the whole core in ITCM).
 ## M7: Stage 2 review and sign-off
 
 - [ ] Full `gate-stage2.sh` (host and board) passes
-- [ ] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ILI9341V: clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
+- [ ] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ST7789V (and ILI9341V): clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
 - [ ] Turn lows into one-line Stage 3 plan tasks; write the carry-over list into `docs/architecture.md` "Targets"
 - [ ] Human sign-off checklist (bottom)
 
