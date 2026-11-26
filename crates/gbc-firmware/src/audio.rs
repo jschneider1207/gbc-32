@@ -476,6 +476,217 @@ impl<const N: usize> Default for AudioRing<N> {
     }
 }
 
+/// Halves an [`AudioTee`] holds by default: 4 = 31 ms of audio, 4 KiB
+/// (what the player's AXI SRAM has room for). Enough when the consumer
+/// runs every video frame (16.7 ms, 2.1 halves).
+pub const TEE_HALVES: usize = 4;
+
+/// One half taken from an [`AudioTee`]: its real frames are `out[..real]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TeeHalf {
+    /// Index of the first real frame among every real frame offered since
+    /// [`AudioTee::new`] (wrapping), on or off.
+    pub first: u32,
+    /// Real frames (popped from the ring).
+    pub real: u16,
+    /// Underrun filler frames the DAC played after them.
+    pub held: u16,
+}
+
+/// What an [`AudioTee`] counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TeeStats {
+    /// Real frames offered since boot (on or off).
+    pub seen: u32,
+    /// Halves queued.
+    pub queued: u32,
+    /// Halves dropped because the queue was full (the consumer was slow).
+    pub dropped_halves: u32,
+    /// Real frames in those halves.
+    pub dropped_frames: u32,
+}
+
+/// A copy of the DAC feed for the PC (ADR 0041): the DMA ISR, right after
+/// it refilled a half ([`FeedTap::pop_into`]), offers that half here; the
+/// main loop takes whole halves and sends them as `Message::Audio`. A
+/// single-producer (the ISR) single-consumer (the main loop) queue of `H`
+/// halves (a power of two), with the [`AudioRing`] ordering rules: the
+/// producer writes a slot, then `Release`-stores `head`; the consumer
+/// reads it after an `Acquire` load of `head`, then `Release`-stores
+/// `tail`.
+///
+/// Off (the default) an offer only counts its real frames (two atomic
+/// accesses). On, it copies the real frames, unless the queue is full:
+/// then the half is **dropped** and counted ([`TeeStats::dropped_halves`]),
+/// so a slow consumer can never stall the DAC; the PC sees the gap in
+/// [`TeeHalf::first`]. The filler of an underrun is not copied, only
+/// counted in [`TeeHalf::held`].
+///
+/// Every field is an integer atomic, so a tee in memory that is not
+/// zeroed at boot (a board's NOLOAD section) is sound; [`AudioTee::reset`]
+/// then sets it up before the ISR runs.
+pub struct AudioTee<const H: usize = TEE_HALVES> {
+    /// 0 off, 1 on.
+    on: AtomicU32,
+    slots: [[AtomicU32; DMA_HALF_FRAMES]; H],
+    /// Per slot: real frames in bits 15:0, held frames in 31:16.
+    counts: [AtomicU32; H],
+    firsts: [AtomicU32; H],
+    head: AtomicU32,
+    tail: AtomicU32,
+    seen: AtomicU32,
+    dropped_halves: AtomicU32,
+    dropped_frames: AtomicU32,
+    queued: AtomicU32,
+}
+
+impl<const H: usize> AudioTee<H> {
+    /// Off and empty.
+    pub const fn new() -> Self {
+        const { assert!(H.is_power_of_two() && H <= 1 << 16) };
+        Self {
+            on: AtomicU32::new(0),
+            slots: [const { [const { AtomicU32::new(0) }; DMA_HALF_FRAMES] }; H],
+            counts: [const { AtomicU32::new(0) }; H],
+            firsts: [const { AtomicU32::new(0) }; H],
+            head: AtomicU32::new(0),
+            tail: AtomicU32::new(0),
+            seen: AtomicU32::new(0),
+            dropped_halves: AtomicU32::new(0),
+            dropped_frames: AtomicU32::new(0),
+            queued: AtomicU32::new(0),
+        }
+    }
+
+    /// Starts or stops copying (either context). Halves already queued
+    /// stay until [`AudioTee::clear`].
+    pub fn set_on(&self, on: bool) {
+        self.on.store(u32::from(on), Ordering::Relaxed);
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.on.load(Ordering::Relaxed) != 0
+    }
+
+    /// Back to [`AudioTee::new`]'s state (off, empty, counters 0; the
+    /// slots are left as they are). Call it before the producer runs.
+    pub fn reset(&self) {
+        for a in [
+            &self.on,
+            &self.head,
+            &self.tail,
+            &self.seen,
+            &self.dropped_halves,
+            &self.dropped_frames,
+            &self.queued,
+        ] {
+            a.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Producer: `half` is the DMA half just refilled, `real` the real
+    /// frames at its start (the rest is underrun filler). At most
+    /// [`DMA_HALF_FRAMES`] frames are kept.
+    pub fn offer(&self, half: &[u32], real: usize) {
+        let real = real.min(half.len()).min(DMA_HALF_FRAMES);
+        let first = self.seen.load(Ordering::Relaxed);
+        self.seen
+            .store(first.wrapping_add(real as u32), Ordering::Relaxed);
+        if !self.is_on() {
+            return;
+        }
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) as usize >= H {
+            self.dropped_halves.fetch_add(1, Ordering::Relaxed);
+            self.dropped_frames
+                .fetch_add(real as u32, Ordering::Relaxed);
+            return;
+        }
+        let i = head as usize & (H - 1);
+        if let (Some(slot), Some(src)) = (self.slots.get(i), half.get(..real)) {
+            for (d, &s) in slot.iter().zip(src) {
+                d.store(s, Ordering::Relaxed);
+            }
+        }
+        let held = (half.len() - real).min(0xFFFF) as u32;
+        if let (Some(c), Some(f)) = (self.counts.get(i), self.firsts.get(i)) {
+            c.store(real as u32 | held << 16, Ordering::Relaxed);
+            f.store(first, Ordering::Relaxed);
+        }
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        self.queued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Consumer: the oldest queued half into `out` (its real frames at
+    /// `out[..real]`), or `None` if none is queued.
+    pub fn pop_into(&self, out: &mut [u32; DMA_HALF_FRAMES]) -> Option<TeeHalf> {
+        let mut it = out.iter_mut();
+        self.pop_with(|w| {
+            if let Some(o) = it.next() {
+                *o = w;
+            }
+        })
+    }
+
+    /// Consumer: the oldest queued half, its real frames handed to `each`
+    /// in order (no copy buffer needed), or `None` if none is queued.
+    pub fn pop_with(&self, mut each: impl FnMut(u32)) -> Option<TeeHalf> {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if head == tail {
+            return None;
+        }
+        let i = tail as usize & (H - 1);
+        let c = self.counts.get(i)?.load(Ordering::Relaxed);
+        let first = self.firsts.get(i)?.load(Ordering::Relaxed);
+        let real = (c & 0xFFFF) as usize;
+        if let Some(slot) = self.slots.get(i) {
+            for s in slot.iter().take(real) {
+                each(s.load(Ordering::Relaxed));
+            }
+        }
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        Some(TeeHalf {
+            first,
+            real: real as u16,
+            held: (c >> 16) as u16,
+        })
+    }
+
+    /// Consumer: drops every queued half.
+    pub fn clear(&self) {
+        let head = self.head.load(Ordering::Acquire);
+        self.tail.store(head, Ordering::Release);
+    }
+
+    /// Halves waiting (a snapshot).
+    pub fn len(&self) -> usize {
+        let h = self.head.load(Ordering::Acquire);
+        let t = self.tail.load(Ordering::Acquire);
+        h.wrapping_sub(t) as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn stats(&self) -> TeeStats {
+        TeeStats {
+            seen: self.seen.load(Ordering::Relaxed),
+            queued: self.queued.load(Ordering::Relaxed),
+            dropped_halves: self.dropped_halves.load(Ordering::Relaxed),
+            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl<const H: usize> Default for AudioTee<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,5 +1060,68 @@ mod tests {
                 (ue, uf, oe, of)
             );
         }
+    }
+
+    #[test]
+    fn tee_copies_real_frames_counts_and_drops() {
+        let tee: AudioTee<4> = AudioTee::new();
+        let half: [u32; DMA_HALF_FRAMES] = core::array::from_fn(|i| i as u32 * 7);
+        let mut out = [0u32; DMA_HALF_FRAMES];
+        // Off: counted, not copied.
+        tee.offer(&half, 256);
+        assert!(tee.is_empty());
+        assert_eq!(tee.stats().seen, 256);
+        tee.set_on(true);
+        tee.offer(&half, 256);
+        tee.offer(&half, 200); // an underrun: 56 filler frames
+        let a = tee.pop_into(&mut out).unwrap();
+        assert_eq!(
+            a,
+            TeeHalf {
+                first: 256,
+                real: 256,
+                held: 0
+            }
+        );
+        assert_eq!(out, half);
+        out = [0; DMA_HALF_FRAMES];
+        let b = tee.pop_into(&mut out).unwrap();
+        assert_eq!(
+            b,
+            TeeHalf {
+                first: 512,
+                real: 200,
+                held: 56
+            }
+        );
+        assert_eq!(out[..200], half[..200]);
+        assert_eq!(out[200], 0, "filler not copied");
+        assert_eq!(tee.pop_into(&mut out), None);
+        // Full: the fifth half is dropped and leaves a gap in `first`.
+        for _ in 0..5 {
+            tee.offer(&half, 256);
+        }
+        let s = tee.stats();
+        assert_eq!((s.dropped_halves, s.dropped_frames, s.queued), (1, 256, 6));
+        let firsts: [u32; 4] = core::array::from_fn(|_| tee.pop_into(&mut out).unwrap().first);
+        assert_eq!(firsts, [712, 968, 1224, 1480]);
+        tee.offer(&half, 256);
+        assert_eq!(
+            tee.pop_into(&mut out).unwrap().first,
+            1992,
+            "gap of the dropped half"
+        );
+        tee.offer(&half, 256);
+        tee.clear();
+        assert!(tee.is_empty());
+        tee.set_on(false);
+        tee.offer(&half, 10);
+        assert!(tee.is_empty());
+        assert_eq!(tee.stats().seen, 2514);
+        tee.set_on(true);
+        tee.offer(&half, 10);
+        tee.reset();
+        assert!(!tee.is_on() && tee.is_empty());
+        assert_eq!(tee.stats(), TeeStats::default());
     }
 }
