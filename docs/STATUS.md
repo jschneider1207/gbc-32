@@ -140,7 +140,7 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0040).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0041).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
