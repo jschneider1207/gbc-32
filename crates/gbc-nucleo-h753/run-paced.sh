@@ -7,6 +7,10 @@
 #   ./run-paced.sh out/paced-cgb_sound.bin ../../test-roms/blargg/cgb_sound/cgb_sound.gb
 #   ./run-paced.sh out/paced-worst-case.bin out/worst-case.gb
 #
+# Note: the host run passes no `--input`, so an image built with
+# GBC_HEADLESS_INPUT set false-fails on `input_fnv` (a changed `paced v1`
+# line, exit 1); build such an image without it for this check.
+#
 # The second argument is the ROM file the image embeds (build.sh: for a
 # synthetic ROM, out/<name>.gb). The script runs the host's
 # `headless <rom> --frames <N> --paced` (tools/headless; the same loop and
@@ -20,7 +24,8 @@
 #    exactly the three lines `paced v1`, `paced end`, `paced drain`, in
 #    that order (else exit 2), so equal lines are equal ROM (rom_fnv),
 #    input, frame count, emulated clock, frame-hash chain and DAC feed
-#    (producer side, `end`, and what the DAC ISR handed the DAC, `drain`).
+#    (producer side, `end`, and what the DAC ISR wrote into the DMA half
+#    buffer, `drain`: the consumer side, not a read of the DAC output).
 # 2. Report-only lines, each required exactly once with each field below
 #    exactly once and numeric (else exit 2); exit 1 unless:
 #    - `stats paced ring`: underrun_events=0 underrun_frames=0

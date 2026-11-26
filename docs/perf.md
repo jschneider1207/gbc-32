@@ -1293,11 +1293,12 @@ Plan Stage 2 M4 acceptance: the audio-paced main loop
 `paced-<rom>` images (src/bin/paced.rs, `--features paced`, the
 `itcm-dtcm` placement of the headless images: `.itcm` 64,080 B, 1,200 B
 free, check-itcm-elf.sh OK; the front end in flash). 35,837 frames
-(10 minutes) each, 2026-11-26, commit eea7a18, checked by
+(10 minutes) each, 2026-11-26, commit 6485873, checked by
 `run-paced.sh` (exit 0 for both): the `paced v1/end/drain` lines equal
 the host's `headless <rom> --frames 35837 --paced` byte for byte (ROM
-fnv, emulated clock, frame-hash chain, DAC feed at the producer and at
-the ISR).
+fnv, emulated clock, frame-hash chain, DAC-feed hash at the producer and,
+at the ISR, as the ISR wrote it into the DMA half buffer: the consumer
+side, not a read of the DAC output). Evidence: docs/reference/m4-evidence.md.
 
 Wiring: the DMA ISR pops the ring through the `FeedTap`; `Idle` is `WFI`
 with DBGMCU_CR DBGSLEEP_D1 set (without it the cycle counter stops in
@@ -1329,7 +1330,7 @@ run starts four refills before the end of the DAC's start ramp.
   fill at the two ends can differ by up to one call's 550 samples, 16.8 ms
   over 600 s: ±28 ppm). The whole-run `ppm` adds the initial fill
   (2,048 frames ahead, +104 ppm) less the wait before the first pop
-  (about 17 ms, -28 ppm). The refills against the
+  (about 30 ms, -50 ppm: five halves, 39 ms, from the run start, less the ~9 ms the `paced v1` line takes on the UART before the first call; paced.rs `RAMP_LEFT`). The refills against the
   cycle counter give 32,768.28 Hz (`dac_rate_millihz`, nominal 32,768.675;
   ±1 refill over the run is ±13 ppm). All against the HSI: the LSE puts
   the CPU at 473.6047 MHz during these runs, so against real time the
