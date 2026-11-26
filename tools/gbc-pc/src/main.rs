@@ -1,8 +1,8 @@
 //! `gbc-pc`: talks to the dev board over the ST-LINK virtual COM port.
 //!
 //! ```text
-//! gbc-pc load <rom> [--port COM5] [--baud 115200] [--retries 5] [--timeout-ms 2000]
-//! gbc-pc hello      [--port COM5] [--baud 115200] [--retries 5] [--timeout-ms 2000]
+//! gbc-pc load <rom> [--port COM5] [--baud 4000000] [--retries 5] [--timeout-ms 2000]
+//! gbc-pc hello      [--port COM5] [--baud 4000000] [--retries 5] [--timeout-ms 2000]
 //! ```
 //!
 //! Exit code 0 on success, 1 on a link or load failure, 2 on a usage or
@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use gbc_pc::{Client, Config, LoadOutcome, Transport};
 
 const USAGE: &str = "usage:
-  gbc-pc load <rom> [--port COM5] [--baud 115200] [--retries 5] [--timeout-ms 2000]
-  gbc-pc hello      [--port COM5] [--baud 115200] [--retries 5] [--timeout-ms 2000]";
+  gbc-pc load <rom> [--port COM5] [--baud 4000000] [--retries 5] [--timeout-ms 2000]
+  gbc-pc hello      [--port COM5] [--baud 4000000] [--retries 5] [--timeout-ms 2000]";
 
 enum Command {
     Load(String),
@@ -39,7 +39,9 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args {
         cmd,
         port: "COM5".into(),
-        baud: 115_200,
+        // The loader image's rate (crates/gbc-nucleo-h753 src/bin/loader.rs,
+        // docs/reference/loader.md).
+        baud: 4_000_000,
         cfg: Config::default(),
     };
     let mut rom = None;
@@ -203,7 +205,7 @@ mod tests {
     fn defaults_and_errors() {
         let a = parse("hello").unwrap();
         assert!(matches!(a.cmd, Command::Hello));
-        assert_eq!((a.port.as_str(), a.baud), ("COM5", 115_200));
+        assert_eq!((a.port.as_str(), a.baud), ("COM5", 4_000_000));
         assert!(parse("load").is_err());
         assert!(parse("hello extra").is_err());
         assert!(parse("load a b").is_err());

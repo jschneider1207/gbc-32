@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run the PC companion (tools/gbc-pc) against the board from WSL.
 #
-#   scripts/gbc-pc.sh load <rom> [--port COM5] [--baud 115200] [--retries 5] [--timeout-ms 2000]
-#   scripts/gbc-pc.sh hello      [--port COM5] [--baud 115200]
+#   scripts/gbc-pc.sh load <rom> [--port COM5] [--baud 4000000] [--retries 5] [--timeout-ms 2000]
+#   scripts/gbc-pc.sh hello      [--port COM5] [--baud 4000000]
 #
 # WSL has poor COM-port access, so gbc-pc is a native Windows console .exe
 # (plan stage-2.md, "Crate layout"). This cross-builds it for
