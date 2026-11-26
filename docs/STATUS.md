@@ -146,7 +146,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Merged: scripted clock-table input + `run-replay.sh` (f2d0c50..24c318d; romtest split into lib + bin, module moves only). Running: `m5-soak` (10-min worst-case soak in the player, RTC save round trip). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
+- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Merged: scripted clock-table input + `run-replay.sh` (64d7374..24c318d; romtest split into lib + bin, module moves only). Running: `m5-soak` (10-min worst-case soak in the player, RTC save round trip). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
 
