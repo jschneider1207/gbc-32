@@ -22,6 +22,11 @@
 //! 3. The channel disables itself and sets CTCIF at the end; the main loop
 //!    sees it the next time it asks ([`LcdDma::busy`], [`LcdDma::wait`]).
 //!
+//! For measurements, [`LcdDma::start_now`] starts a queued transfer from
+//! the main loop instead of TE (the panel may then tear), and
+//! [`LcdDma::wait_started`] waits until TE has taken it. [`readback`] is
+//! the RAMRD comparison of the window with the buffer (between transfers).
+//!
 //! The interrupt and not a polled TE because the main loop must not have
 //! to sit on the TE line: with the core running between frames it would
 //! miss the edge by up to a frame. The completion is polled because
@@ -401,6 +406,40 @@ impl LcdDma {
         }
     }
 
+    /// [`LcdDma::wait`] without waiting: `None` while a transfer is
+    /// pending or running.
+    pub fn try_wait(&mut self) -> Option<Result<Option<Transfer>, Error>> {
+        match self.poll() {
+            Poll::Busy => None,
+            Poll::Idle => Some(Ok(None)),
+            Poll::Done(t) => Some(Ok(Some(t))),
+            Poll::Failed(e) => Some(Err(e)),
+        }
+    }
+
+    /// Waits up to `timeout` CPU cycles until a queued transfer has
+    /// started (the TE interrupt took it): true if it has, or if none is
+    /// pending.
+    pub fn wait_started(&self, timeout: u32) -> bool {
+        let t0 = cycles();
+        while STATE.load(Ordering::Acquire) == PENDING {
+            if cycles().wrapping_sub(t0) > timeout {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Starts a queued transfer now, without waiting for TE (a
+    /// measurement mode: the write front is then anywhere relative to the
+    /// scan, so the panel may tear; the GRAM still gets every byte). No
+    /// effect unless a transfer is pending. The TE interrupt cannot start
+    /// it a second time: both take the state from PENDING with interrupts
+    /// off here.
+    pub fn start_now(&mut self) {
+        cortex_m::interrupt::free(|_| start_pending(cycles()));
+    }
+
     /// The last finished transfer's figures.
     pub fn last(&self) -> Transfer {
         self.last
@@ -477,6 +516,31 @@ pub fn on_te() {
     // SAFETY: write-1-to-clear of line 13's pending bit; the DSB makes the
     // clear reach EXTI before the interrupt returns (no second entry).
     exti().cpupr1.write(|w| unsafe { w.bits(1 << EXTI_LINE) });
+    start_pending(now);
+    let n = TE_COUNT.load(Ordering::Relaxed);
+    if n == 0 {
+        TE_FIRST.store(now, Ordering::Relaxed);
+    } else {
+        let d = now.wrapping_sub(TE_AT.load(Ordering::Relaxed));
+        if d < TE_MIN.load(Ordering::Relaxed) {
+            TE_MIN.store(d, Ordering::Relaxed);
+        }
+        if d > TE_MAX.load(Ordering::Relaxed) {
+            TE_MAX.store(d, Ordering::Relaxed);
+        }
+    }
+    TE_AT.store(now, Ordering::Relaxed);
+    TE_COUNT.store(n.wrapping_add(1), Ordering::Relaxed);
+    cortex_m::asm::dsb();
+}
+
+/// Starts the pending transfer, if one is: RAMWR, then SWRQ (module
+/// docs). `now`: the cycle count of the event that started it (the TE
+/// interrupt's entry). Called from the TE interrupt, or by
+/// [`LcdDma::start_now`] with interrupts off; the state swap lets only one
+/// of them through.
+#[inline]
+fn start_pending(now: u32) {
     if STATE
         .compare_exchange(PENDING, RUNNING, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
@@ -498,21 +562,48 @@ pub fn on_te() {
         START_TE_AT.store(now, Ordering::Relaxed);
         START_AT.store(cycles(), Ordering::Relaxed);
     }
-    let n = TE_COUNT.load(Ordering::Relaxed);
-    if n == 0 {
-        TE_FIRST.store(now, Ordering::Relaxed);
-    } else {
-        let d = now.wrapping_sub(TE_AT.load(Ordering::Relaxed));
-        if d < TE_MIN.load(Ordering::Relaxed) {
-            TE_MIN.store(d, Ordering::Relaxed);
-        }
-        if d > TE_MAX.load(Ordering::Relaxed) {
-            TE_MAX.store(d, Ordering::Relaxed);
+}
+
+/// A readback check's result ([`readback`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Readback {
+    /// Pixels whose three bytes differ from [`lcd::expected_readback`]
+    /// under [`lcd::READBACK_MASK`].
+    pub mismatches: u32,
+    /// The first one: (x, y, got, want).
+    pub first: Option<(u16, u16, [u8; 3], [u8; 3])>,
+}
+
+/// Reads the window ([`Y0`]..=[`Y1`], all columns) back from the panel's
+/// GRAM (RAMRD, 3 bytes per pixel) and compares it with `buf` (plan M3
+/// "Readback self-test"). Takes the panel and buffer from
+/// [`LcdDma::parts`] (no transfer may run). About 70 ms at [`lcd::SPEC`].
+pub fn readback(l: &mut Lcd, buf: &OutFrame) -> Readback {
+    l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
+    l.begin_readback();
+    let mut r = Readback::default();
+    for (y, row) in buf.iter().enumerate() {
+        for (i, &w) in row.iter().enumerate() {
+            // The two pixels of a word: memory bytes hi0 lo0 hi1 lo1.
+            let b = w.to_le_bytes();
+            let px = [
+                u16::from_be_bytes([b[0], b[1]]),
+                u16::from_be_bytes([b[2], b[3]]),
+            ];
+            for (k, p) in px.into_iter().enumerate() {
+                let got = [l.read_data(), l.read_data(), l.read_data()];
+                let want = lcd::expected_readback(p);
+                if (0..3).any(|j| got[j] & lcd::READBACK_MASK != want[j] & lcd::READBACK_MASK) {
+                    r.mismatches += 1;
+                    if r.first.is_none() {
+                        r.first = Some(((i * 2 + k) as u16, y as u16, got, want));
+                    }
+                }
+            }
         }
     }
-    TE_AT.store(now, Ordering::Relaxed);
-    TE_COUNT.store(n.wrapping_add(1), Ordering::Relaxed);
-    cortex_m::asm::dsb();
+    l.end_read();
+    r
 }
 
 /// TE edge statistics since [`te_reset`], in CPU cycles.

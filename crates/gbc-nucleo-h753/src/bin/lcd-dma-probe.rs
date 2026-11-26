@@ -31,7 +31,7 @@ use core::cell::UnsafeCell;
 use core::fmt::Write;
 
 use gbc_firmware::video::{OUT_H, OutFrame, scale_frame};
-use gbc_nucleo_h753::lcd::{self, FrameRate, Lcd, READBACK_MASK, expected_readback};
+use gbc_nucleo_h753::lcd::{self, FrameRate, Lcd};
 use gbc_nucleo_h753::lcd_dma::{self, LcdDma, Transfer, Y0, Y1};
 use gbc_nucleo_h753::pac::interrupt;
 use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led, wait_since};
@@ -152,41 +152,14 @@ fn bars(x: usize, y: usize) -> u16 {
     (r * lv) | (g * lv) << 5 | (b * lv) << 10
 }
 
-/// The two pixels of a buffer word (memory bytes hi0 lo0 hi1 lo1).
-fn pixels(w: u32) -> [u16; 2] {
-    let b = w.to_le_bytes();
-    [
-        u16::from_be_bytes([b[0], b[1]]),
-        u16::from_be_bytes([b[2], b[3]]),
-    ]
-}
-
 /// A mismatching pixel: (x, y, got, want).
-type Bad = (usize, usize, [u8; 3], [u8; 3]);
+type Bad = (u16, u16, [u8; 3], [u8; 3]);
 
-/// Reads the window back and compares it with `buf`: (mismatching
-/// pixels, the first one).
+/// Reads the window back and compares it with `buf` ([`lcd_dma::readback`]):
+/// (mismatching pixels, the first one).
 fn readback(l: &mut Lcd, buf: &OutFrame) -> (u32, Option<Bad>) {
-    l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
-    l.begin_readback();
-    let mut bad = 0u32;
-    let mut first = None;
-    for (y, row) in buf.iter().enumerate() {
-        for (i, &w) in row.iter().enumerate() {
-            for (k, p) in pixels(w).into_iter().enumerate() {
-                let got = [l.read_data(), l.read_data(), l.read_data()];
-                let want = expected_readback(p);
-                if (0..3).any(|j| got[j] & READBACK_MASK != want[j] & READBACK_MASK) {
-                    bad += 1;
-                    if first.is_none() {
-                        first = Some((i * 2 + k, y, got, want));
-                    }
-                }
-            }
-        }
-    }
-    l.end_read();
-    (bad, first)
+    let r = lcd_dma::readback(l, buf);
+    (r.mismatches, r.first)
 }
 
 fn hex3(out: &mut Out, b: [u8; 3]) {
