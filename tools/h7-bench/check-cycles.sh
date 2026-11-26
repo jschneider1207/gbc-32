@@ -2,7 +2,7 @@
 # The on-board cycle ratchet (plan Stage 2 M6, gate step B2): checks the
 # cycles per frame of one bench report against the committed baseline.
 #
-#   ./check-cycles.sh <capture.txt> <image.bin> [<expected-cycles.txt>]
+#   ./check-cycles.sh [--fresh] <capture.txt> <image.bin> [<expected-cycles.txt>]
 #   ./check-cycles.sh --update [--force [--absorb-regression]] <capture.txt> <image.bin> <out-file>
 #
 # The capture is read-serial.sh's output of a `bench-itcm-dtcm-pll480` run
@@ -31,9 +31,13 @@
 #     never a failure. Each line's delta % is printed;
 #   - every workload line in the report has a baseline line (a new
 #     workload, or a QSPI pass the baseline lacks, needs a baseline line);
-#   - real time: every sign-off workload (`worst-case`, synth:worst-case;
-#     the replay ROMs are not in this bench) has max < 7,902,557 cycles
-#     per frame in every pass.
+#   - real time: every sign-off workload (`worst-case`, synth:worst-case,
+#     and `cpu_instrs`, the one replay ROM in this bench) has max <
+#     7,902,557 cycles per frame in every pass.
+# --fresh (check mode; gate B2): also, both of the last two complete
+# reports start after the capture's last `h7bench v1 start ` line (the
+# workloads' start lines of the boot that was flashed), else exit 2, so a
+# report the VCP buffered from an earlier boot is never judged.
 # `worst-case` max against 3,951,279 (the 50% figure) is a REPORT line,
 # never a check (human, 2026-11-25).
 #
@@ -70,12 +74,15 @@
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 die() { echo "check-cycles.sh: $*" >&2; exit 2; }
-usage="usage: check-cycles.sh <capture> <image.bin> [<expected-cycles.txt>] | --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>"
+usage="usage: check-cycles.sh [--fresh] <capture> <image.bin> [<expected-cycles.txt>] | --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>"
 REAL_TIME=7902557   # one real-time frame at 472 MHz (472e6 / 59.7275)
 HALF=3951279        # the 50% figure (plan M6), report only
-SIGNOFF="worst-case"
+# The sign-off workloads in this bench (plan B2: synth:worst-case and the
+# replay ROMs; cpu_instrs is the only replay ROM the bench runs).
+SIGNOFF="worst-case cpu_instrs"
 
-update=0 force=0 absorb=0
+update=0 force=0 absorb=0 fresh=0
+if [ "${1:-}" = --fresh ]; then fresh=1; shift; [ "${1:-}" != --update ] || die "--fresh is for check mode, not --update"; fi
 if [ "${1:-}" = --update ]; then
   update=1; shift
   while :; do
@@ -162,6 +169,21 @@ if [ "$nrep" -lt 2 ]; then
   exit 1
 fi
 cmp -s "$last" "$report" || die "the last complete report is not the one check-report.sh checked ($report)"
+# --fresh: both reports come from the boot that this capture saw run its
+# workloads: they start after the last `h7bench v1 start ` line (printed as
+# each workload starts, before the first report), so a report the VCP
+# buffered from an earlier boot of the same image is never judged.
+if [ "$fresh" = 1 ]; then
+  read -r last_start prev_banner < <(tr -d '\000\r' < "$cap" | awk '
+    /^h7bench v1 start [^ ]+ / { ls = NR }
+    /^h7bench v1 banner image=bench / { inb = 1; b = NR }
+    inb && /^h7bench v1 end pass=[0-9]+$/ { pb = lb; lb = b; inb = 0 }
+    END { print ls + 0, pb + 0 }')
+  [ "$last_start" -gt 0 ] || die "--fresh: no 'h7bench v1 start' line: the capture does not show this boot running its workloads"
+  [ "$prev_banner" -gt "$last_start" ] ||
+    die "--fresh: the last two complete reports do not both follow the last 'start' line (line $last_start): fewer than two reports from this boot (read longer)"
+  echo "check-cycles.sh: --fresh: the last two reports follow the boot's last workload start (line $last_start)"
+fi
 agree=$(awk '
   function field(k,   i, a) { for (i = 1; i <= NF; i++) { split($i, a, "="); if (a[1] == k) return a[2] } return "" }
   function num(v) { return v ~ /^[0-9]+$/ }
@@ -280,7 +302,7 @@ cmp=$(awk -v rt="$REAL_TIME" -v half="$HALF" -v so=" $SIGNOFF " '
       if (index(so, " " p[2] " ")) {
         if (gx[k] >= rt) print "FAIL " k ": max " gx[k] " cycles per frame >= " rt " (one real-time frame at 472 MHz)"
         else print "real time: " k " max " gx[k] " < " rt
-        printf "REPORT: %s max %d = %.1f%% of %d (the 50%% figure; not a check)\n", k, gx[k], gx[k] / half * 100, half
+        if (p[2] == "worst-case") printf "REPORT: %s max %d = %.1f%% of %d (the 50%% figure; not a check)\n", k, gx[k], gx[k] / half * 100, half
       }
     }
   }' <(echo "$parsed") <(echo "$got"))

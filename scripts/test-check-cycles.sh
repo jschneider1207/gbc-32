@@ -86,6 +86,29 @@ cap "$C" "" 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=7902557 /'; base 
 run "worst-case max 7,902,557 (real time) fails" 1 "$C" "$I" "$B"
 cap "$C" qspi 's/^(h7bench v1 qspi worst-case .*) max=2000000 /\1 max=7902557 /'; base "$B" qspi 's/^(qspi worst-case .*) max=2000000/\1 max=8000000/'
 run "qspi worst-case max over real time fails" 1 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 cpu_instrs .*) max=2000000 /\1 max=7902557 /'; base "$B" "" 's/^(flash cpu_instrs .*) max=2000000/\1 max=8000000/'
+run "cpu_instrs (a replay ROM) max 7,902,557 (real time) fails" 1 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 cpu_instrs .*) max=2000000 /\1 max=7902556 /'; base "$B" "" 's/^(flash cpu_instrs .*) max=2000000/\1 max=7902556/'
+run "cpu_instrs max 7,902,556 passes" 0 "$C" "$I" "$B"
+[[ $last == *"real time: flash cpu_instrs max 7902556 < 7902557"* ]] && ok "cpu_instrs real-time line printed" || bad "no cpu_instrs real-time line"
+[[ $last != *"REPORT: flash cpu_instrs"* ]] && ok "no 50% REPORT line for cpu_instrs" || bad "a 50% REPORT line for cpu_instrs"
+
+# --- --fresh: both reports after the boot's last workload start line ---
+starts() { sed -nE 's/^h7bench v1 ([^ ]+) calls=([0-9]+) .*/h7bench v1 start \1 calls=\2/p' "$exp"; }
+# fcap <file> <where>: two reports with the start lines at <where>: before
+# (both reports after them), between (only the last after them), after, none.
+fcap() {
+  { printf 'noise\000\n'; [ "$2" = before ] && starts; report; echo "h7bench v1 end pass=1"
+    [ "$2" = between ] && starts; report; echo "h7bench v1 end pass=2"; [ "$2" = after ] && starts; } | sed 's/$/\r/' > "$1"
+}
+base "$B"
+fcap "$C" before; run "--fresh: start lines before both reports passes" 0 --fresh "$C" "$I" "$B"
+fcap "$C" before; run "start lines before both reports passes without --fresh" 0 "$C" "$I" "$B"
+fcap "$C" between; run "--fresh: only the last report after the start lines: rc 2" 2 --fresh "$C" "$I" "$B"
+fcap "$C" after; run "--fresh: start lines after both reports: rc 2" 2 --fresh "$C" "$I" "$B"
+fcap "$C" none; run "--fresh: no start line: rc 2" 2 --fresh "$C" "$I" "$B"
+fcap "$C" between; run "without --fresh the stale report is accepted" 0 "$C" "$I" "$B"
+fcap "$C" before; run "--fresh with --update: rc 2" 2 --fresh --update "$C" "$I" "$tmp/o2"
 cap "$C"; base "$B" "" 's/cpu_hz=472000000/cpu_hz=480000000/'; run "baseline cpu_hz differs from the banner fails" 1 "$C" "$I" "$B"
 cap "$C"; base "$B" "" 's/placement=itcm-dtcm/placement=flash-axi/'; run "baseline placement differs from the banner fails" 1 "$C" "$I" "$B"
 cap "$C"; run "missing baseline file fails" 1 "$C" "$I" "$tmp/nope"
