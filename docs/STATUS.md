@@ -101,7 +101,7 @@ requires it). Core changes still move counts ~+-1.7% (ITCM), up to ~4% on
 storms; decision: keep +3% on every workload, layout-only failures go to the
 human like check-bench. The cycle baseline must be taken after ADR 0042 and
 from the main checkout path (crate hashes in mangled names are path-
-dependent). Next: LTO/opt-level (running), QSPI tuning, render A/B,
+dependent). LTO/opt-level: nothing faster (perf.md). Next: QSPI tuning, render A/B,
 baseline + check, worst-case report, soak, performance review.
 
 Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
@@ -162,7 +162,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- LTO/opt-level measurement (branch `m6-lto`, worktree in the session scratchpad). (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
+- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
 
 ## Needs human
 
