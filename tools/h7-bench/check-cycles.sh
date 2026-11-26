@@ -3,7 +3,7 @@
 # cycles per frame of one bench report against the committed baseline.
 #
 #   ./check-cycles.sh <capture.txt> <image.bin> [<expected-cycles.txt>]
-#   ./check-cycles.sh --update [--force] <capture.txt> <image.bin> <out-file>
+#   ./check-cycles.sh --update [--force [--absorb-regression]] <capture.txt> <image.bin> <out-file>
 #
 # The capture is read-serial.sh's output of a `bench-itcm-dtcm-pll480` run
 # (the one check-report.sh takes, README.md "QSPI ROM placement"); the
@@ -46,11 +46,19 @@
 #   qspi worst-case mean=3380000 max=3417095
 #
 # --update writes such a file from a capture, only after check-report.sh
-# passes and only for a 472 MHz banner. It refuses an existing <out-file>
-# unless --force. Rules for the committed baseline:
-#   - Absorbing a regression (a > +3% failure) into the committed baseline
-#     needs the human, as for check-bench.sh (plan M6). Refreshing it after
-#     an improvement does not.
+# and the report checks above pass and only for a 472 MHz banner. It
+# refuses an existing <out-file> unless --force. With --force it compares
+# the new lines with the existing file's and refuses (exit 1, listing them)
+# when any line's mean or max is above its old value, or an old line has
+# no new one, unless --absorb-regression is also given. The recorded
+# commit is HEAD, `+dirty` when the tree differs from HEAD (tracked or
+# untracked files) under crates/, tools/h7-bench/, tools/memory-x/,
+# perf/itcm-sections.txt, .cargo/ or rust-toolchain.toml; there is no
+# override. Rules for the committed baseline:
+#   - --absorb-regression, i.e. raising any line of the committed
+#     baseline (not only a > +3% failure), needs the human's approval, as
+#     for check-bench.sh (plan M6); the commit that uses it quotes the
+#     human. Refreshing it after an improvement does not.
 #   - Measure it on an image built in the main checkout path
 #     (/home/jess/gbc-32), after ADR 0042's core-first layout: crate hashes
 #     in symbol names depend on the build path, which moves code and
@@ -62,14 +70,23 @@
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 die() { echo "check-cycles.sh: $*" >&2; exit 2; }
-usage="usage: check-cycles.sh <capture> <image.bin> [<expected-cycles.txt>] | --update [--force] <capture> <image.bin> <out-file>"
+usage="usage: check-cycles.sh <capture> <image.bin> [<expected-cycles.txt>] | --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>"
 REAL_TIME=7902557   # one real-time frame at 472 MHz (472e6 / 59.7275)
 HALF=3951279        # the 50% figure (plan M6), report only
 SIGNOFF="worst-case"
 
-update=0 force=0
-[ "${1:-}" = --update ] && { update=1; shift; }
-[ "$update" = 1 ] && [ "${1:-}" = --force ] && { force=1; shift; }
+update=0 force=0 absorb=0
+if [ "${1:-}" = --update ]; then
+  update=1; shift
+  while :; do
+    case "${1:-}" in
+      --force) force=1; shift ;;
+      --absorb-regression) absorb=1; shift ;;
+      *) break ;;
+    esac
+  done
+  [ "$absorb" = 0 ] || [ "$force" = 1 ] || die "--absorb-regression needs --force"
+fi
 if [ "$update" = 1 ]; then
   [ $# -eq 3 ] || die "$usage"
   cap=$1 img=$2 out=$3
@@ -89,10 +106,10 @@ cap_qspi=0
 # on a large capture and the match is lost.
 grep -qE '^h7bench v1 qspi [^ ]+ calls=' <(tr -d '\000\r' < "$cap") && cap_qspi=1
 
-# --- the baseline (check mode): parsed before anything is judged ---------
-if [ "$update" = 0 ]; then
-  [ -f "$base" ] || { echo "check-cycles.sh: FAIL: baseline $base: no such file" >&2; exit 1; }
-  parsed=$(awk '
+# --- the baseline (check mode; the old file with --update --force): parsed
+# before anything is judged ---------------------------------------------
+parse_base() { # parse_base <file>: "H <placement> <hz>" and "L <pass> <workload> <mean> <max>" lines
+  awk '
     function bad(m) { printf "check-cycles.sh: %s:%d: %s\n", FILENAME, FNR, m > "/dev/stderr"; err = 1; exit 2 }
     /^[ \t]*(#|$)/ { next }
     $1 == "h7cycles" {
@@ -111,7 +128,11 @@ if [ "$update" = 0 ]; then
     }
     { bad("unrecognized line") }
     END { if (err) exit 2
-          if (!n) { printf "check-cycles.sh: %s: no workload lines\n", FILENAME > "/dev/stderr"; exit 2 } }' "$base") || exit 2
+          if (!n) { printf "check-cycles.sh: %s: no workload lines\n", FILENAME > "/dev/stderr"; exit 2 } }' "$1"
+}
+if [ "$update" = 0 ]; then
+  [ -f "$base" ] || { echo "check-cycles.sh: FAIL: baseline $base: no such file" >&2; exit 1; }
+  parsed=$(parse_base "$base") || exit 2
   base_qspi=0
   grep -q '^L qspi ' <<< "$parsed" && base_qspi=1
 fi
@@ -187,8 +208,39 @@ fi
 # --- --update: write the baseline ----------------------------------------
 if [ "$update" = 1 ]; then
   [ "$b_hz" = 472000000 ] || { echo "check-cycles.sh: FAIL: banner cpu_hz=$b_hz, the baseline is at 472000000" >&2; exit 1; }
-  commit=${H7_COMMIT:-$(git -C "$here" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}
-  if [ -z "${H7_COMMIT:-}" ] && ! git -C "$here" diff --quiet HEAD -- ../../crates . 2>/dev/null; then commit=$commit+dirty; fi
+  # --force over an existing baseline: no line may get slower or vanish
+  # unless --absorb-regression (the human's approval) says so.
+  if [ -e "$out" ]; then
+    old=$(parse_base "$out") || exit 2
+    worse=$(awk '
+      FNR == NR { if ($1 == "L") { k = $2 " " $3; om[k] = $4; ox[k] = $5; order[++n] = k } next }
+      { nm[$1 " " $2] = $3; nx[$1 " " $2] = $4 }
+      END {
+        for (i = 1; i <= n; i++) {
+          k = order[i]
+          if (!(k in nm)) { print "  " k ": in the old baseline, not in the capture"; continue }
+          if (nm[k] > om[k] || nx[k] > ox[k]) printf "  %s: mean %d -> %d, max %d -> %d\n", k, om[k], nm[k], ox[k], nx[k]
+        }
+      }' <(echo "$old") <(echo "$got"))
+    if [ -n "$worse" ]; then
+      if [ "$absorb" = 0 ]; then
+        echo "check-cycles.sh: FAIL: --force would raise or drop these lines of $out (--absorb-regression, with the human's approval, absorbs them):" >&2
+        echo "$worse" >&2
+        exit 1
+      fi
+      echo "check-cycles.sh: WARNING: --absorb-regression: raising or dropping these lines of $out (needs the human's approval; quote it in the commit):" >&2
+      echo "$worse" >&2
+    fi
+  fi
+  # The tree the image was built from: HEAD, +dirty for any difference
+  # (tracked or untracked) under what goes into the bench image. No
+  # override: a recorded commit is always what HEAD was.
+  inputs=(../../crates . ../../tools/memory-x ../../perf/itcm-sections.txt ../../.cargo ../../rust-toolchain.toml)
+  commit=$(git -C "$here" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+  if ! git -C "$here" diff --quiet HEAD -- "${inputs[@]}" 2>/dev/null ||
+    [ -n "$(git -C "$here" ls-files --others --exclude-standard -- "${inputs[@]}" 2>/dev/null)" ]; then
+    commit=$commit+dirty
+  fi
   tmpout=$(mktemp "$out.XXXXXX")
   {
     echo "# On-board cycles per frame, the M6 ratchet (check-cycles.sh; gate B2: > +3% fails)."

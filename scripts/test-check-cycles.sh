@@ -142,15 +142,29 @@ run "missing capture: rc 2" 2 "$tmp/nope" "$I" "$B"
 
 # --- --update ---
 O=$tmp/out.txt
-cap "$C" qspi; H7_COMMIT=feedc0de run "--update writes a baseline" 0 --update "$C" "$I" "$O"
-grep -q "^h7cycles v1 image=img.bin placement=itcm-dtcm cpu_hz=$HZ commit=feedc0de image_bytes=$bytes image_cksum=$crc\$" "$O" && ok "--update header" || bad "--update header: $(grep h7cycles "$O")"
+cap "$C" qspi; run "--update writes a baseline" 0 --update "$C" "$I" "$O"
+grep -qE "^h7cycles v1 image=img.bin placement=itcm-dtcm cpu_hz=$HZ commit=[0-9a-f]{12}(\+dirty)? image_bytes=$bytes image_cksum=$crc\$" "$O" && ok "--update header" || bad "--update header: $(grep h7cycles "$O")"
 [ "$(grep -c '^flash ' "$O")" = "$(wc -l < "$exp")" ] && [ "$(grep -c '^qspi ' "$O")" = "$(wc -l < "$exp")" ] && ok "--update has every flash and qspi line" || bad "--update line count"
 run "the written baseline passes against its capture" 0 "$C" "$I" "$O"
 cp "$O" "$tmp/out.keep"; cap "$C" qspi 's/ mean=1000000 / mean=900000 /'
 run "--update refuses an existing file" 1 --update "$C" "$I" "$O"
 cmp -s "$O" "$tmp/out.keep" && ok "existing file unchanged" || bad "--update changed an existing file"
-run "--update --force overwrites" 0 --update --force "$C" "$I" "$O"
-grep -q ' mean=900000 ' "$O" && ok "--force wrote the new values" || bad "--force did not write"
+run "--update --force overwrites with faster values" 0 --update --force "$C" "$I" "$O"
+grep -q ' mean=900000 ' "$O" && ok "--force wrote the faster values" || bad "--force did not write"
+# --force must not hide a regression (M6 review): any line slower, or gone.
+cp "$tmp/out.keep" "$O"; cap "$C" qspi 's/^(h7bench v1 qspi storm-div .*) mean=1000000 /\1 mean=1000001 /'
+run "--update --force refuses a mean 1 cycle slower" 1 --update --force "$C" "$I" "$O"
+[[ $last == *"qspi storm-div: mean 1000000 -> 1000001"* ]] && ok "the slower line is listed" || bad "the slower line is not listed"
+cmp -s "$O" "$tmp/out.keep" && ok "baseline unchanged after a refused --force" || bad "a refused --force changed the baseline"
+cap "$C" qspi 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=2000001 /; s/ mean=1000000 / mean=900000 /'
+run "--update --force refuses a max 1 cycle slower (others faster)" 1 --update --force "$C" "$I" "$O"
+cmp -s "$O" "$tmp/out.keep" && ok "baseline unchanged (max)" || bad "a refused --force changed the baseline (max)"
+cap "$C"; run "--update --force refuses dropping the qspi lines" 1 --update --force "$C" "$I" "$O"
+cmp -s "$O" "$tmp/out.keep" && ok "baseline unchanged (dropped lines)" || bad "a refused --force changed the baseline (dropped lines)"
+cap "$C" qspi 's/^(h7bench v1 qspi storm-div .*) mean=1000000 /\1 mean=1000001 /'
+run "--absorb-regression without --force: rc 2" 2 --update --absorb-regression "$C" "$I" "$O"
+run "--update --force --absorb-regression writes the regression" 0 --update --force --absorb-regression "$C" "$I" "$O"
+grep -q '^qspi storm-div mean=1000001 ' "$O" && [[ $last == *"WARNING: --absorb-regression"* ]] && ok "regression absorbed, with a warning" || bad "--absorb-regression did not write or warn"
 rm -f "$O"; cap "$C" "" 's/^(h7bench v1 cgb-raster .*hash=)[0-9a-f]/\1z/'
 run "--update on a garbled capture refuses" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written from a garbled capture" || bad "file written from a garbled capture"
@@ -167,6 +181,29 @@ run "--update refuses a non-472 MHz banner" 1 --update "$C" "$I" "$O"
 cap "$C" "" "" "" 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=200000 /'
 run "--update refuses a capture whose last two reports disagree" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written from disagreeing reports" || bad "file written from disagreeing reports"
+
+# --- --update's commit: HEAD, +dirty for any change to the image's inputs ---
+# In a scratch repo with the scripts at tools/h7-bench/ (they read ../../).
+R=$tmp/repo; mkdir -p "$R/tools/h7-bench" "$R/crates/x" "$R/tools/memory-x" "$R/perf" "$R/.cargo"
+cp "$script" "$R/tools/h7-bench/check-cycles.sh"; cp "$(dirname "$script")/check-report.sh" "$exp" "$R/tools/h7-bench/"
+for f in crates/x/a tools/h7-bench/a tools/memory-x/a perf/itcm-sections.txt .cargo/config.toml rust-toolchain.toml; do echo 1 > "$R/$f"; done
+git -C "$R" init -q && git -C "$R" add -A && git -C "$R" -c user.name=t -c user.email=t@t commit -qm t
+head=$(git -C "$R" rev-parse --short=12 HEAD)
+rcommit() { rm -f "$O"; bash "$R/tools/h7-bench/check-cycles.sh" --update "$C" "$I" "$O" > /dev/null 2>&1; sed -n 's/^h7cycles .* commit=\([^ ]*\) .*/\1/p' "$O" 2>/dev/null; }
+cap "$C"
+[ "$(rcommit)" = "$head" ] && ok "clean tree: commit=$head" || bad "clean tree: commit=$(rcommit), want $head"
+[ "$(H7_COMMIT=feedc0de rcommit)" = "$head" ] && ok "H7_COMMIT is no override" || bad "H7_COMMIT overrode the commit"
+for f in crates/x/a tools/h7-bench/a tools/memory-x/a perf/itcm-sections.txt .cargo/config.toml rust-toolchain.toml; do
+  cp "$R/$f" "$tmp/keep"; echo 2 >> "$R/$f"
+  [ "$(H7_COMMIT=feedc0de rcommit)" = "$head+dirty" ] && ok "modified $f: +dirty" || bad "modified $f: commit=$(rcommit)"
+  cp "$tmp/keep" "$R/$f"
+done
+for d in crates/x tools/h7-bench tools/memory-x .cargo; do
+  echo new > "$R/$d/untracked"
+  [ "$(rcommit)" = "$head+dirty" ] && ok "untracked file in $d: +dirty" || bad "untracked file in $d: commit=$(rcommit)"
+  rm -f "$R/$d/untracked"
+done
+[ "$(rcommit)" = "$head" ] && ok "clean again: commit=$head" || bad "not clean again: commit=$(rcommit)"
 
 [ $fails -eq 0 ] && echo "all check-cycles tests passed" || echo "$fails failed"
 [ $fails -eq 0 ]

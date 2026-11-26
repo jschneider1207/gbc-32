@@ -546,7 +546,7 @@ before: the second results array).
 
 ```
 ./check-cycles.sh <capture> out/h753/bench-itcm-dtcm-pll480.bin [expected-cycles.txt]
-./check-cycles.sh --update [--force] <capture> <image.bin> <out-file>
+./check-cycles.sh --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>
 ```
 
 The regression ratchet of gate step B2. It runs `check-report.sh` first
@@ -572,9 +572,15 @@ file), 2 a parse or usage error. `scripts/test-check-cycles.sh` (gate H7)
 covers every rule.
 
 `--update` writes a baseline from a 472 MHz capture that passes
-`check-report.sh` and refuses an existing file without `--force`.
-Absorbing a regression (a +3% failure) into the committed file needs the
-human, as for `check-bench.sh`. Measure it on an image built in the main
+`check-report.sh` and refuses an existing file without `--force`. With
+`--force` it refuses (exit 1, listing them) when any line of the existing
+file would get a higher mean or max, or lose its line, unless
+`--absorb-regression` is also given. **`--absorb-regression` needs the
+human's approval**, as absorbing a regression into `check-bench.sh`'s
+baseline does, and the commit that uses it quotes the human. The header's
+`commit=` is HEAD, with `+dirty` for any tracked or untracked change under
+`crates/`, `tools/h7-bench/`, `tools/memory-x/`, `perf/itcm-sections.txt`,
+`.cargo/` or `rust-toolchain.toml`; it has no override. Measure it on an image built in the main
 checkout path after ADR 0042's core-first layout: crate hashes in symbol
 names depend on the build path and move code (ADR 0042). The committed
 `expected-cycles.txt` was recorded that way on 2026-11-26 at main
