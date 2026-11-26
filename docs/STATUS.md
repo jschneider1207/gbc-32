@@ -4,49 +4,64 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 is **COMPLETE** (human, 2026-11-25; tag `stage1-m10`).
-  **Stage 2 (STM32H753 firmware): M0 and M1 done** (M1: gate
-  `--host-only` passed at the tagged commit, milestone review fixed, tag
-  `stage2-m1`). **M2 (ROM in QSPI NOR) is next**, unless the human moves
-  M3 (display) ahead of it (asked 2026-11-25, no answer yet: if they say
-  so, do M3 first; it needs no QSPI, the `headless` image already runs ROMs
-  from internal flash). Plan: `docs/plan/stage-2.md` (D1-D11).
+  **Stage 2 (STM32H753 firmware): M0, M1 and M2 done** (M2: gate
+  `--host-only` passed, milestone review fixed, tag `stage2-m2`).
+  **M3 (display, FMC -> ILI9341V) is next.** Plan: `docs/plan/stage-2.md`
+  (D1-D11).
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
   Real-time frame **7,902,557 cycles**; 50% report line **3,951,279**
   (reported, not gated).
 - **M1 results:** `headless` image byte-equal to the host on the board and
-  in QEMU for cpu_instrs and cgb-acid2 (600 frames); on the board
-  cpu_instrs mean/max 1,296,098 / 1,768,873 cycles per frame (16.4% /
-  22.4%), cgb-acid2 684,112 / 756,317. `.itcm` 64,080 B of 64 KiB (1,200 B
-  free). H735 size: docs/perf.md "Firmware-link size" (margin 2,392 B with
-  builtins in ITCM). M0 bench numbers: `tools/h7-bench/README.md`.
-- **Last updated:** 2026-11-25, session 22 (log
-  `logs/2026-11-25-22-stage2-m1.md`; session 21:
-  `logs/2026-11-25-21-stage2-m0.md`).
+  in QEMU for cpu_instrs and cgb-acid2 (600 frames); cpu_instrs mean/max
+  1,296,098 / 1,768,873 cycles per frame, cgb-acid2 684,112 / 756,317.
+  `.itcm` 64,080 B of 64 KiB (1,200 B free). H735 size: docs/perf.md
+  "Firmware-link size". M0 bench numbers: `tools/h7-bench/README.md`.
+- **M2 results:** shield NOR = Macronix MX25L6433F (8 MiB, QE set),
+  memory-mapped 0xEB at 59 MHz (FSIZE 16 MiB for ES0392 2.7.5; MPU
+  exposes 8 MiB), ~770 cycles per random 32-byte miss. Loader at 2 Mbit/s
+  (exact; 4 MiB in ~50 s, half of it erase). headless from QSPI EQUAL for
+  both ROMs; h7-bench from QSPI (same binary): worst-case 3,417,095 max
+  (+2.4%, 86.5% of the 50% line), storm-gdma +14%/+28%. Facts:
+  `docs/reference/qspi-nor.md`, `loader.md`, `m2-evidence.md` (re-run
+  commands), docs/perf.md "QSPI ROM placement (M2)".
+- **Board state:** `bench-itcm-dtcm-pll480` flashed, bench pack in the NOR.
+  `out/loader.bin` must be rebuilt from main before use (old builds serve
+  the wrong rate; gbc-pc defaults to 2 M).
+- **Last updated:** 2026-11-25, session 23 (log
+  `logs/2026-11-25-23-stage2-m2.md`; session 22:
+  `logs/2026-11-25-22-stage2-m1.md`).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M2 (ROM in QSPI NOR, memory-mapped)
+## Next up: Stage 2 M3 (display on the shield TFT)
 
-Tasks and acceptance: `docs/plan/stage-2.md` M2 (QUADSPI driver with JEDEC
-ID read, MPU window, UART loader (D5) with `gbc-link` and `tools/gbc-pc`
-created there per ADR 0036, read-latency measurement). Open M1 review lows
-(T-4, T-7, T-8, F-2, F-3, F-5..F-7) sit at the end of M1 in the plan; F-4
-(HFNMIENA, speculative FMC/QSPI access in HardFault) is listed under M2 and
-matters once QSPI/FMC are live. M2 also has the h7-bench image-CRC check
-(B1/B2 reuse of f1e1406).
+Tasks and acceptance: `docs/plan/stage-2.md` M3 (FMC bank 1 8-bit, MPU
+region 7 for the LCD as Device, ILI9341V init, RGB555 -> RGB565 1.5x scaler
+in `gbc-firmware`, TE-synced MDMA, readback self-test, ≤ 5% of a frame).
+The Board facts table lists the LCD pins; the PE4/FMC_A20 mapping is
+unverified (check first). Open lows: M1 (T-4, T-8, F-2, F-3, F-5..F-7) and
+M2 (H-2..H-5, T-3..T-5) sit at the end of their milestones in the plan;
+H-2/H-3 (QSPI opcode allow-list, NOR reset at init) are cheap.
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
-`CycleClock`; root workspace), `crates/gbc-nucleo-h753` (own workspace: lib
-bring-up, bins `boot` and `headless` behind feature `headless`; `build.sh`,
-`flash.sh`, `run-headless.sh` = flash + read + compare, image CRC checked),
-`tools/headless` (host counterpart, `expected/`), `tools/headless-qemu`
-(`run.sh`), `tools/memory-x` (memory.x generator), `tools/h7-bench` (cycle
-bench, on the lib). Gate: `scripts/gate-stage2.sh --host-only` (H1-H8,
-~10 min alone, exit 3 = all OK; board steps B1-B5 not implemented, so
-without `--host-only` it exits 1). Board lock: `scripts/lib/board-lock.sh`
-(`with_board_lock`; flash.sh/read-serial.sh take it themselves). Build env
-for the firmware scripts: `GBC_BUILD_LOCK=<lock>`, `GBC_TEST_ROMS=<dir>`.
+`CycleClock`, `rom_image` (ADR 0037); root workspace), `crates/gbc-link`
+(COBS + CRC-32 serial protocol, no deps), `tools/gbc-pc` (Windows .exe
+loader client; `scripts/gbc-pc.sh` builds, runs it via interop, takes the
+board lock; host tests incl. the board's own `loader.rs` and `baud.rs` via
+`#[path]`), `crates/gbc-nucleo-h753` (own workspace: lib bring-up incl.
+`qspi.rs`, `loader.rs`, `baud.rs`; bins `boot`, `qspi-probe`, `qspi-mmap`,
+`qspi-write`, `loader`, `headless` (feature `headless`; `rom-qspi` = ROM
+from the NOR); `build.sh`, `flash.sh`, `run-headless.sh`,
+`run-headless-qspi.sh`, `run-loader-roundtrip.sh`, `gen-test-image.sh`),
+`tools/headless` (host counterpart, `expected/`), `tools/headless-qemu`,
+`tools/memory-x`, `tools/h7-bench` (cycle bench; QSPI pass from a ROM pack,
+`run-qspi.sh`, `check-report.sh`). Gate: `scripts/gate-stage2.sh
+--host-only` (H1-H8, ~7 min alone, exit 3 = all OK; board steps B1-B5 not
+implemented, so without `--host-only` it exits 1). Board lock:
+`scripts/lib/board-lock.sh`. Build env for the firmware scripts:
+`GBC_BUILD_LOCK=<lock>`, `GBC_TEST_ROMS=<dir>`. Serial at another rate:
+`H7_BAUD=<bps> tools/h7-bench/read-serial.sh`.
 
 Key plan points: board performance vs the 50% bar is report-only (the README
 target applies to the H735 at 550 MHz); gated are real time and the +3%
@@ -116,22 +131,11 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 23 (2026-11-25), M2 in progress. Landed: ADR 0037 image format
-  (23bd089), `crates/gbc-link` (fc89592), `tools/gbc-pc` + `scripts/gbc-pc.sh`
-  (11dfa11), QSPI indirect/ID (b325187: MX25L6433F, QE already set),
-  memory-mapped 0xEB + MPU window + F-4 (ac757d6, 105c9dd), NOR write side +
-  UART RX/baud (edcd218..d62bcb5), T-7 and the h7-bench image-range check.
-  Facts: `docs/reference/qspi-nor.md`. Running: the board `loader` bin and a
-  4 MiB gbc-pc round trip, baud measurement (branch `m2-loader`, scratch
-  worktree `wt-loader`). Left in M2 after it: headless from QSPI, bench
-  placement `itcm-dtcm-qspi`, then the milestone review and tag.
+- None.
 
 ## Needs human
 
 Open (session 22, 2026-11-25):
-- **Milestone order (question):** do M3 (display on the shield TFT) before
-  M2 (QSPI ROM)? M3 does not need QSPI. Default if no answer: M2 first, as
-  planned.
 - **H735 ITCM reserve (C-P5, no answer needed now):** measured on the firmware
   link (docs/perf.md "Firmware-link size"), a core grown to the 122,880 B gate
   plus the compiler_builtins it calls (4,278 B) leaves 3,854 B of the 8 KiB
@@ -215,6 +219,11 @@ Open (earlier sessions):
   mid-session on 2026-11-22).
 
 Open: `../gbc-32-hardware/docs/firmware-interface.md` says the audio rate is "decided in firmware M6"; ADR 0021 fixed it at 32,768 Hz (agents may not edit that repo).
+
+Decided in session 23 (2026-11-25), human: the NUCLEO taking ROMs only up
+to 8 MiB - 256 B (M2 review H-6; Stage 3 loads into >= 8 MiB HyperRAM, so
+unaffected): "that doesnt matter then for the nucleo prototype". No
+answer came to the M3-before-M2 question; M2 was done first as planned.
 
 Decided in session 18 (2026-11-24), human ("Go with your recommendation
 for each", to the three questions put to them):

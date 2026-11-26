@@ -205,6 +205,8 @@ hash lines as the host. The `itcm-dtcm-qspi` figures are committed. The
 gated). If it exceeds a full real-time frame, the M6 ROM-placement task
 becomes required.
 
+**Met (session 23, 2026-11-25; tag `stage2-m2`):** 4 MiB round trip, headless from QSPI (both ROMs EQUAL) and the h7-bench QSPI pass re-run on dc36238 (`docs/reference/m2-evidence.md`); `synth:worst-case` from QSPI 3,417,095 max = 86.5% of the 50% line, 43.2% of a frame, so the M6 ROM-placement task stays optional; `--host-only` H1-H8 OK. Review: 3 mediums fixed (H-1 36dbe9c/1c53efe, T-1 79706b7, T-2 dc36238/c617829), H-6 closed by the human, lows as tasks above.
+
 Carries over: the MPU/memory-mapped lessons and the measured miss cost
 (OCTOSPI HyperRAM is memory-mapped the same way), the image header, and
 the loader protocol framing. The NOR program/erase code does not carry

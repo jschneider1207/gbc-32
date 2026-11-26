@@ -6,7 +6,7 @@ image generator was not committed, no script did the round trip, and the
 captures were gone). NUCLEO-H753ZI + X-NUCLEO-GFX02Z1 (MX25L6433F),
 ST-LINK VCP on COM5, CPU 472 MHz.
 
-**Run on commit `f0d6a3e`** (2026-11-25), clean tree, every image built
+**Run on commit `f0d6a3e`** (2026-11-25; rebased onto main as `dc36238`, which differs from it only in `docs/plan/stage-2.md`), clean tree, every image built
 from it by `build.sh` (here and in `tools/h7-bench`). The loader served at
 2,000,000 bit/s (exact; `loader.md` "Baud rate"). The full captures were
 kept outside the repository; the lines below are copied from them.
