@@ -1845,6 +1845,56 @@ them. Cart RAM goes in AXI SRAM too (it can be up to 128 KB with MBC5).
 `check-code-size.sh` prints both sizes for thumbv7em. The same split
 applies on the H735 (above).
 
+#### ITCM tier A/B (M6)
+
+The default drop, the plain tile path, was never measured against the
+alternative of keeping it in ITCM. It cannot simply be added back:
+`.itcm` is 64,032 B with it dropped (h7-bench; 64,088 B in `player`), so
+it fits only if a different tier of at least about 6,830 B leaves instead.
+The tier sizes in the h7-bench ELF (FUNC symbols matched by the globs,
+2026-11-26) are: A 39,094 B; B per event 7,402 B; B plain tile path
+8,078 B; B per line 3,196 B; C APU 9,556 B; D 844 B. So the per-line
+tier the plan suggested (3,196 B), or per line plus D (4,040 B), does not
+make room. Two single-tier swaps do:
+
+| Build (`H7_BENCH_ITCM_DROP`) | `.itcm` | `check-itcm-elf.sh` |
+|---|---|---|
+| default: `plain tile path` | 64,032 B | OK |
+| `cheap, per-event` (Tier B per event in flash, plain tile path in ITCM) | 64,632 B | OK |
+| `APU, per sync` (Tier C in flash, plain tile path in ITCM) | 62,544 B | OK (\*) |
+
+(\*) Only 39 globs are kept with this drop, and `tools/memory-x`'s
+`MIN_GLOBS` guard (40) refuses it. It was lowered to 30 for this
+measurement only and then reverted.
+
+Measured on `bench-itcm-dtcm-pll480` (472 MHz, internal-flash ROMs), built
+in one worktree path. Each capture passed `check-report.sh` (15 lines equal
+to `expected-hashes.txt`). Two runs of the default image agreed within
+0.01%, so any difference below comes from layout, not from run-to-run
+noise. Deltas against the default, mean / max:
+
+| Workload | drop per-event | drop APU |
+|---|---|---|
+| `synth:worst-case` | +1.42% / +1.42% | +2.35% / +2.46% |
+| `synth:cgb-raster` | -0.21% / -0.22% | -0.07% / -0.07% |
+| `synth:dmg-raster` | +2.55% / +2.56% | +0.34% / +0.33% |
+| `synth:event-storm` | +1.14% / +1.13% | +1.86% / +1.86% |
+| `blargg/cpu_instrs` | +0.64% / +0.50% | +0.40% / +0.32% |
+| max \|delta\| over 15 | 4.97% (storm-div, faster) | 2.46% (worst-case max) |
+
+Neither swap is faster on the bound set. Both are slower on `worst-case`
+and `event-storm`, and the per-event swap is slower on `dmg-raster` as
+well. The workload that should gain most from the plain tile path,
+`cgb-raster`, the closest to cgb-acid2-like content, gains at most 0.2%,
+which is noise. The plain tile path runs once per line per run of plain
+tiles and stays warm in the 16 KiB I-cache, while the per-event PPU
+functions and the APU set run at every event or sync. **The default stays
+`plain tile path`** for both h7-bench and gbc-nucleo-h753. The `player`
+image built from main runs Pokemon Red with 0 over budget (busy max
+1.83 M cycles, 23% of the budget). The earlier figure "no tier dropped,
+opt-level 2: +2.1% cgb-raster" ("LTO and opt-level (M6)") measured a
+different code generation, not this placement.
+
 ### Mechanism (both chips)
 
 gbc-core cannot name its own sections. In edition 2024
