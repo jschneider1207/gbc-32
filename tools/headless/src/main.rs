@@ -5,8 +5,16 @@
 //! this tool cannot print different lines for the same ROM and script.
 //!
 //! ```text
-//! headless <rom> [--input <program.txt>] [--frames <N>]
+//! headless <rom> [--input <program.txt>] [--frames <N>] [--paced]
 //! ```
+//!
+//! `--paced` runs `gbc_firmware::paced` instead (the audio-paced main
+//! loop, Stage 2 M4) and prints its lines (`paced ` compared, `stats `
+//! not; format in its module docs): the board's `paced` lines must equal
+//! these. The consumer is simulated: the idle hook pops one DMA half
+//! (256 frames) through a `FeedTap`, as the board's DMA ISR would during
+//! `WFI`. The `stats paced speed` line is meaningless here (no real-time
+//! consumer).
 //!
 //! `--frames` defaults to the script's `end <frames>` line. The `stats`
 //! lines time each `run_frame` call with the host's monotonic clock in
@@ -23,8 +31,11 @@ use std::time::Instant;
 
 use gbc_core::{Frame, Memory, StereoSample, WHITE, cart_ram_size};
 use gbc_firmware::CycleClock;
+use gbc_firmware::audio::{DMA_HALF_FRAMES, FeedRing, FeedTap};
+use gbc_firmware::headless::NoSink;
 use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};
+use gbc_firmware::paced::{self, Feed, Hooks, Idle};
 
 /// Nanoseconds since start, wrapping (about 4.3 s per wrap; a `run_frame`
 /// call takes milliseconds).
@@ -55,20 +66,37 @@ impl<W: std::io::Write> std::fmt::Write for Out<W> {
     }
 }
 
+/// The host's stand-in for the board's DMA ISR during `WFI`: each idle
+/// call pops one DMA half through the tap.
+struct HostConsumer<'a> {
+    ring: &'a FeedRing,
+    tap: &'a FeedTap,
+    half: [u32; DMA_HALF_FRAMES],
+}
+
+impl Idle for HostConsumer<'_> {
+    fn idle(&mut self) {
+        self.tap.pop_into(self.ring, &mut self.half);
+    }
+}
+
 struct Args {
     rom: String,
     input: Option<String>,
     frames: Option<u32>,
+    paced: bool,
 }
 
-const USAGE: &str = "usage: headless <rom> [--input <program.txt>] [--frames <N>]";
+const USAGE: &str = "usage: headless <rom> [--input <program.txt>] [--frames <N>] [--paced]";
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut rom = None;
     let mut input = None;
     let mut frames = None;
+    let mut paced = false;
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--paced" => paced = true,
             "--input" => input = Some(it.next().ok_or("--input needs a file")?),
             "--frames" => {
                 let n = it.next().ok_or("--frames needs a number")?;
@@ -83,6 +111,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         rom: rom.ok_or("no ROM given")?,
         input,
         frames,
+        paced,
     })
 }
 
@@ -132,16 +161,41 @@ fn main() -> ExitCode {
         w: std::io::BufWriter::new(std::io::stdout().lock()),
         err: None,
     };
-    let r = headless::run(&rom, Script::new(&presses), frames, bufs, &clock, &mut out);
+    let script = Script::new(&presses);
+    let r = if args.paced {
+        let ring = Box::new(FeedRing::new());
+        let tap = FeedTap::new();
+        let mut consumer = HostConsumer {
+            ring: &ring,
+            tap: &tap,
+            half: [0; DMA_HALF_FRAMES],
+        };
+        let hooks = Hooks {
+            clock: &clock,
+            sink: &mut NoSink,
+            idle: &mut consumer,
+        };
+        let feed = Feed {
+            ring: &ring,
+            tap: &tap,
+        };
+        paced::run(&rom, script, frames, bufs, feed, hooks, &mut out)
+            .map(drop)
+            .map_err(|e| format!("{e:?}"))
+    } else {
+        headless::run(&rom, script, frames, bufs, &clock, &mut out)
+            .map(drop)
+            .map_err(|e| format!("{e:?}"))
+    };
     let flushed = out.w.flush();
     if let Some(e) = out.err.or(flushed.err()) {
         eprintln!("headless: stdout: {e}");
         return ExitCode::from(1);
     }
     match r {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("headless: {e:?}");
+            eprintln!("headless: {e}");
             ExitCode::from(1)
         }
     }
