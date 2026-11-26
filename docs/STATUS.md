@@ -35,8 +35,9 @@ Session 22 (2026-11-25) progress; ticks with commits in `docs/plan/stage-2.md` M
   and cgb-acid2 (4ee66e1), `gbc-nucleo-h753` lib + `boot` image verified on
   the board (34d7fab; `lse_cpu_hz=473532048`), path-independent firmware
   images (afe079e).
-- Remaining, in order: (1) `headless` board image, byte-equal to
-  `tools/headless/expected/*` (in flight, branch `m1-headless`); (2) h7-bench
+- Done since: `headless` board image, byte-equal to the host on the board
+  (71b22ec, a1f5bdb; the M1 board acceptance is met).
+- Remaining, in order: (2) h7-bench
   switch-over onto the `gbc-nucleo-h753` lib (ADR 0036: drop `h755`, 392 MHz
   and HSI-64 images; re-check bench hashes on the board); (3) QEMU smoke of
   the headless loop; (4) C-P5 size-gate measurement on the firmware link
@@ -112,7 +113,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- `headless` board image (branch `m1-headless`, scratch worktree `wt-headless`).
+- h7-bench switch-over (branch `m1-h7-switch`, uses the board) and QEMU smoke (branch `m1-qemu`), scratch worktrees.
 
 ## Needs human
 
