@@ -1237,6 +1237,12 @@ it does not slow the MDMA either (in all three modes the sink was
 already waiting when it finished, `late=0`, so the figure is exact). TE
 to SWRQ 59 to 88 cycles. 0 transfer errors.
 
+The image rebuilt at 6af43aa (one panic-location byte different: a doc
+comment moved a line in `lcd_dma.rs`), `te-wait`, run once more: lines
+equal, 587 readbacks, 0 mismatches, control 2, core 681,404 / 753,518,
+`scale_frame` + `present` at most 197,375, the transfer 3,822,714 to
+3,822,740.
+
 `dmg-acid2` (`headless-display-dmg-acid2`, `te-wait`, the same build):
 its 602 lines equal the host tool's (`tools/headless`, 600 frames; no
 committed expected file, so a scratch file), 592 frames, 0 mismatching
