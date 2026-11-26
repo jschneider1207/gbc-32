@@ -1286,6 +1286,67 @@ dmg-acid2 592 readbacks, 0 mismatches, core 683,981 / 752,329. The
 readback is unchanged (42.63 M cycles); the loop is about 8 ms a frame
 longer (run_ms 68,856 instead of 59,070).
 
+### Paced loop (M4)
+
+Plan Stage 2 M4 acceptance: the audio-paced main loop
+(`gbc_firmware::paced`) on the board with the panel and the DAC on, the
+`paced-<rom>` images (src/bin/paced.rs, `--features paced`, the
+`itcm-dtcm` placement of the headless images: `.itcm` 64,080 B, 1,200 B
+free, check-itcm-elf.sh OK; the front end in flash). 35,837 frames
+(10 minutes) each, 2026-11-26, commit eea7a18, checked by
+`run-paced.sh` (exit 0 for both): the `paced v1/end/drain` lines equal
+the host's `headless <rom> --frames 35837 --paced` byte for byte (ROM
+fnv, emulated clock, frame-hash chain, DAC feed at the producer and at
+the ISR).
+
+Wiring: the DMA ISR pops the ring through the `FeedTap`; `Idle` is `WFI`
+with DBGMCU_CR DBGSLEEP_D1 set (without it the cycle counter stops in
+`WFI`: 163 counts per TE period instead of 7.9 M, measured at every
+boot, docs/reference/audio-dac.md); the display sink scales and presents
+a frame only if the previous transfer has finished, else skips it; the
+run starts four refills before the end of the DAC's start ramp.
+
+| | `cgb_sound` | `synth:worst-case` |
+|---|---|---|
+| core cycles per call, mean / max | 741,536 / 2,458,648 (frame 54) | 3,325,532 / 3,347,461 |
+| as a share of a 472 MHz frame (7,902,556) | 9.4% / 31.1% | 42.1% / 42.4% |
+| ring push (conditioning + hash), mean / max | 34,236 / 35,549 | 35,162 / 35,707 |
+| frame hash (`fbs`, per `FRAME_READY`), mean / max | 184,926 / 186,306 | 184,920 / 186,058 |
+| display sink, mean / max (skips included) | 139,505 / 195,265 | 148,663 / 204,706 |
+| `scale_frame` / `present` mean (presented frames) | 193,289 / 339 | 202,312 / 362 |
+| busy per frame (sum of the means), idle share | 1,100,203, **86.1% idle** | 3,694,277, **53.3% idle** |
+| `WFI` calls (run / drain) | 107,720 / 10 | 70,871 / 8 |
+| ring fill min / max (of 2,048) | 1,039 / 2,047 | 1,243 / 2,047 |
+| underruns / overruns during the run | 0 / 0 | 0 / 0 |
+| `ppm` (whole run) / `steady_ppm` | +82 / +9 | +72 / +18 |
+| display presented / skipped | 25,788 / 10,046 (28.0%) | 26,231 / 9,605 (26.8%) |
+| display transfer errors / stuck | 0 / 0 | 0 / 0 |
+| DAC ISR cost min / max (pop + tap fold of 256 frames) | 552 / 8,110 | 556 / 8,290 |
+| DAC errors, missed refills | 0 | 0 |
+
+- **Speed.** `steady_ppm` (from the first `WFI`, the ring full at both
+  ends) is the ÷7,202 divider's +20.6 ppm within the measurement (the
+  fill at the two ends can differ by up to one call's 550 samples, 16.8 ms
+  over 600 s: ±28 ppm). The whole-run `ppm` adds the initial fill
+  (2,048 frames ahead, +104 ppm) less the wait before the first pop
+  (about 17 ms, -28 ppm). The refills against the
+  cycle counter give 32,768.28 Hz (`dac_rate_millihz`, nominal 32,768.675;
+  ±1 refill over the run is ±13 ppm). All against the HSI: the LSE puts
+  the CPU at 473.6047 MHz during these runs, so against real time the
+  emulator runs +3,400 ppm fast (STATUS "Needs human").
+- **Display skips (front-end policy, report only).** About 27% of the
+  frames find the previous transfer still pending or running: a frame
+  presented at a random point of the panel's TE period waits up to
+  16.7 ms for TE, then 8.1 ms for the transfer, so it is often not done
+  when the next frame comes 16.7 ms later; the panel then shows about
+  44 frames a second, in runs of every other frame as the two 60 Hz
+  clocks drift. The core never waits for the panel.
+- **The cost of the stand-ins.** The frame hash (`fbs`, 2.3% of a frame)
+  and the tap's FNV fold in the ISR are acceptance instruments, not
+  product cost; `scale_frame` (2.4 to 2.6%) is the display's.
+- `cgb_sound`'s slowest call is frame 54, early in the ROM (31% of a
+  frame), the reason for its lower `min_fill`.
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed

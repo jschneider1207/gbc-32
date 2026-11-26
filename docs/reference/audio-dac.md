@@ -162,6 +162,39 @@ pin to that 0.2 V.
   to 3,946 to 4,079. A ring's `pop_into` (a copy) should cost about as
   much as the fill.
 
+## In the paced loop (M4, `paced-<rom>`)
+
+Measured 2026-11-26 with `src/bin/paced.rs` (figures: docs/perf.md
+"Paced loop (M4)").
+
+- **The cycle counter stops in `WFI`** unless DBGMCU_CR DBGSLEEP_D1
+  (bit 0) is set (RM0433 Rev 9 DBGMCU_CR: "automatic clock stop" in
+  Sleep): sleeping in `WFI` between TE interrupts, the mean TE period read
+  as 163 DWT counts with the bit clear and 7,895,954 with it set (the
+  panel's 59.8 Hz at 472 MHz). DWT_CYCCNT counts CPU clock cycles and
+  CSleep gates the CPU clock. So a loop that idles in `WFI` and times
+  itself with the DWT must set the bit (the paced image does), or its
+  elapsed time is the busy time only. Stage 3 should time real time from
+  a timer instead, so Sleep can gate the clock.
+- **DBGMCU_CR survives a system reset** (`dbgmcu_cr_boot=0x00000001` in
+  every boot after the first image set it; only a power-on reset clears
+  it), so an image must write the bit it depends on, not assume the reset
+  value.
+- **The start ramp and the speed figures.** `AudioDac::start` plays its
+  8,192-frame ramp (30 refills after the 512 frames it writes itself)
+  before the source is called. A loop started right after `start` fills
+  the ring and then idles 250 ms that the speed figures count as real
+  time with nothing consumed: a 1,200-frame run measured -8,630 ppm. The
+  paced image waits until 26 refills have passed (96 M cycles, 203 ms),
+  then runs.
+- **ISR cost with the ring:** `TAP.pop_into(&RING, out)` (a 256-frame
+  copy plus the tap's FNV-1a fold of 1,024 bytes) is 8,110 to 8,290
+  cycles at most (17.5 µs, 0.22% of the CPU at 128 interrupts/s); 552 to
+  556 at least (the stop ramp's zeros).
+- Over two 10-minute runs (76,872 refills each) with the panel's MDMA
+  transfers and the core running: 0 late refills, 0 TEIF/DMEIF/FEIF, 0
+  DAC DMA underruns, stop ramp finished.
+
 ## Wiring (for the human)
 
 | Signal | MCU pin | ST morpho (outer rows, free with the shield on) | Zio (under the shield) |
