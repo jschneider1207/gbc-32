@@ -185,6 +185,9 @@ All runs below were with the D-cache on, at 472 MHz.
   expected: 12 compare mismatches (one per round), and 29 unaligned
   mismatches in each cache state (the number of checks that cover that
   byte). The loader task must re-run these checks on a known image.
+  The `qspi-write` image now compares the window against indirect reads
+  on a non-0xFF pattern, in the last 64 KiB block only ("Write side"
+  below).
 
 ### Read latency (59 MHz, 0xEB, CPU 472 MHz; DWT cycles, median of 64)
 
@@ -200,6 +203,151 @@ The cost of a random miss is about **770 cycles per 32-byte line**. That
 is the figure the plan wants as a stand-in for Stage 3 HyperRAM. At
 59 MHz it is roughly 85% wire time, so a faster clock (M6) scales it
 almost linearly.
+
+## Write side: program and erase (as set up on 2026-11-25)
+
+The driver is the end of `crates/gbc-nucleo-h753/src/qspi.rs`, the
+on-board checks are the `qspi-write` image (`src/bin/qspi-write.rs`).
+
+```rust
+pub fn write_enable(&mut self) -> Result<(), NorError>          // WREN, then RDSR: WEL must be 1
+pub fn wait_idle(&mut self, op: Op) -> Result<u8, NorError>      // auto-polling on WIP = 0
+pub fn erase_4k(&mut self, addr: u32) -> Result<(), NorError>    // SE 0x20, addr % 4096 == 0
+pub fn erase_64k(&mut self, addr: u32) -> Result<(), NorError>   // BE 0xD8, addr % 65536 == 0
+pub fn program_page(&mut self, addr: u32, data: &[u8]) -> Result<(), NorError> // PP 0x02, inside one page
+pub fn program(&mut self, addr: u32, data: &[u8]) -> Result<(), NorError>      // split on page boundaries
+```
+
+- **Indirect mode only.** The methods are on `Qspi`, and no `Qspi`
+  exists while `Mapped` holds it (`memory_mapped` consumes it, `exit`
+  hands it back). Each call also checks CCR.FMODE != 11
+  (`NorError::MemoryMapped`).
+- **Sequence of each program or erase:** `wait_idle` (WIP = 0, in case
+  an operation cut by a reset is still running), WREN and a RDSR check
+  of WEL, the command, `wait_idle`, then RDSCUR: P_FAIL (bit 5) after a
+  program, E_FAIL (bit 6) after an erase (datasheet Table 10; both are
+  volatile and cleared by the next successful operation). The flow is
+  the datasheet's Figure "program/erase flow" (section 10-19 and 10-26).
+- **`wait_idle`** uses automatic status polling (RM0433 23.3.6): RDSR
+  every 64 QUADSPI clocks (PIR), PSMKR = 0x01 (WIP), PSMAR = 0, AND
+  mode, APMS = 1 so the QUADSPI stops on the match. CR.APMS is set only
+  for the poll and restored after it. The timeout is **twice the
+  datasheet maximum** (`Op::timeout_cycles`, DWT): 2.4 ms for a page,
+  400 ms for a 4K sector, 2 s for a 64K block. On a timeout the polling
+  is aborted (CR.ABORT) and `NorError::Timeout` returned.
+- **1-line PP (0x02)**, no 4PP for now. No dummy cycles on any write
+  (ES0392 2.7.1: the first data nibble is lost after a dummy phase in
+  indirect write mode). The FIFO is fed one byte at a time while
+  FLEVEL < 32.
+- **Never sent:** chip erase (0x60, 0xC7) and WRSR (0x01). `write_ccr`
+  asserts against these three opcodes in every mode (an indirect read
+  with one of them would send it too). No status or configuration
+  register is ever written: QE is already 1.
+- Errors: `NorError::{Qspi(Error), Alignment, OutOfRange, Timeout,
+  WelNotSet(status), Failed(rdscur), MemoryMapped}`. `program` checks the
+  whole range before writing anything; `program_page` refuses more than
+  256 bytes or a page crossing (the NOR would wrap the rest to the page
+  start, section 10-19).
+
+### Measured times (CPU 472 MHz, QUADSPI 39.3 MHz, DWT)
+
+Two runs on 2026-11-25 (the second image only added the `~!` command; a
+mutant run is not counted). Each figure is the whole driver call: `wait_idle`, WREN, the RDSR
+check, the command, the wait and the RDSCUR check.
+
+| Operation | Run 1 | Run 2 | Datasheet typ | Datasheet max |
+|---|---|---|---|---|
+| 64 KiB block erase (BE 0xD8), first | 342.1 ms | 340.8 ms | 250 ms | 1 s |
+| 64 KiB block erase, final (after the 4K erase) | 308.8 ms | 308.5 ms | 250 ms | 1 s |
+| 4 KiB sector erase (SE 0x20) | 24.0 ms | 23.4 ms | 25 ms | 200 ms |
+| One aligned 256-byte page (PP 0x02) | 0.414 ms | 0.414 ms | 0.33 ms | 1.2 ms |
+| The other 65,280 bytes in 132 `program` calls (385 page programs, many partial) | 109.2 ms | 109.2 ms | | |
+| ... per page program, average | 0.283 ms | 0.283 ms | | |
+
+So programming a whole 8 MiB image would take about 8 MiB / 256 x
+0.414 ms = **13.6 s** of program time plus 128 x 0.34 s = **44 s** of
+64K erases, about 57 s in all, at this clock and with 1-line PP. Sending
+256 bytes on one line at 39.3 MHz takes 52 us of the 0.414 ms; the rest
+is the NOR's tPP. 4PP (0x38) would save little.
+
+### On-board checks (`qspi-write`)
+
+It writes **only the last 64 KiB block, 0x7F_0000..0x80_0000**: every
+write goes through a wrapper that panics outside it. Once per reset:
+
+1. argument checks inside the block, before anything is erased:
+   misaligned 4K and 64K erases, a page program crossing a page, one of
+   257 bytes, one past the end of the NOR, and `program` past the end:
+   all refused with the right error;
+2. 64K erase, then all 0xFF (0x03);
+3. one aligned page with `program_page`, then the rest of the block in
+   132 `program` pieces of 1 to 1024 bytes (LCG lengths; the first is 1
+   byte, so the starts are unaligned; 116 pieces span page boundaries),
+   with a fixed-seed LCG data stream;
+4. the block read back with 0x03 at 39 MHz, 0xEB indirect at 59 MHz
+   and through the memory-mapped window: 65,536 bytes each, all equal
+   to the pattern. Then 3,456 unaligned window reads (byte, u16 and u32
+   `from_le_bytes`, `read_unaligned`, 16-byte copies; cold and warm)
+   around page, sector and line boundaries against an 0x03 reference;
+5. 4K erase of sector 5 (0x7F_5000): it reads 0xFF and the other 15
+   sectors still hold the pattern (0x03 and window);
+6. 64K erase again: all 0xFF (0x03 and window). Afterwards SR = 0x40
+   (QE only, WEL 0, WIP 0) and RDSCUR = 0x00.
+
+Both runs: every line PASS, 0 mismatches, `exit_fallbacks=0`. The block
+is left erased. This is the first window-against-indirect check on data
+that is not all 0xFF (see "The tests are weak" above). `qspi-mmap`
+itself still reads a blank NOR outside this block; the loader task
+should re-run it once a ROM image is in the NOR.
+
+Mutation check: with the WREN step removed from the program/erase
+sequence, the NOR ignores every program and erase (they "complete" in
+5 us), and the image reports `verify` FAIL with 65,263 mismatches on
+each of 0x03, 0xEB and the window (the block stayed blank; 273 pattern
+bytes happen to be 0xFF), `erase4` FAIL with 61,191, and `result FAIL`.
+
+## UART (USART3, the ST-LINK VCP)
+
+`crates/gbc-nucleo-h753/src/uart.rs`. The kernel clock is rcc_pclk1
+(RCC_D2CCIP2R USART234578SEL = 000, the reset value) = 472 / 2 (HPRE)
+/ 2 (D2PPRE1) = **118 MHz**; USART_PRESC is /1. After reset: 115200 8N1,
+TX and RX, FIFOs off (BRR 1024, as before this change). `set_baud(bps)`
+picks BRR and OVER8 (`uart::baud_setting`: 16x oversampling unless its
+error is over 1% and 8x does better), refuses more than 2% error, waits
+for TC, and turns the 16-byte TX and RX FIFOs on. RX: `try_read`,
+`read_timeout(cycles)`, and `rx_errors()` (ORE, FE, NE counted and
+cleared on every read). The fault handler re-initialises the UART at
+the current rate, so a fault report after `set_baud` reaches a host
+that has switched.
+
+| Rate | Oversampling | BRR | Actual | Error | Within 2% |
+|---|---|---|---|---|---|
+| 115,200 | 16 | 1024 (0x400) | 115,234 | +0.03% | yes |
+| 230,400 | 16 | 512 | 230,469 | +0.03% | yes |
+| 460,800 | 16 | 256 | 460,938 | +0.03% | yes |
+| 921,600 | 16 | 128 | 921,875 | +0.03% | yes |
+| 1,000,000 | 16 | 118 | 1,000,000 | 0 | yes |
+| 2,000,000 | 16 | 59 | 2,000,000 | 0 | yes |
+| 3,000,000 | 16 | 39 | 3,025,641 | +0.85% | yes |
+| 4,000,000 | 8 | 0x35 (USARTDIV 59) | 4,000,000 | 0 | yes |
+| 6,000,000 | 8 | 0x23 (USARTDIV 39) | 6,051,282 | +0.85% | yes |
+| 8,000,000 | 8 | 0x17 (USARTDIV 29) | 7,866,667 | -1.67% | yes, but over the 8x tolerance budget |
+| 12,000,000 | 8 | 0x12 (USARTDIV 20) | 11,800,000 | -1.67% | as 8 M |
+
+The receiver's whole tolerance for 8N1 is 3.75% or 3.33% at 16x and
+2.50% or 2% at 8x (RM0433 48.5.8, Tables 406 and 407: BRR[3:0] zero or
+not). It covers both ends' errors, so 8 M and 12 M are not usable.
+Which rates the ST-LINK/V3's VCP can produce on its side is
+**unverified** (its user manual is not local).
+
+**Verified on the board (2026-11-25)** with a PowerShell
+`System.IO.Ports.SerialPort` on COM5, under the board lock: a 23-byte
+and a 2,000-byte echo at 115200, then a switch with `~<digit>` and
+2,000-byte echoes at 921,600, 2,000,000 and 4,000,000 (8x), and back to
+115200: every byte echoed, 0 framing and noise errors. The overrun check
+(`~!`: the image stops reading for 50 ms while 300 bytes arrive) gave 1
+byte kept with the FIFOs off (RDR) and 17 with them on (16 in the FIFO
+plus one), and the overrun count rose by one each time.
 
 ## Clock options on the H753
 
@@ -217,6 +365,9 @@ almost linearly.
 
 - Macronix, MX25L6433F datasheet, PM2130 Rev. 1.4, 2016-03-10. Read from
   the distributor copy at https://static.rapidonline.com/pdf/73-3773.pdf.
+  For the write side: section 10-4 (status register), 10-19 (PP),
+  10-26 and Table 10 (security register, P_FAIL and E_FAIL), and the AC
+  table on p. 66 (tPP, tSE, tBE, tSHSL).
   Macronix publishes later revisions at macronix.com; those were not
   compared (**unverified** whether any timings changed).
 - ST community: the GFX02Z1 flash is the MX25L6433F
