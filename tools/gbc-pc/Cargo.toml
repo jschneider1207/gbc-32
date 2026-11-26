@@ -17,3 +17,9 @@ gbc-link = { path = "../../crates/gbc-link" }
 # the MPL-2.0 `serialport` crate).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_Communication", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+# tests/board.rs compiles the board's loader session
+# (crates/gbc-nucleo-h753/src/loader.rs) on the host, which needs the image
+# header code; test-only, the tool itself does not use it.
+[dev-dependencies]
+gbc-firmware = { path = "../../crates/gbc-firmware" }
