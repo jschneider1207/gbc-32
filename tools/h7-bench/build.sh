@@ -6,7 +6,9 @@
 #                         HSI clock (plan D11) and named *-pll480 as the
 #                         figures in README.md are: selftest, clockcheck,
 #                         the three placements; then the host expected-hash
-#                         test. Images go to out/h753/.
+#                         test and the bench pack (bench-pack.bin, the
+#                         workload ROMs for the QSPI NOR). Images go to
+#                         out/h753/.
 #   H7_BENCH_QEMU=1       also the QEMU smoke run (needs qemu-system-arm)
 #   H7_BENCH_LOCK=<file>  run every cargo and QEMU command under
 #                         `flock -x <file>` (agents: the shared build lock)
@@ -158,6 +160,8 @@ itcm_check bench-itcm-dtcm-pll480
 echo "== host: expected lines (calls, frames, clocks, hash) against expected-hashes.txt"
 (cd host && locked cargo test --release)
 (cd host && locked cargo run --release)
+echo "== host: the bench pack for the QSPI NOR (src/pack.rs; README \"QSPI ROM placement\")"
+(cd host && locked cargo run --release -- pack "../$OUT/bench-pack.bin")
 
 # qemu <name> <features>: run the image on QEMU's Cortex-M7 board and
 # compare its report with expected-hashes.txt.

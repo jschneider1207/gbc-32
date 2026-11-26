@@ -232,13 +232,25 @@ pub fn run(
 /// One report line for workload `i`. The host prints the same line with
 /// zero cycle figures (`host/`), so the `calls`, `frames`, `clocks` and
 /// `hash` fields can be compared as text.
+// The host and QEMU print through this; the board images, which name the
+// ROM source, through `report_line_from`.
+#[allow(dead_code)]
 pub fn report_line(out: &mut impl Write, i: usize, r: &Result<Stats, Error>) {
+    report_line_from(out, "", i, r);
+}
+
+/// [`report_line`] with `source` (empty, or a word ending in a space such
+/// as `"qspi "`) between the prefix and the name: `h7bench v1 qspi
+/// worst-case calls=...` for the same workload run on its ROM from
+/// another place. With `source` removed the line compares as
+/// [`report_line`]'s.
+pub fn report_line_from(out: &mut impl Write, source: &str, i: usize, r: &Result<Stats, Error>) {
     let name = WORKLOADS[i].name;
     // A write error has nowhere to go (the UART writer never fails).
     let _ = match r {
         Ok(s) => writeln!(
             out,
-            "h7bench v1 {name} calls={} frames={} clocks={} min={} mean={} max={} hash={:016x}\r",
+            "h7bench v1 {source}{name} calls={} frames={} clocks={} min={} mean={} max={} hash={:016x}\r",
             s.calls,
             s.frames,
             s.clocks,
@@ -249,7 +261,7 @@ pub fn report_line(out: &mut impl Write, i: usize, r: &Result<Stats, Error>) {
         ),
         Err(e) => writeln!(
             out,
-            "h7bench v1 {name} ERROR {}\r",
+            "h7bench v1 {source}{name} ERROR {}\r",
             match e {
                 Error::Header => "bad ROM header",
                 Error::CartRam => "cartridge RAM buffer too small",

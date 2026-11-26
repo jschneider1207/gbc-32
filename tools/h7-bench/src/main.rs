@@ -11,6 +11,13 @@
 //!   QEMU's mps2-an500, to check the hashes of a thumbv7em build without
 //!   hardware.
 //!
+//! The measurement images run every workload on its ROM in internal flash
+//! (the `.rodata` copy) and then, when the QSPI NOR holds a valid bench
+//! pack (`pack.rs`, loaded with the gbc-nucleo-h753 loader), once more on
+//! the pack's copy read through the memory-mapped window: the
+//! `<placement>-qspi` figures (plan Stage 2 M2), from the same binary and
+//! boot as the internal-flash ones. Without a pack only the first pass runs.
+//!
 //! The board images' bring-up, banner registers and fault handlers are the
 //! gbc-nucleo-h753 lib's (ADR 0036), so they cannot drift from the
 //! firmware's; this crate keeps the workloads, its own lines and the TCM
@@ -28,6 +35,8 @@ use gbc_nucleo_h753 as board;
 mod qemu;
 #[cfg(feature = "qemu")]
 use qemu::run;
+#[cfg(all(feature = "board", not(feature = "selftest")))]
+mod pack;
 #[cfg(not(feature = "selftest"))]
 mod workload;
 
@@ -110,15 +119,37 @@ mod bench {
     #[cfg(feature = "board")]
     pub type Results = [Option<Result<Stats, Error>>; WORKLOADS.len()];
 
-    /// Runs workload `i`. `now` and `between` as in [`workload::run`].
+    /// Workload `i`'s ROM in internal flash.
+    #[cfg(feature = "board")]
+    pub fn rom(i: usize) -> &'static [u8] {
+        ROMS[i]
+    }
+
+    /// Runs workload `i` on its ROM in internal flash. `now` and `between`
+    /// as in [`workload::run`].
+    #[cfg(feature = "qemu")]
     pub fn run(
         i: usize,
         b: &mut Buffers,
         now: impl FnMut() -> u32,
         between: impl FnMut(u32),
     ) -> Result<Stats, Error> {
+        run_on(ROMS[i], i, b, now, between)
+    }
+
+    /// Runs workload `i` on `rom` (its bytes, from wherever they are).
+    /// The board calls this with the same `now` and `between` types for
+    /// every ROM source, so both sources run one instance of
+    /// [`workload::run`]: the same code at the same addresses.
+    pub fn run_on<N: FnMut() -> u32, B: FnMut(u32)>(
+        rom: &[u8],
+        i: usize,
+        b: &mut Buffers,
+        now: N,
+        between: B,
+    ) -> Result<Stats, Error> {
         workload::run(
-            ROMS[i],
+            rom,
             b.cart_ram,
             b.mem,
             b.frame,
@@ -189,31 +220,45 @@ fn main() -> ! {
     run(buffers::take())
 }
 
-/// The measurement: every workload once, then the report forever.
+/// The measurement: every workload once on its ROM in internal flash, then
+/// once more on the bench pack's copy in the QSPI NOR if there is a valid
+/// one, then the report forever.
 #[cfg(all(not(feature = "selftest"), feature = "board"))]
 fn run(mut b: bench::Buffers) -> ! {
     use core::fmt::Write;
+
+    use workload::WORKLOADS;
 
     let mut board = board::init(PREFIX);
     // The clock this run actually has, for every banner (plan D11); about
     // 2 s, before the first workload.
     board.measure_clock();
     banner!(board, "bench");
-    let mut results: bench::Results = [None; workload::WORKLOADS.len()];
-    for (i, w) in workload::WORKLOADS.iter().enumerate() {
-        let _ = writeln!(
-            board.uart,
-            "h7bench v1 start {} calls={}\r",
-            w.name, w.calls
-        );
-        // LD1 toggles every 8 calls, outside the measured window.
-        let r = bench::run(i, &mut b, board::cycles, |n| {
-            if n.is_multiple_of(8) {
-                board::led::toggle();
-            }
-        });
-        workload::report_line(&mut board.uart, i, &r);
-        results[i] = Some(r);
+    // Mapped for good when it is a pack: `run` never returns, so the ROM
+    // slices into the window stay valid.
+    let qspi = qspi_rom::open();
+    qspi_rom::print(&mut board.uart, &qspi);
+    let qspi_roms = qspi.as_ref().ok().map(qspi_rom::Pack::roms);
+    // One pass per ROM source: internal flash, then the QSPI window. Both
+    // call `bench::run_on` with the same `now` and `between` (fn items), so
+    // they run the same instance of `workload::run`.
+    let mut results: [bench::Results; 2] = [[None; WORKLOADS.len()]; 2];
+    for (s, source) in ["", "qspi "].into_iter().enumerate() {
+        for (i, w) in WORKLOADS.iter().enumerate() {
+            let rom = match (s, &qspi_roms) {
+                (0, _) => bench::rom(i),
+                (_, Some(roms)) => roms[i],
+                (_, None) => break,
+            };
+            let _ = writeln!(
+                board.uart,
+                "h7bench v1 start {source}{} calls={}\r",
+                w.name, w.calls
+            );
+            let r = bench::run_on(rom, i, &mut b, board::cycles, blink);
+            workload::report_line_from(&mut board.uart, source, i, &r);
+            results[s][i] = Some(r);
+        }
     }
     // Deepest stack use over the whole run (the report loop below is
     // shallower than the workloads).
@@ -232,12 +277,123 @@ fn run(mut b: bench::Buffers) -> ! {
         }
         pass += 1;
         banner!(board, "bench");
-        for (i, r) in results.iter().enumerate() {
-            if let Some(r) = r {
-                workload::report_line(&mut board.uart, i, r);
+        qspi_rom::print(&mut board.uart, &qspi);
+        for (source, rs) in ["", "qspi "].into_iter().zip(&results) {
+            for (i, r) in rs.iter().enumerate() {
+                if let Some(r) = r {
+                    workload::report_line_from(&mut board.uart, source, i, r);
+                }
             }
         }
         let _ = writeln!(board.uart, "h7bench v1 stack used={used} of={size}\r");
+    }
+}
+
+/// `between` for [`workload::run`]: LD1 toggles every 8 calls, outside the
+/// measured window.
+#[cfg(all(not(feature = "selftest"), feature = "board"))]
+fn blink(n: u32) {
+    if n.is_multiple_of(8) {
+        board::led::toggle();
+    }
+}
+
+/// The bench pack in the QSPI NOR (`pack.rs`): mapped and checked once at
+/// boot, before the first workload.
+#[cfg(all(not(feature = "selftest"), feature = "board"))]
+mod qspi_rom {
+    use core::fmt::Write;
+
+    use gbc_firmware::rom_image::{self, HEADER_LEN, ImageError, ImageHeader};
+    use gbc_nucleo_h753::qspi::{self, Qspi};
+    use gbc_nucleo_h753::{Uart, cycles};
+
+    use crate::pack::{self, PackError};
+    use crate::workload::WORKLOADS;
+
+    /// Why there is no QSPI pass.
+    #[derive(Debug)]
+    pub enum Fail {
+        /// The QUADSPI would not enter memory-mapped mode.
+        Map(qspi::Error),
+        /// No valid ADR 0037 image in the NOR (`stage` header or validate).
+        Image(&'static str, ImageError),
+        /// A valid image that is not a bench pack.
+        Pack(PackError),
+    }
+
+    /// A valid pack, mapped for good.
+    pub struct Pack {
+        mapped: qspi::Mapped,
+        header: ImageHeader,
+        /// Cycles of `rom_image::validate` (its header checks and the hash
+        /// of the whole pack through the cold window) and `pack::parse`.
+        validate_cycles: u32,
+        /// Every ROM in the pack is byte for byte the one in internal flash.
+        same_as_flash: bool,
+    }
+
+    impl Pack {
+        /// The pack's ROMs, in [`WORKLOADS`] order, in the window.
+        pub fn roms(&self) -> [&[u8]; WORKLOADS.len()] {
+            let data = &self.mapped.bytes()[HEADER_LEN..HEADER_LEN + self.header.len as usize];
+            // `open` parsed these same bytes; the NOR cannot change while
+            // `mapped` exists (qspi::Mapped::bytes).
+            pack::parse(data).expect("the pack parsed at boot")
+        }
+    }
+
+    /// Maps the NOR (0xEB at [`qspi::PRESCALER_MMAP`], cached, as the
+    /// `headless-qspi` image) and checks the image there and its pack.
+    /// On an error after mapping the window stays mapped and unused.
+    pub fn open() -> Result<Pack, Fail> {
+        let mut q = Qspi::init(qspi::PRESCALER_SAFE);
+        q.set_prescaler(qspi::PRESCALER_MMAP).map_err(Fail::Map)?;
+        let mapped = q
+            .memory_mapped(&qspi::QUAD_IO_READ)
+            .map_err(|(_, e)| Fail::Map(e))?;
+        let window = mapped.bytes();
+        let t0 = cycles();
+        let header = rom_image::read_header(window).map_err(|e| Fail::Image("header", e))?;
+        let data = rom_image::validate(window).map_err(|e| Fail::Image("validate", e))?;
+        let roms = pack::parse(data).map_err(Fail::Pack)?;
+        let validate_cycles = cycles().wrapping_sub(t0);
+        let same_as_flash = roms
+            .iter()
+            .enumerate()
+            .all(|(i, r)| *r == crate::bench::rom(i));
+        Ok(Pack {
+            header,
+            validate_cycles,
+            same_as_flash,
+            mapped,
+        })
+    }
+
+    /// The `qspi pack` line: `ok` with what was found, or `none` with why.
+    pub fn print(out: &mut Uart, p: &Result<Pack, Fail>) {
+        // The UART writer never fails.
+        let _ = match p {
+            Ok(p) => writeln!(
+                out,
+                "h7bench v1 qspi pack ok len={} hash={:016x} roms={} same_as_flash={} \
+                 validate_cycles={} qspi_hz={} window=cached exit_fallbacks={}\r",
+                p.header.len,
+                p.header.hash,
+                WORKLOADS.len(),
+                u8::from(p.same_as_flash),
+                p.validate_cycles,
+                p.mapped.clock_hz(),
+                qspi::exit_fallbacks()
+            ),
+            Err(Fail::Map(e)) => writeln!(out, "h7bench v1 qspi pack none stage=map error={e:?}\r"),
+            Err(Fail::Image(stage, e)) => {
+                writeln!(out, "h7bench v1 qspi pack none stage={stage} error={e:?}\r")
+            }
+            Err(Fail::Pack(e)) => {
+                writeln!(out, "h7bench v1 qspi pack none stage=pack error={e:?}\r")
+            }
+        };
     }
 }
 
