@@ -112,8 +112,13 @@ dependencies = [
  "cortex-m-rt",
  "cortex-m-semihosting",
  "gbc-core",
+ "memory-x",
  "stm32h7",
 ]
+
+[[package]]
+name = "memory-x"
+version = "0.1.0"
 
 [[package]]
 name = "nb"
