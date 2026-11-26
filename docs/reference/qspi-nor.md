@@ -102,6 +102,105 @@ together with QUADSPI's SIOO (send instruction only once, RM0433
 23.3.13): that is a tuning option for M6. Enhance mode blocks
 program/erase Resume until it is exited (datasheet section 10-29).
 
+## Memory-mapped mode (as set up on 2026-11-25)
+
+The driver is `Qspi::memory_mapped` / `Mapped` in
+`crates/gbc-nucleo-h753/src/qspi.rs`, the MPU region is in `src/mpu.rs`,
+and the on-board checks are in the `qspi-mmap` image
+(`src/bin/qspi-mmap.rs`). Read commands only: nothing was written to the
+NOR.
+
+| Setting | Value | Why |
+|---|---|---|
+| Command | 0xEB 1-4-4: instruction on 1 line, 24-bit address on 4, one alternate byte 0xFF on 4 (2 cycles), DCYC 4, data on 4 | 6 dummy cycles in all at CR.DC = 0 (Table 7). 0xFF doesn't enter enhance mode (see above) |
+| CCR | `0x0F10EDEB` (FMODE 11, DMODE 11, DCYC 4, ABSIZE 00, ABMODE 11, ADSIZE 10, ADMODE 11, IMODE 01, 0xEB); SIOO, DDRM, DHHC, FRCM all 0 | RM0433 23.5.6 |
+| ABR | `0xFF` | |
+| Clock | HCLK3 236 MHz / 4 = 59 MHz (PRESCALER 3; CR = `0x03000011`: SSHIFT, EN) | an even divider (ES0392 2.7.6). Faster clocks are M6 tuning |
+| DCR | `0x00170200`: FSIZE 23 (**16 MiB**), CSHT 2 (3 cycles, 51 ns) | ES0392 2.7.5: a memory-mapped read of the last byte of the FSIZE region reads 0x00, and the next read of it stalls the AXI bus. The margin puts that byte at 0x90FF_FFFF, outside the MPU window. Seen on the board: with FSIZE 22 (exactly 8 MiB), the image hung in its first compare round |
+| TCEN | **0** (no timeout, LPTR unused) | after an access the QUADSPI fills its FIFO and then holds NCS low with the clock stopped, so the next sequential read skips the 20-clock command (instruction 8 + address 6 + mode 2 + dummy 4 = 0.34 us at 59 MHz). TCEN = 1 would save the NOR's selected-idle current and pay that cost again after every idle period. The NUCLEO is USB-powered, so latency wins. Stage 3 can revisit |
+| Prefetch | always on in memory-mapped mode (RM0433 23.3.7; there is no switch) | |
+| MPU | region 6: base 0x9000_0000, 8 MiB, Normal write-back no write-allocate (TEX 000 C 1 B 1), not shareable, read-only at both privilege levels (AP 110), XN. RASR = `0x1603002D` | Normal memory is needed for unaligned loads. The other 248 MB of the bank stay region 0's (no-access, XN, strongly-ordered) |
+
+Order, in `qspi.rs`:
+- **Enter:** BUSY = 0, TCEN cleared, ABR, CCR with FMODE = 11, DSB, then
+  MPU region 6 on (DSB, ISB).
+- **Exit:** MPU region 6 off (DSB, ISB), then ABORT. If BUSY is still
+  high, clear EN (see below). Then the ES0392 2.7.4 sequence (required
+  when leaving memory-mapped mode), restore DCR and CR, then clean and
+  invalidate the D-cache, so the loader never reads stale lines after a
+  program or erase.
+
+**Observed: ABORT alone doesn't always idle the QUADSPI.** Sometimes the
+abort completes (ABORT clears, TCF sets) but BUSY stays high and FLEVEL
+climbs to 30: SR went from `0x620` before the abort to `0x1E22` after it.
+That is a new prefetch, even though the MPU window was already closed and
+a DSB had completed every CPU access. In a given build it happens in the
+same place every time: once per run, after compare round 10 of 12. It
+moved with the code layout: the first time it showed up was in a
+mutation build, as a panic. Clearing EN always brought BUSY down (RM0433
+23.3.7: BUSY falls on "a timeout, ... an abort, or the peripheral is
+disabled"), and every later indirect and memory-mapped read was correct.
+`qspi::exit_fallbacks()` counts these cases. **Unverified:** the cause.
+One candidate is a speculative M7 line fill that was in flight and
+reached the QUADSPI after the abort. Neither ES0392 nor RM0433 describes
+this behaviour.
+
+MPU guidance (**unverified** against the app notes themselves, which aren't
+local): an ST moderator on community.st.com, citing AN4861 section 4.6,
+says the unused part of the 256 MB QUADSPI space "must be set to strongly
+ordered XN". ST's AN4760 example makes the mapped part strongly-ordered
+too. That can't work here: the core needs unaligned reads, and those fault
+on Device and strongly-ordered memory.
+
+### On-board checks (`qspi-mmap`)
+
+All runs below were with the D-cache on, at 472 MHz.
+
+- **compare:** 102 segments, 90,766 B per run. The segments cover the
+  start, the end of the device (including its last byte, 0x7FFFFF), the
+  64 KiB and 4 MiB boundaries, 32 page boundaries (±128 B, with odd
+  starts) and 64 random 1 KiB pieces from a fixed-seed LCG, read in 12
+  rounds of up to 8 KiB. Each round compares indirect 0x03 (at 39 MHz)
+  against indirect 0xEB (at 59 MHz) and against the window (a slice
+  compare). Each round leaves and re-enters memory-mapped mode.
+- **unaligned:** 8 line-aligned bases (64, 0x1000, 0x20020, 0x7FFFC0 up
+  to the last byte, and 4 random ones). At every offset from base − 8 to
+  base + 40 it checks eight access kinds against the 0x03 reference:
+  - a byte read;
+  - u16 and u32 `from_le_bytes` of a slice (the core's pattern);
+  - `read_unaligned` u16 and u32;
+  - raw LDRH and LDR (inline asm; CCR.UNALIGN_TRP = 0);
+  - a 16-byte `copy_from_slice` (the core's VRAM DMA block).
+
+  Each kind is checked three ways: cold (lines invalidated before each
+  access), warm, and with the window non-cacheable. That is 3,072 checks
+  each way.
+- **Result:** every captured run passed, with 0 mismatches: 24 runs of one
+  build and 10 of the final one. A deliberate read of 0x9080_0000 (past
+  the window) faults with `cfsr=0x00000082 mmfar=0x90800000`, with the MPU
+  still on in HardFault (HFNMIENA = 1).
+- **The tests are weak: the NOR is blank.** All 90,766 compared bytes
+  were 0xFF, the only byte value seen. A wrong data shift would mostly go
+  unnoticed. A mutation that flipped one reference byte failed as
+  expected: 12 compare mismatches (one per round), and 29 unaligned
+  mismatches in each cache state (the number of checks that cover that
+  byte). The loader task must re-run these checks on a known image.
+
+### Read latency (59 MHz, 0xEB, CPU 472 MHz; DWT cycles, median of 64)
+
+| Access | Cycles | Time | Note |
+|---|---|---|---|
+| One u32, cold, cacheable (line invalidated: a line fill, critical word first) | 362 to 385 (max 587) | 0.77 to 0.82 us | a new command each time (random address) |
+| One 32-byte line, cold, read word by word | 770 | 1.63 us | about (20 + 64) QUADSPI clocks x 8, plus about 100 cycles of bus overhead |
+| One u32, non-cacheable, random | 376 to 388 | 0.80 us | (20 + 8) x 8 = 224, plus overhead |
+| The next u32 after it, non-cacheable (already prefetched) | 120 | 0.25 us | the AXI-to-QUADSPI round trip, with no flash access |
+| 64 KiB copy, cold (into DTCM, 4 KiB at a time) | 1,048,950 | 2.22 ms = **28.1 MB/s** | the wire limit at 59 MHz x 4 bits is 29.5 MB/s |
+
+The cost of a random miss is about **770 cycles per 32-byte line**. That
+is the figure the plan wants as a stand-in for Stage 3 HyperRAM. At
+59 MHz it is roughly 85% wire time, so a faster clock (M6) scales it
+almost linearly.
+
 ## Clock options on the H753
 
 - The QUADSPI is good for ≤ 133 MHz SDR at VDD ≥ 2.7 V (DS12117
@@ -129,3 +228,11 @@ program/erase Resume until it is exited (datasheet section 10-29).
   layout.
 - RM0433 Rev 9 chapter 23; DS12117 Rev 10 Table 9 (AF numbers) and Table
   73; ES0392 Rev 16 section 2.7; UM2905 Rev 2 Table 3 and section 5.3.
+- Memory-mapped mode: RM0433 Rev 9 sections 23.3.7, 23.3.12, 23.3.15,
+  23.5.1 (TCEN) and 23.5.13 (LPTR). ES0392 Rev 16 sections 2.7.4 and
+  2.7.5. Armv7-M ARM B3.5 (MPU, HFNMIENA) and A3.2.1 (unaligned
+  accesses). The MPU guidance for the unused QUADSPI space comes from an
+  ST community thread
+  (https://community.st.com/stm32-mcus-products-25/speculative-access-and-stm32h7-memory-protection-unit-16674),
+  which cites AN4861 section 4.6. AN4861 and AN4760 themselves were not
+  read.
