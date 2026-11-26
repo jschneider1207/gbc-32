@@ -4,10 +4,12 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 is **COMPLETE** (human, 2026-11-25; tag `stage1-m10`).
-  **Stage 2 (STM32H753 firmware): M0-M4 done** (M4: 10-minute paced runs
-  on the board, milestone review fixed, tag `stage2-m4` at c0de0b5).
-  **M5 (input and the player loop) in progress.** Plan:
-  `docs/plan/stage-2.md` (D1-D11).
+  **Stage 2 (STM32H753 firmware): M0-M5 done** (M5: player image, replay
+  set, soak and save round trip on the board, milestone review fixed, tag
+  `stage2-m5`). The human checks in M3-M5's acceptance (panel look,
+  listening, buttons = sign-off items 1-3) are still open: the tags were
+  set without them so work could continue overnight. **M6 (memory layout
+  and performance) is next.** Plan: `docs/plan/stage-2.md` (D1-D11).
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
@@ -33,42 +35,48 @@
   in the loop (M3)".
 - **M4 results:** DAC1 dual 12-bit on PA4/PA5, TIM6 236 MHz / 7202 =
   32,768.675 Hz, DMA1 stream 0 (2 x 256 frames, MPU region 9), watchdog
-  restart. `paced-<rom>` images (audio-paced loop + display): cgb_sound and
-  synth:worst-case 35,837 frames each, `paced` lines EQUAL to host, 0
-  underruns, ppm +82/+71 vs DWT; worst-case core 3,328,804 / 3,350,486
-  mean/max with display + audio. Display skips ~27% of frames (M4 P-7).
-  Facts: `docs/reference/audio-dac.md`, `m4-evidence.md`, docs/perf.md
-  "Paced loop (M4)". Check: `run-paced.sh` (tests `scripts/test-run-paced.sh`).
-- **Board state:** `paced-cgb_sound` flashed (plays ~10 min after reset,
-  then silent); bench pack in the NOR. `out/loader.bin` must be rebuilt
-  from main before use.
-- **Last updated:** 2026-11-26, session 25 (log
-  `logs/2026-11-26-25-stage2-m4.md`; session 24:
-  `logs/2026-11-25-24-stage2-m3.md`).
+  restart. `paced-<rom>` images: cgb_sound and synth:worst-case 35,837
+  frames each, `paced` lines EQUAL to host, 0 underruns, ppm +82/+71 vs
+  DWT. Display skips 7% after the post-M4 smoothing (cf86d75). Facts:
+  `docs/reference/audio-dac.md`, `m4-evidence.md`, docs/perf.md "Paced
+  loop (M4)".
+- **M5 results:** `player` image (ROM from the NOR, paced loop, display,
+  DAC, joystick + PC input over a DMA UART at 2 Mbit/s, saves over the
+  link, Stats every 300 frames, MPU stack guard): proposed replay set 6/6
+  EQUAL to host (`run-replay.sh`); 10-min worst-case soak 0 over budget, 0
+  underruns (scripted and live); save round trip byte-identical
+  (`run-player-save.sh`, halted RTC). Wario Land 3 150 s: busy max 29.7%
+  of a frame. Live stack 12,968 of 22,912 B. Facts:
+  `docs/reference/{player.md,link-protocol.md,m5-evidence.md}`, docs/perf.md
+  "Player (M5)", ADR 0040 (PC syncs the RTC).
+- **Board state:** `player` flashed, cgb-acid2 in the NOR. To play:
+  `scripts/play-on-board.sh <rom>` (see Needs human).
+- **Last updated:** 2026-11-26, session 26 (log
+  `logs/2026-11-26-26-stage2-m5.md`; sessions 24-25: M3, M4).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M5 (input and the player loop)
+## Next up: Stage 2 M6 (memory layout and performance to full speed)
 
-Done: gbc-pc side (b303636, `docs/reference/link-protocol.md`), display pending-frame replace (cf86d75), `gbc_firmware::{buttons,save}` and `paced::run_with` (`InputSource`,
-`Service` hooks), 6c2bcee. In flight: `tools/gbc-pc` live input + save
-load/dump. Next: the `player` image (ROM from QSPI, display with the
-pending-frame replace (M4 P-7), audio, joystick + PC input, saves over the
-link, stats, input echo, DMG compat palette), then the scripted replay-set
-run vs host and the save round trip (use a halted-RTC `.sav` fixture: a
-running RTC changes the footer in emulated time). Open lows: M1 (T-4, T-8,
-F-2, F-3, F-5..F-7), M2 (H-2..H-5, T-3, T-5), M3 (T-3, T-4, P-3, P-5, P-6),
-M4 (T-3, P-3, P-4, P-5, P-7) at the end of their milestones in the plan.
+Tasks and acceptance: `docs/plan/stage-2.md` M6. Already shown in M5: the
+player fits real time with 0 frames over budget for 10 minutes of
+synth:worst-case (M6's gated item; re-run at M6 close on the shipped
+placement). Still to do: ADR 0026 decision (player keeps `Frame` in DTCM),
+ITCM set with the front end, LTO/opt-level variants, QSPI tuning, the
+on-board cycle baseline `tools/h7-bench/expected-cycles.txt` with the +3%
+ratchet (and the +-2% rebuild-noise risk below), the worst-case report vs
+3,951,279, and the performance review. Open lows sit at the end of each
+milestone in the plan (M1-M5).
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
-`CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save`; root workspace), `crates/gbc-link`
+`CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save` (RTC sync), `replay` (clock-table input), `player` (stats); root workspace), `crates/gbc-link`
 (COBS + CRC-32 serial protocol, no deps), `tools/gbc-pc` (Windows .exe
 loader client; `scripts/gbc-pc.sh` builds, runs it via interop, takes the
 board lock; host tests incl. the board's own `loader.rs` and `baud.rs` via
 `#[path]`), `crates/gbc-nucleo-h753` (own workspace: lib bring-up incl.
-`qspi.rs`, `loader.rs`, `baud.rs`, `lcd.rs`, `lcd_dma.rs`, `gpio.rs`, `audio_dac.rs`; bins `boot`, `lcd-probe`, `lcd-dma-probe`, `dac-probe`, `paced` (images `paced-<rom>`), `qspi-probe`, `qspi-mmap`,
+`qspi.rs`, `loader.rs`, `baud.rs`, `lcd.rs`, `lcd_dma.rs`, `gpio.rs`, `audio_dac.rs`, `link_uart.rs`, `link_session.rs`, `joystick.rs`, `display.rs`, `paced_board.rs`; bins `player` (features `player`, `player-script`), `link-probe`, `boot`, `lcd-probe`, `lcd-dma-probe`, `dac-probe`, `paced` (images `paced-<rom>`), `qspi-probe`, `qspi-mmap`,
 `qspi-write`, `loader`, `headless` (feature `headless`; `rom-qspi` = ROM
 from the NOR; `display` = panel + readback self-test, images `headless-display-<rom>`); `build.sh [image...]`, `flash.sh`, `run-headless.sh`,
-`run-headless-qspi.sh`, `run-loader-roundtrip.sh`, `gen-test-image.sh`),
+`run-headless-qspi.sh`, `run-loader-roundtrip.sh`, `gen-test-image.sh`, `run-paced.sh`, `run-replay.sh` (+ `replay-set.txt`, `soak-set.txt`), `run-player-save.sh`, `run-save-roundtrip.sh`; host tests of the run scripts in `scripts/test-run-*.sh`, `scripts/test-check-report.sh`), `tools/replay-input` (romtest input -> clock table), `scripts/play-on-board.sh`,
 `tools/headless` (host counterpart, `expected/`), `tools/headless-qemu`,
 `tools/memory-x`, `tools/h7-bench` (cycle bench; QSPI pass from a ROM pack,
 `run-qspi.sh`, `check-report.sh`). Gate: `scripts/gate-stage2.sh
@@ -146,7 +154,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Merged: scripted clock-table input + `run-replay.sh` (64d7374..24c318d; romtest split into lib + bin, module moves only). Running: `m5-soak` (10-min worst-case soak in the player, RTC save round trip). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
+- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
 
 ## Needs human
 
