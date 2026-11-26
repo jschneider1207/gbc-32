@@ -16,7 +16,7 @@ rust-toolchain.toml        pinned stable toolchain + thumbv7em-none-eabihf
 crates/
   gbc-core/                #![no_std], no alloc. All emulation logic.
   gbc-desktop/             std front end (Stage 1 only): window, audio, input, saves
-  gbc-firmware/            (Stage 2, not yet created) #![no_std], forbid(unsafe), host-tested board-independent firmware: main loop and pacing, RGB555 converter/scaler, audio conditioning, input debounce/mapping, stats, ROM image header; boards plug in drivers via traits; depends on gbc-core only (not gbc-link)
+  gbc-firmware/            #![no_std], no alloc, forbid(unsafe) (tests/hard_rules.rs), host-tested board-independent firmware; depends on gbc-core only (not gbc-link); ADR 0036. M1: CycleClock trait, scripted input (input.rs), FNV-1a, the headless loop and its line format (headless.rs). Later: main loop and pacing, RGB555 converter/scaler, audio conditioning, input debounce/mapping, stats, ROM image header; boards plug in drivers via traits
   gbc-link/                (Stage 2, not yet created) #![no_std], no deps, no unsafe, host-tested serial protocol (ROM load, save load/dump, PC input, stats); transport-agnostic
   gbc-nucleo-h753/         (Stage 2, not yet created) not a workspace member (thumbv7em only, own profile/rustflags): lib + bins for the NUCLEO-H753ZI: PAC, bring-up at 472 MHz, drivers, fault/panic handlers, generated memory.x; depends on gbc-firmware, gbc-core, gbc-link; wires gbc-link to the UART; a Stage 3 board gets its own crate (gbc-handheld); ADR 0036
 tools/
@@ -24,6 +24,7 @@ tools/
   sm83-tests/              SM83 single-step CPU tests (data: scripts/fetch-sm83-tests.sh -> test-data/, gitignored)
   bench/                   headless runs for check-bench.sh (Ir), the behavior fingerprint, synthetic ROMs (docs/perf.md)
   fuzz/                    fuzz targets over the public API: no panic, no hang (scripts/check-fuzz.sh)
+  headless/                host counterpart of the board's headless image: calls gbc-firmware's loop, so it prints the same `headless ` lines for a ROM + input script; expected/ holds the 600-frame board targets (cpu_instrs, cgb-acid2), checked by its tests
   h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H753ZI (first on a NUCLEO-H755ZI-Q; its README); from Stage 2 M1 it takes its bring-up from gbc-nucleo-h753's lib (ADR 0036)
   memory-x/                (Stage 2, not yet created) host lib, build-dependency of gbc-nucleo-h753 and h7-bench: generates memory.x (chip maps, placements, .itcm rules from perf/itcm-sections.txt; ADR 0026, 0036)
   gbc-pc/                  (Stage 2, not yet created) PC companion, native Windows .exe (x86_64-pc-windows-gnu): sends ROM/.sav, pulls saves, forwards keys, prints stats; deps gbc-link + windows-sys (plan D9: no serialport)
