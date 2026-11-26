@@ -1089,6 +1089,31 @@ ITCM (`storm-ppu` 28.56 M / 28.86 M cycles, 365.2% at most).
   counts by up to about 2%: treat these figures as +-2% (code layout,
   most likely; not separated).
 
+### `headless` image on the board (Stage 2 M1/M2, 472 MHz)
+
+The `headless` images (`crates/gbc-nucleo-h753`, M6-target placement: the
+ITCM set minus the plain tile path, data in DTCM), 600 frames, cycles per
+`run_frame` from the image's `stats` line (DWT, 472 MHz nominal). Every
+run's 602 `headless` lines equal the host's. "M1" is the M1 close run;
+"internal" and "QSPI" are one build (0765d62) run back to back on
+2026-11-25: the same ITCM set and size (64,080 B; its bytes differ, the flash
+layout around it having moved), the ROM either in internal flash
+(`.rodata`) or read through the memory-mapped QSPI window (0xEB at
+59 MHz, cached; `headless-qspi.bin`, `docs/reference/loader.md`).
+
+| ROM | M1, internal flash | internal flash | QSPI | QSPI vs internal | QSPI, % of a frame |
+|---|---|---|---|---|---|
+| `cpu_instrs` | 1,296,098 / 1,768,873 | 1,294,935 / 1,767,664 | 1,297,900 / 1,769,785 | +0.23% / +0.12% | 16.42% / 22.39% |
+| `cgb-acid2` | 684,112 / 756,317 | 683,081 / 755,648 | 693,063 / 759,572 | +1.46% / +0.52% | 8.77% / 9.61% |
+
+(mean / max; a frame is 7,902,557 cycles, the 50% line 3,951,279.) The
+worst frame from QSPI is 44.8% of the 50% line (cpu_instrs). The two
+images differ in flash code layout as well as in where the ROM is, and a
+rebuild alone moves these counts by up to about 2% (above), so the QSPI
+cost here is "within about 1.5%", not a measured miss cost; the
+bench placement `itcm-dtcm-qspi` (plan M2) is the controlled figure.
+`exit_fallbacks=0`: the image never leaves memory-mapped mode.
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed

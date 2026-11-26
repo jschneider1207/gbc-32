@@ -85,3 +85,36 @@ of=90766 distinct_values=256` (the 0xFF bytes are the erased upper 4 MiB
 its segments also cover). Its own `exit_fallbacks` rose by one per run
 (in `compare`), as recorded in `qspi-nor.md` ("ABORT alone doesn't always
 idle the QUADSPI"): the same once-per-run case, independent of the data.
+
+## Running the headless image from QSPI (plan Stage 2 M2)
+
+`out/headless-qspi.bin` (`--features rom-qspi`, build.sh) is the M1
+`headless` loop without an embedded ROM: at boot it maps the NOR (0xEB,
+59 MHz), runs `rom_image::validate` over the window and runs 600 frames on
+the image's data at 0x9000_0000 (cached). With no valid image it prints
+`headless qspi error stage=<map|header|validate> error=<e>` once a second
+and runs no frame. One command loads a ROM and compares:
+
+```
+cd crates/gbc-nucleo-h753 && ./build.sh
+./run-headless-qspi.sh ../../test-roms/blargg/cpu_instrs/cpu_instrs.gb ../../tools/headless/expected/cpu_instrs.txt
+./run-headless-qspi.sh ../../test-roms/cgb-acid2/cgb-acid2.gbc ../../tools/headless/expected/cgb-acid2.txt
+```
+
+It holds the board lock across three steps: flash `out/loader.bin`,
+`scripts/gbc-pc.sh load <rom>` (a no-op when the NOR already holds that
+ROM), then `RUN_HEADLESS_ROM=<rom> run-headless.sh out/headless-qspi.bin
+<expected>`. Besides the M1 checks (a complete report, `image_bytes`/
+`image_cksum` equal to the `.bin`), `RUN_HEADLESS_ROM` requires the
+report's `rom_len`/`rom_hash` (the NOR header, which the image checked
+against the data) to be the file's length and FNV-1a 64 computed by the
+script, so a stale NOR image exits 2 (checked on a saved capture: another
+ROM, one changed hash digit and a report without the fields all exit 2).
+`GBC_BUILD_LOCK=<file>` builds gbc-pc under that lock first.
+
+2026-11-25, both ROMs: 602 of 602 `headless` lines equal, image CRC and
+ROM hash matched, `exit_fallbacks=0` (the image never leaves
+memory-mapped mode). Boot `validate`: 1,051,582 cycles for cpu_instrs
+(64 KiB, 2.23 ms, ~29.4 MB/s), 527,294 for cgb-acid2 (32 KiB). Loads at
+4 Mbit/s: 64 KiB in 0.82 s, 32 KiB in 0.46 s. Cycles per frame:
+`docs/perf.md`, "`headless` image on the board".
