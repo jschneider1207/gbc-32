@@ -350,6 +350,15 @@ frames over budget in 10 minutes of `synth:worst-case`. The cycle baseline
 is committed. The performance review (AGENTS.md) is required at this
 milestone's close.
 
+**Met (session 27, 2026-11-26; tag `stage2-m6`):** `player-script`
+10-minute `synth:worst-case` from the NOR: PASS, 0 over budget, 0
+underruns, core max 3,390,856 (42.9% of a frame; 85.8% of the 3,951,279
+report line); live `player` 640 s: 0 over budget, 0 underruns
+(`docs/reference/m6-evidence.md`). Baseline `tools/h7-bench/expected-cycles.txt`
+committed (a9ea350); bench worst case from QSPI 85.6% of the report line
+(H735 projection 73.5%, labelled). Review: `docs/reviews/stage2-m6.md`
+(no high; mediums fixed, P3 to the human); `--host-only` exit 3.
+
 Carries over: the placement method and checks (on the H735 the rule
 covers all of gbc-core), measured miss costs, and the LTO findings. The
 ITCM tiering does not carry over (the H735 puts the whole core in ITCM).

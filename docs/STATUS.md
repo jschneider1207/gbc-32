@@ -4,12 +4,12 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 is **COMPLETE** (human, 2026-11-25; tag `stage1-m10`).
-  **Stage 2 (STM32H753 firmware): M0-M5 done** (M5: player image, replay
-  set, soak and save round trip on the board, milestone review fixed, tag
-  `stage2-m5`). The human checks in M3-M5's acceptance (panel look,
+  **Stage 2 (STM32H753 firmware): M0-M6 done** (M6: measured placement,
+  core-first layout, QSPI tuning, on-board cycle baseline, soak, review
+  fixed, tag `stage2-m6`). The human checks in M3-M5's acceptance (panel look,
   listening, buttons = sign-off items 1-3) are still open: the tags were
-  set without them so work could continue overnight. **M6 (memory layout
-  and performance) is next.** Plan: `docs/plan/stage-2.md` (D1-D11).
+  set without them so work could continue overnight. **M7 (Stage 2 review
+  and sign-off) is next.** Plan: `docs/plan/stage-2.md` (D1-D11).
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
@@ -49,23 +49,33 @@
   of a frame. Live stack 12,968 of 22,912 B. Facts:
   `docs/reference/{player.md,link-protocol.md,m5-evidence.md}`, docs/perf.md
   "Player (M5)", ADR 0040 (PC syncs the RTC).
-- **Board state:** `player` flashed, Pokemon Red (scratch copy) in the NOR. To play:
+- **M6 results:** ADR 0026 Accepted (measured placement); ADR 0042
+  core-first flash layout (gbc-core's flash code in `.text_core` at
+  0x0801_0400; rebuild noise was branch-predictor aliasing). QSPI 0xEB +
+  SIOO at 99.2 MHz from PLL2 (miss 429 cycles; worst case QSPI cost
+  +1.26%). LTO/opt-level and the ITCM tier swap: nothing faster. Baseline
+  `tools/h7-bench/expected-cycles.txt` + `check-cycles.sh` (+3%, two
+  agreeing reports; `--absorb-regression` needs the human). Bench worst
+  case 85.6% of 3,951,279 (H735 projection 73.5%); shipped player soak 10
+  min: 0 over budget, core max 3,390,856 (42.9%). Facts: docs/perf.md M6
+  sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
+- **Board state:** `player` flashed (M6, 99.2 MHz QSPI), Pokemon Red (scratch copy) in the NOR. To play:
   `scripts/play-on-board.sh <rom>` (see Needs human).
-- **Last updated:** 2026-11-26, session 26 (log
-  `logs/2026-11-26-26-stage2-m5.md`; sessions 24-25: M3, M4).
+- **Last updated:** 2026-11-26, session 27 (log
+  `logs/2026-11-26-27-stage2-m6.md`; session 26: M5).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M6 (memory layout and performance to full speed)
+## Next up: Stage 2 M7 (review and sign-off)
 
-Tasks and acceptance: `docs/plan/stage-2.md` M6. Already shown in M5: the
-player fits real time with 0 frames over budget for 10 minutes of
-synth:worst-case (M6's gated item; re-run at M6 close on the shipped
-placement). Still to do: ADR 0026 decision (player keeps `Frame` in DTCM),
-ITCM set with the front end, LTO/opt-level variants, QSPI tuning, the
-on-board cycle baseline `tools/h7-bench/expected-cycles.txt` with the +3%
-ratchet (and the +-2% rebuild-noise risk below), the worst-case report vs
-3,951,279, and the performance review. Open lows sit at the end of each
-milestone in the plan (M1-M5).
+Tasks and acceptance: `docs/plan/stage-2.md` M7. First: implement the
+board steps B1-B5 of `scripts/gate-stage2.sh` (plan "Proposed
+`scripts/gate-stage2.sh`"; adding checks is stricter-only, but the plan
+says the human approves the gate's first version: show them the B-step
+diff before relying on it). B2 runs `tools/h7-bench/check-cycles.sh`
+against `expected-cycles.txt`; B3/B4/B5 wrap `run-replay.sh`,
+the soak set and `run-player-save.sh`. Then the three M7 reviews, lows to
+Stage 3 tasks, the architecture "Targets" carry-over list, and the human
+checklist. Open lows: end of each milestone in the plan (M1-M6).
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
 `CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save` (RTC sync), `replay` (clock-table input), `player` (stats); root workspace), `crates/gbc-link`
@@ -91,24 +101,6 @@ target applies to the H735 at 550 MHz); gated are real time and the +3%
 cycle ratchet. Input: shield joystick plus PC over serial; saves travel over
 serial. Shared logic in `gbc-firmware`, protocol in `gbc-link`, PC side in
 `tools/gbc-pc` (ADR 0005 amendment).
-
-**M6 progress (session 27, 2026-11-26):** ADR 0026 Accepted with the
-measured placement (67884fa; ITCM task waits on one A/B: `Renderer::render`
-in ITCM vs flash). Rebuild noise settled: branch-predictor (BTAC) aliasing
-on code addresses; fix = core-first flash layout, gbc-core's flash code in
-`.text_core` at fixed 0x0801_0400 (ADR 0042, 8f9fdb9; check-itcm-elf.sh
-requires it). Core changes still move counts ~+-1.7% (ITCM), up to ~4% on
-storms; decision: keep +3% on every workload, layout-only failures go to the
-human like check-bench. The cycle baseline must be taken after ADR 0042 and
-from the main checkout path (crate hashes in mangled names are path-
-dependent). LTO/opt-level: nothing faster (perf.md). QSPI: memory-mapped reads at
-100 MHz from PLL2 + SIOO/enhance mode (c9c6d14): miss 770 -> 419 cycles,
-worst-case QSPI cost +2.38% -> +1.23% (docs/perf.md "QSPI tuning (M6)").
-`tools/h7-bench/check-cycles.sh` (5916aa0; +3% ratchet, test in gate H7)
-exists; `expected-cycles.txt` not yet recorded. Next: ITCM tier A/B
-(running, branch `m6-tier`), then record the baseline from the main
-checkout (both passes, bench pack in the NOR, reload Pokemon Red after),
-worst-case report, 10-min soak on the shipped player, performance review.
 
 Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
 unplayed checklist rows (Pokemon Crystal, Alone in the Dark). Stage 1 close
@@ -168,17 +160,28 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- ITCM tier A/B (branch `m6-tier`, scratch worktree). (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
+- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
 
 ## Needs human
 
 Open (session 27, 2026-11-26):
-- FYI, agent decision: the QSPI now uses the NOR's enhance mode (SIOO), which
-  survives an MCU reset. Images built before c9c6d14 panic in QSPI init
-  ("QUADSPI busy after the ES0392 2.7.4 sequence") if the NOR is still in
-  that mode; running any current image clears it, and a power cycle should
-  (untested). Only flash current images. Dropping SIOO would cost ~0.2 points
-  on the worst case if you object.
+- **Decision for you (M6 review P3):** the +3% on-board cycle ratchet
+  covers every workload, but code layout alone moves the storm workloads
+  (outside the bound by your earlier decision) by up to ~4.2% (storm-div),
+  so an ordinary core edit can fail a storm line with no real slowdown;
+  the bound workloads have 1.3-1.8 points of margin. Options: (a) keep +3%
+  everywhere and you approve each layout-only rebaseline (current rule,
+  agent's default); (b) a wider tolerance for the `storm-*` and
+  `dma-storm` lines; (c) storms report-only. (b)/(c) loosen a check, so
+  they are yours. ADR 0042 amendment has the numbers.
+- FYI, agent decision: the QSPI uses the NOR's enhance mode (SIOO) at
+  99.2 MHz. Images built before c9c6d14 panic in QSPI init on this board,
+  and the M6 review showed it happens with the NOR in normal mode too, so
+  the cause is not enhance mode; it's open (hypotheses in
+  `docs/reference/qspi-nor.md`; a power cycle by you would help tell them
+  apart). Current images have not hit it. Only flash current images.
+- FYI: gate H7 now also runs `scripts/test-check-cycles.sh` and
+  `scripts/test-check-itcm-elf.sh` (stricter only).
 
 Open (sessions 24-26, 2026-11-25/26):
 - **Still to look at / listen to:** cgb-acid2 and dmg-acid2 on the panel
