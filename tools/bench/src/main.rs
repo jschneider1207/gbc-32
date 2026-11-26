@@ -5,7 +5,10 @@
 //! (build.rs; checked by scripts/check-bench.sh, docs/perf.md "Build flags").
 //!
 //! Usage: `bench <rom | synth:<name>> <emulated-seconds>` (synthetic ROMs:
-//! synth.rs), or `bench --fingerprint` (fingerprint.rs). It is meant to run
+//! synth.rs), or `bench --fingerprint` (fingerprint.rs). `bench --write-synth
+//! <name> <out.gb>` writes a synthetic ROM to a file (the board's
+//! `paced-<name>` images embed it, and the host's `headless --paced` runs
+//! the same file). It is meant to run
 //! under
 //! `valgrind --tool=callgrind --toggle-collect=bench::run_emulation`
 //! (scripts/check-bench.sh), so only the emulation loop is counted: process
@@ -117,6 +120,28 @@ pub fn run_emulation(
     black_box(frames)
 }
 
+/// `bench --write-synth <name> <out.gb>`.
+fn write_synth(args: &[String]) -> ExitCode {
+    let [name, out] = args else {
+        eprintln!("usage: bench --write-synth <name> <out.gb>");
+        return ExitCode::from(2);
+    };
+    let Some(rom) = synth::build(name) else {
+        eprintln!(
+            "unknown synthetic ROM {name} (have: {})",
+            synth::NAMES.join(", ")
+        );
+        return ExitCode::from(2);
+    };
+    match std::fs::write(out, rom) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{out}: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "--wall") {
@@ -131,6 +156,9 @@ fn main() -> ExitCode {
     }
     if args.get(1).is_some_and(|a| a == "--fingerprint") {
         return fingerprint_main(&args[2..]);
+    }
+    if args.get(1).is_some_and(|a| a == "--write-synth") {
+        return write_synth(&args[2..]);
     }
     let [_, path, secs] = &args[..] else {
         eprintln!("usage: bench <rom | synth:<name>> <emulated-seconds>");
