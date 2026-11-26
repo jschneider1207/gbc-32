@@ -1290,6 +1290,19 @@ nothing about the QSPI.
   with Pokemon Red (reloaded, hash 0x0bfa5d71919acbbc) for 60 s: 0 over
   budget, 0 display errors, core max 1,348,228 cycles.
 
+**Clock after the M6 review (T6).** PLL2 now runs from a 12.8 MHz input
+(DIVM2 5 x DIVN2 62 / DIVR2 4 = 198.4 MHz; the 16 MHz input of the first
+set sat on the PLL's maximum), so memory-mapped reads run at 99.2 MHz,
+and CSHT is sized for the fastest HSI (6 cycles, was 5). `qspi-mmap`:
+cold 32-byte line 429 cycles median (was 419), cold u32 200 (194), 64 KiB
+copy 47.3 MB/s (47.7). `bench-itcm-dtcm-pll480` with the pack in the NOR
+(one boot, worktree build; check-report and check-cycles OK, the last
+two of 78 reports agree): worst-case QSPI +1.26% mean / +1.34% max over
+internal (was +1.23% mean), storm-gdma +7.73% / +15.39% (was +7.56% /
++15.04%), every other workload at most +0.18%; against
+expected-cycles.txt the QSPI lines moved -0.05% to +0.21% mean (storm-gdma
++0.18% mean, +0.35% max), all within the +3% ratchet.
+
 ### M6 worst-case report (h7-bench ratchet measurement; shipped-image figure below)
 
 Plan Stage 2 M6 "Report". `bench-itcm-dtcm-pll480` (the core placement

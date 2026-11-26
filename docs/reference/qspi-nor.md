@@ -300,9 +300,12 @@ holding the bench pack, compare and unaligned checks all PASS):
 |---|---:|---:|---:|---:|---:|
 | 59 MHz, mode 0xFF (M2) | 362-385 | 770 | 376-388 | 120 | 28.1 MB/s |
 | 100 MHz, mode 0xFF | 237 | 463 | 242 | 68 | 47.7 MB/s |
-| 100 MHz, SIOO + 0xA5 (adopted) | 194 | 419 | 206 | 68 | 47.7 MB/s |
+| 100 MHz, SIOO + 0xA5 | 194 | 419 | 206 | 68 | 47.7 MB/s |
+| 99.2 MHz, SIOO + 0xA5, CSHT 6 (adopted, M6 review T6) | 200 | 429 | 212 | 68 | 47.3 MB/s |
 
-A random 32-byte miss is now **~420 cycles (0.89 us)**, against 770. The
+A random 32-byte miss is now **~430 cycles (0.91 us)**, against 770
+(419 at 100 MHz with CSHT 5: the slower clock and the extra NCS-high
+cycle cost about 10). The
 copy is at 95% of the 50 MB/s wire limit. Bench figures: docs/perf.md
 "QSPI tuning (M6)".
 
