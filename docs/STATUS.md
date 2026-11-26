@@ -146,11 +146,25 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS). Running: `m5-player` (player image, `scripts/play-on-board.sh`). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
+- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Running: `m5-replay` (acceptance-schema scripted input, `run-replay.sh`, the proposed replay set on the player). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
 
 Open (session 25, 2026-11-26):
+- **You can play on the board now** (sign-off items 1-4): `scripts/play-on-board.sh
+  <rom> [--sav f] [--sav-out f]` (copies the ROM to scratch, loads it into
+  the NOR only if needed, flashes `player`, runs `gbc-pc play`: arrows, Z =
+  B, X = A, Enter = Start, Backspace/Right Shift = Select, F5 = save dump,
+  Esc quits; the joystick is the D-pad, B1 = Start). `play` reads keys
+  globally (GetAsyncKeyState), so keys typed in other windows count too.
+  Details and limits: `docs/reference/player.md`. Measured: Wario Land 3
+  150 s, 0 frames over budget (busy max 29.7% of a frame), 0 underruns;
+  your LADX `.sav` (scratch copy) round-tripped byte-identically.
+- FYI (agent decisions, say if you object): the `player` image keeps the
+  core's `Frame` in DTCM (the ADR 0026 target), and its save buffer is
+  64 KiB, so a cart with 128 KiB of RAM runs but its save is refused (AXI
+  SRAM holds the 128 KiB-aligned panel buffer). Joystick and B1 were never
+  pressed by a human; B1 is assumed active high (UM2407 doesn't say).
 - **Gate hooks for three new script tests** (stricter only; not done
   because gate edits prompt you): `scripts/test-run-headless.sh`,
   `scripts/test-check-report.sh`, `scripts/test-run-paced.sh` all pass and
