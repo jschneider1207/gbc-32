@@ -343,7 +343,11 @@ fn serve(
         session.feed(b, game, shared);
     });
     if let Some(buf) = link.tx_buf() {
-        let cap = if session.audio_on() { TX_AUDIO_CAP } else { buf.len() };
+        let cap = if session.audio_on() {
+            TX_AUDIO_CAP
+        } else {
+            buf.len()
+        };
         let n = session.fill_tx_with(&mut buf[..cap], extra);
         link.start_tx(n);
     }
