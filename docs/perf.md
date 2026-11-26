@@ -1520,6 +1520,49 @@ tier the list names first, the plain tile path (8,078 B), and then fills
 routines and 89 long-branch thunks: nothing is left for front-end ISRs. A
 Stage 2 front end on an H753/H755 must drop more.
 
+## Player (M5)
+
+The `player` image (`docs/reference/player.md`): the paced loop with the
+ROM in the QSPI NOR, the display (newest frame at TE), the DAC, live
+input and the link session, the M6-target ITCM set (`check-itcm-elf.sh`
+OK: 64,080 B of 65,280 B) and, in this image, the frame buffer in DTCM.
+Its statistics (every 300 frames, `gbc_firmware::player`): `core` is the
+`run_frame` call alone; `busy` is the whole loop iteration awake (one
+service-hook call to the next minus the cycles asleep in `WFI`: link,
+input, core, audio push, frame hash, display hand-off, idle-hook checks,
+interrupts); **over budget** = `busy` > 7,902,557 cycles (1/59.7275 s at
+472 MHz). Measured 2026-11-26 at 472 MHz, no input (title and attract
+screens), branch `m5-player` (commits f3187ad, 82449fb):
+
+| Run | Frames | core mean | core p99 (max window) | core max | front end mean / max | busy max | slack min | over budget | underruns | presented / skipped |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cgb-acid2, 20 s via the wrapper | 2,461 | 683,666 | 688,876 | 757,929 | 415,185 / 455,465 | 1,156,129 (14.6%) | 6,762,972 | 0 | 0 | 2,364 / 84 |
+| Wario Land 3, 150 s | 11,071 | 1,790,006 (heaviest window) | 1,859,948 | 1,897,911 (24.0%) | 443,761 / 500,382 | 2,350,158 (29.7%) | 5,592,506 | 0 | 0 | 10,339 / 649 |
+
+Percentages are of the 7,902,557-cycle budget. The front end (about
+0.41-0.50 M cycles, 0.9-1.1 ms per frame) is mostly the 1.5x scaler into
+the panel buffer and the audio push. `skipped` frames are superseded
+before the panel's TE took them (the panel runs at about 60 Hz against
+59.73 Hz). The first Wario Land 3 run had 5 underruns (1,280 frames),
+all at the start: the run hashes the 2 MiB ROM from the NOR for its
+header line before the first frame, longer than the paced image's
+4-refill margin before the DAC's start ramp ends; live mode now starts 24
+refills (187 ms) before the end (commit 82449fb), and the second run
+above had 0.
+
+Scripted mode (`player-script`, `GBC_HEADLESS_FRAMES=2400`, no input,
+cgb_sound in the NOR; `run-paced.sh out/player-script.bin cgb_sound.gb`,
+`RUN_PACED_FRAMES=2400`): **PASS**, the three `paced` lines equal the
+host's `headless --paced` (fbs `bf833017780c5a60`, feed
+`a47140640767c765`, 1,316,677 DAC frames), ring underruns 0 / overruns
+0 (fill 1,243..2,047), speed +856 ppm (steady -238), display 2,194
+presented / 203 skipped, 0 transfer errors, DAC no errors. Core min /
+mean / max 672,430 / 959,192 / 2,460,484 (frame 54); `stats player`
+busy max 2,903,956 (36.7%), over budget 0. (Its `underruns=6
+underrun_frames=1467` are since boot and include the drain's last pop and
+the DAC stop ramp after the run, which pop an empty ring; the run's own
+figure is `stats paced ring`: 0.)
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce

@@ -64,7 +64,10 @@ to `SaveBegin.hash`, via `<out>.part` and a rename.
 - A frame the board cannot decode is still answered `Nak` (any seq);
   in `play` the PC ignores a `Nak` that does not carry the seq of its
   outstanding dump request.
-- `Stats` frames (any seq) are printed as they arrive.
+- `Stats` frames (any seq) are printed as they arrive. The `player` image
+  puts its statistics in `extra` as ASCII `key=value` fields separated by
+  spaces, starting with `image=player` (`docs/reference/player.md`);
+  `gbc-pc play` prints them as `stats: <extra>`.
 
 `play` does not send `Hello`; it can follow a `load` in a separate run.
 `gbc-pc play --port null --seconds 2` runs the loop with no board.
