@@ -3,9 +3,12 @@
 # section sizes and checks what can be checked without the board, as
 # tools/h7-bench/build.sh does.
 #
-#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader, headless-<rom>
-#                         for each acceptance ROM (cpu_instrs, cgb-acid2), and headless-qspi
-#                         (the headless loop on whatever ROM the QSPI NOR holds)
+#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader,
+#                         lcd-probe, headless-<rom> for each acceptance ROM (cpu_instrs,
+#                         cgb-acid2), and headless-qspi (the headless loop on whatever ROM
+#                         the QSPI NOR holds)
+#   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
+#                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
 #                         (agents: the shared build lock)
 #   GBC_TEST_ROMS=<dir>   where the test ROMs are (default: the repo's
@@ -71,6 +74,22 @@ command -v readelf >/dev/null || { echo "FAIL: readelf (binutils) not found" >&2
 mkdir -p "$OUT"
 fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
+
+# The images to build: the arguments, or all of them.
+ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe"
+for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%%=*}"; done
+ALL_IMAGES="$ALL_IMAGES headless-qspi"
+for a in "$@"; do
+  case " $ALL_IMAGES " in *" $a "*) ;; *) echo "build.sh: no image named $a (images: $ALL_IMAGES)" >&2; exit 2;; esac
+done
+SELECTED=("$@")
+# want <image>: whether to build it.
+want() {
+  [ "${#SELECTED[@]}" -eq 0 ] && return 0
+  local a
+  for a in "${SELECTED[@]}"; do [ "$a" = "$1" ] && return 0; done
+  return 1
+}
 
 # word <file> <index>: little-endian 32-bit word of a .bin, as 8 hex digits.
 word() { od -An -tx4 -j $(($2 * 4)) -N4 "$1" | tr -d ' \n'; }
@@ -144,24 +163,29 @@ check_image() {
   echo "  DTCM: $((16#$send - DTCM_LO)) B of statics and tables, $((16#$sstart - 16#$send)) B of stack region"
 }
 
-built=$(build_bin boot locked cargo build --release --bin boot "${REMAP[@]}")
-check_image boot "$built"
-# The QSPI NOR probe (plan Stage 2 M2), built as `boot` is.
-built=$(build_bin qspi-probe locked cargo build --release --bin qspi-probe "${REMAP[@]}")
-check_image qspi-probe "$built"
-# The NOR in memory-mapped mode (plan Stage 2 M2), built as `boot` is.
-built=$(build_bin qspi-mmap locked cargo build --release --bin qspi-mmap "${REMAP[@]}")
-check_image qspi-mmap "$built"
-# The NOR write side and UART receive (plan Stage 2 M2), built as `boot`.
-built=$(build_bin qspi-write locked cargo build --release --bin qspi-write "${REMAP[@]}")
-check_image qspi-write "$built"
-# The ROM loader (plan Stage 2 M2), built as `boot`; GBC_LOADER_BAUD sets
-# its serving rate (src/bin/loader.rs).
-built=$(build_bin loader locked cargo build --release --bin loader "${REMAP[@]}")
-check_image loader "$built"
+# plain <image>: an image built as `boot` (no features), the
+# bin of the same name.
+plain() {
+  want "$1" || return 0
+  built=$(build_bin "$1" locked cargo build --release --bin "$1" "${REMAP[@]}")
+  check_image "$1" "$built"
+}
+plain boot
+# The QSPI NOR probe (plan Stage 2 M2).
+plain qspi-probe
+# The NOR in memory-mapped mode (plan Stage 2 M2).
+plain qspi-mmap
+# The NOR write side and UART receive (plan Stage 2 M2).
+plain qspi-write
+# The ROM loader (plan Stage 2 M2); GBC_LOADER_BAUD sets its serving rate
+# (src/bin/loader.rs).
+plain loader
+# The ILI9341V panel over the FMC (plan Stage 2 M3).
+plain lcd-probe
 
 for entry in "${HEADLESS_ROMS[@]}"; do
   rom=${entry%%=*} path=$ROMS/${entry#*=}
+  want "headless-$rom" || continue
   [ -f "$path" ] || { bad "headless-$rom: no ROM at $path (scripts/fetch-test-roms.sh, or set GBC_TEST_ROMS)"; continue; }
   built=$(GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked cargo build --release --bin headless --features headless "${REMAP[@]}")
   check_image "headless-$rom" "$built"
@@ -176,11 +200,13 @@ done
 # The headless image with its ROM from the QSPI NOR (plan Stage 2 M2,
 # `rom-qspi`): no ROM embedded, so one image for every ROM; the same checks
 # as the headless-<rom> images.
-built=$(GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked env -u GBC_HEADLESS_ROM cargo build --release --bin headless --features rom-qspi "${REMAP[@]}")
-check_image headless-qspi "$built"
-echo "  post-link ITCM check (--drop '$ITCM_DROP')"
-../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-qspi.elf" | sed 's/^/  /' ||
-  bad "headless-qspi: post-link ITCM check (scripts/check-itcm-elf.sh)"
+if want headless-qspi; then
+  built=$(GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked env -u GBC_HEADLESS_ROM cargo build --release --bin headless --features rom-qspi "${REMAP[@]}")
+  check_image headless-qspi "$built"
+  echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-qspi.elf" | sed 's/^/  /' ||
+    bad "headless-qspi: post-link ITCM check (scripts/check-itcm-elf.sh)"
+fi
 
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
 echo "build.sh: OK; images in $(pwd)/$OUT"

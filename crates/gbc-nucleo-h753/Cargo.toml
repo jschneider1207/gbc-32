@@ -53,6 +53,14 @@ name = "loader"
 test = false
 bench = false
 
+# First contact with the shield's ILI9341V panel over the FMC: IDs,
+# timed fills and a full GRAM readback per FMC timing (plan Stage 2 M3);
+# built as `boot`.
+[[bin]]
+name = "lcd-probe"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
