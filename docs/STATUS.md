@@ -118,6 +118,11 @@ Working rules that matter here:
 ## Needs human
 
 Open (session 22, 2026-11-25):
+- **H735 ITCM reserve (C-P5, no answer needed now):** measured on the firmware
+  link (docs/perf.md "Firmware-link size"), a core grown to the 122,880 B gate
+  plus the compiler_builtins it calls (4,278 B) leaves 3,854 B of the 8 KiB
+  reserve for ISRs and the blit. Gate unchanged; lowering it to 118,784 B is
+  your call once the H735 front end exists.
 - FYI, no answer needed unless you object: ADR 0036 drops h7-bench's `h755`
   feature and its 392 MHz and HSI-64 images when h7-bench moves onto the
   `gbc-nucleo-h753` bring-up lib (the H755 is retired; D8, D11). Sources and
