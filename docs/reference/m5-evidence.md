@@ -8,8 +8,8 @@ the ST7789V shield, QSPI NOR and DAC1, ST-LINK VCP, CPU 472 MHz,
 are separate acceptance items. They are recorded in the sections before
 "Board state left".
 
-**Commit.** Branch `m5-replay` at `cc57af5` (firmware `f2d0c50`,
-`9853591`; runner `d055d95`, `cc57af5`). The per-ROM `.bin` images are not
+**Commit.** Branch `m5-replay` (merged to main) at `569161e` (firmware `64d7374`,
+`9ab8da2`; runner `64c5084`, `569161e`). The per-ROM `.bin` images are not
 committed (each one compiles in its input and frame count). Rebuild them
 with `run-replay.sh` and compare the cksums printed in the reports here.
 
@@ -136,7 +136,7 @@ rtc3test-sub-second report. It covers:
 
 The first full board run checked only cpu_instrs and reported PASS: the
 flash, gbc-pc or serial step read the rest of the list from stdin. Fixed
-in `cc57af5`. The list is now read on fd 3, and the selected entries are
+in `569161e`. The list is now read on fd 3, and the selected entries are
 counted up front. Each fix alone was mutation-checked against the stdin
 test. Other mutations, each failing the tests: removing the late, handed,
 over-budget, rc-1, rc-2, line-count, "stats input without a table" and
@@ -146,7 +146,7 @@ arithmetic error is still caught by the checked-entries count (exit 2).
 ## The 10-minute `synth:worst-case` soak
 
 Acceptance: "A 10-minute `synth:worst-case` run has 0 frames over budget
-and 0 underruns." 2026-11-26, same board, commit `8228214` (branch
+and 0 underruns." 2026-11-26, same board, commit `ca98462` (branch
 `m5-soak`).
 
 **Scripted** (the main evidence): `soak-set.txt` is one run-replay entry,
@@ -239,7 +239,7 @@ cd crates/gbc-nucleo-h753
 GBC_BUILD_LOCK=<lock> ./run-player-save.sh
 ```
 
-Results (2026-11-26, COM5, 2,000,000 baud, commit `213dd3b`, branch `m5-soak`):
+Results (2026-11-26, COM5, 2,000,000 baud, commit `23180ea`, branch `m5-soak`):
 
 | run | result |
 |---|---|

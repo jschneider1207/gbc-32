@@ -109,7 +109,7 @@ dump goes out as whole frames, up to 4 KiB per TX transfer.
   (hash, footer) at the verdict. Applying is `save::reload` (a power cycle
   of the running game); the footer time of the applied save is stamped
   back on dumps, so load then dump is byte-identical.
-- One save buffer (128 KiB + 64, AXI SRAM) serves load and dump: a
+- One save buffer (AXI SRAM; 128 KiB + 64 in link-probe, 64 KiB + 64 in the player) serves load and dump: a
   `SaveDumpRequest` drops a load in progress, a `SaveBegin` stops a dump
   being sent.
 - `Input`: the bitmap goes to `buttons::Shared::set_pc`; 90 frames (1.5 s)
