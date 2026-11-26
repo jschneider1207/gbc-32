@@ -4,9 +4,10 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 is **COMPLETE** (human, 2026-11-25; tag `stage1-m10`).
-  **Stage 2 (STM32H753 firmware): M0-M3 done** (M3: acceptance run on the
-  board, milestone review fixed, tag `stage2-m3`). **M4 (audio out) is
-  next.** Plan: `docs/plan/stage-2.md` (D1-D11).
+  **Stage 2 (STM32H753 firmware): M0-M4 done** (M4: 10-minute paced runs
+  on the board, milestone review fixed, tag `stage2-m4` at c0de0b5).
+  **M5 (input and the player loop) in progress.** Plan:
+  `docs/plan/stage-2.md` (D1-D11).
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
@@ -30,30 +31,41 @@
   scale+present max 196,480 cycles (2.5% of a frame), core +0.07%.
   Facts: `docs/reference/lcd-panel.md`, ADR 0039, docs/perf.md "Display
   in the loop (M3)".
-- **Board state:** `headless-display-cgb-acid2` flashed (its last frame
-  stays on the panel); bench pack in the NOR. `out/loader.bin` must be
-  rebuilt from main before use.
-- **Last updated:** 2026-11-26, session 24 (log
-  `logs/2026-11-25-24-stage2-m3.md`; session 23:
-  `logs/2026-11-25-23-stage2-m2.md`).
+- **M4 results:** DAC1 dual 12-bit on PA4/PA5, TIM6 236 MHz / 7202 =
+  32,768.675 Hz, DMA1 stream 0 (2 x 256 frames, MPU region 9), watchdog
+  restart. `paced-<rom>` images (audio-paced loop + display): cgb_sound and
+  synth:worst-case 35,837 frames each, `paced` lines EQUAL to host, 0
+  underruns, ppm +82/+71 vs DWT; worst-case core 3,328,804 / 3,350,486
+  mean/max with display + audio. Display skips ~27% of frames (M4 P-7).
+  Facts: `docs/reference/audio-dac.md`, `m4-evidence.md`, docs/perf.md
+  "Paced loop (M4)". Check: `run-paced.sh` (tests `scripts/test-run-paced.sh`).
+- **Board state:** `paced-cgb_sound` flashed (plays ~10 min after reset,
+  then silent); bench pack in the NOR. `out/loader.bin` must be rebuilt
+  from main before use.
+- **Last updated:** 2026-11-26, session 25 (log
+  `logs/2026-11-26-25-stage2-m4.md`; session 24:
+  `logs/2026-11-25-24-stage2-m3.md`).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M4 (audio out)
+## Next up: Stage 2 M5 (input and the player loop)
 
-Tasks and acceptance: `docs/plan/stage-2.md` M4 (DAC1 on PA4/PA5, TIM6
-32,768 Hz trigger, DMA1 circular buffer in AXI SRAM; DC blocker, i16 ->
-12-bit, sample ring in `gbc-firmware`; audio-driven pacing; DAC-feed hash
-equal to the host's). Open lows: M1 (T-4, T-8, F-2, F-3, F-5..F-7), M2
-(H-2..H-5, T-3..T-5) and M3 (T-3..T-5, P-1..P-9) sit at the end of their
-milestones in the plan.
+Done: `gbc_firmware::{buttons,save}` and `paced::run_with` (`InputSource`,
+`Service` hooks), 6c2bcee. In flight: `tools/gbc-pc` live input + save
+load/dump. Next: the `player` image (ROM from QSPI, display with the
+pending-frame replace (M4 P-7), audio, joystick + PC input, saves over the
+link, stats, input echo, DMG compat palette), then the scripted replay-set
+run vs host and the save round trip (use a halted-RTC `.sav` fixture: a
+running RTC changes the footer in emulated time). Open lows: M1 (T-4, T-8,
+F-2, F-3, F-5..F-7), M2 (H-2..H-5, T-3, T-5), M3 (T-3, T-4, P-3, P-5, P-6),
+M4 (T-3, P-3, P-4, P-5, P-7) at the end of their milestones in the plan.
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
-`CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`; root workspace), `crates/gbc-link`
+`CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save`; root workspace), `crates/gbc-link`
 (COBS + CRC-32 serial protocol, no deps), `tools/gbc-pc` (Windows .exe
 loader client; `scripts/gbc-pc.sh` builds, runs it via interop, takes the
 board lock; host tests incl. the board's own `loader.rs` and `baud.rs` via
 `#[path]`), `crates/gbc-nucleo-h753` (own workspace: lib bring-up incl.
-`qspi.rs`, `loader.rs`, `baud.rs`, `lcd.rs`, `lcd_dma.rs`, `gpio.rs`; bins `boot`, `lcd-probe`, `lcd-dma-probe`, `qspi-probe`, `qspi-mmap`,
+`qspi.rs`, `loader.rs`, `baud.rs`, `lcd.rs`, `lcd_dma.rs`, `gpio.rs`, `audio_dac.rs`; bins `boot`, `lcd-probe`, `lcd-dma-probe`, `dac-probe`, `paced` (images `paced-<rom>`), `qspi-probe`, `qspi-mmap`,
 `qspi-write`, `loader`, `headless` (feature `headless`; `rom-qspi` = ROM
 from the NOR; `display` = panel + readback self-test, images `headless-display-<rom>`); `build.sh [image...]`, `flash.sh`, `run-headless.sh`,
 `run-headless-qspi.sh`, `run-loader-roundtrip.sh`, `gen-test-image.sh`),
@@ -134,9 +146,26 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 24: M4 started. Branches `m4-audio-fw` (DC blocker, 12-bit conversion, SPSC sample ring in gbc-firmware) and `m4-dac` (DAC1 + TIM6 + DMA1 driver, `dac-probe`, board) in scratch worktrees.
+- Session 25: branch `m5-pc` (gbc-pc live input + save load/dump) in a scratch worktree.
 
 ## Needs human
+
+Open (session 25, 2026-11-26):
+- **Gate hooks for three new script tests** (stricter only; not done
+  because gate edits prompt you): `scripts/test-run-headless.sh`,
+  `scripts/test-check-report.sh`, `scripts/test-run-paced.sh` all pass and
+  never touch the board. Hook each into `scripts/gate-stage2.sh` next to
+  the `scripts/test-board-lock.sh` block (~lines 504-506: `sub ...`,
+  `run_status <script>`, `[ "${rc}" -eq 0 ] || fail ...`). Say "hook them"
+  and an agent will do it (the edit will prompt).
+- FYI, no answer needed unless you object: the M5 save round-trip will use
+  a `.sav` fixture with the MBC3 RTC **halted** (DH bit 6). With a running
+  RTC the footer advances in emulated time, so "dump after a scripted run
+  equals the original" can't hold; a no-RTC cart is also covered.
+- FYI: `paced-*` images set DBGMCU_CR.DBGSLEEP_D1 so DWT counts in WFI
+  (needed for the speed figure). It survives a system reset until a power
+  cycle and keeps the CPU clock running in sleep (more power); dev-board
+  only, Stage 3 should time with a TIM (M4 P-5).
 
 Open (session 24, 2026-11-25):
 - **Audio-paced emulation runs ~0.33% fast in real time** (no answer
