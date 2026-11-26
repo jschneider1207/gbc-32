@@ -46,7 +46,11 @@
 //! back makes load → take byte-identical for the canonical lengths (RAM,
 //! RAM + 48, RAM + 17); a 44-byte footer, or a clock cart's RAM-only
 //! image, comes back as RAM + 48 / RAM + 17. Syncing to real time is the
-//! PC's job (`tools/gbc-pc` knows the time).
+//! PC's job (`tools/gbc-pc` knows the time, ADR 0040): it sends
+//! [`Image::encode_synced`] (the clock advanced by the wall time since
+//! the stamp, as the desktop does on load, [`Clock::sync`]) and restamps
+//! dumps with [`Image::encode_restamped`]. Both take `now` as a
+//! parameter; nothing here reads a clock.
 
 use gbc_core::{
     CLOCK_HZ, CartInfo, Config, Emulator, Huc3RtcState, LoadErrorKind, RtcState, RtcTime, cart_info,
@@ -71,6 +75,24 @@ pub enum ClockKind {
 pub enum Clock {
     Mbc3(RtcState),
     Huc3(Huc3RtcState),
+}
+
+impl Clock {
+    /// The clock as it should be at unix time `now`, given it was stored
+    /// at `saved_unix`: advanced by `now - saved_unix` seconds by the
+    /// core's `advance_seconds` (a halted MBC3 clock stays put; the day
+    /// counter wraps and sets the carry flag as the hardware would). A
+    /// stored time in the future counts as no time passed. This is the
+    /// desktop front end's sync on load (ADR 0023), shared with
+    /// `tools/gbc-pc` (ADR 0040).
+    #[must_use]
+    pub fn sync(self, saved_unix: u64, now: u64) -> Self {
+        let elapsed = now.saturating_sub(saved_unix);
+        match self {
+            Self::Mbc3(s) => Self::Mbc3(s.advance_seconds(elapsed)),
+            Self::Huc3(s) => Self::Huc3(s.advance_seconds(elapsed)),
+        }
+    }
 }
 
 /// What a cartridge's save holds: its RAM size and clock.
@@ -198,6 +220,23 @@ impl<'s> Image<'s> {
         Ok(())
     }
 
+    /// This image re-encoded for a load at unix time `now`: the RAM as
+    /// is, the clock [`Clock::sync`]ed from the stamp to `now`, stamped
+    /// `now` (HuC3: minus the seconds into the minute, as [`take`]). A
+    /// 44-byte footer comes out as 48 bytes; an image without a footer
+    /// comes out unchanged. Returns the length written to `out`.
+    pub fn encode_synced(&self, now: u64, out: &mut [u8]) -> Result<usize, SaveError> {
+        let clock = self.clock.map(|c| c.sync(self.unix_time, now));
+        encode(self.ram, clock, now, out)
+    }
+
+    /// This image with its footer stamped `now` and the clock as stored
+    /// (for a dump: the registers were current at `now`). The RAM is
+    /// unchanged; an image without a footer comes out unchanged.
+    pub fn encode_restamped(&self, now: u64, out: &mut [u8]) -> Result<usize, SaveError> {
+        encode(self.ram, self.clock, now, out)
+    }
+
     /// Hands the clock to the core, after `Emulator::load` (which starts
     /// the clock from zero). Not advanced by real time (module docs).
     /// Without a clock in the image the core's clock is left alone.
@@ -321,13 +360,26 @@ pub fn take(emu: &Emulator<'_>, unix_time: u64, out: &mut [u8]) -> Result<usize,
     if !info.has_save() {
         return Err(SaveError::NoSave);
     }
-    let ram = emu.cart_ram();
-    let rtc = emu.rtc_state();
-    let huc3 = emu.huc3_rtc_state();
-    let footer = match (rtc, huc3) {
-        (Some(_), _) => MBC3_FOOTER_LEN,
-        (None, Some(_)) => HUC3_FOOTER_LEN,
-        (None, None) => 0,
+    let clock = emu
+        .rtc_state()
+        .map(Clock::Mbc3)
+        .or_else(|| emu.huc3_rtc_state().map(Clock::Huc3));
+    encode(emu.cart_ram(), clock, unix_time, out)
+}
+
+/// Writes `ram`, then `clock`'s footer (if any) stamped `unix_time`, to
+/// the start of `out`; returns the length. The encoding [`take`]
+/// documents. Refused, writing nothing, if `out` is short.
+pub fn encode(
+    ram: &[u8],
+    clock: Option<Clock>,
+    unix_time: u64,
+    out: &mut [u8],
+) -> Result<usize, SaveError> {
+    let footer = match clock {
+        Some(Clock::Mbc3(_)) => MBC3_FOOTER_LEN,
+        Some(Clock::Huc3(_)) => HUC3_FOOTER_LEN,
+        None => 0,
     };
     let need = ram.len() + footer;
     let have = out.len();
@@ -336,22 +388,26 @@ pub fn take(emu: &Emulator<'_>, unix_time: u64, out: &mut [u8]) -> Result<usize,
         .ok_or(SaveError::BufferTooSmall { need, have })?;
     let (o_ram, o_footer) = out.split_at_mut(ram.len());
     o_ram.copy_from_slice(ram);
-    if let Some(r) = rtc {
-        put_time(&mut o_footer[..20], &r.live);
-        put_time(&mut o_footer[20..40], &r.latched);
-        o_footer[40..48].copy_from_slice(&unix_time.to_le_bytes());
-    } else if let Some(c) = huc3 {
-        let into_minute = u64::from(c.subminute_clocks / CLOCK_HZ);
-        o_footer[..8].copy_from_slice(&unix_time.saturating_sub(into_minute).to_le_bytes());
-        for (o, v) in o_footer[8..16].as_chunks_mut::<2>().0.iter_mut().zip([
-            c.minutes,
-            c.days,
-            c.alarm_minutes,
-            c.alarm_days,
-        ]) {
-            o.copy_from_slice(&v.to_le_bytes());
+    match clock {
+        Some(Clock::Mbc3(r)) => {
+            put_time(&mut o_footer[..20], &r.live);
+            put_time(&mut o_footer[20..40], &r.latched);
+            o_footer[40..48].copy_from_slice(&unix_time.to_le_bytes());
         }
-        o_footer[16] = u8::from(c.alarm_enabled);
+        Some(Clock::Huc3(c)) => {
+            let into_minute = u64::from(c.subminute_clocks / CLOCK_HZ);
+            o_footer[..8].copy_from_slice(&unix_time.saturating_sub(into_minute).to_le_bytes());
+            for (o, v) in o_footer[8..16].as_chunks_mut::<2>().0.iter_mut().zip([
+                c.minutes,
+                c.days,
+                c.alarm_minutes,
+                c.alarm_days,
+            ]) {
+                o.copy_from_slice(&v.to_le_bytes());
+            }
+            o_footer[16] = u8::from(c.alarm_enabled);
+        }
+        None => {}
     }
     Ok(need)
 }

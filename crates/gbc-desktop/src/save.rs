@@ -9,6 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use gbc_core::{CLOCK_HZ, CartInfo, EjectedCart, Emulator, Huc3RtcState, RtcState, RtcTime};
+use gbc_firmware::save::Clock as FwClock;
 
 /// Size of the de-facto RTC footer: 10 x u32 LE and a u64 LE unix time.
 pub const FOOTER_LEN: usize = 48;
@@ -60,12 +61,29 @@ impl Clock {
     /// the wall-clock time since it was saved. `now` is `None` to skip the
     /// sync (tests, and anything that must not depend on the host clock);
     /// a stored time in the future counts as no time passed.
+    ///
+    /// The rule is `gbc_firmware::save::Clock::sync`, which `tools/gbc-pc`
+    /// applies too when it sends a save to the board (ADR 0040).
     pub fn sync(self, saved_unix: u64, now: Option<u64>) -> Self {
         let Some(now) = now else { return self };
-        let elapsed = now.saturating_sub(saved_unix);
-        match self {
-            Self::Mbc3(s) => Self::Mbc3(s.advance_seconds(elapsed)),
-            Self::Huc3(s) => Self::Huc3(s.advance_seconds(elapsed)),
+        Self::from(FwClock::from(self).sync(saved_unix, now))
+    }
+}
+
+impl From<Clock> for FwClock {
+    fn from(c: Clock) -> Self {
+        match c {
+            Clock::Mbc3(s) => Self::Mbc3(s),
+            Clock::Huc3(s) => Self::Huc3(s),
+        }
+    }
+}
+
+impl From<FwClock> for Clock {
+    fn from(c: FwClock) -> Self {
+        match c {
+            FwClock::Mbc3(s) => Self::Mbc3(s),
+            FwClock::Huc3(s) => Self::Huc3(s),
         }
     }
 }
