@@ -177,3 +177,47 @@ rx_high=257`. With `RUN_SAVE_EXPECT` a copy with one byte changed, the
 script exits 1 at step 4 (`d1.sav ... differ: byte 1001`). The probe's
 frame of `jr -2` takes ~606,000 cycles (1.28 ms) of core time. `gbc-pc
 play --seconds 3`: 7 `Input` frames sent, the probe counted `inputs=7`.
+
+## Audio to the PC (ADR 0041), `gbc-pc play --audio-wav`
+
+Opt-in: a board sends no audio until asked, so nothing else changes.
+
+| PC sends | Board answers |
+|---|---|
+| `AudioStart` | `Ack`, then `Audio` messages (any seq, never answered) until stopped; `Nak UnexpectedType` from an image without audio (link-probe, the player's no-ROM loop) |
+| `AudioStop` | `Ack`; no more `Audio` (ones already queued may follow) |
+
+`Audio { first: u32, held: u16, data }`: `data` is the **real** frames
+the DAC ISR handed to the DMA, in order (never underrun filler), 3 bytes
+each (`gbc_link::audio::pack`: left code = DAC channel 1 in bits 0..=11,
+right in 12..=23, little-endian), at most 340 frames; the player sends
+one message per DMA half, 256 frames (7.8 ms). `first` is the index of
+the first of them among all real frames fed since the board started
+(wrapping u32), so consecutive messages chain (`first + frames`) and a
+jump is a gap. `held` is the filler frames (the last frame repeated) the
+DAC played right after them: 0 unless the board underran.
+
+- The stream stops on `AudioStop`, on `Hello`, and after 90 frames
+  (1.5 s) without any decoded frame from the PC (`play` repeats `Input`
+  every 500 ms), so it never outlives the PC.
+- Transmit order: replies, then the pending `Stats`, then audio, then
+  dump frames; whole frames only. While audio streams one TX transfer is
+  at most 3,072 B (15.4 ms), so every service call finds the transmitter
+  idle.
+- The board never waits for the PC: its queue (`AudioTee`, 4 halves =
+  31 ms) drops whole halves when full and counts them (`audio_dropped`,
+  `audio_dropped_halves` in `Stats`); the PC sees the jump in `first`.
+
+The PC (`tools/gbc-pc/src/audio.rs`): checks the chain (gaps forward are
+filled with the last frame, at most 1 s each, so WAV sample i is frame
+`first_frame + i`; a jump back is a board reset, no fill), writes the
+real frames as a 16-bit stereo WAV at 32,768 Hz, sample = `(code - 2048)
+<< 4`, and prints `audio:` lines: the link's received bytes/s,
+`first_frame`, frames, messages, gaps, missing, filled, held, and the
+board's `audio_*` fields from its last `Stats`.
+
+Measured 2026-11-26 (NUCLEO-H753ZI, COM5, 2 Mbit/s, Pokemon Red intro,
+no keys): 60 s, 7,703 messages, 0 gaps, 0 drops, 100,868 B/s received;
+a second 30 s run the same. Both captures equal the host's feed
+(`headless --paced --dac-feed`) for every frame (1,971,968 and 986,112
+frames from `first_frame`).

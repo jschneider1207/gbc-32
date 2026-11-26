@@ -112,6 +112,16 @@ ring short; 0 = no audible gap), `overruns`, `presented`/`skipped`
 `replies_dropped`, `sessions`, `stats_sent`, `stats_dropped`, `rx_high`,
 `tx_errors`, `baud`.
 
+Audio to the PC (live mode only, before `stack_used`; ADR 0041):
+`audio_on` (1 while streaming), `audio_sent` (`Audio` messages),
+`audio_frames` (real frames in them), `audio_dropped` /
+`audio_dropped_halves` (frames / DMA halves dropped because the link fell
+behind; 0 = a complete stream), `audio_timeouts` (streams stopped for want
+of the PC), `audio_cyc_per_frame` (main-loop cycles to pack and encode,
+per frame sent: 107 measured), `audio_isr_max` (the DAC ISR's most
+cycles **in this window**, reset per window: 8,356 with audio off, 10,496
+on, so the copy adds ~2,140 cycles per half, 8.4 per frame).
+
 `stack_used=<used>/<size>` (also since boot, in both modes; between
 `stats_dropped` and `rx_high`): the deepest stack use in bytes, from the
 paint high-water mark (`stack::usage`), of the DTCM stack region. **Stack
@@ -139,6 +149,29 @@ skip it, so the headroom above still matters.
 cost that much (plan D7, M6 "the whole loop fits real time"). The ring
 (about 75 ms of audio) absorbs single slow frames, so an over-budget
 frame is not necessarily an underrun.
+
+## Audio to the PC
+
+There is no speaker on the DAC pins, so the player can also stream what
+the DAC plays to the PC (ADR 0041; protocol in `link-protocol.md`,
+"Audio to the PC"):
+
+    scripts/play-on-board.sh <rom> --seconds 60 --audio-wav /path/out.wav
+
+or, with the player already running, `scripts/gbc-pc.sh play --seconds
+60 --audio-wav out.wav`. The WAV (16-bit stereo, 32,768 Hz; the board
+plays at 32,768.675 Hz) holds the real frames the DAC was fed, from the
+first one received; `gbc-pc` prints `audio:` lines (bytes/s, `first_frame`,
+gaps, the board's `audio_*` counters). Without `--audio-wav` nothing is
+streamed.
+
+**Checking a capture against the host** (deterministic with no keys and
+no save): `headless <rom> --paced --frames N --dac-feed feed.bin` writes
+the host's DAC feed (LE u32 per frame; N video frames give ~547 N
+frames, so pick N > (first_frame + frames) / 547); WAV sample i maps back
+to the DAC code `(s >> 4) + 2048` and must equal feed frame
+`first_frame + i`. 2026-11-26, Pokemon Red (no keys), 60 s from frame
+901,120: all 1,971,968 frames equal, 0 gaps, 0 drops.
 
 ## Scripted mode
 
