@@ -44,6 +44,16 @@
 //! percentage, two decimals, of one real-time frame (`hz * FRAME_CLOCKS /
 //! CLOCK_HZ` counts, 7,902,557 cycles at 472 MHz).
 //!
+//! # Board hook
+//!
+//! [`run_with_sink`] also hands every completed frame to a [`FrameSink`]
+//! (the board's display, M3): after each `run_frame` call whose events
+//! contain `FRAME_READY`, after that call's line is written, outside the
+//! `run_frame` cycle count. The sink only reads the frame, and it writes
+//! no line, so the lines are the same with any sink ([`run`] is
+//! `run_with_sink` with [`NoSink`]). A board prints its own figures after
+//! the run, on lines of its own that start with `stats ` (not compared).
+//!
 //! # Run conditions
 //!
 //! A fresh emulator: power-on post-boot state (no boot ROM), the default
@@ -64,8 +74,8 @@
 use core::fmt::Write;
 
 use gbc_core::{
-    Buttons, CLOCK_HZ, Config, Emulator, FRAME_CLOCKS, Frame, LoadErrorKind, Memory, StereoSample,
-    WHITE, cart_ram_size,
+    Buttons, CLOCK_HZ, Config, Emulator, Events, FRAME_CLOCKS, Frame, LoadErrorKind, Memory,
+    StereoSample, WHITE, cart_ram_size,
 };
 
 use crate::CycleClock;
@@ -133,6 +143,24 @@ pub struct Summary {
     pub cycles: CycleStats,
 }
 
+/// The board's per-frame hook ("Board hook" in the module docs).
+pub trait FrameSink {
+    /// `frame` is the frame buffer right after `run_frame` call `n` (the
+    /// `frame=<n>` line's) returned `FRAME_READY`. Not called for a call
+    /// that ended without a frame (LCD off). The time spent here is not in
+    /// the `run_frame` statistics.
+    fn frame(&mut self, n: u32, frame: &Frame);
+}
+
+/// A [`FrameSink`] that does nothing (the host, and the board without a
+/// display).
+pub struct NoSink;
+
+impl FrameSink for NoSink {
+    #[inline(always)]
+    fn frame(&mut self, _n: u32, _frame: &Frame) {}
+}
+
 /// Runs `rom` for `frames` frames with `input` and prints the lines (module
 /// docs) to `out`. Returns the summary, or the error that ended the run.
 pub fn run<C, W>(
@@ -146,6 +174,25 @@ pub fn run<C, W>(
 where
     C: CycleClock + ?Sized,
     W: Write + ?Sized,
+{
+    run_with_sink(rom, input, frames, bufs, clock, out, &mut NoSink)
+}
+
+/// [`run`], handing each completed frame to `sink` ("Board hook" in the
+/// module docs). The lines are the same as `run`'s.
+pub fn run_with_sink<C, W, S>(
+    rom: &[u8],
+    input: Script<'_>,
+    frames: u32,
+    bufs: Buffers<'_>,
+    clock: &C,
+    out: &mut W,
+    sink: &mut S,
+) -> Result<Summary, Error>
+where
+    C: CycleClock + ?Sized,
+    W: Write + ?Sized,
+    S: FrameSink + ?Sized,
 {
     writeln!(
         out,
@@ -201,6 +248,9 @@ where
             emu.clock(),
             r.events.bits(),
         )?;
+        if r.events.contains(Events::FRAME_READY) {
+            sink.frame(n, frame);
+        }
     }
     writeln!(
         out,
@@ -295,7 +345,90 @@ mod tests {
     use super::*;
 
     extern crate std;
+    use std::boxed::Box;
     use std::string::String;
+    use std::vec;
+    use std::vec::Vec;
+
+    /// Every `frame` call: the frame number and the frame's hash.
+    struct Recorder(Vec<(u32, u64)>);
+    impl FrameSink for Recorder {
+        fn frame(&mut self, n: u32, frame: &Frame) {
+            let mut h = Fnv1a::new();
+            h.frame(frame);
+            self.0.push((n, h.get()));
+        }
+    }
+
+    struct Zero;
+    impl CycleClock for Zero {
+        fn now(&self) -> u32 {
+            0
+        }
+        fn hz(&self) -> u32 {
+            0
+        }
+    }
+
+    /// The lines of a `frames`-frame run of `rom`, with `sink`.
+    fn lines<S: FrameSink>(rom: &[u8], frames: u32, sink: &mut S) -> String {
+        let mut mem = Box::new(Memory::new());
+        let mut frame: Box<Frame> = Box::new([0; gbc_core::SCREEN_WIDTH * gbc_core::SCREEN_HEIGHT]);
+        let mut audio = vec![StereoSample::default(); MIN_AUDIO_SLOTS];
+        let bufs = Buffers {
+            mem: &mut mem,
+            save_ram: &mut [],
+            frame: &mut frame,
+            audio: &mut audio,
+        };
+        let mut s = String::new();
+        run_with_sink(rom, Script::new(&[]), frames, bufs, &Zero, &mut s, sink).unwrap();
+        s
+    }
+
+    /// The sink sees exactly the frames whose line has FRAME_READY (ev bit
+    /// 0), with that line's number and hash, and changes no line.
+    #[test]
+    fn sink_gets_each_completed_frame() {
+        // A 32 KiB ROM-only cartridge (type 0) whose program at 0100h
+        // waits about four frames (B x 256 x DEC C/JR NZ: 16 clocks per
+        // round, 262k clocks), turns the LCD off (LDH (40h),A with A = 0) and loops: so
+        // the run has frames with FRAME_READY, then calls without.
+        let mut rom = vec![0u8; 0x8000];
+        let prog = [
+            0x06, 0x40, // LD B,40h
+            0x0E, 0x00, // LD C,0     <- outer (0102h)
+            0x0D, // DEC C            <- inner (0104h)
+            0x20, 0xFD, // JR NZ,inner
+            0x05, // DEC B
+            0x20, 0xF8, // JR NZ,outer
+            0xAF, // XOR A
+            0xE0, 0x40, // LDH (40h),A
+            0x18, 0xFE, // JR -2
+        ];
+        rom[0x100..0x100 + prog.len()].copy_from_slice(&prog);
+        let frames = 12;
+        let mut rec = Recorder(Vec::new());
+        let with = lines(&rom, frames, &mut rec);
+        assert_eq!(with, lines(&rom, frames, &mut NoSink));
+        let mut want = Vec::new();
+        for l in with.lines().filter(|l| l.starts_with("headless frame=")) {
+            let field = |k: &str| {
+                l.split(' ')
+                    .find_map(|f| f.strip_prefix(k))
+                    .map(String::from)
+            };
+            let ev = u16::from_str_radix(&field("ev=").unwrap(), 16).unwrap();
+            if ev & 1 != 0 {
+                let n: u32 = field("frame=").unwrap().parse().unwrap();
+                let fb = u64::from_str_radix(&field("fb=").unwrap(), 16).unwrap();
+                want.push((n, fb));
+            }
+        }
+        // Both kinds of call happened.
+        assert!(!want.is_empty() && want.len() < frames as usize, "{with}");
+        assert_eq!(rec.0, want);
+    }
 
     #[test]
     fn stats_lines_format() {
