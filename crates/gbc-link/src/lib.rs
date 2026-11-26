@@ -81,6 +81,22 @@
 )]
 
 pub mod cobs;
+
+/// The `Message::Input { buttons }` bitmap (M5): one bit per Game Boy
+/// button, 1 = pressed, the layout of `gbc_core::Buttons` (the P1 register
+/// halves: action buttons low, D-pad high). This crate has no dependencies
+/// (D9), so the match is checked where both are visible:
+/// `tools/gbc-pc/tests/buttons.rs`, against `gbc_firmware::buttons::from_pc`.
+pub mod buttons {
+    pub const A: u8 = 1 << 0;
+    pub const B: u8 = 1 << 1;
+    pub const SELECT: u8 = 1 << 2;
+    pub const START: u8 = 1 << 3;
+    pub const RIGHT: u8 = 1 << 4;
+    pub const LEFT: u8 = 1 << 5;
+    pub const UP: u8 = 1 << 6;
+    pub const DOWN: u8 = 1 << 7;
+}
 mod crc;
 mod message;
 

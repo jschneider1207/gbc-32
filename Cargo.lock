@@ -635,6 +635,7 @@ dependencies = [
  "cpal",
  "ctrlc",
  "gbc-core",
+ "gbc-firmware",
  "gilrs",
  "ringbuf",
  "softbuffer",

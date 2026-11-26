@@ -23,3 +23,8 @@ winit = "0.30"
 # GBC_FRAME_LOG, the QPC clock, and process CPU time for the stats.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Performance", "Win32_System_Threading"] }
+
+# src/save.rs checks that the firmware's save images (Stage 2 M5,
+# gbc_firmware::save) are byte for byte what this front end writes.
+[dev-dependencies]
+gbc-firmware = { path = "../gbc-firmware" }

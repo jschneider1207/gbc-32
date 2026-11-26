@@ -101,7 +101,7 @@ pub enum Message<'a> {
     SaveChunk { offset: u32, data: &'a [u8] },
     /// Asks the board to dump its save as `SaveChunk`s (M5).
     SaveDumpRequest,
-    /// Held buttons, bit layout as `gbc_core::Buttons` (M5): bit 0 A,
+    /// Held buttons ([`crate::buttons`]), bit layout as `gbc_core::Buttons` (M5): bit 0 A,
     /// 1 B, 2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down; 1 = pressed.
     Input { buttons: u8 },
     // --- board -> PC ---

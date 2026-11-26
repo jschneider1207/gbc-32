@@ -15,10 +15,12 @@ use gbc_core::{
 };
 use gbc_firmware::CycleClock;
 use gbc_firmware::audio::{AudioRing, FeedRing, FeedTap, dac_feed_hash};
+use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Raw, RawInputs, Shared};
 use gbc_firmware::fnv;
 use gbc_firmware::headless::{Buffers, FrameSink, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{Press, Script};
-use gbc_firmware::paced::{self, Error, Feed, Hooks, Idle, Report};
+use gbc_firmware::paced::{self, Error, Feed, Hooks, Idle, Report, Service, Serviced};
+use gbc_firmware::save;
 
 /// Counts its own reads (deterministic stats; they aren't compared).
 struct CountingClock(Cell<u32>);
@@ -80,7 +82,9 @@ fn compared(out: &str) -> Vec<String> {
 /// The compared lines, computed without `gbc_firmware::paced`, the ring,
 /// the tap or `Script`: a straight `run_frame` loop that keeps every
 /// sample, then `dac_feed_hash` over all of them.
-fn reference(rom: &[u8], presses: &[Press], frames: u32) -> Vec<String> {
+/// `reload_at`: eject and load again (cart RAM zeroed) before that frame's
+/// input, as `save::reload` of a zero image does.
+fn reference(rom: &[u8], presses: &[Press], frames: u32, reload_at: Option<u32>) -> Vec<String> {
     let mut mem = Box::new(Memory::new());
     let mut save = vec![0u8; cart_ram_size(rom).unwrap()];
     let mut frame: Box<Frame> = Box::new([WHITE; 160 * 144]);
@@ -92,6 +96,12 @@ fn reference(rom: &[u8], presses: &[Press], frames: u32) -> Vec<String> {
     let mut fb_bytes = Vec::new();
     let mut ready = 0;
     for n in 0..frames {
+        if Some(n) == reload_at {
+            let c = emu.eject().unwrap();
+            c.cart_ram.fill(0);
+            assert!(emu.load(c.rom, c.cart_ram, Config::default()).is_ok());
+            held = Buttons::EMPTY;
+        }
         let b = presses
             .iter()
             .filter(|p| n >= p.frame && n - p.frame < p.hold)
@@ -263,7 +273,7 @@ fn run_pattern(rom: &[u8], frames: u32, p: &Pattern) -> Run {
 fn compared_lines_match_a_straight_loop_at_any_consumer_rate() {
     let rom = synthetic_rom();
     let frames = 120;
-    let want = reference(&rom, &PRESSES, frames);
+    let want = reference(&rom, &PRESSES, frames, None);
     let mut saw_underrun = false;
     let mut saw_starving = false;
     for p in &PATTERNS {
@@ -408,9 +418,139 @@ fn cgb_sound_matches_the_reference() {
     let Some(rom) = test_rom("blargg/cgb_sound/cgb_sound.gb") else {
         return;
     };
-    let want = reference(&rom, &PRESSES, 600);
+    let want = reference(&rom, &PRESSES, 600, None);
     for p in [&PATTERNS[0], &PATTERNS[5]] {
         let r = run_pattern(&rom, 600, p);
         assert_eq!(compared(&r.out), want, "{}", p.0);
     }
+}
+
+/// A battery-backed copy of the synthetic ROM (MBC5+RAM+BATTERY, 8 KiB),
+/// so `save::reload` accepts it; the program is the same.
+fn battery_rom() -> Vec<u8> {
+    let mut rom = synthetic_rom();
+    rom[0x147] = 0x1B;
+    rom[0x149] = 0x02;
+    rom
+}
+
+struct LogPins<'a>(&'a RefCell<Vec<(char, u32)>>);
+impl RawInputs for LogPins<'_> {
+    fn read(&mut self) -> Raw {
+        let mut log = self.0.borrow_mut();
+        let n = log.iter().filter(|e| e.0 == 'i').count() as u32;
+        log.push(('i', n));
+        Raw::NONE
+    }
+}
+
+/// The player-loop hook under test: feeds the script's buttons as PC
+/// input frames, logs its calls, and reloads a zero save at `reload_at`.
+struct Svc<'a> {
+    shared: &'a Shared,
+    log: &'a RefCell<Vec<(char, u32)>>,
+    reload_at: Option<u32>,
+    zero: Vec<u8>,
+}
+impl Service for Svc<'_> {
+    fn service(&mut self, n: u32, emu: &mut Emulator<'_>) -> Serviced {
+        self.log.borrow_mut().push(('s', n));
+        self.shared.set_pc(Script::new(&PRESSES).held(n).bits());
+        if Some(n) == self.reload_at {
+            let layout = save::Layout::of_emulator(emu).unwrap();
+            let img = save::check(layout, &self.zero).unwrap();
+            save::reload(emu, &img, Config::default()).unwrap();
+            return Serviced::Reloaded;
+        }
+        Serviced::Continue
+    }
+}
+
+fn run_live(
+    rom: &[u8],
+    frames: u32,
+    reload_at: Option<u32>,
+) -> (Vec<String>, Report, Vec<(char, u32)>) {
+    let ring = Box::new(AudioRing::<{ gbc_firmware::audio::RING_FRAMES }>::new());
+    let tap = FeedTap::new();
+    let consumer = Consumer {
+        ring: &ring,
+        tap: &tap,
+        idle_pop: 256,
+        sink_pop: none,
+        idles: RefCell::new(Vec::new()),
+    };
+    let mut mem = Box::new(Memory::new());
+    let mut save_ram = vec![0u8; cart_ram_size(rom).unwrap()];
+    let mut frame: Box<Frame> = Box::new([0; 160 * 144]);
+    let mut audio = vec![StereoSample::default(); 1000];
+    let bufs = Buffers {
+        mem: &mut mem,
+        save_ram: &mut save_ram,
+        frame: &mut frame,
+        audio: &mut audio,
+    };
+    let log = RefCell::new(Vec::new());
+    let shared = Shared::new();
+    let mut input = LiveInput::<_, FRAME_SAMPLES>::new(LogPins(&log), &shared);
+    let mut svc = Svc {
+        shared: &shared,
+        log: &log,
+        reload_at,
+        zero: vec![0; 0x2000],
+    };
+    let clock = CountingClock(Cell::new(0));
+    let mut out = String::new();
+    let report = paced::run_with(
+        rom,
+        &mut input,
+        frames,
+        bufs,
+        Feed {
+            ring: &ring,
+            tap: &tap,
+        },
+        Hooks {
+            clock: &clock,
+            sink: &mut SinkSide(&consumer),
+            idle: &mut IdleSide(&consumer),
+        },
+        &mut svc,
+        &mut out,
+    )
+    .unwrap();
+    (compared(&out), report, log.into_inner())
+}
+
+/// Live input (PC frames through the service hook, pins idle) replaying
+/// the script gives the script run's state lines; the hook runs once per
+/// frame, before that frame's input sample.
+#[test]
+fn run_with_live_input_and_service_matches_the_script() {
+    let rom = battery_rom();
+    let frames = 90;
+    let (got, report, log) = run_live(&rom, frames, None);
+    let want = reference(&rom, &PRESSES, frames, None);
+    assert_eq!(&got[1..], &want[1..]);
+    assert!(got[0].contains("input_fnv=0000000000000000"), "{}", got[0]);
+    let expect: Vec<(char, u32)> = (0..frames).flat_map(|n| [('s', n), ('i', n)]).collect();
+    assert_eq!(log, expect);
+    assert_eq!(report.emulated, report.clock);
+}
+
+/// A reload from the hook in the middle of a held button (B, frames
+/// 40..70) re-applies it, and the speed figures count the clocks before
+/// the reload.
+#[test]
+fn run_with_reload_reapplies_buttons_and_counts_clocks() {
+    let rom = battery_rom();
+    let frames = 90;
+    let (got, report, _) = run_live(&rom, frames, Some(50));
+    let want = reference(&rom, &PRESSES, frames, Some(50));
+    assert_eq!(&got[1..], &want[1..]);
+    // The emulated total adds the clock at the reload (after 50 calls,
+    // the same as a 50-frame run's end) to the clock since.
+    let (_, first, _) = run_live(&rom, 50, None);
+    assert!(report.clock < report.emulated);
+    assert_eq!(report.emulated, first.clock + report.clock);
 }

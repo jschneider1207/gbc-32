@@ -16,6 +16,13 @@
 //! never on when the consumer pops. [`run`] plays `N` calls (35,837 is
 //! 10 minutes at 59.7275 Hz), drains the ring and prints the lines below.
 //!
+//! [`run_with`] (M5, the player loop) generalises the input to any
+//! [`InputSource`] (a [`Script`], or [`crate::buttons::LiveInput`]: pins
+//! and PC buttons), sampled once per frame and applied at the frame's start
+//! clock, and adds a [`Service`] hook between frames for the board's UART
+//! (input frames, save load and dump through [`crate::save`]). [`run`] is
+//! `run_with` with the script and [`NoService`], so its lines are unchanged.
+//!
 //! # Line format (version 1)
 //!
 //! As in [`crate::headless`]: `\n` endings, decimal numbers, hashes as 16
@@ -116,13 +123,13 @@
 
 use core::fmt::Write;
 
-use gbc_core::{Buttons, CLOCK_HZ, Events};
+use gbc_core::{Buttons, CLOCK_HZ, Emulator, Events};
 
 use crate::CycleClock;
 use crate::audio::{AudioRing, Conditioner, FeedHash, FeedTap, RingStats};
 use crate::fnv::{self, Fnv1a};
 use crate::headless::{self, Buffers, CycleStats, FrameSink, MIN_AUDIO_SLOTS};
-use crate::input::Script;
+use crate::input::{InputSource, Script};
 
 /// The board's wait for the consumer (`WFI` on the MCU).
 pub trait Idle {
@@ -130,6 +137,42 @@ pub trait Idle {
     /// while draining. Returns when the consumer may have popped (or at
     /// once: the loop just checks again).
     fn idle(&mut self);
+}
+
+/// The board's per-frame hook for [`run_with`], called between frames: at
+/// the top of every iteration, once the ring has room and right before the
+/// frame's input is sampled (so for frame 0 before the first run call).
+/// The player loop polls its UART here: PC input frames (into
+/// [`crate::buttons::Shared`]), save loads ([`crate::save::reload`]) and
+/// dump requests ([`crate::save::take`]).
+pub trait Service {
+    /// `frame` is the index of the run call about to happen. The hook must
+    /// not change the buttons (the loop applies them from its
+    /// [`InputSource`]); if it ejected and reloaded the cartridge it
+    /// returns [`Serviced::Reloaded`], so the loop re-applies the held
+    /// buttons the eject cleared and keeps its speed figures right across
+    /// the clock restart.
+    fn service(&mut self, frame: u32, emu: &mut Emulator<'_>) -> Serviced;
+}
+
+/// What a [`Service`] call did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Serviced {
+    /// Nothing the loop needs to know.
+    Continue,
+    /// The cartridge was ejected and loaded again (clock back to 0).
+    Reloaded,
+}
+
+/// No per-frame work: what [`run`] uses.
+pub struct NoService;
+
+impl Service for NoService {
+    #[inline]
+    fn service(&mut self, _: u32, _: &mut Emulator<'_>) -> Serviced {
+        Serviced::Continue
+    }
 }
 
 /// The board's hooks for [`run`].
@@ -174,6 +217,10 @@ pub struct Report {
     pub frames: u32,
     /// `Emulator::clock` at the end.
     pub clock: u64,
+    /// Emulated clocks over the whole run: `clock` plus the clock before
+    /// each [`Serviced::Reloaded`] (equal to `clock` without reloads). The
+    /// `speed` line uses it.
+    pub emulated: u64,
     /// Calls that returned `FRAME_READY`.
     pub ready: u32,
     /// The `fbs=` chain.
@@ -222,6 +269,41 @@ where
     I: Idle + ?Sized,
     W: Write + ?Sized,
 {
+    let mut input = input;
+    run_with(
+        rom,
+        &mut input,
+        frames,
+        bufs,
+        feed,
+        hooks,
+        &mut NoService,
+        out,
+    )
+}
+
+/// [`run`] with any [`InputSource`] and a per-frame [`Service`] hook (the
+/// player loop, M5). With a [`Script`] and [`NoService`] it is [`run`]:
+/// the same calls on the emulator in the same order, so the same lines.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with<C, S, I, In, V, W, const N: usize>(
+    rom: &[u8],
+    input: &mut In,
+    frames: u32,
+    bufs: Buffers<'_>,
+    feed: Feed<'_, N>,
+    hooks: Hooks<'_, C, S, I>,
+    service: &mut V,
+    out: &mut W,
+) -> Result<Report, Error>
+where
+    C: CycleClock + ?Sized,
+    S: FrameSink + ?Sized,
+    I: Idle + ?Sized,
+    In: InputSource + ?Sized,
+    V: Service + ?Sized,
+    W: Write + ?Sized,
+{
     // The pacing rule is only sound if the ring can hold a call's samples.
     const { assert!(N >= MIN_AUDIO_SLOTS) };
     let Feed { ring, tap } = feed;
@@ -264,6 +346,8 @@ where
     let mut held = Buttons::EMPTY;
     let mut idle_calls = 0u64;
     let mut steady_from = None;
+    // Emulated clocks before the last reload (the clock restarts at 0).
+    let mut clock_base = 0u64;
     let (mut core, mut push, mut hash, mut sinkc) = (
         CycleStats::EMPTY,
         CycleStats::EMPTY,
@@ -274,13 +358,21 @@ where
     for n in 0..frames {
         while ring.free() < MIN_AUDIO_SLOTS {
             if steady_from.is_none() {
-                steady_from = Some((emu.clock(), time.total));
+                steady_from = Some((clock_base + emu.clock(), time.total));
             }
             idle.idle();
             idle_calls += 1;
             time.tick(clock.now());
         }
-        let b = input.held(n);
+        let before = emu.clock();
+        if service.service(n, &mut emu) == Serviced::Reloaded {
+            clock_base += before;
+            // `eject` released every button.
+            held = Buttons::EMPTY;
+        }
+        // `set_buttons` between calls is `set_buttons_at` the frame's start
+        // clock (gbc-core).
+        let b = input.buttons(n);
         if b != held {
             emu.set_buttons(b);
             held = b;
@@ -322,7 +414,8 @@ where
     }
     let s1 = ring.stats();
     let elapsed = time.total;
-    let steady = steady_from.map(|(c, e)| (emu.clock() - c, elapsed - e));
+    let emulated = clock_base + emu.clock();
+    let steady = steady_from.map(|(c, e)| (emulated - c, elapsed - e));
     writeln!(
         out,
         "paced end frames={frames} clock={} ready={ready} fbs={:016x} feed_frames={feed_frames} feed={:016x}",
@@ -347,6 +440,7 @@ where
     let report = Report {
         frames,
         clock: emu.clock(),
+        emulated,
         ready,
         fbs: fbs.get(),
         feed_frames,
@@ -486,7 +580,7 @@ fn stats_lines<W: Write + ?Sized>(out: &mut W, r: &Report) -> Result<(), Error> 
         "stats paced drain underrun_events={} underrun_frames={}",
         r.drain.underrun_events, r.drain.underrun_frames
     )?;
-    if let Some(ppm) = speed_ppm(r.clock, r.elapsed, r.hz) {
+    if let Some(ppm) = speed_ppm(r.emulated, r.elapsed, r.hz) {
         write!(
             out,
             "stats paced speed elapsed={} ppm={ppm:+} steady_ppm=",

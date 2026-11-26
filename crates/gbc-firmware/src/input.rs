@@ -1,5 +1,7 @@
-//! Scripted button input for the headless loop: a table of presses, each
-//! holding some buttons for a number of frames.
+//! Scripted button input for the frame loops: a table of presses, each
+//! holding some buttons for a number of frames; and [`InputSource`], the
+//! per-frame input hook of [`crate::paced::run_with`] that a script and
+//! live input ([`crate::buttons::LiveInput`]) both implement.
 //!
 //! # Text format
 //!
@@ -95,6 +97,40 @@ impl<'a> Script<'a> {
             h.byte(p.buttons.bits());
         }
         h.get()
+    }
+}
+
+/// Where a frame loop's buttons come from ([`crate::paced::run_with`]):
+/// a [`Script`] for deterministic replays, or live board and PC input
+/// ([`crate::buttons::LiveInput`]).
+///
+/// The loop calls [`InputSource::buttons`] once per frame, for frame `n`
+/// right before run call `n`, and applies the result at that call's start
+/// clock (the emulator's clock between calls). That is
+/// `Emulator::set_buttons`, which gbc-core defines as
+/// `set_buttons_at(clock(), buttons)`: the plan's "applied with
+/// `set_buttons_at` at the frame's start clock".
+pub trait InputSource {
+    /// The buttons held during frame `n`. Called exactly once per frame,
+    /// with `n` counting up from 0.
+    fn buttons(&mut self, frame: u32) -> Buttons;
+    /// The `input_fnv=` value of the header line: [`Script::fnv`] for a
+    /// script. A live source has no table to hash and returns
+    /// [`LIVE_INPUT_FNV`]; its compared lines are not reproducible anyway.
+    fn fnv(&self) -> u64;
+}
+
+/// The header's `input_fnv=` for live input (no table to hash).
+pub const LIVE_INPUT_FNV: u64 = 0;
+
+impl InputSource for Script<'_> {
+    #[inline]
+    fn buttons(&mut self, frame: u32) -> Buttons {
+        self.held(frame)
+    }
+
+    fn fnv(&self) -> u64 {
+        Script::fnv(self)
     }
 }
 

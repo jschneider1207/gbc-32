@@ -356,7 +356,7 @@ mod tests {
     const MBC3: Option<ClockKind> = Some(ClockKind::Mbc3);
     const HUC3: Option<ClockKind> = Some(ClockKind::Huc3);
 
-    fn sample_rtc() -> RtcState {
+    pub(super) fn sample_rtc() -> RtcState {
         RtcState {
             live: RtcTime {
                 seconds: 59,
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(sync(halted, 0, Some(999)), halted, "halted stays put");
     }
 
-    fn sample_huc3() -> Huc3RtcState {
+    pub(super) fn sample_huc3() -> Huc3RtcState {
         let mut c = Huc3RtcState::default();
         c.minutes = 754;
         c.days = 0x1234;
@@ -728,5 +728,81 @@ mod path_tests {
         fs::write(dir.join("zelda.txt"), b"").unwrap();
         assert_eq!(save_path(&other), dir.join("zelda.sav"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// The firmware's save code (`gbc_firmware::save`, Stage 2 M5) writes and
+/// reads this module's format: the board's dumps are `.sav` files this
+/// front end loads, and the other way round.
+#[cfg(test)]
+mod firmware_format {
+    use super::tests::{sample_huc3, sample_rtc};
+    use super::*;
+    use gbc_core::{Config, Memory};
+    use gbc_firmware::save as fw;
+
+    fn rom(cart_type: u8, ram_code: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100..0x104].copy_from_slice(&[0x00, 0x18, 0xFE, 0x00]);
+        rom[0x147] = cart_type;
+        rom[0x149] = ram_code;
+        rom
+    }
+
+    /// Loads `rom` with patterned RAM, sets `clock`, and returns what the
+    /// desktop encodes and what the firmware takes, both stamped `unix`.
+    fn both(rom: &[u8], clock: Option<Clock>, unix: u64) -> (Vec<u8>, Vec<u8>) {
+        let size = gbc_core::cart_ram_size(rom).unwrap();
+        let mut ram: Vec<u8> = (0..size).map(|i| (i * 13 + 1) as u8).collect();
+        let mut mem = Box::new(Memory::new());
+        let mut emu = Emulator::new(&mut mem);
+        assert!(emu.load(rom, &mut ram, Config::default()).is_ok());
+        if let Some(c) = clock {
+            c.restore(&mut emu);
+        }
+        let desktop = encode(emu.cart_ram(), Clock::of(&emu).as_ref().map(|c| (c, unix)));
+        let mut out = vec![0u8; fw::Layout::of_emulator(&emu).unwrap().len()];
+        let n = fw::take(&emu, unix, &mut out).unwrap();
+        out.truncate(n);
+        (desktop, out)
+    }
+
+    #[test]
+    fn firmware_take_equals_desktop_encode() {
+        let mut rtc = sample_rtc();
+        rtc.subsecond_clocks = 12_345;
+        let mut huc3 = sample_huc3();
+        huc3.subminute_clocks = 42 * CLOCK_HZ + 7;
+        for (ty, code, clock) in [
+            (0x10, 0x03, Some(Clock::Mbc3(rtc))),
+            (0x10, 0x00, Some(Clock::Mbc3(rtc))),
+            (0xFE, 0x03, Some(Clock::Huc3(huc3))),
+            (0x1B, 0x02, None),
+            (0x06, 0x00, None),
+        ] {
+            let (desktop, firmware) = both(&rom(ty, code), clock, 1_700_000_123);
+            assert_eq!(firmware, desktop, "type {ty:02x}");
+        }
+    }
+
+    #[test]
+    fn firmware_check_reads_desktop_files_as_desktop_decode_does() {
+        for (ty, kind, clock) in [
+            (0x10, ClockKind::Mbc3, Clock::Mbc3(sample_rtc())),
+            (0xFE, ClockKind::Huc3, Clock::Huc3(sample_huc3())),
+        ] {
+            let r = rom(ty, 0x02);
+            let ram: Vec<u8> = (0..0x2000).map(|i| i as u8).collect();
+            let bytes = encode(&ram, Some((&clock, 99)));
+            let d = decode(&bytes, 0x2000, Some(kind));
+            let img = fw::check(fw::Layout::of_rom(&r).unwrap(), &bytes).unwrap();
+            assert_eq!(img.ram(), &d.ram[..]);
+            let (dc, du) = d.rtc.unwrap();
+            let fc = match img.clock().unwrap() {
+                fw::Clock::Mbc3(s) => Clock::Mbc3(s),
+                fw::Clock::Huc3(s) => Clock::Huc3(s),
+            };
+            assert_eq!((fc, img.unix_time()), (dc, du), "type {ty:02x}");
+        }
     }
 }
