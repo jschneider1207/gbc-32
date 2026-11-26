@@ -255,6 +255,19 @@ pub fn memory_x(chip: Chip, data: Data, itcm: Option<&ItcmSet>) -> String {
 /// line and never returns; 2 KiB is several times its depth.
 pub const FAULT_STACK_BYTES: u32 = 2048;
 
+/// Bytes of the stack guard ([`firmware_memory_x`]): a no-access MPU region
+/// (gbc-nucleo-h753 `mpu::REGION_STACK_GUARD`) between the statics and the
+/// stack, so a stack overflow faults instead of silently writing `.bss`
+/// (Stage 2 M1 review F-2, M5 review P-1). A power of two (an MPU region
+/// is), and the guard is aligned to its size. 128 rather than the minimum
+/// 32: an overflowing `push` faults with the stack pointer just above the
+/// guard, and the HardFault entry then stacks its frame below that, up to
+/// 104 B for an extended (FP) frame (Armv7-M B1.5.7) whose eight basic
+/// words are the lowest; with a 32 B guard they would land in the statics
+/// below it. With 128 B they fall in the guard (the stacking faults,
+/// MMFSR.MSTKERR, and nothing is written).
+pub const STACK_GUARD_BYTES: u32 = 128;
+
 /// The `memory.x` text for an image that links `gbc-nucleo-h753`'s lib
 /// (ADR 0036): [`memory_x`]'s map, plus what the lib reads from every
 /// image whatever its placement, so the lib needs no placement features:
@@ -263,6 +276,11 @@ pub const FAULT_STACK_BYTES: u32 = 2048;
 ///   (8-byte aligned, as a stack pointer must be); no placement puts
 ///   anything else there, and the linker refuses an AXI region that
 ///   overflows;
+/// - `__stack_guard`, the base of the [`STACK_GUARD_BYTES`] guard: the end
+///   of the statics (`__euninit`) rounded up to the guard's size; and
+///   `_stack_end` right above it, which replaces cortex-m-rt's `PROVIDE`d
+///   default (`__euninit` itself), so the stack's paint (`paint-stack`) and
+///   the lib's `stack::usage` start above the guard and never touch it;
 /// - `__sitcm`, `__eitcm` and `__siitcm` without an ITCM set, and
 ///   `__sdtcm_ro`, `__edtcm_ro` and `__sidtcm_ro` with the data in AXI
 ///   SRAM: start = end, so the lib's TCM copy copies nothing. They are
@@ -290,6 +308,17 @@ SECTIONS {{
     __fault_stack_top = .;
   }} > AXI
 }} INSERT AFTER .got;
+"
+    )
+}
+
+/// The stack guard's symbols (see [`firmware_memory_x`]).
+fn stack_guard_symbols() -> String {
+    format!(
+        "
+/* Stack guard: {STACK_GUARD_BYTES} B, no-access MPU region, below the stack. */
+__stack_guard = ALIGN(__euninit, {STACK_GUARD_BYTES});
+_stack_end = __stack_guard + {STACK_GUARD_BYTES};
 "
     )
 }
@@ -331,6 +360,9 @@ fn generate(chip: Chip, data: Data, itcm: Option<&ItcmSet>, firmware: bool) -> S
         AXI_SECTION.to_owned()
     };
     let mut s = format!("MEMORY {{\n{mem}}}\n{axi}");
+    if firmware {
+        s.push_str(&stack_guard_symbols());
+    }
     match itcm {
         Some(set) => write_itcm(&mut s, set),
         None if firmware => s.push_str(NO_ITCM_SYMBOLS),
@@ -486,7 +518,9 @@ mod tests {
     }
 
     /// Every symbol the lib reads, in each placement.
-    const LIB_SYMBOLS: [&str; 7] = [
+    const LIB_SYMBOLS: [&str; 9] = [
+        "__stack_guard =",
+        "_stack_end =",
         "__sitcm =",
         "__eitcm =",
         "__siitcm =",

@@ -104,10 +104,15 @@ extern "C" fn hard_fault(frame: *const u32, exc_return: u32) -> ! {
         && ((0x2000_0000..=0x2002_0000 - 32).contains(&at)
             || (0x2400_0000..=0x2408_0000 - 32).contains(&at));
     // The frame: r0-r3, r12, lr, pc, xpsr.
-    let (lr, pc) = if in_ram && cfsr & (1 << 12) == 0 {
+    // Stacked only if neither the bus (BFSR.STKERR, CFSR bit 12) nor the
+    // MPU (MMFSR.MSTKERR, bit 4: a stack overflow into the stack guard,
+    // `mpu::REGION_STACK_GUARD`) refused the stacking; reading a frame in
+    // the guard would fault again here and lock the core up.
+    let stacked = in_ram && cfsr & (1 << 12 | 1 << 4) == 0;
+    let (lr, pc) = if stacked {
         // SAFETY: the eight words of the frame are inside DTCM or AXI SRAM
-        // (checked above) and the CPU did stack them (BFSR.STKERR, CFSR
-        // bit 12, is clear); a volatile read cannot disturb anything.
+        // (checked above) and the CPU did stack them (STKERR and MSTKERR
+        // are clear); a volatile read cannot disturb anything.
         unsafe { (frame.add(5).read_volatile(), frame.add(6).read_volatile()) }
     } else {
         (0, 0)
@@ -115,7 +120,7 @@ extern "C" fn hard_fault(frame: *const u32, exc_return: u32) -> ! {
     die(format_args!(
         "hardfault sp={at:#010x} exc_return={exc_return:#010x} frame={} pc={pc:#010x} \
          lr={lr:#010x} cfsr={cfsr:#010x} hfsr={hfsr:#010x} bfar={bfar:#010x} mmfar={mmfar:#010x}",
-        if in_ram { "ok" } else { "none" }
+        if stacked { "ok" } else { "none" }
     ))
 }
 

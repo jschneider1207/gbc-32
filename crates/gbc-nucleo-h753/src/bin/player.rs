@@ -409,6 +409,11 @@ impl Player<'_> {
             self.stats_sent,
             self.stats_dropped,
         )?;
+        // The deepest stack use since boot, the paint high-water mark (M5
+        // review P-1: live mode's save and dump paths go deeper than the
+        // scripted run).
+        let (used, size) = stack::usage();
+        write!(out, " stack_used={used}/{size}")?;
         if let Some(link) = &self.link {
             write!(
                 out,
@@ -801,10 +806,9 @@ fn main() -> ! {
     cap.live = None;
     let _ = display.borrow_mut().report(&mut cap);
     let _ = dac_line(&mut cap, stop.is_ok());
-    let (used, size) = stack::usage();
     let _ = write!(cap, "stats player ");
     let _ = player.fields(&mut cap, &player.total);
-    let _ = writeln!(cap, " stack_used={used}/{size}");
+    let _ = writeln!(cap);
     let (buf, len, overflow) = (cap.buf, cap.len, cap.overflow);
     let captured = &buf[..len];
     let mut n = 0u32;

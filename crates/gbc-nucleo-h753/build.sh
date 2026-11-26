@@ -78,6 +78,7 @@ ITCM_DROP=${GBC_ITCM_DROP-plain tile path}
 MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
 DTCM_LO=0x20000000 DTCM_HI=0x20020000 AXI_LO=0x24000000 AXI_HI=0x24080000
 FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
+STACK_GUARD_BYTES=128  # memory_x::STACK_GUARD_BYTES
 
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
 # link_probe_rom <out>: the link probe's ROM (plan Stage 2 M5). No test ROM
@@ -186,6 +187,14 @@ check_image() {
   { [ $((16#$sdata)) -le $((16#$edata)) ] && [ $((16#$edata)) -le $((16#$sbss)) ] &&
     [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
+  # The stack guard (mpu::REGION_STACK_GUARD): aligned to its size, above
+  # the statics, the stack (and its paint) right above it.
+  guard=$(sym "$syms" __stack_guard)
+  echo "  stack guard 0x${guard:-none}, $STACK_GUARD_BYTES B"
+  { [ -n "$guard" ] && [ $((16#$guard % STACK_GUARD_BYTES)) -eq 0 ] &&
+    [ $((16#$guard)) -ge $((16#$ebss)) ] &&
+    [ $((16#$guard + STACK_GUARD_BYTES)) -eq $((16#$send)) ]; } ||
+    bad "$name: stack guard 0x${guard:-none} misplaced (.bss ends 0x$ebss, stack ends 0x$send)"
 
   # The image's identity (src/image.rs): the range the image hashes must be
   # exactly the .bin (scripts/lib/image-range.sh).

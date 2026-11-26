@@ -54,6 +54,19 @@
 //! ring and reads the transmit buffer). Disabled at [`init`], set once by
 //! [`crate::link_uart::LinkUart::new`].
 //!
+//! Region [`REGION_STACK_GUARD`] is the stack guard (Stage 2 M1 review
+//! F-2, M5 review P-1): `memory_x::STACK_GUARD_BYTES` (128) of no-access,
+//! execute-never at `__stack_guard`, between the end of the statics and
+//! `_stack_end` (memory_x::firmware_memory_x). The stack grows down from
+//! the top of DTCM towards the statics; without the guard an overflow
+//! would write `.bss` and `.data` silently. With it the first access to
+//! the guard is a MemManage fault (MMFSR.DACCVIOL, MMFAR the address),
+//! escalated to HardFault, whose report prints MMFAR. Set at [`init`],
+//! never changed. A frame larger than the guard can still skip it (a
+//! `sub sp` and then a store below the guard): the guard catches a stack
+//! that creeps past its end, not every overflow, so the measured
+//! high-water mark (`stack::usage`) still has to leave headroom.
+//!
 //! The MPU stays on in HardFault and NMI (HFNMIENA, see
 //! `CTRL_ENABLE_HFNMIENA`).
 //!
@@ -77,6 +90,11 @@ pub const REGION_AUDIO_BUF: u32 = 9;
 /// The serial link's DMA receive ring and transmit buffer (M5, 8 KiB of AXI
 /// SRAM, [`crate::link_uart`]), see the module docs.
 pub const REGION_LINK_BUF: u32 = 10;
+/// The stack guard, see the module docs. Above region 3 (DTCM), so its
+/// no-access wins there.
+pub const REGION_STACK_GUARD: u32 = 11;
+/// `memory_x::STACK_GUARD_BYTES`, the size the linker script reserves.
+const STACK_GUARD_BYTES: usize = 128;
 
 const XN: u32 = 1 << 28;
 /// AP: no access at any privilege level.
@@ -172,12 +190,35 @@ pub(crate) fn init(mpu: &mut MPU) {
                 }
             }
         }
+        // The stack guard, after the loop (which disabled its region).
+        let (base, rasr) = stack_guard();
+        mpu.rbar.write(base | (1 << 4) | REGION_STACK_GUARD);
+        mpu.rasr.write(rasr | 1);
         mpu.ctrl.write(CTRL_ENABLE_HFNMIENA);
     }
     // Armv7-M B3.5.10 (MPU_CTRL): a DSB and an ISB so the new map applies
     // to the next access and the next instruction fetch.
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
+}
+
+/// (base, RASR without ENABLE) of [`REGION_STACK_GUARD`]: no access,
+/// execute-never, strongly-ordered (as region 0), at `__stack_guard`.
+fn stack_guard() -> (u32, u32) {
+    unsafe extern "C" {
+        static __stack_guard: u8;
+        static _stack_end: u32;
+    }
+    let base = &raw const __stack_guard as usize;
+    let end = &raw const _stack_end as usize;
+    // The linker script's layout (memory_x::firmware_memory_x): the guard
+    // is aligned to its size and the stack (with its paint) starts right
+    // above it. build.sh checks the same on the ELF.
+    assert!(base.is_multiple_of(STACK_GUARD_BYTES) && end == base + STACK_GUARD_BYTES);
+    (
+        base as u32,
+        size(STACK_GUARD_BYTES as u64) | XN | AP_NONE | STRONGLY_ORDERED,
+    )
 }
 
 /// What [`qspi_window`] maps at 0x9000_0000.
