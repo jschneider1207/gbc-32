@@ -24,6 +24,24 @@ name = "boot"
 test = false
 bench = false
 
+# Built only with `--features headless` (build.sh), which also selects the
+# ITCM set in build.rs; see the feature.
+[[bin]]
+name = "headless"
+required-features = ["headless"]
+test = false
+bench = false
+
+# The placement is per build, not per bin: every bin of a package shares
+# one build script and so one memory.x (ADR 0036). The `headless` feature
+# turns on the ITCM set of perf/itcm-sections.txt (the M6-target
+# `itcm-dtcm` placement) and the ROM embedding; `boot` links no gbc-core,
+# so it is built without it (the set would leave `.itcm` nearly empty and
+# fail its ASSERT). build.sh builds `--bin boot` and `--bin headless
+# --features headless` separately.
+[features]
+headless = ["dep:gbc-core", "dep:gbc-firmware"]
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
@@ -42,6 +60,9 @@ cortex-m-rt = { version = "=0.7.7", features = ["paint-stack"] }
 # (RM0433). Its default `rt` feature gives cortex-m-rt the interrupt
 # vector table.
 stm32h7 = { version = "=0.15.1", features = ["stm32h753v"] }
+# The emulator and the headless loop (ADR 0036), for the `headless` image.
+gbc-core = { path = "../gbc-core", optional = true }
+gbc-firmware = { path = "../gbc-firmware", optional = true }
 
 # The memory.x generator (ADR 0036), shared with tools/h7-bench.
 [build-dependencies]

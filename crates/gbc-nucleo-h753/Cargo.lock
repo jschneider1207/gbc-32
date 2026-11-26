@@ -92,11 +92,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
+name = "gbc-core"
+version = "0.1.0"
+
+[[package]]
+name = "gbc-firmware"
+version = "0.1.0"
+dependencies = [
+ "gbc-core",
+]
+
+[[package]]
 name = "gbc-nucleo-h753"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "gbc-core",
+ "gbc-firmware",
  "memory-x",
  "stm32h7",
 ]
