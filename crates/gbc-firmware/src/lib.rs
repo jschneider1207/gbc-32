@@ -10,6 +10,8 @@
 //!   boundary"). Output goes to any [`core::fmt::Write`].
 //! - [`input`]: scripted button input, a `&[Press]` table and a no-alloc
 //!   parser for the text format of `scripts/inputs/*.txt`.
+//! - [`audio`]: DC blocker, 12-bit DAC conversion, the sample ring and the
+//!   DAC-feed hash (M4).
 //! - [`fnv`]: 64-bit FNV-1a, the hash on every output line.
 //! - [`headless`]: the headless frame loop and its line format.
 //! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
@@ -21,6 +23,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod audio;
 pub mod fnv;
 pub mod headless;
 pub mod input;
