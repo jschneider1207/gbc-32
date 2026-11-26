@@ -1,0 +1,18 @@
+# The proposed Stage 2 replay set (plan stage-2.md, "Proposed
+# acceptance/stage2.toml", `replay`), for run-replay.sh. A proposal only:
+# acceptance/stage2.toml is human-owned and, once written, supersedes this
+# list. Placeholders chosen 2026-11-26 (docs/reference/m5-evidence.md):
+# - "a SameSuite HDMA ROM": same-suite/dma/hdma_mode0.gb (HBlank HDMA,
+#   passes in stage1.toml group same-suite-cgb);
+# - "an rtc3test ROM": rtc3test/rtc3test.gb with stage1.toml group
+#   rtc3test-sub-second's input (3 presses, the most of the three groups)
+#   and its run (30 s: `replay-input table` gives end = 1793 calls).
+#
+# <rom under test-roms/> <frames>              no input
+# <rom under test-roms/> - <stage1 group>      the group's input and length
+blargg/cpu_instrs/cpu_instrs.gb 3600
+cgb-acid2/cgb-acid2.gbc 600
+dmg-acid2/dmg-acid2.gb 600
+blargg/cgb_sound/cgb_sound.gb 2400
+same-suite/dma/hdma_mode0.gb 600
+rtc3test/rtc3test.gb - rtc3test-sub-second
