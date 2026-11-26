@@ -37,7 +37,12 @@ Session 22 (2026-11-25) progress; ticks with commits in `docs/plan/stage-2.md` M
   images (afe079e).
 - Done since: `headless` board image, byte-equal to the host on the board
   (71b22ec, a1f5bdb; the M1 board acceptance is met).
-- Remaining, in order: (2) h7-bench
+- Also done: h7-bench on the lib (0712e2d, d064d06; 15/15 hashes equal,
+  cycles within +-2%), QEMU smoke (8d2d5b7), C-P5 size report (bb3fc2d).
+- Remaining: `gate-stage2.sh --host-only` first version (branch `m1-gate2`,
+  drafted by an agent; needs the human's approval before main), then the M1
+  milestone review and tag `stage2-m1`.
+- Old list, for reference: (2) h7-bench
   switch-over onto the `gbc-nucleo-h753` lib (ADR 0036: drop `h755`, 392 MHz
   and HSI-64 images; re-check bench hashes on the board); (3) QEMU smoke of
   the headless loop; (4) C-P5 size-gate measurement on the firmware link
@@ -113,7 +118,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- h7-bench switch-over (branch `m1-h7-switch`, uses the board) and QEMU smoke (branch `m1-qemu`), scratch worktrees.
+- `gate-stage2.sh` draft (branch `m1-gate2`, scratch worktree `wt-gate2`); runs gate-stage1 in full, alone.
 
 ## Needs human
 
