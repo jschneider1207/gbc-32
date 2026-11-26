@@ -190,3 +190,31 @@ fn broken_dump_in_play_writes_no_file_and_play_goes_on() {
     // Input still flowed after the failure.
     assert_eq!(c.transport().inputs[c.transport().inputs.len() - 2], b::A);
 }
+
+fn forty_two() -> u64 {
+    42
+}
+
+#[test]
+fn f5_dump_restamps_the_clock_footer_unless_raw() {
+    // 8 KiB RAM + an MBC3 footer (registers 0, stamp 5).
+    let mut save: Vec<u8> = (0..8192u32).map(|i| (i % 253) as u8).collect();
+    save.extend_from_slice(&[0; 40]);
+    save.extend_from_slice(&5u64.to_le_bytes());
+    for (clock, stamp) in [(Some(forty_two as fn() -> u64), 42u64), (None, 5)] {
+        let mut board = SimBoard::new(1 << 20);
+        board.save = Some(save.clone());
+        let out = sav_out(&format!("stamp-{stamp}"));
+        let mut script = vec![keys(&[Key::F5])];
+        script.extend(vec![keys(&[]); 30]);
+        let opts = PlayOptions {
+            sav_out: Some(out.clone()),
+            clock,
+            ..PlayOptions::default()
+        };
+        run(board, script, opts);
+        let got = std::fs::read(&out).unwrap();
+        assert_eq!(got[..8192 + 40], save[..8192 + 40]);
+        assert_eq!(got[8192 + 40..], stamp.to_le_bytes());
+    }
+}

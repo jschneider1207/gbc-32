@@ -7,6 +7,11 @@
 #
 #   ./run-player-save.sh
 #
+# Every gbc-pc load --sav and dump here runs with --raw-save: this is a
+# transport check (the bytes PC -> board -> PC unchanged), so the RTC
+# real-time sync on load and the restamp on dump (ADR 0040), which would
+# change the footer's clock and timestamp, are off.
+#
 # run-save-roundtrip.sh does this against the link probe; this is the same
 # round trip against the image that plays games. The `player-script` build
 # has the link off (player.md "Scripted mode"), so the run is the live
@@ -86,7 +91,7 @@ pc() { "$root/scripts/gbc-pc.sh" "$@" --baud "$baud" < /dev/null; }
 clean() { grep -q '^link: resends 0, naks 0, timeouts 0, ' "$1"; }
 # dump <name> <step>: gbc-pc dump into $scratch/<name>.sav (must succeed cleanly).
 dump() {
-  pc dump "$scratch/$1.sav" > "$scratch/$1.txt" 2>&1 || { cat "$scratch/$1.txt"; fail "$2 dump $1: gbc-pc failed"; }
+  pc dump "$scratch/$1.sav" --raw-save > "$scratch/$1.txt" 2>&1 || { cat "$scratch/$1.txt"; fail "$2 dump $1: gbc-pc failed"; }
   grep -E '^(dumped|link:)' "$scratch/$1.txt"
   clean "$scratch/$1.txt" || fail "$2 dump $1: link counters: $(grep '^link:' "$scratch/$1.txt")"
 }
@@ -106,7 +111,7 @@ dump dp 2
 if cmp -s "$scratch/dp.sav" "$fixture"; then fail "2 the power-on save already equals the fixture"; fi
 
 echo "run-player-save: 3/4 loading the fixture"
-pc load "$rom" --sav "$fixture" > "$scratch/load.txt" 2>&1 || { cat "$scratch/load.txt"; fail "3 load --sav: gbc-pc failed"; }
+pc load "$rom" --sav "$fixture" --raw-save > "$scratch/load.txt" 2>&1 || { cat "$scratch/load.txt"; fail "3 load --sav: gbc-pc failed"; }
 cat "$scratch/load.txt"
 grep -q '^already loaded (length and hash match)$' "$scratch/load.txt" || fail "3 load: the player's ROM was not 'already loaded'"
 clean "$scratch/load.txt" || fail "3 load: link counters: $(grep '^link:' "$scratch/load.txt")"

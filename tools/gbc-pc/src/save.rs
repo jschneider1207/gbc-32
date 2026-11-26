@@ -17,6 +17,7 @@ use gbc_link::{MAX_CHUNK, Message};
 
 use crate::client::{Client, Error, Failure, Incoming, Received, Reply, unexpected};
 use crate::fnv;
+use crate::rtc::WallClock;
 use crate::transport::Transport;
 
 /// The largest save this tool sends or accepts: far above any cartridge
@@ -316,9 +317,17 @@ pub fn part_path(path: &Path) -> PathBuf {
 }
 
 /// `dump`: the board's save into `path`, only when complete and verified
-/// (never a partial file). Returns its length.
-pub fn dump_to_file<T: Transport>(client: &mut Client<T>, path: &Path) -> Result<usize, Error> {
+/// (never a partial file). With `clock`, a clock footer is restamped with
+/// its time when the dump arrived ([`crate::rtc::from_dump`]); `None`
+/// (`--raw-save`) writes the bytes as received. Returns the length and
+/// whether it was restamped.
+pub fn dump_to_file<T: Transport>(
+    client: &mut Client<T>,
+    path: &Path,
+    clock: Option<WallClock>,
+) -> Result<(usize, bool), Error> {
     let data = client.dump_save()?;
+    let (data, restamped) = crate::rtc::from_dump(data, clock.map(|f| f()));
     write_atomic(path, &data)?;
-    Ok(data.len())
+    Ok((data.len(), restamped))
 }

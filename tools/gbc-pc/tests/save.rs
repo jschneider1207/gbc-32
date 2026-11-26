@@ -146,7 +146,10 @@ fn dump_file_equals_the_boards_save() {
     let mut board = board_with_save(&save);
     board.dump_faults = vec![(EVERY_DUMP, DumpFault::StatsBetween)];
     let mut c = Client::new(board, cfg());
-    assert_eq!(dump_to_file(&mut c, &out).unwrap(), save.len());
+    assert_eq!(
+        dump_to_file(&mut c, &out, None).unwrap(),
+        (save.len(), false)
+    );
     assert_eq!(std::fs::read(&out).unwrap(), save);
     assert!(!part_path(&out).exists());
     assert_eq!(c.transport().work.dumps, 1);
@@ -201,7 +204,7 @@ fn broken_dumps_are_errors_and_write_no_file() {
         let mut board = board_with_save(&save);
         board.dump_faults = vec![(EVERY_DUMP, fault)];
         let mut c = Client::new(board, cfg());
-        let e = dump_to_file(&mut c, &out).unwrap_err();
+        let e = dump_to_file(&mut c, &out, None).unwrap_err();
         assert!(
             matches!(e, Error::GaveUp { request: "SaveDumpRequest", attempts: 4, last } if last == want),
             "{fault:?}: {e}"
@@ -215,7 +218,7 @@ fn nak_to_a_dump_request_is_an_error_and_writes_no_file() {
     let dir = out_dir("nak");
     let out = dir.join("game.sav");
     let mut c = Client::new(SimBoard::new(1 << 20), cfg());
-    let e = dump_to_file(&mut c, &out).unwrap_err();
+    let e = dump_to_file(&mut c, &out, None).unwrap_err();
     assert!(
         matches!(
             e,
@@ -235,7 +238,7 @@ fn silent_board_dump_times_out_and_writes_no_file() {
     let out = dir.join("game.sav");
     let link = Faulty::new(board_with_save(&sav(100)), &[(0, Fault::SilenceForever)]);
     let mut c = Client::new(link, cfg());
-    let e = dump_to_file(&mut c, &out).unwrap_err();
+    let e = dump_to_file(&mut c, &out, None).unwrap_err();
     assert!(
         matches!(
             e,

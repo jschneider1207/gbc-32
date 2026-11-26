@@ -20,6 +20,7 @@ use gbc_link::Message;
 
 use crate::client::{Client, Error, Failure, Incoming, Received};
 use crate::input::{InputSchedule, Key, KeySet, REFRESH};
+use crate::rtc::WallClock;
 use crate::save::{DumpRx, DumpStep, write_atomic};
 use crate::transport::Transport;
 
@@ -38,6 +39,10 @@ pub struct PlayOptions {
     pub poll: Duration,
     /// `Input` refresh period ([`REFRESH`]).
     pub refresh: Duration,
+    /// Restamps a dump's clock footer with this clock's time as it is
+    /// written ([`crate::rtc::from_dump`]); `None` (`--raw-save`) writes
+    /// it as received.
+    pub clock: Option<WallClock>,
 }
 
 impl Default for PlayOptions {
@@ -47,6 +52,7 @@ impl Default for PlayOptions {
             sav_out: None,
             poll: Duration::from_millis(10),
             refresh: REFRESH,
+            clock: None,
         }
     }
 }
@@ -207,6 +213,7 @@ pub fn play<T: Transport>(
             DumpStep::Pending => {}
             DumpStep::Done(data) => {
                 job = None;
+                let (data, _) = crate::rtc::from_dump(data, opts.clock.map(|f| f()));
                 match &opts.sav_out {
                     None => event(PlayEvent::NoSavOut),
                     Some(path) => match write_atomic(path, &data) {

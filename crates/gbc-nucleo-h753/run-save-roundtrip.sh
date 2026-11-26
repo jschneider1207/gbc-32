@@ -4,6 +4,11 @@
 #
 #   ./run-save-roundtrip.sh
 #
+# Every gbc-pc load --sav and dump here runs with --raw-save: this is a
+# transport check (the bytes PC -> board -> PC unchanged), so the RTC
+# real-time sync on load and the restamp on dump (ADR 0040), which would
+# change the footer's clock and timestamp, are off.
+#
 # One board session (the board lock, scripts/lib/board-lock.sh, held
 # across all of it), in order:
 #   1. flash.sh out/link-probe.bin (build.sh link-probe: the emulator on
@@ -72,7 +77,7 @@ pc() { "$root/scripts/gbc-pc.sh" "$@" --baud "$baud"; }
 clean() { grep -q '^link: resends 0, naks 0, timeouts 0, ' "$1"; }
 # dump <name>: gbc-pc dump into $scratch/<name>.sav (must succeed cleanly).
 dump() {
-  pc dump "$scratch/$1.sav" > "$scratch/$1.txt" 2>&1 || { cat "$scratch/$1.txt"; fail "$2 dump $1: gbc-pc failed"; }
+  pc dump "$scratch/$1.sav" --raw-save > "$scratch/$1.txt" 2>&1 || { cat "$scratch/$1.txt"; fail "$2 dump $1: gbc-pc failed"; }
   grep -E '^(dumped|link:)' "$scratch/$1.txt"
   clean "$scratch/$1.txt" || fail "$2 dump $1: link counters: $(grep '^link:' "$scratch/$1.txt")"
 }
@@ -88,7 +93,7 @@ dump d0 2
 if cmp -s "$scratch/d0.sav" "$fixture"; then fail "2 the power-on save already equals the fixture"; fi
 
 echo "run-save-roundtrip: 3/7 loading the fixture"
-pc load "$rom" --sav "$fixture" > "$scratch/load.txt" 2>&1 || { cat "$scratch/load.txt"; fail "3 load --sav: gbc-pc failed"; }
+pc load "$rom" --sav "$fixture" --raw-save > "$scratch/load.txt" 2>&1 || { cat "$scratch/load.txt"; fail "3 load --sav: gbc-pc failed"; }
 cat "$scratch/load.txt"
 grep -q '^already loaded (length and hash match)$' "$scratch/load.txt" || fail "3 load: the probe's ROM was not 'already loaded'"
 clean "$scratch/load.txt" || fail "3 load: link counters: $(grep '^link:' "$scratch/load.txt")"
@@ -100,7 +105,7 @@ dump d2 4; same d2 4
 
 echo "run-save-roundtrip: 5/7 a wrong-size save"
 cat "$fixture" > "$scratch/long.sav" && printf 'x' >> "$scratch/long.sav"
-if pc load "$rom" --sav "$scratch/long.sav" > "$scratch/long.txt" 2>&1; then fail "5 wrong size: gbc-pc reported success"; fi
+if pc load "$rom" --sav "$scratch/long.sav" --raw-save > "$scratch/long.txt" 2>&1; then fail "5 wrong size: gbc-pc reported success"; fi
 grep -E '^gbc-pc:' "$scratch/long.txt"
 grep -q 'Nak OutOfRange' "$scratch/long.txt" || fail "5 wrong size: not refused with Nak OutOfRange"
 dump d3 5; same d3 5
@@ -109,7 +114,7 @@ echo "run-save-roundtrip: 6/7 a bad footer"
 cp "$fixture" "$scratch/badfooter.sav"
 dh=$(( $(stat -c %s "$fixture") - 48 + 16 ))
 printf '\141' | dd of="$scratch/badfooter.sav" bs=1 seek=$dh conv=notrunc status=none
-if pc load "$rom" --sav "$scratch/badfooter.sav" > "$scratch/badfooter.txt" 2>&1; then fail "6 bad footer: gbc-pc reported success"; fi
+if pc load "$rom" --sav "$scratch/badfooter.sav" --raw-save > "$scratch/badfooter.txt" 2>&1; then fail "6 bad footer: gbc-pc reported success"; fi
 grep -E '^gbc-pc:' "$scratch/badfooter.txt"
 grep -q 'Nak OutOfRange' "$scratch/badfooter.txt" || fail "6 bad footer: not refused with Nak OutOfRange"
 dump d4 6; same d4 6

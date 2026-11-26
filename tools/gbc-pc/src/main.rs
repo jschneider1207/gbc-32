@@ -1,14 +1,19 @@
 //! `gbc-pc`: talks to the dev board over the ST-LINK virtual COM port.
 //!
 //! ```text
-//! gbc-pc load <rom> [--sav <file.sav>] [link options]
-//! gbc-pc dump <out.sav>                [link options]
-//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [link options]
+//! gbc-pc load <rom> [--sav <file.sav>] [--raw-save] [link options]
+//! gbc-pc dump <out.sav>                [--raw-save] [link options]
+//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]
 //! gbc-pc hello                         [link options]
 //! link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 //! ```
 //!
-//! `load --sav` sends the save after the ROM. `dump` writes the board's
+//! `load --sav` sends the save after the ROM, its clock footer (MBC3 RTC,
+//! HuC3) first synced to the PC's clock as the desktop does on load, and
+//! refused here if the board would refuse it. `dump` and `play`'s dumps
+//! restamp a clock footer with the PC's time (ADR 0040, `gbc_pc::rtc`).
+//! `--raw-save` turns both off: the bytes go and come exactly as they are
+//! (transport checks). `dump` writes the board's
 //! save only when complete and verified (via a `.part` file and a
 //! rename). `play` sends the keys as `Input` frames (arrows, Z = B,
 //! X = A, Enter = Start, Right Shift/Backspace = Select) until Esc or
@@ -27,10 +32,11 @@ use gbc_pc::play::{Exit, Keyboard, PlayEvent, PlayOptions};
 use gbc_pc::{Client, Config, LoadOutcome, Transport};
 
 const USAGE: &str = "usage:
-  gbc-pc load <rom> [--sav <file.sav>]                [link options]
-  gbc-pc dump <out.sav>                               [link options]
-  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [link options]
+  gbc-pc load <rom> [--sav <file.sav>]                [--raw-save] [link options]
+  gbc-pc dump <out.sav>                               [--raw-save] [link options]
+  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [--raw-save] [link options]
   gbc-pc hello                                        [link options]
+--raw-save: no RTC sync on load, no restamp on dump (byte-exact saves)
 link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]";
 
 enum Command {
@@ -51,6 +57,8 @@ struct Args {
     port: String,
     baud: u32,
     cfg: Config,
+    /// `--raw-save`: saves byte-exact, no clock sync or restamp.
+    raw_save: bool,
 }
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -75,6 +83,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         // docs/reference/loader.md).
         baud: 2_000_000,
         cfg: Config::default(),
+        raw_save: false,
     };
     let mut path = None;
     while let Some(a) = it.next() {
@@ -94,6 +103,10 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--sav-out" => match &mut args.cmd {
                 Command::Play { sav_out, .. } => *sav_out = Some(value("--sav-out")?),
                 _ => return Err("--sav-out is a play option".into()),
+            },
+            "--raw-save" => match args.cmd {
+                Command::Hello => return Err("--raw-save is a load, dump or play option".into()),
+                _ => args.raw_save = true,
             },
             "--seconds" => {
                 let n = number(&value("--seconds")?, "--seconds")?;
@@ -143,6 +156,22 @@ fn main() -> ExitCode {
                 Ok(s) => s,
                 Err(code) => return code,
             };
+            let now = (!args.raw_save).then(gbc_pc::rtc::unix_now);
+            let sav = match sav
+                .map(|s| gbc_pc::rtc::for_load(&rom, &s, now))
+                .transpose()
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "gbc-pc: save refused here, as the board would refuse it: {e:?} (--raw-save sends it unchecked)"
+                    );
+                    return ExitCode::from(1);
+                }
+            };
+            if sav.is_some() && now.is_some() {
+                println!("save: clock footer (if any) synced to the PC's clock");
+            }
             (Some(rom), sav)
         }
         _ => (None, None),
@@ -204,10 +233,13 @@ fn keyboard() -> Box<dyn Keyboard> {
 
 fn run<T: Transport>(port: T, args: &Args, rom: Option<&[u8]>, sav: Option<&[u8]>) -> ExitCode {
     let mut client = Client::new(port, args.cfg);
+    let clock: Option<gbc_pc::rtc::WallClock> = (!args.raw_save).then_some(gbc_pc::rtc::unix_now);
     let result = match (&args.cmd, rom) {
         (Command::Load { .. }, Some(rom)) => load(&mut client, rom, sav),
-        (Command::Dump(out), _) => dump(&mut client, Path::new(out)),
-        (Command::Play { sav_out, seconds }, _) => play(&mut client, sav_out.as_deref(), *seconds),
+        (Command::Dump(out), _) => dump(&mut client, Path::new(out), clock),
+        (Command::Play { sav_out, seconds }, _) => {
+            play(&mut client, sav_out.as_deref(), *seconds, clock)
+        }
         _ => client.hello().map(|info| {
             println!(
                 "HelloReply: protocol {}, max_chunk {}, flash_len {} ({} KiB)",
@@ -232,13 +264,22 @@ fn run<T: Transport>(port: T, args: &Args, rom: Option<&[u8]>, sav: Option<&[u8]
     }
 }
 
-fn dump<T: Transport>(client: &mut Client<T>, out: &Path) -> Result<(), gbc_pc::Error> {
+fn dump<T: Transport>(
+    client: &mut Client<T>,
+    out: &Path,
+    clock: Option<gbc_pc::rtc::WallClock>,
+) -> Result<(), gbc_pc::Error> {
     let start = Instant::now();
-    let len = gbc_pc::save::dump_to_file(client, out)?;
+    let (len, restamped) = gbc_pc::save::dump_to_file(client, out, clock)?;
     println!(
-        "dumped {len} bytes in {:.2} s to {} (hash verified)",
+        "dumped {len} bytes in {:.2} s to {} (hash verified{})",
         start.elapsed().as_secs_f64(),
-        out.display()
+        out.display(),
+        if restamped {
+            "; clock footer stamped with the PC's time"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
@@ -247,10 +288,12 @@ fn play<T: Transport>(
     client: &mut Client<T>,
     sav_out: Option<&str>,
     seconds: Option<u64>,
+    clock: Option<gbc_pc::rtc::WallClock>,
 ) -> Result<(), gbc_pc::Error> {
     let opts = PlayOptions {
         duration: seconds.map(Duration::from_secs),
         sav_out: sav_out.map(PathBuf::from),
+        clock,
         ..PlayOptions::default()
     };
     println!(
@@ -383,6 +426,16 @@ mod tests {
         assert!(parse("load a --sav-out x").is_err());
         assert!(parse("hello --seconds 2").is_err());
         assert!(parse("play --seconds two").is_err());
+    }
+
+    #[test]
+    fn raw_save_flag() {
+        assert!(!parse("load g.gbc --sav g.sav").unwrap().raw_save);
+        assert!(parse("load g.gbc --sav g.sav --raw-save").unwrap().raw_save);
+        assert!(parse("dump out.sav --raw-save").unwrap().raw_save);
+        assert!(parse("play --raw-save --sav-out g.sav").unwrap().raw_save);
+        assert!(!parse("dump out.sav").unwrap().raw_save);
+        assert!(parse("hello --raw-save").is_err());
     }
 
     #[test]

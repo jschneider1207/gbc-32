@@ -658,6 +658,7 @@ version = "0.1.0"
 name = "gbc-pc"
 version = "0.1.0"
 dependencies = [
+ "gbc-core",
  "gbc-firmware",
  "gbc-link",
  "windows-sys 0.61.2",

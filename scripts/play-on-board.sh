@@ -14,10 +14,12 @@
 #   3. otherwise: flash `loader`, `gbc-pc load <rom>` into the QSPI NOR,
 #      flash `player` (each flash takes ~25 s);
 #   4. with --sav: `gbc-pc load <rom> --sav <file>` against the player
-#      (AlreadyLoaded, then the save is applied);
+#      (AlreadyLoaded, then the save is applied; gbc-pc first syncs its
+#      clock footer to the PC's time, as the desktop does on load, ADR 0040);
 #   5. `gbc-pc play`: keys to the board, stats printed every 5 s; Esc ends
 #      it (or --seconds N); F5 dumps the save to --sav-out (default: the
-#      scratch dir, printed), as does joystick CENTER + B1.
+#      scratch dir, printed), as does joystick CENTER + B1. A dump's clock
+#      footer is stamped with the PC's time, so the desktop loads it right.
 # Builds gbc-pc and the loader and player images first (crates/gbc-nucleo-h753/build.sh),
 # unless PLAY_NO_BUILD=1.
 #

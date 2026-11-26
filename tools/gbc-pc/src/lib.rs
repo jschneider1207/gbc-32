@@ -13,6 +13,7 @@ pub mod client;
 pub mod fnv;
 pub mod input;
 pub mod play;
+pub mod rtc;
 pub mod save;
 pub mod sim;
 pub mod transport;

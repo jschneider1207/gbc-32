@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run the PC companion (tools/gbc-pc) against the board from WSL.
 #
-#   scripts/gbc-pc.sh load <rom> [--sav <file.sav>]             [link options]
-#   scripts/gbc-pc.sh dump <out.sav>                            [link options]
-#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [link options]
+#   scripts/gbc-pc.sh load <rom> [--sav <file.sav>] [--raw-save] [link options]
+#   scripts/gbc-pc.sh dump <out.sav> [--raw-save] [link options]
+#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]
 #   scripts/gbc-pc.sh hello                                     [link options]
 #   link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 #
@@ -32,9 +32,9 @@ root=$PWD
 . "$root/scripts/lib/board-lock.sh"
 
 usage() {
-  echo "usage: $0 load <rom> [--sav <file.sav>] [link options]" >&2
-  echo "       $0 dump <out.sav> [link options]" >&2
-  echo "       $0 play [--sav-out <file.sav>] [--seconds N] [link options]" >&2
+  echo "usage: $0 load <rom> [--sav <file.sav>] [--raw-save] [link options]" >&2
+  echo "       $0 dump <out.sav> [--raw-save] [link options]" >&2
+  echo "       $0 play [--sav-out <file.sav>] [--seconds N] [--raw-save] [link options]" >&2
   echo "       $0 hello [link options]" >&2
   echo "link options: [--port COM5|null] [--baud N] [--retries N] [--timeout-ms N]" >&2
   exit 2

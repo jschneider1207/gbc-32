@@ -12,14 +12,16 @@ workspace = true
 
 [dependencies]
 gbc-link = { path = "../../crates/gbc-link" }
+# The save check and the RTC sync on load / restamp on dump (src/rtc.rs,
+# ADR 0040): the desktop's rule, shared. no_std, depends on gbc-core only.
+gbc-firmware = { path = "../../crates/gbc-firmware" }
 
 # Direct Win32 COM-port access (plan D9: windows-sys, MIT/Apache-2.0; not
 # the MPL-2.0 `serialport` crate).
+# tests/rtc.rs stands in for the board with a real core (load, clock,
+# take).
+[dev-dependencies]
+gbc-core = { path = "../../crates/gbc-core" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_Communication", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_UI_Input_KeyboardAndMouse"] }
-
-# tests/board.rs compiles the board's loader session
-# (crates/gbc-nucleo-h753/src/loader.rs) on the host, which needs the image
-# header code; test-only, the tool itself does not use it.
-[dev-dependencies]
-gbc-firmware = { path = "../../crates/gbc-firmware" }
