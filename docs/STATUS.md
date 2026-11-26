@@ -92,9 +92,17 @@ cycle ratchet. Input: shield joystick plus PC over serial; saves travel over
 serial. Shared logic in `gbc-firmware`, protocol in `gbc-link`, PC side in
 `tools/gbc-pc` (ADR 0005 amendment).
 
-**Risk for M6 (open, decide there):** with the same clock and sources, a
-rebuild moves cycles/frame by about +-2% (code layout), against the planned
-+3% on-board ratchet. M6's baseline must say how it handles that.
+**M6 progress (session 27, 2026-11-26):** ADR 0026 Accepted with the
+measured placement (67884fa; ITCM task waits on one A/B: `Renderer::render`
+in ITCM vs flash). Rebuild noise settled: branch-predictor (BTAC) aliasing
+on code addresses; fix = core-first flash layout, gbc-core's flash code in
+`.text_core` at fixed 0x0801_0400 (ADR 0042, 8f9fdb9; check-itcm-elf.sh
+requires it). Core changes still move counts ~+-1.7% (ITCM), up to ~4% on
+storms; decision: keep +3% on every workload, layout-only failures go to the
+human like check-bench. The cycle baseline must be taken after ADR 0042 and
+from the main checkout path (crate hashes in mangled names are path-
+dependent). Next: LTO/opt-level (running), QSPI tuning, render A/B,
+baseline + check, worst-case report, soak, performance review.
 
 Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
 unplayed checklist rows (Pokemon Crystal, Alone in the Dark). Stage 1 close
@@ -148,13 +156,13 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0042).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0043).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
+- LTO/opt-level measurement (branch `m6-lto`, worktree in the session scratchpad). (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
 
 ## Needs human
 
