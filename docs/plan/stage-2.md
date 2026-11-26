@@ -193,7 +193,7 @@ for byte.
 - [ ] M2 review H-4 (low): after the EN=0 exit fallback the FIFO may still hold prefetched bytes (RM0433 23.3.15: only ABORT flushes); `drain` would return them as the next indirect read's data; assert FLEVEL == 0 after restoring CR, or ABORT once more with EN=1
 - [ ] M2 review H-5 (low): `Qspi::init` has no once-guard and `Mapped` no Drop; a second init with region 6 open pulses QSPIRST under an open window (bus error); add a DONE flag or close region 6 in `init`
 - [ ] M2 review T-3 (low): the h7-bench report has no integrity check (cycle fields are zeroed before comparing), so a VCP-garbled digit can reach docs/perf.md; require two byte-identical reports or add bytes/cksum to `end pass=`
-- [x] (b498ab5) M2 review T-4 (low): the new script checks (`RUN_HEADLESS_ROM`, `check-report.sh` failure modes) were checked only on uncommitted captures; add regression tests like `scripts/test-board-lock.sh`
+- [x] (25156c0) M2 review T-4 (low): the new script checks (`RUN_HEADLESS_ROM`, `check-report.sh` failure modes) were checked only on uncommitted captures; add regression tests like `scripts/test-board-lock.sh`
 - [ ] M2 review T-5 (low): `docs/reference/loader.md` documents `flash.sh loader` and `gbc-pc.sh load` as two lock takes (fails safe); `GBC_BOARD_LOCK_HELD=1` makes the wrappers skip the pre-build so `gbc-pc.sh`'s cargo build runs outside `GBC_BUILD_LOCK`
 - [x] M2 review H-6 (low, no change; human 2026-11-25: "that doesnt matter then for the nucleo prototype"): the ADR 0037 header shares the 8 MiB NOR, so the NUCLEO takes ROMs up to 8 MiB − 256 B and an 8 MiB MBC5 cart can't be loaded. Stage 3 is unaffected (eMMC library, ROM copied into ≥ 8 MiB HyperRAM, hardware ADR 0003)
 
