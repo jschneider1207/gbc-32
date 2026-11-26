@@ -1105,6 +1105,54 @@ the layout (about +-1.7% via ITCM, up to about +-4% on the storms), and a
 baseline must be built in the main checkout (the bytes, not the
 addresses, depend on the path).
 
+### LTO and opt-level (M6)
+
+Measured 2026-11-26 on `bench-itcm-dtcm-pll480` (472 MHz, ROMs in
+internal flash), each variant built from main at 82458a9 with only
+`tools/h7-bench/Cargo.toml`'s `[profile.release]` changed (always
+`codegen-units = 1` and the CodeGenPrepare flag of "Build flags"). Every
+report passed `check-report.sh`: all 15 hash lines equal
+`expected-hashes.txt`. Mean cycles per frame against the baseline (the
+noise floor for a changed core-code layout is about +-1.5% on the bound
+workloads and up to about +-4% on the storms; "Layout noise" above):
+
+| Variant | `.itcm` B | `.text_core` B | `.bin` B | ITCM check | worst-case | cgb-raster | dmg-raster | event-storm | cpu_instrs | max \|delta\| of 15 |
+|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
+| baseline (opt 3, no LTO) | 64,032 | 51,352 | 730,856 | OK | 3,306,187 | 2,638,603 | 1,922,353 | 2,036,204 | 1,296,155 | (0.03 reflash) |
+| `lto = "fat"` * | 63,344 | 29,264 | 725,888 | cannot run | +2.25% | -0.22% | -0.86% | -0.67% | -0.25% | 4.15 (storm-div -) |
+| `lto = "thin"` * | 64,152 | 32,168 | 731,784 | cannot run | -0.16% | +0.13% | +0.06% | -0.72% | -0.21% | 7.31 (storm-spsw +) |
+| gbc-core `opt-level = 2` | 54,064 | 47,808 | 727,304 | OK | +0.11% | +4.35% | +1.70% | +2.77% | -0.11% | 4.35 (cgb-raster +) |
+| same, no tier dropped | 60,600 | 41,288 | 720,792 | OK (`--drop ''`) | -0.60% | +2.08% | +0.91% | +2.63% | -0.24% | 3.70 (storm-control +) |
+| gbc-core `opt-level = "s"` | 47,536 | 40,520 | 720,672 | OK | +10.56% | +22.62% | +25.42% | +13.50% | +12.74% | 28.72 (halt-irq +) |
+
+Baseline max per frame on worst-case 3,343,564 (fat 3,421,235, thin
+3,340,606, opt 2 3,347,062 / 3,323,074 without a drop, "s" 3,697,090).
+
+\* **LTO does not link as the tree stands.** Under LTO gbc-core's rlib
+holds bitcode, not objects, so `.text_core`'s file pattern
+(`*libgbc_core-*.rlib:*(.text .text.*)`) and the `.rodata.cst*` rule of
+`.dtcm_rodata` match nothing and the `.text_core` ASSERT fails the link.
+The LTO rows were measured with an uncommitted rule matching by symbol
+name instead (`*(.text._R*8gbc_core*)`, `*(.rodata.cst*)`). Then
+`scripts/check-itcm-elf.sh` cannot run at all: it reads the function
+sections of the gbc-core rlib whose crate hash the ELF carries, and the
+LTO rlib has none, so it exits with an error (build.sh FAIL). By name,
+no function that is in ITCM in the baseline ended up in flash in either
+LTO image (only two panic thunks moved), so the placement itself held.
+
+**Result: nothing adopted; the firmware profiles stay as they are.** Fat
+LTO is 2.3% slower on worst-case (the gated figure) and no bound
+workload gains beyond noise; thin LTO is within noise on the bound set
+but 7.2-7.3% slower on storm-spsw and storm-ppu. gbc-core at
+`opt-level = 2` frees 10 KB of ITCM, enough to keep the plain tile path
+there too, but is slower either way (cgb-raster +2.1 to +4.4%,
+event-storm +2.6 to +2.8%); `"s"` costs 10 to 29%. Making LTO usable
+would also need `.text_core`, `.dtcm_rodata` and `check-itcm-elf.sh` to
+match by symbol rather than by file, for no measured gain. No change is
+recommended for the root workspace's release profile either: these are
+firmware-link measurements, and none of them beat opt-level 3 without
+LTO.
+
 ### `headless` image on the board (Stage 2 M1/M2, 472 MHz)
 
 The `headless` images (`crates/gbc-nucleo-h753`, M6-target placement: the
