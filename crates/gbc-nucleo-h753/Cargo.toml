@@ -92,6 +92,10 @@ bench = false
 [features]
 headless = ["dep:gbc-core"]
 rom-qspi = ["headless"]
+# `display` (implies `headless`): the same image with the panel in the
+# loop: each frame scaled, sent by MDMA and read back (plan Stage 2 M3;
+# build.sh: out/headless-display-<rom>.bin).
+display = ["headless"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

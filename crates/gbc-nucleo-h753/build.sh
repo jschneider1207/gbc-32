@@ -5,8 +5,10 @@
 #
 #   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader,
 #                         lcd-probe, lcd-dma-probe, headless-<rom> for each acceptance
-#                         ROM (cpu_instrs, cgb-acid2), and headless-qspi (the headless
-#                         loop on whatever ROM the QSPI NOR holds)
+#                         ROM (cpu_instrs, cgb-acid2), headless-qspi (the headless
+#                         loop on whatever ROM the QSPI NOR holds), and
+#                         headless-display-<rom> (the loop with the panel, M3) for
+#                         cgb-acid2 and dmg-acid2
 #   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
 #                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
@@ -18,11 +20,15 @@
 #                         build.rs reads the same variable)
 #   GBC_HEADLESS_INPUT    an input program for the headless images, and
 #   GBC_HEADLESS_FRAMES   their frame count (build.rs; default: none, 600)
+#   GBC_DISPLAY_START     the headless-display images' transfer start: te-wait
+#                         (default), te, now or off (build.rs, src/bin/headless.rs)
 #
 # The `boot` image is built without features, the `headless` ones with
 # `--features headless`, which selects the ITCM placement (build.rs), one
 # build per ROM (the ROM is embedded): out/headless-<rom>.{elf,bin}; and
-# once with `--features rom-qspi` (no ROM embedded): out/headless-qspi.{elf,bin}.
+# once with `--features rom-qspi` (no ROM embedded): out/headless-qspi.{elf,bin};
+# and with `--features display`, one per display ROM:
+# out/headless-display-<rom>.{elf,bin}.
 #
 # Checks per image: the vector table (initial SP in DTCM and 8-byte
 # aligned, reset vector a Thumb address inside the image), the flash fit,
@@ -51,6 +57,9 @@ REMAP=(--config "target.$TARGET.rustflags=['--remap-path-prefix=$ROOT=/gbc-32','
 OUT=out
 # name=path under GBC_TEST_ROMS: the M1 acceptance ROMs (plan Stage 2 M1).
 HEADLESS_ROMS=(cpu_instrs=blargg/cpu_instrs/cpu_instrs.gb cgb-acid2=cgb-acid2/cgb-acid2.gbc)
+# The M3 display ROMs: cgb-acid2 (the acceptance run) and dmg-acid2 (the
+# human's look, plan Stage 2 M3 acceptance).
+DISPLAY_ROMS=(cgb-acid2=cgb-acid2/cgb-acid2.gbc dmg-acid2=dmg-acid2/dmg-acid2.gb)
 ROMS=${GBC_TEST_ROMS:-../../test-roms}
 ITCM_DROP=${GBC_ITCM_DROP-plain tile path}
 MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
@@ -79,6 +88,7 @@ bad() { echo "FAIL: $*" >&2; fail=1; }
 ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe lcd-dma-probe"
 for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%%=*}"; done
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
+for entry in "${DISPLAY_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-display-${entry%%=*}"; done
 for a in "$@"; do
   case " $ALL_IMAGES " in *" $a "*) ;; *) echo "build.sh: no image named $a (images: $ALL_IMAGES)" >&2; exit 2;; esac
 done
@@ -209,6 +219,20 @@ if want headless-qspi; then
   ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-qspi.elf" | sed 's/^/  /' ||
     bad "headless-qspi: post-link ITCM check (scripts/check-itcm-elf.sh)"
 fi
+
+# The headless loop with the panel (plan Stage 2 M3, `display`): the same
+# checks as the headless-<rom> images.
+for entry in "${DISPLAY_ROMS[@]}"; do
+  rom=${entry%%=*} path=$ROMS/${entry#*=}
+  want "headless-display-$rom" || continue
+  [ -f "$path" ] || { bad "headless-display-$rom: no ROM at $path (scripts/fetch-test-roms.sh, or set GBC_TEST_ROMS)"; continue; }
+  echo "  GBC_DISPLAY_START=${GBC_DISPLAY_START:-te-wait}"
+  built=$(GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked cargo build --release --bin headless --features display "${REMAP[@]}")
+  check_image "headless-display-$rom" "$built"
+  echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-display-$rom.elf" | sed 's/^/  /' ||
+    bad "headless-display-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
+done
 
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
 echo "build.sh: OK; images in $(pwd)/$OUT"

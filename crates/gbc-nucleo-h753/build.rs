@@ -66,6 +66,21 @@ fn main() {
     if headless {
         headless_inputs(&out, env::var_os("CARGO_FEATURE_ROM_QSPI").is_none());
     }
+    if env::var_os("CARGO_FEATURE_DISPLAY").is_some() {
+        display_start();
+    }
+}
+
+/// `GBC_DISPLAY_START` for the `display` feature: what starts a transfer
+/// (src/bin/headless.rs `display::Start`); default `te-wait`.
+fn display_start() {
+    println!("cargo:rerun-if-env-changed=GBC_DISPLAY_START");
+    let start = env::var("GBC_DISPLAY_START").unwrap_or_else(|_| "te-wait".into());
+    assert!(
+        ["off", "te-wait", "te", "now"].contains(&start.as_str()),
+        "GBC_DISPLAY_START={start:?}: not off, te-wait, te or now"
+    );
+    println!("cargo:rustc-env=GBC_DISPLAY_START={start}");
 }
 
 /// `embed_rom`: false for `rom-qspi`, whose ROM is not part of the image.

@@ -53,6 +53,14 @@
 //! line ends with `rom_len=<n> rom_hash=<16 hex> exit_fallbacks=<k>`:
 //! `run-headless.sh` with `RUN_HEADLESS_ROM` requires them to be the ROM
 //! file's, so a stale NOR image cannot pass.
+//!
+//! With the `display` feature (plan Stage 2 M3; build.sh
+//! `headless-display-<rom>`) the run also shows every completed frame on
+//! the shield's panel and reads each one back ([`display`]); the
+//! `headless` lines stay those of the run without it, and the display's
+//! figures follow the run's `stats` lines as `stats display ...` lines.
+//! `GBC_DISPLAY_START` (build.rs; default `te-wait`) picks what starts a
+//! transfer: `te-wait`, `te`, `now`, or `off` (no display, the same code).
 #![no_std]
 #![no_main]
 
@@ -72,8 +80,10 @@ use gbc_firmware::rom_image::{self, ImageHeader};
 use gbc_nucleo_h753::qspi::{self, Qspi};
 
 const PREFIX: &str = "gbc-nucleo-h753";
-#[cfg(not(feature = "rom-qspi"))]
+#[cfg(not(any(feature = "rom-qspi", feature = "display")))]
 const IMAGE: &str = "headless";
+#[cfg(feature = "display")]
+const IMAGE: &str = "headless-display";
 #[cfg(feature = "rom-qspi")]
 const IMAGE: &str = "headless-qspi";
 
@@ -101,7 +111,16 @@ const MAX_PRESSES: usize = 256;
 const CART_RAM_BYTES: usize = 128 * 1024;
 /// The capture buffer: about 64 B per frame line, so room for about 2,000
 /// frames.
+#[cfg(not(feature = "display"))]
 const CAPTURE_BYTES: usize = 128 * 1024;
+/// With the display, half (about 1,000 frames): the panel's 128 KiB
+/// buffer is aligned to its size (`lcd_dma::DmaBuffer`), so it goes at
+/// the next 128 KiB boundary after these buffers, and with a 128 KiB
+/// capture it would end at the top of AXI SRAM, leaving no room for the
+/// fault stack. The frame and audio buffers keep their addresses (the
+/// cartridge RAM moves; the acceptance ROMs use none).
+#[cfg(feature = "display")]
+const CAPTURE_BYTES: usize = 64 * 1024;
 /// The pause after each report (1 s at [`CPU_HZ`]); a report of 600
 /// frames takes about 3.5 s on the wire.
 const REPORT_GAP: u32 = CPU_HZ;
@@ -429,9 +448,12 @@ fn main() -> ! {
         frame: b.frame,
         audio: &mut b.audio[..],
     };
+    #[cfg(feature = "display")]
+    let mut display = display::init();
     let clock = Dwt::new();
     // The result is in the captured lines (`headless error ...`, or the
     // lines stopping short); the host compares those.
+    #[cfg(not(feature = "display"))]
     let _ = headless::run(
         rom,
         Script::new(&presses[..count]),
@@ -440,6 +462,25 @@ fn main() -> ! {
         &clock,
         &mut cap,
     );
+    #[cfg(feature = "display")]
+    {
+        let r = headless::run_with_sink(
+            rom,
+            Script::new(&presses[..count]),
+            frames,
+            bufs,
+            &clock,
+            &mut cap,
+            &mut display,
+        );
+        let core = match r {
+            Ok(s) => (s.cycles.sum / u64::from(s.frames.max(1)), s.cycles.max),
+            Err(_) => (0, 0),
+        };
+        // After the run's lines, as `stats ` lines (not compared). A full
+        // capture sets `overflow` and the host refuses the report.
+        let _ = display.report(&mut cap, core);
+    }
     let run = Run {
         frames,
         cycles: clock.total(),
@@ -454,5 +495,405 @@ fn main() -> ! {
         led::toggle();
         n = n.wrapping_add(1);
         wait_since(cycles(), REPORT_GAP);
+    }
+}
+
+/// The panel in the loop (plan Stage 2 M3, the `display` feature): a
+/// [`FrameSink`] that shows every completed frame and checks the previous
+/// one by reading it back. The `headless` lines are those of a run without
+/// it (the sink writes no line, `gbc_firmware::headless` "Board hook"); its
+/// figures go on `stats display` lines after the run (not compared).
+///
+/// Per completed frame `n`, outside the core's cycle count:
+/// 1. wait for frame `n - 1`'s transfer to finish, then read the window
+///    back and compare it with the buffer, which still holds `n - 1`
+///    ([`lcd_dma::readback`], ~70 ms);
+/// 2. `scale_frame` frame `n` into the buffer (timed) and queue it
+///    (`present`, timed: window commands and the MDMA registers);
+/// 3. depending on [`Start`]: wait until TE has started it, start it at
+///    once, or return with it queued.
+///
+/// So with `te-wait` and `now` the transfer of frame `n` (8.1 ms) runs
+/// while the core emulates frame `n + 1`, for every frame (the contention
+/// measurement); with `te` the overlap depends on where TE falls. After
+/// the run the last transfer is read back too, then a control (one buffer
+/// word inverted must give exactly 2 mismatching pixels).
+#[cfg(feature = "display")]
+mod display {
+    use core::fmt::{self, Write};
+    use core::hint::black_box;
+
+    use gbc_core::{FRAME_CLOCKS, Frame};
+    use gbc_firmware::headless::FrameSink;
+    use gbc_firmware::video::scale_frame;
+    use gbc_nucleo_h753::lcd::{self, FrameRate, Lcd};
+    use gbc_nucleo_h753::lcd_dma::{self, LcdDma};
+    use gbc_nucleo_h753::pac::interrupt;
+    use gbc_nucleo_h753::{CPU_HZ, cycles};
+
+    #[interrupt]
+    fn EXTI15_10() {
+        lcd_dma::on_te();
+    }
+
+    /// What starts a queued transfer (`GBC_DISPLAY_START`, build.rs).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Start {
+        /// No display: the sink returns at once (the panel is set up and
+        /// black). The same code as the other modes, for a same-build
+        /// baseline of the core's cycles.
+        Off,
+        /// TE, and the sink waits until it has started (ADR 0039's start,
+        /// with the overlap made certain).
+        TeWait,
+        /// TE; the sink returns with the transfer queued.
+        Te,
+        /// At once, from the sink (`LcdDma::start_now`; may tear).
+        Now,
+    }
+
+    impl Start {
+        const NAMES: [(&str, Start); 4] = [
+            ("off", Start::Off),
+            ("te-wait", Start::TeWait),
+            ("te", Start::Te),
+            ("now", Start::Now),
+        ];
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Start::Off => "off",
+                Start::TeWait => "te-wait",
+                Start::Te => "te",
+                Start::Now => "now",
+            }
+        }
+    }
+
+    const fn same(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    const fn code(s: &str) -> u8 {
+        let mut i = 0;
+        while i < Start::NAMES.len() {
+            if same(s, Start::NAMES[i].0) {
+                return i as u8;
+            }
+            i += 1;
+        }
+        panic!("GBC_DISPLAY_START: not off, te-wait, te or now");
+    }
+
+    /// The mode's index in [`Start::NAMES`]. Read through `black_box`, so
+    /// the compiler cannot specialise the code on it: images that differ
+    /// only in the mode have the same code (one constant differs).
+    const START_CODE: u8 = code(env!("GBC_DISPLAY_START"));
+
+    fn start() -> Start {
+        match black_box(START_CODE) {
+            0 => Start::Off,
+            1 => Start::TeWait,
+            2 => Start::Te,
+            _ => Start::Now,
+        }
+    }
+
+    /// Any wait here is shorter: 50 ms (a TE period plus a transfer is
+    /// 25 ms).
+    const TIMEOUT: u32 = CPU_HZ / 20;
+
+    /// Min / max / sum of a series of cycle counts.
+    #[derive(Clone, Copy)]
+    struct Range {
+        min: u32,
+        max: u32,
+        sum: u64,
+        n: u32,
+    }
+
+    impl Range {
+        const fn new() -> Range {
+            Range {
+                min: 0,
+                max: 0,
+                sum: 0,
+                n: 0,
+            }
+        }
+        fn add(&mut self, v: u32) {
+            self.min = if self.n == 0 { v } else { self.min.min(v) };
+            self.max = self.max.max(v);
+            self.sum += u64::from(v);
+            self.n += 1;
+        }
+        fn mean(&self) -> u64 {
+            self.sum / u64::from(self.n.max(1))
+        }
+    }
+
+    fn range(out: &mut dyn Write, name: &str, r: &Range) -> fmt::Result {
+        write!(
+            out,
+            " {name}_min={} {name}_mean={} {name}_max={}",
+            r.min,
+            r.mean(),
+            r.max
+        )
+    }
+
+    fn us(c: u64) -> u64 {
+        c * 1_000_000 / u64::from(CPU_HZ)
+    }
+
+    /// (x, y, got, want), as `lcd_dma::Readback::first`.
+    type BadPixel = (u16, u16, [u8; 3], [u8; 3]);
+
+    pub struct Display {
+        dma: LcdDma,
+        start: Start,
+        /// The frame whose transfer is queued or running and not yet read
+        /// back.
+        queued: Option<u32>,
+        /// A wait timed out: the display stops (the channel's state is
+        /// unknown, so nothing may touch the FMC again).
+        dead: bool,
+        frames: u32,
+        transfers: u32,
+        readbacks: u32,
+        mismatches: u32,
+        /// The first mismatching pixel.
+        first_bad: Option<(u32, BadPixel)>,
+        errors: u32,
+        first_error: Option<(u32, lcd_dma::Error)>,
+        start_timeouts: u32,
+        /// Transfers already finished when the sink first looked (their
+        /// `start_to_done` is then only an upper bound, so not in `mdma`).
+        late: u32,
+        scale: Range,
+        setup: Range,
+        mdma: Range,
+        te_to_start: Range,
+        /// The wait for the previous transfer (TE included).
+        wait: Range,
+        /// `te-wait`: from the end of `present` until TE started it.
+        to_start: Range,
+        readback: Range,
+    }
+
+    /// Sets the panel up (FMC at `SPEC`, the Game Boy frame rate, all
+    /// black) and the transfer (ADR 0039).
+    pub fn init() -> Display {
+        let mut l = Lcd::init(lcd::SPEC);
+        l.set_frame_rate(FrameRate::GAME_BOY);
+        l.set_window(0, 0, lcd::WIDTH - 1, lcd::HEIGHT - 1);
+        l.begin_pixels();
+        l.fill(0, u32::from(lcd::WIDTH) * u32::from(lcd::HEIGHT));
+        let dma = LcdDma::new(l);
+        Display {
+            dma,
+            start: start(),
+            queued: None,
+            dead: false,
+            frames: 0,
+            transfers: 0,
+            readbacks: 0,
+            mismatches: 0,
+            first_bad: None,
+            errors: 0,
+            first_error: None,
+            start_timeouts: 0,
+            late: 0,
+            scale: Range::new(),
+            setup: Range::new(),
+            mdma: Range::new(),
+            te_to_start: Range::new(),
+            wait: Range::new(),
+            to_start: Range::new(),
+            readback: Range::new(),
+        }
+    }
+
+    impl Display {
+        /// Waits for the queued transfer and reads it back.
+        fn finish(&mut self) {
+            let Some(n) = self.queued.take() else {
+                return;
+            };
+            let t0 = cycles();
+            let r = match self.dma.try_wait() {
+                Some(r) => {
+                    if matches!(r, Ok(Some(_))) {
+                        self.late += 1;
+                    }
+                    r
+                }
+                None => match self.dma.wait(TIMEOUT) {
+                    Ok(Some(t)) => {
+                        self.mdma.add(t.start_to_done);
+                        Ok(Some(t))
+                    }
+                    r => r,
+                },
+            };
+            self.wait.add(cycles().wrapping_sub(t0));
+            match r {
+                Ok(Some(t)) => {
+                    self.transfers += 1;
+                    self.te_to_start.add(t.te_to_start);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.errors += 1;
+                    self.first_error.get_or_insert((n, e));
+                    if matches!(e, lcd_dma::Error::Timeout { .. }) {
+                        self.dead = true;
+                        return;
+                    }
+                }
+            }
+            let t0 = cycles();
+            let (l, buf) = self.dma.parts();
+            let rb = lcd_dma::readback(l, buf);
+            self.readback.add(cycles().wrapping_sub(t0));
+            self.readbacks += 1;
+            self.mismatches += rb.mismatches;
+            if let (None, Some(p)) = (self.first_bad, rb.first) {
+                self.first_bad = Some((n, p));
+            }
+        }
+
+        /// After the run: the last transfer read back, the control, and
+        /// the `stats display` lines. `run_frame`: the core's (mean, max)
+        /// cycles from the run's summary.
+        pub fn report(&mut self, out: &mut dyn Write, run_frame: (u64, u32)) -> fmt::Result {
+            let mut control = None;
+            if self.start != Start::Off && !self.dead {
+                self.finish();
+                if !self.dead && self.readbacks > 0 {
+                    // The GRAM holds the last frame: one buffer word
+                    // inverted (both its pixels, every bit) must give
+                    // exactly 2 mismatching pixels.
+                    let (l, buf) = self.dma.parts();
+                    buf[100][60] ^= 0xFFFF_FFFF;
+                    let rb = lcd_dma::readback(l, buf);
+                    buf[100][60] ^= 0xFFFF_FFFF;
+                    control = Some(rb.mismatches);
+                }
+            }
+            let te = lcd_dma::te_stats();
+            write!(
+                out,
+                "stats display start={} frames={} transfers={} readbacks={} mismatches={} \
+                 control_mismatches=",
+                self.start.name(),
+                self.frames,
+                self.transfers,
+                self.readbacks,
+                self.mismatches,
+            )?;
+            match control {
+                Some(c) => write!(out, "{c}")?,
+                None => write!(out, "none")?,
+            }
+            write!(
+                out,
+                " transfer_errors={} start_timeouts={} dead={} late={} te_edges={} \
+                 te_min={} te_max={}",
+                self.errors,
+                self.start_timeouts,
+                u8::from(self.dead),
+                self.late,
+                te.edges,
+                te.min,
+                te.max,
+            )?;
+            if let Some((n, (x, y, got, want))) = self.first_bad {
+                write!(
+                    out,
+                    " first_bad=frame{n}:({x},{y}) got={:02x}{:02x}{:02x} want={:02x}{:02x}{:02x}",
+                    got[0], got[1], got[2], want[0], want[1], want[2]
+                )?;
+            }
+            if let Some((n, e)) = self.first_error {
+                write!(out, " first_error=frame{n}:{e:?}")?;
+            }
+            writeln!(out)?;
+
+            // The CPU's share: conversion plus queueing, against 5% of a
+            // real-time frame at CPU_HZ (plan M3 acceptance).
+            let frame = u64::from(CPU_HZ) * u64::from(FRAME_CLOCKS) / u64::from(gbc_core::CLOCK_HZ);
+            let budget = frame / 20;
+            let worst = u64::from(self.scale.max) + u64::from(self.setup.max);
+            write!(out, "stats display cpu")?;
+            range(out, "scale", &self.scale)?;
+            range(out, "setup", &self.setup)?;
+            writeln!(
+                out,
+                " worst_sum={worst} budget={budget} ok={}",
+                u8::from(self.scale.n > 0 && worst <= budget)
+            )?;
+
+            write!(out, "stats display dma")?;
+            range(out, "mdma", &self.mdma)?;
+            write!(out, " mdma_max_us={}", us(u64::from(self.mdma.max)))?;
+            range(out, "te_to_start", &self.te_to_start)?;
+            writeln!(out)?;
+
+            write!(out, "stats display waits")?;
+            range(out, "wait", &self.wait)?;
+            range(out, "to_start", &self.to_start)?;
+            range(out, "readback", &self.readback)?;
+            writeln!(out)?;
+
+            writeln!(
+                out,
+                "stats display core start={} run_frame_mean={} run_frame_max={}",
+                self.start.name(),
+                run_frame.0,
+                run_frame.1
+            )
+        }
+    }
+
+    impl FrameSink for Display {
+        fn frame(&mut self, n: u32, frame: &Frame) {
+            if self.start == Start::Off || self.dead {
+                return;
+            }
+            self.frames += 1;
+            self.finish();
+            if self.dead {
+                return;
+            }
+            let t0 = cycles();
+            scale_frame(frame, self.dma.buffer());
+            let t1 = cycles();
+            self.dma.present();
+            if self.start == Start::Now {
+                self.dma.start_now();
+            }
+            let t2 = cycles();
+            self.scale.add(t1.wrapping_sub(t0));
+            self.setup.add(t2.wrapping_sub(t1));
+            self.queued = Some(n);
+            if self.start == Start::TeWait {
+                if !self.dma.wait_started(TIMEOUT) {
+                    self.start_timeouts += 1;
+                }
+                self.to_start.add(cycles().wrapping_sub(t2));
+            }
+        }
     }
 }
