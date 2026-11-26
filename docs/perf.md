@@ -1114,6 +1114,68 @@ cost here is "within about 1.5%", not a measured miss cost; the
 bench placement `itcm-dtcm-qspi` (plan M2) is the controlled figure.
 `exit_fallbacks=0`: the image never leaves memory-mapped mode.
 
+### QSPI ROM placement (M2, `itcm-dtcm-qspi`, 472 MHz)
+
+Plan Stage 2 M2: the bench workloads with their ROMs read through the
+memory-mapped QSPI NOR (0xEB quad I/O at 59 MHz, window cached;
+`docs/reference/qspi-nor.md`) instead of internal flash, the conservative
+proxy for the Stage 3 HyperRAM. Method (tools/h7-bench README "QSPI ROM
+placement"): the fifteen ROMs go into the NOR as one *bench pack* (one ADR
+0037 image, `docs/reference/loader.md`); `bench-itcm-dtcm-pll480` (built at
+7458dc5) runs every workload on its ROM in internal flash and then on the
+pack's copy, in the same boot, through one instance of the frame loop, so
+the ROM pointer is the only difference and the comparison is free of the
++-2% rebuild noise. Every line of both passes equals `expected-hashes.txt`
+(calls, frames, clocks, hash), the pack's ROMs equal the embedded ones
+byte for byte, and the banner's image CRC is the `.bin`'s
+(`check-report.sh`); `exit_fallbacks=0`. Three boots: boots 1 and 2
+printed the same sixty figures to the cycle, boot 3 is within 0.054% of
+them.
+
+**Measured: cycles per frame at 472 MHz, mean / max over 120 calls
+(cpu_instrs 600), boot 1; % of a 472 MHz frame (7,902,557 cycles) from
+QSPI:**
+
+| Workload | internal flash | QSPI | QSPI vs internal | % of a frame, QSPI |
+|---|---|---|---|---|
+| `synth:worst-case` | 3,300,028 / 3,338,391 | 3,378,396 / 3,417,095 | +2.37% / +2.36% | **42.8% / 43.2%** |
+| `synth:cgb-raster` | 2,608,239 / 2,647,364 | 2,611,818 / 2,653,032 | +0.14% / +0.21% | 33.1% / 33.6% |
+| `synth:dmg-raster` | 1,920,125 / 1,942,291 | 1,923,155 / 1,947,229 | +0.16% / +0.25% | 24.3% / 24.6% |
+| `synth:event-storm` | 2,028,773 / 2,042,705 | 2,032,042 / 2,048,093 | +0.16% / +0.26% | 25.7% / 25.9% |
+| `blargg/cpu_instrs` | 1,296,003 / 1,768,804 | 1,296,953 / 1,768,804 | +0.07% / +0.00% | 16.4% / 22.4% |
+| `synth:dma-storm` | 3,071,740 / 3,077,003 | 3,075,984 / 3,081,493 | +0.14% / +0.15% | 38.9% / 39.0% |
+| `synth:halt-irq` | 656,766 / 658,741 | 659,184 / 662,248 | +0.37% / +0.53% | 8.3% / 8.4% |
+| `synth:apu-writes` | 895,837 / 918,106 | 897,533 / 920,678 | +0.19% / +0.28% | 11.4% / 11.7% |
+| `synth:oam-lines` | 1,446,752 / 1,462,811 | 1,448,369 / 1,464,718 | +0.11% / +0.13% | 18.3% / 18.5% |
+| `synth:storm-control` | 2,242,987 / 2,261,261 | 2,246,694 / 2,265,580 | +0.17% / +0.19% | 28.4% / 28.7% |
+| `synth:storm-apu` | 23,962,863 / 24,175,615 | 23,963,759 / 24,176,415 | +0.00% / +0.00% | 303.2% / 305.9% |
+| `synth:storm-spsw` | 14,468,245 / 14,632,669 | 14,466,317 / 14,618,911 | -0.01% / -0.09% | 183.1% / 185.0% |
+| `synth:storm-div` | 16,462,228 / 16,606,192 | 16,462,989 / 16,606,915 | +0.00% / +0.00% | 208.3% / 210.1% |
+| `synth:storm-gdma` | 2,905,185 / 2,930,139 | 3,317,581 / 3,756,955 | +14.20% / +28.22% | 42.0% / 47.5% |
+| `synth:storm-ppu` | 28,474,636 / 28,772,245 | 28,475,119 / 28,775,851 | +0.00% / +0.01% | 360.3% / 364.1% |
+
+So with its ROM in QSPI the worst case takes **85.5% / 86.5% of the 50%
+line** (3,951,279 cycles; report only), against 83.5% / 84.5% from
+internal flash in the same boot, and 43.2% of a real-time frame at most:
+nowhere near a full frame, so the M6 ROM-placement task stays optional.
+
+- The QSPI cost is the ROM's cache misses: 0.1-0.4% where the program
+  runs from a small ROM working set, +2.4% on the worst case (its HBlank
+  HDMA copies 2 KiB from ROM every frame) and +14% / +28% on
+  `storm-gdma` (outside the bound), whose GDMA source walks the whole
+  address space, about 13 KB of ROM a frame, more than the 16 KiB D-cache
+  keeps between frames. At ~770 cycles per random 32-byte miss
+  (`qspi-nor.md`) those are about 100 and 540 misses a frame (estimates
+  from that figure, not counted). A ROM-heavy game (large streamed
+  graphics or PCM) will sit between the two. The plan takes this NOR as the
+  conservative proxy for the Stage 3 HyperRAM (its miss latency is not
+  measured yet).
+- Against the `headless-qspi` figures above (different builds, +0.23% /
+  +1.46%), this is the controlled figure: cpu_instrs +0.07% here.
+- The internal-flash column is within -1.1% to +2.7% of the previous
+  `itcm-dtcm` run (h7-bench README "After the switch onto the lib";
+  +0.12% on the worst case), the usual rebuild band.
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed

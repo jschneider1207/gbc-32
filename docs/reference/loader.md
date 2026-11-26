@@ -118,3 +118,20 @@ memory-mapped mode). Boot `validate`: 1,051,582 cycles for cpu_instrs
 (64 KiB, 2.23 ms, ~29.4 MB/s), 527,294 for cgb-acid2 (32 KiB). Loads at
 4 Mbit/s: 64 KiB in 0.82 s, 32 KiB in 0.46 s. Cycles per frame:
 `docs/perf.md`, "`headless` image on the board".
+
+## Several ROMs in one image: the bench pack (plan Stage 2 M2)
+
+The NOR holds one ADR 0037 image, and the `itcm-dtcm-qspi` bench needs
+fifteen workload ROMs. They travel as one **bench pack**: a file whose
+bytes are, to the loader and to `rom_image`, just the image's data (its
+length and FNV-1a 64 are the header's, so `validate` covers all of it; the
+header's title field is the pack's bytes 0x134..0x144, meaningless). The
+pack's own layout (`tools/h7-bench/src/pack.rs`, written by
+`tools/h7-bench/host`'s `pack <file>`, `out/h753/bench-pack.bin`): an
+8-byte magic `H7BPACK1`, the entry count (15), then one 32-byte entry per
+workload in report order (name NUL-padded to 24 bytes, offset, length),
+then the ROMs, each at a multiple of 256 bytes after the table, 0xFF
+between them; 524,800 bytes for the current fifteen. The bench image parses
+it at boot and refuses anything else (`qspi pack none stage=pack`).
+`tools/h7-bench/run-qspi.sh` does loader, load and bench run under one
+board lock; tools/h7-bench/README.md "QSPI ROM placement".

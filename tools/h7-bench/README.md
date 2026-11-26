@@ -55,6 +55,13 @@ cycles -1.9% to +1.2% off the 472 MHz table ("After the switch onto the
 lib"). The text below keeps the removed images' names and figures as
 history; `m4-stub/` is kept but no longer built.
 
+**ROMs from the QSPI NOR, 2026-11-25 (plan Stage 2 M2).** The bench images
+now also run every workload on a copy of its ROM in the shield's QSPI NOR
+(a "bench pack" loaded by the gbc-nucleo-h753 loader), in the same boot as
+the internal-flash pass: `itcm-dtcm-qspi`. The worst case costs 2.4% more
+from QSPI (3,378,396 / 3,417,095 cycles, 85.5% / 86.5% of the 50% line);
+see "QSPI ROM placement" and its result in "Results".
+
 Not part of the root workspace: `cargo build` at the repo root does not see
 it.
 
@@ -72,6 +79,12 @@ name the figures below were taken under:
 | `bench-flash-dtcm-pll480` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
 | `bench-itcm-dtcm-pll480` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
 | `qemu`, `qemu-itcm` | `qemu` (+`itcm`) | Only with `H7_BENCH_QEMU=1`: the frame loop on QEMU (see "Build"). |
+| `bench-pack.bin` | (host) | Not an image: the fifteen workload ROMs as one blob for the QSPI NOR ("QSPI ROM placement"). |
+
+Every `bench-*` image also runs each workload a second time on its ROM
+from the QSPI NOR when the NOR holds a valid bench pack ("QSPI ROM
+placement"): with the pack loaded, `bench-itcm-dtcm-pll480` is the
+`itcm-dtcm-qspi` placement too.
 
 The board images have the default feature `board` (the lib); the QEMU
 images are built with `--no-default-features` and link no lib. The
@@ -166,7 +179,7 @@ Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 ## Build
 
 ```
-./build.sh                      # all five images, the host hash test
+./build.sh                      # all five images, the host hash test, the bench pack
 H7_BENCH_QEMU=1 ./build.sh      # also the QEMU smoke run (qemu-system-arm)
 H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
 ```
@@ -461,6 +474,73 @@ it works (every 8 frames; 1 Hz toggle in the selftest; 2 Hz after the
 report); LD2 (yellow) on once bring-up is through; LD3 (red) blinking fast
 in antiphase with LD1 is a fault (panic, HardFault, unexpected exception),
 with a `h7bench v1 FAULT ...` line on the UART every second.
+
+## QSPI ROM placement
+
+Plan Stage 2 M2, placement `itcm-dtcm-qspi`: the bench workloads with
+their ROMs read from the shield's QSPI NOR (MX25L6433F, memory-mapped,
+0xEB quad I/O at 59 MHz, cached; `docs/reference/qspi-nor.md`) instead of
+internal flash, as the conservative proxy for the Stage 3 HyperRAM.
+
+**One binary, one boot, two ROM sources.** Every board bench image, after
+its banner, maps the NOR, runs `rom_image::validate` over the window and
+parses the image's data as a *bench pack* (below). It then runs all
+fifteen workloads on their ROMs in internal flash (`.rodata`, the lines as
+before) and, if the pack is valid, all fifteen again on the pack's copies
+in the window:
+
+```
+h7bench v1 qspi pack ok len=524800 hash=b8aead06e9d0dc4e roms=15 same_as_flash=1 validate_cycles=8408320 qspi_hz=59000000 window=cached exit_fallbacks=0
+h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778
+...
+h7bench v1 qspi worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778
+...
+```
+
+Both passes call one instance of `workload::run` (the same fn items for
+`now` and `between`; `readelf` shows one `workload::run` symbol), with the
+same buffers, clock and placement, so the ROM pointer is the only
+difference: the QSPI figures are against the internal-flash ones of the
+same boot, free of the +-2% rebuild noise. The window stays mapped for the
+life of the image, so `exit_fallbacks` stays 0. `same_as_flash=1`: every
+pack ROM is byte for byte the embedded one. Without a valid pack the line
+is `h7bench v1 qspi pack none stage=<map|header|validate|pack>
+error=<e>` and only the flash pass runs; the QEMU image has no QSPI code.
+The pack line is repeated after every banner.
+
+**The bench pack** (`src/pack.rs`; the NOR holds one ADR 0037 image, and
+the pack is that image's data, so the loader, the header and `validate`
+treat it as any ROM): magic `H7BPACK1`, the entry count, one 32-byte
+entry per workload in report order (name, offset, length), then the
+ROMs at 256-byte-aligned offsets, 0xFF between them. `host/`'s
+`cargo run --release -- pack <file>` writes it (build.sh:
+`out/h753/bench-pack.bin`, 524,800 B) after parsing it back with the
+firmware's parser; `cargo test` covers the round trip and every refusal.
+
+**Run:**
+
+```
+./build.sh && ../../crates/gbc-nucleo-h753/build.sh   # the bench images, the pack, the loader
+./run-qspi.sh out/h753/bench-itcm-dtcm-pll480.bin     # loader, load the pack, flash, read 100 s, check
+./check-report.sh <capture> <image.bin> --qspi        # the check alone, on a saved capture
+```
+
+`run-qspi.sh` holds the board lock across: flash the loader, `scripts/
+gbc-pc.sh load out/h753/bench-pack.bin` (a no-op when the NOR holds it
+already), flash the image, `read-serial.sh` into
+`out/h753/runs/<image>-<time>.txt`, `check-report.sh`. The check takes the
+last complete report of the capture (banner through `end pass=N`) and
+requires: the banner's `image_bytes`/`image_cksum` equal `cksum` of the
+`.bin`; the fifteen flash lines and, with `--qspi`, the fifteen `qspi`
+lines (with `qspi ` removed), cycle fields zeroed, exactly
+`expected-hashes.txt`; `qspi pack ok ... same_as_flash=1`. It then prints
+the mean / max table with QSPI against flash in %. Exit 0 pass, 1 a check
+failed, 2 no complete report. A later run needs only the last three steps
+(the pack stays in the NOR).
+
+The image takes about 65 s from reset to its first report (two passes of
+about 30 s, the storms most of it); the stack peak is now 4,488 B (3,440
+before: the second results array).
 
 ## Measurement
 
@@ -770,6 +850,64 @@ of the drop unknown; see "Still not verified".
 - ITCM against flash: 1.36x on the worst case, 1.04x to 1.15x on the
   others; DTCM against AXI SRAM makes under 1%.
 - `stack used=2952` (itcm-dtcm), 2944 (the flash placements).
+
+### ROMs from QSPI (`itcm-dtcm-qspi`), NUCLEO-H753ZI at 472 MHz, 2026-11-25
+
+`bench-itcm-dtcm-pll480` as built at 7458dc5 (core unchanged), with the
+bench pack (524,800 B, FNV-1a 64 `b8aead06e9d0dc4e`) loaded by the
+gbc-nucleo-h753 loader at 4 Mbit/s in 5.47 s; "QSPI ROM placement" for
+the method. Three boots of the same `.bin` (`run-qspi.sh` once, then
+flash and read twice), each running the internal-flash pass and then the
+QSPI pass. Every boot passed `check-report.sh --qspi`: banner
+`image_bytes=728720 image_cksum=1055326146` = `cksum` of the `.bin`; all
+fifteen flash lines and all fifteen `qspi` lines' `calls`, `frames`,
+`clocks` and `hash` equal `expected-hashes.txt`; `qspi pack ok ...
+same_as_flash=1 validate_cycles=8408320 qspi_hz=59000000 window=cached
+exit_fallbacks=0` (the pack's validate: 17.8 ms, 29.5 MB/s through the
+cold window). `stack used=4488 of=77564`.
+
+Cycles per frame, mean / max, boot 1 (boot 2 printed exactly the same
+sixty numbers; boot 3 differs by at most 0.054%, `halt-irq`'s QSPI max):
+
+| Workload | internal flash | QSPI | QSPI vs internal |
+|---|---|---|---|
+| worst-case | 3,300,028 / 3,338,391 | 3,378,396 / 3,417,095 | +2.37% / +2.36% |
+| cgb-raster | 2,608,239 / 2,647,364 | 2,611,818 / 2,653,032 | +0.14% / +0.21% |
+| dmg-raster | 1,920,125 / 1,942,291 | 1,923,155 / 1,947,229 | +0.16% / +0.25% |
+| event-storm | 2,028,773 / 2,042,705 | 2,032,042 / 2,048,093 | +0.16% / +0.26% |
+| cpu_instrs | 1,296,003 / 1,768,804 | 1,296,953 / 1,768,804 | +0.07% / +0.00% |
+| dma-storm | 3,071,740 / 3,077,003 | 3,075,984 / 3,081,493 | +0.14% / +0.15% |
+| halt-irq | 656,766 / 658,741 | 659,184 / 662,248 | +0.37% / +0.53% |
+| apu-writes | 895,837 / 918,106 | 897,533 / 920,678 | +0.19% / +0.28% |
+| oam-lines | 1,446,752 / 1,462,811 | 1,448,369 / 1,464,718 | +0.11% / +0.13% |
+| storm-control | 2,242,987 / 2,261,261 | 2,246,694 / 2,265,580 | +0.17% / +0.19% |
+| storm-apu | 23,962,863 / 24,175,615 | 23,963,759 / 24,176,415 | +0.00% / +0.00% |
+| storm-spsw | 14,468,245 / 14,632,669 | 14,466,317 / 14,618,911 | -0.01% / -0.09% |
+| storm-div | 16,462,228 / 16,606,192 | 16,462,989 / 16,606,915 | +0.00% / +0.00% |
+| storm-gdma | 2,905,185 / 2,930,139 | 3,317,581 / 3,756,955 | +14.20% / +28.22% |
+| storm-ppu | 28,474,636 / 28,772,245 | 28,475,119 / 28,775,851 | +0.00% / +0.01% |
+
+- The worst case from QSPI: 3,378,396 / 3,417,095 cycles, 42.8% / 43.2%
+  of a 472 MHz frame, **85.5% / 86.5% of the 50% line** (3,951,279; report
+  only), far from a real-time frame (7,902,557).
+- Run to run (three boots), every figure moved by at most 0.054%, so the
+  QSPI cost is resolved to well under 0.1%: about 0.1-0.4% on most
+  workloads, +2.4% on the worst case and +14% / +28% on `storm-gdma`.
+  Those two read the ROM in bulk every frame: the worst case's HBlank HDMA
+  copies 2 KiB from ROM 0000 a frame, and `storm-gdma`'s GDMA source
+  walks the whole address space at 1,665 blocks of 16 B a frame, so
+  roughly half its 26.6 KB a frame comes from ROM, more than the 16 KiB
+  D-cache holds. At the ~770 cycles per random 32-byte miss of
+  `docs/reference/qspi-nor.md`, +78 k cycles a frame is about 100 misses
+  and +412 k about 540 (estimates from that figure, not counted).
+- The internal-flash pass against the previous `itcm-dtcm` run ("After
+  the switch onto the lib"), a different build: -1.1% (`cgb-raster`) to
+  +2.7% (`storm-div`), +0.12% on the worst case. That is the rebuild
+  noise this method avoids: the QSPI column is compared with the flash
+  column of the same boot, not with that table.
+- The other two images (`flash-axi`, `flash-dtcm`) run the QSPI pass too
+  when the pack is loaded; not run.
+- Captures (`out/h753/runs/`) are not committed.
 
 ### After the switch onto the lib, 2026-11-25
 
