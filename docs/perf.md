@@ -1371,6 +1371,10 @@ SECTIONS {
     *(.rodata._R*8gbc_core3ppu6render6SPREAD*)
     *(.rodata._R*8gbc_core3ppu6render10ATTR_FETCH*)
     *(.rodata._R*8gbc_core3apu5noise4POP8*)
+    /* gbc-core's merged constant pools: read_high's IO read mask, the APU
+       duty and volume tables (review C-P7; tools/memory-x). Its panic
+       strings and Locations stay in flash. */
+    *libgbc_core-*.rlib:*(.rodata.cst*)
     . = ALIGN(4);
     __edtcm_ro = .;
   } > RAM AT > FLASH

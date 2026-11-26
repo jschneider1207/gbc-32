@@ -109,6 +109,21 @@ SECTIONS {
 
 /// The core's hot lookup tables, in DTCM (docs/perf.md): part of `.data`
 /// in all but name, copied by the image's startup.
+///
+/// Besides the three named tables, gbc-core's anonymous constant pools
+/// (`.rodata.cst4/8/16/32`, merged by the linker; 128 B live in the h7-bench
+/// image, 2026-11-25): small tables LLVM makes from `match`es and array
+/// literals, and the ITCM set reads some of them on every call (`read_high`'s
+/// FF10-FF2F read mask, the square duty and wave volume tables in the APU,
+/// `Ctx::boundary`'s 8-byte table). Keyed to gbc-core's archive member
+/// (lld matches the file pattern against `archive:member`), not to every
+/// crate's pools. Left in flash on purpose: gbc-core's `.rodata.str1.1`
+/// (the absolute source paths of panic locations) and `.rodata..L*` (the
+/// panic `Location`s, plus initializers and tables of flash-resident cold
+/// code: `Sys::new`, `Ppu::reset`/`write_lcdc`, `Emulator::load`,
+/// `cart_ram_size`). They are read only on a panic or outside the frame
+/// loop, and the paths make their size depend on the checkout path
+/// (review C-P7, Stage 2 M1).
 const DTCM_RODATA_SECTION: &str = "
 SECTIONS {
   .dtcm_rodata : ALIGN(4) {
@@ -116,6 +131,7 @@ SECTIONS {
     *(.rodata._R*8gbc_core3ppu6render6SPREAD*)
     *(.rodata._R*8gbc_core3ppu6render10ATTR_FETCH*)
     *(.rodata._R*8gbc_core3apu5noise4POP8*)
+    *libgbc_core-*.rlib:*(.rodata.cst*)
     . = ALIGN(4);
     __edtcm_ro = .;
   } > RAM AT > FLASH
@@ -363,6 +379,24 @@ mod tests {
         assert!(qemu.contains("ITCM  : ORIGIN = 0x20300100"));
         assert!(!qemu.contains("0x24000000"));
         assert!(qemu.contains(".dtcm_rodata"));
+    }
+
+    #[test]
+    fn dtcm_rodata_holds_gbc_core_constant_pools() {
+        let s = memory_x(Chip::H753, Data::Dtcm, None);
+        let start = s.find(".dtcm_rodata :").unwrap();
+        let end = start + s[start..].find("__edtcm_ro = .;").unwrap();
+        let section = &s[start..end];
+        // Keyed to gbc-core's archive member, so other crates' pools and
+        // gbc-core's cold strings and panic locations stay in flash.
+        assert!(section.contains("\n    *libgbc_core-*.rlib:*(.rodata.cst*)\n"));
+        assert!(
+            !section.contains("\n    *(.rodata.cst"),
+            "unkeyed: every crate's pools"
+        );
+        assert!(!section.contains(".rodata.str") && !section.contains(".rodata..L"));
+        // Not emitted when the data is in AXI SRAM.
+        assert!(!memory_x(Chip::H753, Data::AxiSram, None).contains(".rodata.cst"));
     }
 
     #[test]
