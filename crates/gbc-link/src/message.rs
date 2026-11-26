@@ -5,8 +5,9 @@ use crate::{DecodeError, EncodeError, MAX_CHUNK, MAX_STATS_EXTRA};
 
 /// Message type codes. 0x01..=0x7F are PC -> board, 0x80..=0xFF board ->
 /// PC; within each half, groups of 16 by purpose leave room for later
-/// messages. 0x00 is never a valid type. `SAVE_CHUNK` goes both ways
-/// (board -> PC as a save dump) and sits in the PC -> board half.
+/// messages. 0x00 is never a valid type. `SAVE_BEGIN` and `SAVE_CHUNK`
+/// go both ways (board -> PC as a save dump) and sit in the PC -> board
+/// half.
 pub mod ty {
     pub const HELLO: u8 = 0x01;
     pub const ROM_BEGIN: u8 = 0x10;
@@ -94,12 +95,15 @@ pub enum Message<'a> {
     RomChunk { offset: u32, data: &'a [u8] },
     /// All chunks sent; the board verifies and answers `RomDone`.
     RomEnd,
-    /// Starts a save (cartridge RAM) load (M5).
+    /// Starts a save (`.sav`: cartridge RAM plus any clock footer) load,
+    /// PC -> board, or a dump, board -> PC answering `SaveDumpRequest`:
+    /// total length and FNV-1a 64 of the save (M5).
     SaveBegin { len: u32, hash: u64 },
     /// Save bytes at `offset`: PC -> board for a load, board -> PC for a
     /// dump (M5).
     SaveChunk { offset: u32, data: &'a [u8] },
-    /// Asks the board to dump its save as `SaveChunk`s (M5).
+    /// Asks the board to dump its save as `SaveBegin` then `SaveChunk`s,
+    /// all with this request's seq (M5).
     SaveDumpRequest,
     /// Held buttons ([`crate::buttons`]), bit layout as `gbc_core::Buttons` (M5): bit 0 A,
     /// 1 B, 2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down; 1 = pressed.

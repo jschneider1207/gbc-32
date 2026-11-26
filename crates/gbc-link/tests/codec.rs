@@ -506,3 +506,46 @@ fn byte_soup_never_panics() {
         assert_eq!(r[0].as_ref().unwrap().0, 2);
     }
 }
+
+/// The save dump direction (crate docs, "Saves and input"): `SaveBegin`
+/// then the chunks, all with the request's seq, back to back on the wire
+/// with no answers between them, decode in order and rebuild the save.
+#[test]
+fn save_dump_stream_decodes_in_order() {
+    let save = pattern(2 * MAX_CHUNK + 300, 5);
+    let seq = 42;
+    let mut wire = frame(
+        &Message::SaveBegin {
+            len: save.len() as u32,
+            hash: 0x1234,
+        },
+        seq,
+    );
+    for (i, data) in save.chunks(MAX_CHUNK).enumerate() {
+        let offset = (i * MAX_CHUNK) as u32;
+        wire.extend(frame(&Message::SaveChunk { offset, data }, seq));
+    }
+    let mut d = FrameDecoder::new();
+    let mut rest = &wire[..];
+    let mut got = Vec::new();
+    let mut begin = None;
+    while !rest.is_empty() {
+        let (used, f) = d.feed_slice(rest);
+        rest = &rest[used..];
+        let Some(f) = f else { continue };
+        match f.unwrap() {
+            (s, Message::SaveBegin { len, hash }) => {
+                assert_eq!(s, seq);
+                assert!(begin.is_none() && got.is_empty());
+                begin = Some((len, hash));
+            }
+            (s, Message::SaveChunk { offset, data }) => {
+                assert_eq!((s, offset as usize), (seq, got.len()));
+                got.extend_from_slice(data);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(begin, Some((save.len() as u32, 0x1234)));
+    assert_eq!(got, save);
+}

@@ -38,10 +38,10 @@
 //! | 0x10 | `RomBegin`        | PC→B | len u32, hash u64 (FNV-1a 64, ADR 0037)     | 12 |
 //! | 0x11 | `RomChunk`        | PC→B | offset u32, data                            | 4 + 0..=1024 |
 //! | 0x12 | `RomEnd`          | PC→B | —                                           | 0 |
-//! | 0x20 | `SaveBegin`       | PC→B | len u32, hash u64 (M5)                      | 12 |
+//! | 0x20 | `SaveBegin`       | both | len u32, hash u64 (FNV-1a 64; load PC→B, dump B→PC; M5) | 12 |
 //! | 0x21 | `SaveChunk`       | both | offset u32, data (load PC→B, dump B→PC; M5) | 4 + 0..=1024 |
 //! | 0x22 | `SaveDumpRequest` | PC→B | — (M5)                                      | 0 |
-//! | 0x30 | `Input`           | PC→B | buttons u8 (`gbc_core::Buttons` bits; M5)   | 1 |
+//! | 0x30 | `Input`           | PC→B | buttons u8 (`gbc_core::Buttons` bits; M5; not answered) | 1 |
 //! | 0x80 | `Ack`             | B→PC | —                                           | 0 |
 //! | 0x81 | `Nak`             | B→PC | code u8 ([`NakCode`])                       | 1 |
 //! | 0x82 | `HelloReply`      | B→PC | protocol u16, max_chunk u16, flash_len u32  | 8 |
@@ -56,6 +56,31 @@
 //! body of the wrong length is [`DecodeError::BadLength`] (fixed-size
 //! bodies must match exactly). `Stats.extra` is room for later fields; a
 //! v1 reader ignores it.
+//!
+//! # Saves and input (M5)
+//!
+//! Full description for the board side: `docs/reference/link-protocol.md`.
+//!
+//! - **Save load** (after the ROM): `SaveBegin { len, hash }` → `Ack`
+//!   (`Nak OutOfRange` when `len` is not a valid `.sav` size for the
+//!   loaded cartridge, `Nak UnexpectedType` when no game can take one),
+//!   then `SaveChunk`s in order from offset 0, each → `Ack`. There is no
+//!   end message: the answer to the chunk that completes `len` is the
+//!   verdict, after the board has checked the hash and the format: `Ack`
+//!   = applied, `Nak HashMismatch` / `Nak OutOfRange` = refused, nothing
+//!   applied. A resend of that chunk gets the same verdict (duplicate).
+//! - **Save dump**: `SaveDumpRequest` (seq s) → `SaveBegin { len, hash }`
+//!   then `SaveChunk`s covering `0..len` in order, all with seq s and
+//!   sent without waiting (no per-chunk `Ack`); or `Nak UnexpectedType`
+//!   when there is no save. The board snapshots the save at the request.
+//!   The PC checks the order and the hash; on a gap, a corrupt frame, a
+//!   bad hash or silence it sends a **new** `SaveDumpRequest` (new seq),
+//!   and ignores frames still carrying an older seq. A board-started dump
+//!   (button combo) is the same `SaveBegin` + chunks with any seq.
+//! - **Input**: `Input { buttons }`, a new seq per frame, never answered
+//!   (no `Ack`; the stop-and-wait rule does not apply). The PC sends it on
+//!   every change and every 500 ms without one, so the latest frame is the
+//!   state and a lost one is healed by the next.
 //!
 //! `Nak` codes: 1 BadCrc, 2 BadFrame, 3 UnexpectedType, 4 OutOfRange,
 //! 5 FlashError, 6 HashMismatch, 7 Busy, 8 VersionMismatch; others decode
