@@ -160,6 +160,26 @@ pub trait Service {
     /// buttons the eject cleared and keeps its speed figures right across
     /// the clock restart.
     fn service(&mut self, frame: u32, emu: &mut Emulator<'_>) -> Serviced;
+
+    /// Called at the end of every iteration, after call `frame`'s samples
+    /// are in the ring and its frame (if any) went to the sink, with that
+    /// call's [`CycleClock`] counts: the player's statistics. Changes
+    /// nothing in the run (the default does nothing).
+    #[inline]
+    fn frame_done(&mut self, _frame: u32, _cycles: FrameCycles) {}
+}
+
+/// One iteration's [`CycleClock`] counts (as the `stats paced core` and
+/// `frontend` lines measure them), for [`Service::frame_done`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameCycles {
+    /// Around the `run_frame` call alone.
+    pub core: u32,
+    /// Conditioning, feed hash and ring push.
+    pub push: u32,
+    /// The frame hash and the sink, 0 when the call completed no frame.
+    pub hash: u32,
+    pub sink: u32,
 }
 
 /// What a [`Service`] call did.
@@ -404,6 +424,11 @@ where
         let t2 = clock.now();
         push.add(t2.wrapping_sub(t1), n);
 
+        let mut fc = FrameCycles {
+            core: t1.wrapping_sub(t0),
+            push: t2.wrapping_sub(t1),
+            ..FrameCycles::default()
+        };
         if r.events.contains(Events::FRAME_READY) {
             let mut fb = Fnv1a::new();
             fb.frame(frame);
@@ -414,10 +439,13 @@ where
             let t4 = clock.now();
             hash.add(t3.wrapping_sub(t2), n);
             sinkc.add(t4.wrapping_sub(t3), n);
+            fc.hash = t3.wrapping_sub(t2);
+            fc.sink = t4.wrapping_sub(t3);
             time.tick(t4);
         } else {
             time.tick(t2);
         }
+        service.frame_done(n, fc);
     }
     let s1 = ring.stats();
     let elapsed = time.total;

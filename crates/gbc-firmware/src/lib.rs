@@ -25,6 +25,8 @@
 //!   sample ring has room, idles (`WFI`) otherwise; its line format; and
 //!   [`paced::run_with`], the player loop's form with live input and a
 //!   per-frame service hook (M5).
+//! - [`player`]: the player image's DMG compatibility palette and its
+//!   per-frame statistics window (M5).
 //! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
 //! - [`video`]: the RGB555 to RGB565 1.5x scaler (240x216) for the panel (M3).
 
@@ -37,6 +39,7 @@ pub mod fnv;
 pub mod headless;
 pub mod input;
 pub mod paced;
+pub mod player;
 pub mod rom_image;
 pub mod save;
 pub mod video;

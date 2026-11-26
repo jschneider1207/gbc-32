@@ -19,7 +19,7 @@ use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Raw, RawInputs, Shared};
 use gbc_firmware::fnv;
 use gbc_firmware::headless::{Buffers, FrameSink, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{Press, Script};
-use gbc_firmware::paced::{self, Error, Feed, Hooks, Idle, Report, Service, Serviced};
+use gbc_firmware::paced::{self, Error, Feed, FrameCycles, Hooks, Idle, Report, Service, Serviced};
 use gbc_firmware::save;
 
 /// Counts its own reads (deterministic stats; they aren't compared).
@@ -489,6 +489,17 @@ impl Service for Svc<'_> {
         }
         Serviced::Continue
     }
+    fn frame_done(&mut self, n: u32, c: FrameCycles) {
+        // The counting clock ticks 1000 per read: a call's core count is
+        // one tick, as the push; the hash and sink are 0 on calls without a
+        // frame.
+        assert_eq!((c.core, c.push), (1000, 1000), "frame {n}");
+        assert!(
+            matches!((c.hash, c.sink), (0, 0) | (1000, 1000)),
+            "frame {n}: {c:?}"
+        );
+        self.log.borrow_mut().push(('d', n));
+    }
 }
 
 fn run_live(
@@ -559,7 +570,9 @@ fn run_with_live_input_and_service_matches_the_script() {
     let want = reference(&rom, &PRESSES, frames, None);
     assert_eq!(&got[1..], &want[1..]);
     assert!(got[0].contains("input_fnv=0000000000000000"), "{}", got[0]);
-    let expect: Vec<(char, u32)> = (0..frames).flat_map(|n| [('s', n), ('i', n)]).collect();
+    let expect: Vec<(char, u32)> = (0..frames)
+        .flat_map(|n| [('s', n), ('i', n), ('d', n)])
+        .collect();
     assert_eq!(log, expect);
     assert_eq!(report.emulated, report.clock);
 }
