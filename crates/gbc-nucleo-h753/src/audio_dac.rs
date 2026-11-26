@@ -756,7 +756,19 @@ impl AudioDac {
         if !matches!(PHASE.load(Ordering::Acquire), RAMP_UP | PLAY) {
             return false;
         }
-        if cycles().wrapping_sub(LAST_AT.load(Ordering::Relaxed)) <= max_gap {
+        // LAST_AT first, then the counter (M7 review): called with the
+        // interrupt enabled, so `on_dma` can store a newer LAST_AT (its
+        // entry `t0`) between the two reads. Read the other way round,
+        // `now` would be older than that `t0`, the difference would wrap
+        // to ~4.29e9 and a healthy stream would be restarted as a stall.
+        // In this order the ISR's `t0` was read before our load and our
+        // `now` after it (one core, so program order of the interrupt),
+        // giving `now - last` >= 0. Acquire keeps the compiler and CPU
+        // from moving the counter's volatile read before the load; the
+        // ISR's Relaxed store needs no Release (same core, nothing else
+        // published with it).
+        let last = LAST_AT.load(Ordering::Acquire);
+        if cycles().wrapping_sub(last) <= max_gap {
             return false;
         }
         // No refill interrupt from here on: the buffer and the stream are
