@@ -61,6 +61,14 @@ name = "lcd-probe"
 test = false
 bench = false
 
+# The frame path: MDMA from the AXI buffer to the panel on TE, readback
+# per frame, TE and frame-rate tuning, then a test image (plan Stage 2
+# M3); built as `boot`.
+[[bin]]
+name = "lcd-dma-probe"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]

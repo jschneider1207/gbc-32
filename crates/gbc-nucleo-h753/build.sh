@@ -4,9 +4,9 @@
 # tools/h7-bench/build.sh does.
 #
 #   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader,
-#                         lcd-probe, headless-<rom> for each acceptance ROM (cpu_instrs,
-#                         cgb-acid2), and headless-qspi (the headless loop on whatever ROM
-#                         the QSPI NOR holds)
+#                         lcd-probe, lcd-dma-probe, headless-<rom> for each acceptance
+#                         ROM (cpu_instrs, cgb-acid2), and headless-qspi (the headless
+#                         loop on whatever ROM the QSPI NOR holds)
 #   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
 #                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
@@ -76,7 +76,7 @@ fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
 
 # The images to build: the arguments, or all of them.
-ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe"
+ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe lcd-dma-probe"
 for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%%=*}"; done
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
 for a in "$@"; do
@@ -180,8 +180,10 @@ plain qspi-write
 # The ROM loader (plan Stage 2 M2); GBC_LOADER_BAUD sets its serving rate
 # (src/bin/loader.rs).
 plain loader
-# The ILI9341V panel over the FMC (plan Stage 2 M3).
+# The ST7789V panel over the FMC (plan Stage 2 M3).
 plain lcd-probe
+# The MDMA frame transfer on TE (plan Stage 2 M3).
+plain lcd-dma-probe
 
 for entry in "${HEADLESS_ROMS[@]}"; do
   rom=${entry%%=*} path=$ROMS/${entry#*=}
