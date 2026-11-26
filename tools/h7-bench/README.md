@@ -570,7 +570,11 @@ covers every rule.
 Absorbing a regression (a +3% failure) into the committed file needs the
 human, as for `check-bench.sh`. Measure it on an image built in the main
 checkout path after ADR 0042's core-first layout: crate hashes in symbol
-names depend on the build path and move code (ADR 0042).
+names depend on the build path and move code (ADR 0042). The committed
+`expected-cycles.txt` was recorded that way on 2026-11-26 at main
+a6a2995 (`bench-itcm-dtcm-pll480`, both passes, boot 1 of two; the
+second boot passed against it, largest |delta| 0.047%; `docs/perf.md`
+"M6 worst-case report (shipped placement)").
 
 ## Measurement
 
