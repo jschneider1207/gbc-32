@@ -1086,8 +1086,24 @@ ITCM (`storm-ppu` 28.56 M / 28.86 M cycles, 365.2% at most).
   three workloads in ITCM, up to 1.036x from flash. An integer-PLL 472 MHz
   ITCM build of the previous code differs from this one by 0.979x to
   1.013x at the same clock, so rebuilding the bench crate alone moves
-  counts by up to about 2%: treat these figures as +-2% (code layout,
-  most likely; not separated).
+  counts by up to about 2%: treat these figures as +-2%. The cause is
+  code layout through the branch predictor (BTAC aliasing on code
+  addresses, in flash and ITCM alike), separated in M6: see below.
+
+**Layout noise and the core-first flash layout (ADR 0042, M6).** With
+the branch predictor off (diagnostic only) a 32 B shift of flash or ITCM
+code moved every workload by at most 0.11%; with it on, flash shifts of
+8 to 1000 B moved the storms by 1.7 to 4.2% and ITCM shifts of 4 to 32 B
+by 0.3 to 1.7%, while moving only `.rodata` moved at most 0.25% and a
+reflash 0.03%. The bound workloads (worst-case, cgb-raster, cpu_instrs,
+event-storm) moved by at most 0.61% under every perturbation. Alignment
+flags did not help. The ITCM images now put gbc-core's flash code first,
+at the fixed address 0x0801_0400 (`.text_core`, `tools/memory-x`), with
+the image's and the lib's code after it, so a bench-code change moved
+the counts by 0.38% at most instead of 3.29%. A core change still moves
+the layout (about +-1.7% via ITCM, up to about +-4% on the storms), and a
+baseline must be built in the main checkout (the bytes, not the
+addresses, depend on the path).
 
 ### `headless` image on the board (Stage 2 M1/M2, 472 MHz)
 
