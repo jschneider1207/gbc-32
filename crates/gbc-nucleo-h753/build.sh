@@ -55,6 +55,8 @@ FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
 # build_bin: the ELF path as cargo reports it (not an assumed target/ path).
 . ../../scripts/lib/cargo-bin.sh
+# check_image_range: the image's hashed range equals the .bin.
+. ../../scripts/lib/image-range.sh
 
 # rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -123,18 +125,9 @@ check_image() {
     [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
 
-  # The image's identity (src/image.rs): the range the image hashes, the
-  # end of `.rodata` or of the last load image in flash, must be exactly
-  # the .bin, or run-headless.sh's check against `cksum < .bin` fails.
-  img_end=$(( 16#$(sym "$syms" __erodata) ))
-  for t in "__sdata __edata __sidata" "__sitcm __eitcm __siitcm" "__sdtcm_ro __edtcm_ro __sidtcm_ro"; do
-    read -r s e li <<< "$t"
-    e=$(( 16#$(sym "$syms" "$li") + 16#$(sym "$syms" "$e") - 16#$(sym "$syms" "$s") ))
-    if [ "$e" -gt $((0x08000000)) ] && [ "$e" -le $((0x08000000 + MAX_BIN)) ] && [ "$e" -gt "$img_end" ]; then img_end=$e; fi
-  done
-  read -r img_crc _ < <(cksum < "$bin")
-  echo "  image range 0x08000000..$(printf 0x%08x "$img_end"); cksum $img_crc"
-  [ $((img_end - 0x08000000)) -eq "$size" ] || bad "$name: image range $((img_end - 0x08000000)) B is not the .bin's $size B (src/image.rs)"
+  # The image's identity (src/image.rs): the range the image hashes must be
+  # exactly the .bin (scripts/lib/image-range.sh).
+  check_image_range "$name" "$elf" "$bin" "$MAX_BIN" || fail=1
 
   # The fault stack: in AXI SRAM, 8-byte aligned, its full size above the
   # end of the `.axisram` buffers.

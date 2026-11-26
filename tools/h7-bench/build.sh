@@ -47,6 +47,8 @@ echo "== board $BOARD; images in $OUT"
 locked() { if [ -n "${H7_BENCH_LOCK:-}" ]; then flock -x "$H7_BENCH_LOCK" "$@"; else "$@"; fi; }
 # build_bin: the ELF path as cargo reports it (not an assumed target/ path).
 . ../../scripts/lib/cargo-bin.sh
+# check_image_range: the image's hashed range equals the .bin.
+. ../../scripts/lib/image-range.sh
 
 # rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -116,6 +118,9 @@ image() {
   { [ $((16#$sdata)) -le $((16#$edata)) ] && [ $((16#$edata)) -le $((16#$sbss)) ] &&
     [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
+  # The image's identity (the banner's image_bytes/image_cksum, the lib's
+  # src/image.rs): the range it hashes must be exactly the .bin.
+  check_image_range "$name" "$OUT/$name.elf" "$OUT/$name.bin" "$MAX_BIN" || fail=1
   # The fault stack the lib's HardFault moves to: in AXI SRAM, 8-byte
   # aligned, its full size above the end of the `.axisram` buffers.
   local ftop axi_end
