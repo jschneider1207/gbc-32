@@ -45,16 +45,17 @@
 //! high (RM0433 section 23.3.4), so WP# and HOLD#/RESET# are defined even
 //! before quad mode is used.
 //!
-//! Clock: the kernel clock is rcc_hclk3 (RCC_D1CCIPR QSPISEL = 00, the
-//! reset value, set again explicitly), [`HCLK_HZ`] = 236 MHz, divided by
-//! PRESCALER + 1. ES0392 2.7.6: with HCLK as the kernel clock, a
-//! prescaler of 0 does not give a 50% duty cycle, and RM0433 23.5.1 says
-//! no odd division factor does; so only even factors are accepted
-//! ([`Qspi::init`]).
+//! Clock (M6 tuning, `docs/reference/qspi-nor.md` "Clock"): the kernel
+//! clock is pll2_r_ck (RCC_D1CCIPR QSPISEL = 10), [`KER_HZ`] = 200 MHz,
+//! divided by PRESCALER + 1. rcc_hclk3 (236 MHz) gives only 118 MHz (over
+//! 0xEB's 104 MHz at CR.DC = 0) or 59 MHz with an even factor; PLL2 gives
+//! 100 MHz. RM0433 23.5.1 (and DS12117 Table 170) say an odd division
+//! factor does not give a 50% duty cycle, which the NOR needs (tCH, tCL
+//! >= 45%); so only even factors are accepted ([`Qspi::init`]).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::clock::{HCLK_HZ, wait_for};
+use crate::clock::wait_for;
 use crate::gpio::pin_af;
 use crate::pac;
 
@@ -75,16 +76,29 @@ const FSIZE: u32 = (2 * NOR_BYTES).trailing_zeros() - 1;
 /// QUADSPI bank, 0x9000_0000 to 0x9FFF_FFFF).
 pub const WINDOW: usize = 0x9000_0000;
 
-/// The prescaler of the first-contact clock: 236 / 6 = 39.3 MHz, an even
+/// The QUADSPI kernel clock: pll2_r_ck, started by [`Qspi::init`]: HSI
+/// 64 MHz / DIVM2 4 = 16 MHz (PLL input range 8 to 16 MHz), x DIVN2 50 =
+/// 800 MHz VCO (wide range, 192 to 836 MHz, DS12117 Table 39), / DIVR2 4.
+/// The HSI is within +-0.5% at 30 C plus +-1% over -20 to 105 C (DS12117
+/// Table 36), so the 100 MHz memory-mapped clock stays under 104 MHz.
+pub const KER_HZ: u32 = 200_000_000;
+/// PLL2 dividers for [`KER_HZ`] (RM0433 8.7.10 PLLCKSELR DIVM2, 8.7.14
+/// PLL2DIVR: fields are N - 1 and R - 1).
+const PLL2_DIVM: u8 = 4;
+const PLL2_DIVN: u16 = 50;
+const PLL2_DIVR: u8 = 4;
+
+/// The prescaler of the first-contact clock: 200 / 6 = 33.3 MHz, an even
 /// factor, under the 50 MHz every common serial NOR allows for its slowest
 /// read command (0x03).
 pub const PRESCALER_SAFE: u8 = 5;
 
-/// The memory-mapped clock for now: 236 / 4 = 59 MHz, an even factor,
-/// well under 0xEB's 104 MHz at CR.DC = 0 (MX25L6433F Table 7), but over
-/// 0x03's 50 MHz: 0x03 reads go at [`PRESCALER_SAFE`].
-/// A faster clock is M6 tuning.
-pub const PRESCALER_MMAP: u8 = 3;
+/// The memory-mapped clock: 200 / 2 = 100 MHz, an even factor, under
+/// 0xEB's 104 MHz at CR.DC = 0 and VCC >= 3 V (MX25L6433F Table 7; the
+/// shield's VCC is 3.3 V) and DS12117 Table 170's 133 MHz, but over 0x03's
+/// 50 MHz: 0x03 reads go at [`PRESCALER_SAFE`]. Measured: M6, docs/perf.md
+/// "QSPI tuning (M6)".
+pub const PRESCALER_MMAP: u8 = 1;
 
 /// The 0xEB mode byte ("performance enhance" bits P7..P0, MX25L6433F
 /// sections 10-12 and 10-13): the part enters enhance mode (the next
@@ -107,6 +121,23 @@ pub const QUAD_IO_READ: Read = Read {
     alternate: Some((MODE_BYTE, Lines::Quad)),
     dummy_cycles: 4,
     data_lines: Lines::Quad,
+};
+
+/// The mode byte that keeps the NOR in 0xEB "performance enhance" mode
+/// (P7..P4 = 1010 toggles against P3..P0 = 0101, MX25L6433F sections 10-12
+/// and 10-13): the next command starts with the address, no instruction.
+pub const ENHANCE_MODE_BYTE: u8 = 0xA5;
+
+/// [`QUAD_IO_READ`] with [`ENHANCE_MODE_BYTE`], for memory-mapped mode
+/// only: [`Qspi::memory_mapped`] then sets SIOO (RM0433 23.3.13, send the
+/// instruction only once), so every command after the first is address,
+/// mode and dummy cycles only (8 QUADSPI clocks fewer per random miss).
+/// Never use it in indirect mode: the NOR would take the next instruction
+/// byte as an address. [`Mapped::exit`] and [`Qspi::init`] take the NOR
+/// out of enhance mode ([`Qspi::release_enhance`]).
+pub const QUAD_IO_READ_XIP: Read = Read {
+    alternate: Some((ENHANCE_MODE_BYTE, Lines::Quad)),
+    ..QUAD_IO_READ
 };
 
 /// Bounded waits: polls of a status bit. One poll is a few AHB reads, so a
@@ -134,6 +165,7 @@ const FCR_CTEF: u32 = 1 << 0;
 const FCR_CTCF: u32 = 1 << 1;
 // QUADSPI_CCR (23.5.6).
 const CCR_FRCM: u32 = 1 << 29;
+const CCR_SIOO: u32 = 1 << 28;
 const CCR_FMODE_INDIRECT_READ: u32 = 0b01 << 26;
 const CCR_FMODE_MEMORY_MAPPED: u32 = 0b11 << 26;
 const CCR_DMODE_SHIFT: u32 = 24;
@@ -315,7 +347,7 @@ fn cr_value(prescaler: u8) -> u32 {
 /// command, longer than the 15 ns after a read); CKMODE 0 (mode 0; serial
 /// NORs take mode 0 and 3). Only while BUSY = 0.
 fn write_dcr(prescaler: u8) {
-    let clk = HCLK_HZ / (u32::from(prescaler) + 1);
+    let clk = KER_HZ / (u32::from(prescaler) + 1);
     let csht = clk.div_ceil(20_000_000).clamp(1, 8) - 1;
     // SAFETY: FSIZE 23 and CSHT 0..7 are valid field values; the reserved
     // bits stay 0.
@@ -326,7 +358,7 @@ fn write_dcr(prescaler: u8) {
 
 impl Qspi {
     /// Turns the QUADSPI on and sets it up for the shield's NOR, at
-    /// [`HCLK_HZ`] / (`prescaler` + 1). Call once, after [`crate::init`].
+    /// [`KER_HZ`] / (`prescaler` + 1). Call once, after [`crate::init`].
     ///
     /// # Panics
     /// If `prescaler` is even (an odd division factor, ES0392 2.7.6 and
@@ -363,12 +395,14 @@ impl Qspi {
         });
         let _ = rcc.ahb4enr.read();
 
-        // The kernel clock: rcc_hclk3 (RM0433 section 8.7.19, RCC_D1CCIPR
-        // QSPISEL = 00), set while the peripheral clock is off. Then the
+        // The kernel clock: pll2_r_ck (RM0433 section 8.7.19, RCC_D1CCIPR
+        // QSPISEL = 10, [`KER_HZ`]), set while the peripheral clock is
+        // off, once PLL2 runs (`pll2_on`). Then the
         // bus clock (RCC_AHB3ENR QSPIEN, 8.7.40), read back so it is on
         // before the reset, and a reset pulse (RCC_AHB3RSTR QSPIRST,
         // 8.7.28) for a known state whatever ran before.
-        rcc.d1ccipr.modify(|_, w| w.qspisel().rcc_hclk3());
+        pll2_on(rcc);
+        rcc.d1ccipr.modify(|_, w| w.qspisel().pll2_r());
         rcc.ahb3enr.modify(|_, w| w.qspien().set_bit());
         let _ = rcc.ahb3enr.read();
         rcc.ahb3rstr.modify(|_, w| w.qspirst().set_bit());
@@ -392,7 +426,53 @@ impl Qspi {
         // FTHRES 0 (FTF with one byte in the FIFO); TCEN 0 (see
         // [`Qspi::memory_mapped`]); no interrupts; EN.
         write_cr(cr_value(prescaler));
-        Qspi { prescaler }
+        let mut q = Qspi { prescaler };
+        // The NOR may still be in enhance mode from an image that ran
+        // before this reset (it has no reset pin and the MCU reset does
+        // not reach it). A failure shows in the first real command.
+        let _ = q.release_enhance();
+        q
+    }
+
+    /// Takes the NOR out of 0xEB enhance mode ([`QUAD_IO_READ_XIP`]), if it
+    /// is in it: one 0xEB read without the instruction phase (IMODE 00),
+    /// address 0x7F_FFFF and mode byte 0xFF on 4 lines, 4 dummy cycles, one
+    /// data byte. In enhance mode the NOR takes it as a 4READ and leaves
+    /// the mode (0xFF does not toggle, MX25L6433F sections 10-12, 10-13).
+    /// Otherwise IO0 carries the bit 0 of each address nibble and of the
+    /// mode byte, all 1: instruction 0xFF, not a command of the part
+    /// (Table 4), and NCS rises after 14 clocks, so it does nothing.
+    fn release_enhance(&mut self) -> Result<(), Error> {
+        let q = regs();
+        if !not_busy() {
+            return Err(Error::Busy);
+        }
+        // SAFETY: write-1-to-clear flags.
+        q.fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
+        // SAFETY: DL is any 32-bit value (one byte: 0).
+        q.dlr.write(|w| unsafe { w.bits(0) });
+        // SAFETY: ALTERNATE is any 32-bit value; with ABSIZE 00 only its
+        // low byte is sent.
+        q.abr.write(|w| unsafe { w.bits(0xFF) });
+        let quad = Lines::Quad as u32;
+        // IMODE 00 but an address phase: not ES0392 2.7.2's data-only read,
+        // and CCR != 0 (2.7.3).
+        write_ccr(
+            CCR_FMODE_INDIRECT_READ
+                | quad << CCR_DMODE_SHIFT
+                | 4 << CCR_DCYC_SHIFT
+                | CCR_ABSIZE_8
+                | quad << CCR_ABMODE_SHIFT
+                | CCR_ADSIZE_24
+                | quad << CCR_ADMODE_SHIFT,
+        );
+        // SAFETY: ADDRESS is any 32-bit value; 24 bits are sent.
+        q.ar.write(|w| unsafe { w.bits(NOR_BYTES - 1) });
+        let r = self.drain(&mut [0u8]);
+        if r.is_err() {
+            abort();
+        }
+        r
     }
 
     /// The PRESCALER field `init` was given.
@@ -400,9 +480,9 @@ impl Qspi {
         self.prescaler
     }
 
-    /// The QUADSPI clock, nominal: [`HCLK_HZ`] / (PRESCALER + 1).
+    /// The QUADSPI clock, nominal: [`KER_HZ`] / (PRESCALER + 1).
     pub fn clock_hz(&self) -> u32 {
-        HCLK_HZ / (u32::from(self.prescaler) + 1)
+        KER_HZ / (u32::from(self.prescaler) + 1)
     }
 
     /// Changes the clock divider (RM0433 23.5.1: PRESCALER only while
@@ -512,10 +592,63 @@ fn abort() {
     regs().fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
 }
 
+/// Starts PLL2 for [`KER_HZ`] (RM0433 8.5.5 "PLL initialization phase":
+/// DIVM2, the input range and VCO, the dividers, then PLL2ON and a wait
+/// for PLL2RDY), integer mode, only the R output. The source is the one
+/// PLLCKSELR.PLLSRC already selects for PLL1 (HSI, [`crate::clock`]).
+/// If PLL2 already runs (nothing in the lib starts it, but a debugger
+/// might), the QUADSPI is moved to rcc_hclk3 and PLL2 restarted.
+///
+/// # Panics
+/// If PLL2 does not lock.
+fn pll2_on(rcc: &pac::rcc::RegisterBlock) {
+    if rcc.cr.read().pll2on().bit_is_set() {
+        rcc.d1ccipr.modify(|_, w| w.qspisel().rcc_hclk3());
+        rcc.cr.modify(|_, w| w.pll2on().clear_bit());
+        assert!(
+            wait_for(POLLS, || rcc.cr.read().pll2rdy().bit_is_clear()),
+            "PLL2 did not stop"
+        );
+    }
+    rcc.pllckselr.modify(|_, w| w.divm2().bits(PLL2_DIVM));
+    rcc.pllcfgr.modify(|_, w| {
+        w.pll2rge()
+            .range8()
+            .pll2vcosel()
+            .wide_vco()
+            .pll2fracen()
+            .reset()
+            .divp2en()
+            .disabled()
+            .divq2en()
+            .disabled()
+            .divr2en()
+            .enabled()
+    });
+    // SAFETY: DIVN2 field 49 (x50, valid 4..512), DIVR2 field 3 (/4);
+    // DIVP2 and DIVQ2 0 for disabled outputs (RM0433 8.5.5, as clock.rs
+    // does for PLL1).
+    rcc.pll2divr.write(|w| unsafe {
+        w.divn2()
+            .bits(PLL2_DIVN - 1)
+            .divp2()
+            .bits(0)
+            .divq2()
+            .bits(0)
+            .divr2()
+            .bits(PLL2_DIVR - 1)
+    });
+    rcc.cr.modify(|_, w| w.pll2on().set_bit());
+    assert!(
+        wait_for(POLLS, || rcc.cr.read().pll2rdy().bit_is_set()),
+        "PLL2 did not lock"
+    );
+}
+
 /// ES0392 section 2.7.4, "QUADSPI internal timing criticality": a
 /// sequence to run after reset (and when leaving memory-mapped mode).
 /// The CR = 0 that follows the first CCR write must complete within 127
-/// kernel clocks (254 CPU cycles here): the three writes are back to
+/// kernel clocks (300 CPU cycles at 472 MHz and [`KER_HZ`]): the three writes are back to
 /// back, with nothing between them but the store instructions.
 fn errata_2_7_4() {
     write_cr(0);
@@ -549,7 +682,7 @@ impl Qspi {
     /// served without a new command. TCEN = 1 would raise NCS after
     /// LPTR.TIMEOUT idle cycles, saving the NOR's selected-but-idle
     /// current at the cost of a new instruction, address, mode and dummy
-    /// phase (8 + 6 + 6 = 20 QUADSPI clocks, 0.34 us at 59 MHz) on the next
+    /// phase (8 + 6 + 6 = 20 QUADSPI clocks, 0.2 us at 100 MHz) on the next
     /// access, even a sequential one. The core reads the ROM mostly
     /// sequentially and the NUCLEO is USB-powered, so the latency wins;
     /// a battery-powered Stage 3 board can revisit this.
@@ -573,12 +706,15 @@ impl Qspi {
         cmd.write_abr();
         // FMODE = 11 (23.3.12 "Memory-mapped mode"): the frame is sent
         // when a master reads the window; DLR and AR are not used.
-        write_ccr(cmd.ccr(CCR_FMODE_MEMORY_MAPPED));
+        // SIOO with the enhance-mode byte only ([`QUAD_IO_READ_XIP`]).
+        let enhance = cmd.alternate.is_some_and(|(b, _)| b == ENHANCE_MODE_BYTE);
+        let sioo = if enhance { CCR_SIOO } else { 0 };
+        write_ccr(cmd.ccr(CCR_FMODE_MEMORY_MAPPED) | sioo);
         // The CCR write reaches the peripheral before the MPU opens the
         // window (the region change itself ends with a DSB and an ISB).
         cortex_m::asm::dsb();
         crate::mpu::qspi_window(crate::mpu::Window::Cached);
-        Ok(Mapped { q: self })
+        Ok(Mapped { q: self, enhance })
     }
 }
 
@@ -587,6 +723,8 @@ impl Qspi {
 /// need [`Mapped::exit`], which hands the [`Qspi`] back.
 pub struct Mapped {
     q: Qspi,
+    /// Mapped with [`QUAD_IO_READ_XIP`]: the NOR is in enhance mode.
+    enhance: bool,
 }
 
 impl Mapped {
@@ -664,6 +802,14 @@ impl Mapped {
         errata_2_7_4();
         write_dcr(self.q.prescaler);
         write_cr(cr_value(self.q.prescaler));
+        let mut q = self.q;
+        if self.enhance {
+            // Panics rather than hand back a NOR that would take the next
+            // instruction as an address.
+            if let Err(e) = q.release_enhance() {
+                panic!("QUADSPI: leaving 0xEB enhance mode failed: {e:?}");
+            }
+        }
         // No line of the window may outlive the mapping: a later program
         // or erase would leave it stale. Clean as well as invalidate, since
         // the other cacheable regions (AXI SRAM) hold dirty lines.
@@ -672,7 +818,7 @@ impl Mapped {
         // a clean-and-invalidate by set/way loses no data.
         let mut cp = unsafe { cortex_m::Peripherals::steal() };
         cp.SCB.clean_invalidate_dcache(&mut cp.CPUID);
-        self.q
+        q
     }
 }
 

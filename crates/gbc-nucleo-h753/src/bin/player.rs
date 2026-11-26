@@ -703,7 +703,7 @@ fn map_rom() -> Result<qspi::Mapped, (&'static str, Why)> {
     let mut q = Qspi::init(qspi::PRESCALER_SAFE);
     q.set_prescaler(qspi::PRESCALER_MMAP)
         .map_err(|e| err("map", &e))?;
-    q.memory_mapped(&qspi::QUAD_IO_READ)
+    q.memory_mapped(&qspi::QUAD_IO_READ_XIP)
         .map_err(|(_, e)| err("map", &e))
 }
 

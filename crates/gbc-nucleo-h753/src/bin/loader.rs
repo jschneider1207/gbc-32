@@ -32,7 +32,7 @@ use core::fmt::{self, Write};
 use gbc_firmware::rom_image::{ImageError, ImageHeader};
 use gbc_link::ty;
 use gbc_nucleo_h753::loader::{Loader, Nor, Progress};
-use gbc_nucleo_h753::qspi::{self, NOR_BYTES, NorError, QUAD_IO_READ, Qspi};
+use gbc_nucleo_h753::qspi::{self, NOR_BYTES, NorError, QUAD_IO_READ_XIP, Qspi};
 use gbc_nucleo_h753::uart::{self, Uart};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led};
 
@@ -108,7 +108,7 @@ impl Nor for BoardNor {
             self.q = Some(q);
             return Err(e.into());
         }
-        let (mut q, r) = match q.memory_mapped(&QUAD_IO_READ) {
+        let (mut q, r) = match q.memory_mapped(&QUAD_IO_READ_XIP) {
             Ok(m) => {
                 let r = f(m.bytes());
                 (m.exit(), Ok(r))

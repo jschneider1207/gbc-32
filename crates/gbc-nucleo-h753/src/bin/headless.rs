@@ -370,7 +370,7 @@ fn map_qspi(board: &mut board::Board) -> qspi::Mapped {
     if let Err(e) = q.set_prescaler(qspi::PRESCALER_MMAP) {
         qspi_error(board, "map", &e);
     }
-    match q.memory_mapped(&qspi::QUAD_IO_READ) {
+    match q.memory_mapped(&qspi::QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((_, e)) => qspi_error(board, "map", &e),
     }

@@ -19,7 +19,7 @@
 //!    boundaries) with `program`; the data is a fixed-seed LCG stream
 //!    ([`Pattern`]);
 //! 4. `verify`: the block read back with indirect 0x03 (39 MHz), indirect
-//!    0xEB (59 MHz) and through the memory-mapped window, against the
+//!    0xEB (100 MHz) and through the memory-mapped window, against the
 //!    pattern; then unaligned window reads (byte, u16 and u32
 //!    `from_le_bytes`, `read_unaligned`, 16-byte copies, cold and warm)
 //!    around page and line boundaries against an 0x03 reference;
@@ -44,7 +44,8 @@ use core::fmt::{self, Write};
 use core::hint::black_box;
 
 use gbc_nucleo_h753::qspi::{
-    self, BLOCK_BYTES, NOR_BYTES, NorError, Op, PAGE_BYTES, QUAD_IO_READ, Qspi, Read, SECTOR_BYTES,
+    self, BLOCK_BYTES, NOR_BYTES, NorError, Op, PAGE_BYTES, QUAD_IO_READ, QUAD_IO_READ_XIP, Qspi,
+    Read, SECTOR_BYTES,
 };
 use gbc_nucleo_h753::uart::{self, baud_setting};
 use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led};
@@ -272,7 +273,7 @@ fn check(q: Qspi, via: Via, expect: Expect) -> (Qspi, Diff) {
         }
         Via::Window => {
             let _ = q.set_prescaler(qspi::PRESCALER_MMAP);
-            let m = match q.memory_mapped(&QUAD_IO_READ) {
+            let m = match q.memory_mapped(&QUAD_IO_READ_XIP) {
                 Ok(m) => m,
                 Err((q, _)) => {
                     d.errors += 1;
@@ -316,7 +317,7 @@ fn unaligned(q: Qspi, bases: &[u32]) -> (Qspi, u32, u32, u32) {
         errors += u32::from(q.read(&READ_03.at(SCRATCH + b - 8), r).is_err());
     }
     let _ = q.set_prescaler(qspi::PRESCALER_MMAP);
-    let m = match q.memory_mapped(&QUAD_IO_READ) {
+    let m = match q.memory_mapped(&QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((q, _)) => return (q, 0, 0, errors + 1),
     };

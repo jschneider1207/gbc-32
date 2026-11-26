@@ -350,7 +350,7 @@ mod qspi_rom {
         let mut q = Qspi::init(qspi::PRESCALER_SAFE);
         q.set_prescaler(qspi::PRESCALER_MMAP).map_err(Fail::Map)?;
         let mapped = q
-            .memory_mapped(&qspi::QUAD_IO_READ)
+            .memory_mapped(&qspi::QUAD_IO_READ_XIP)
             .map_err(|(_, e)| Fail::Map(e))?;
         let window = mapped.bytes();
         let t0 = cycles();

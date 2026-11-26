@@ -8,7 +8,7 @@
 //!
 //! - `compare`: [`SEGMENTS`] (start and end of the device, page and 64 KiB
 //!   boundaries, fixed-seed LCG offsets; about 88 KiB) read with 0x03 at
-//!   39 MHz as the reference, then with 0xEB in indirect mode at 59 MHz,
+//!   33 MHz as the reference, then with 0xEB in indirect mode at 100 MHz,
 //!   then through the window (slice compares, as the core reads its ROM).
 //!   Each round of up to 8 KiB leaves memory-mapped mode and enters it
 //!   again, so the switch both ways (`Mapped::exit`) runs many times.
@@ -36,7 +36,7 @@ use core::fmt::Write;
 use core::hint::black_box;
 
 use cortex_m::peripheral::SCB;
-use gbc_nucleo_h753::qspi::{self, Mapped, NOR_BYTES, QUAD_IO_READ, Qspi, Read};
+use gbc_nucleo_h753::qspi::{self, Mapped, NOR_BYTES, QUAD_IO_READ, QUAD_IO_READ_XIP, Qspi, Read};
 use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led, pac, wait_since};
 
 const PREFIX: &str = "gbc-nucleo-h753";
@@ -184,7 +184,7 @@ fn round(mut q: Qspi, segs: &[(u32, u16)], t: &mut Tally, refbuf: &mut [u8]) -> 
         }
         pos += len;
     }
-    let m = match q.memory_mapped(&QUAD_IO_READ) {
+    let m = match q.memory_mapped(&QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((q, _)) => {
             t.errors += 1;
@@ -352,7 +352,7 @@ fn unaligned(out: &mut Uart, q: Qspi) -> (Qspi, bool) {
         errors += u32::from(q.read(&READ_03.at(b as u32 - 8), r).is_err());
     }
     let _ = q.set_prescaler(qspi::PRESCALER_MMAP);
-    let mut m: Mapped = match q.memory_mapped(&QUAD_IO_READ) {
+    let mut m: Mapped = match q.memory_mapped(&QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((q, _)) => {
             let _ = writeln!(out, "{PREFIX} qspi-mmap unaligned enter=err FAIL\r");
@@ -413,7 +413,7 @@ fn timed(f: impl FnOnce()) -> u32 {
 }
 
 fn latency(out: &mut Uart, q: Qspi) -> Qspi {
-    let mut m = match q.memory_mapped(&QUAD_IO_READ) {
+    let mut m = match q.memory_mapped(&QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((q, _)) => {
             let _ = writeln!(out, "{PREFIX} qspi-mmap latency enter=err\r");
@@ -527,7 +527,7 @@ fn latency(out: &mut Uart, q: Qspi) -> Qspi {
 /// is on, and the NOR's first bytes through the window.
 fn config(out: &mut Uart, mut q: Qspi) -> Qspi {
     let _ = q.set_prescaler(qspi::PRESCALER_MMAP);
-    let m = match q.memory_mapped(&QUAD_IO_READ) {
+    let m = match q.memory_mapped(&QUAD_IO_READ_XIP) {
         Ok(m) => m,
         Err((q, e)) => {
             let _ = writeln!(out, "{PREFIX} qspi-mmap config enter=err:{e:?}\r");
@@ -616,7 +616,7 @@ fn main() -> ! {
     }
     // The fault test: past the window, inside the QUADSPI bank.
     let m = q
-        .memory_mapped(&QUAD_IO_READ)
+        .memory_mapped(&QUAD_IO_READ_XIP)
         .unwrap_or_else(|_| panic!("memory-mapped mode for the fault test"));
     let past = qspi::WINDOW + NOR as usize;
     let _ = writeln!(
