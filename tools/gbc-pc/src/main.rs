@@ -3,7 +3,7 @@
 //! ```text
 //! gbc-pc load <rom> [--sav <file.sav>] [--raw-save] [link options]
 //! gbc-pc dump <out.sav>                [--raw-save] [link options]
-//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio-wav <file.wav>] [link options]
+//! gbc-pc play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio] [--audio-wav <file.wav>] [link options]
 //! gbc-pc hello                         [link options]
 //! link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 //! ```
@@ -34,9 +34,10 @@ use gbc_pc::{Client, Config, LoadOutcome, Transport};
 const USAGE: &str = "usage:
   gbc-pc load <rom> [--sav <file.sav>]                [--raw-save] [link options]
   gbc-pc dump <out.sav>                               [--raw-save] [link options]
-  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [--raw-save] [--audio-wav <file.wav>] [link options]
+  gbc-pc play [--sav-out <file.sav>] [--seconds N]    [--raw-save] [--audio] [--audio-wav <file.wav>] [link options]
   gbc-pc hello                                        [link options]
 --raw-save: no RTC sync on load, no restamp on dump (byte-exact saves)
+--audio: play the board's sound live on the default Windows output device
 link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]";
 
 enum Command {
@@ -60,6 +61,8 @@ struct Args {
     cfg: Config,
     /// `--raw-save`: saves byte-exact, no clock sync or restamp.
     raw_save: bool,
+    /// `--audio` (play): live playback on the default output device.
+    audio: bool,
 }
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -86,6 +89,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         baud: 2_000_000,
         cfg: Config::default(),
         raw_save: false,
+        audio: false,
     };
     let mut path = None;
     while let Some(a) = it.next() {
@@ -109,6 +113,10 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--audio-wav" => match &mut args.cmd {
                 Command::Play { audio_wav, .. } => *audio_wav = Some(value("--audio-wav")?),
                 _ => return Err("--audio-wav is a play option".into()),
+            },
+            "--audio" => match args.cmd {
+                Command::Play { .. } => args.audio = true,
+                _ => return Err("--audio is a play option".into()),
             },
             "--raw-save" => match args.cmd {
                 Command::Hello => return Err("--raw-save is a load, dump or play option".into()),
@@ -220,6 +228,110 @@ fn open_com(_port: &str, _baud: u32) -> std::io::Result<Box<dyn Transport>> {
     ))
 }
 
+/// `--audio`: the playback thread and the state it shares with the play
+/// loop (`gbc_pc::live`, `gbc_pc::waveout`).
+struct LivePlayer {
+    shared: std::sync::Arc<std::sync::Mutex<gbc_pc::live::Live>>,
+    rate: u32,
+    buffers: usize,
+    buffer_ms: u32,
+    #[cfg(windows)]
+    dev: gbc_pc::waveout::LiveAudio,
+}
+
+impl LivePlayer {
+    #[cfg(windows)]
+    fn start() -> std::io::Result<Self> {
+        use gbc_pc::waveout::{BUFFER_MS, BUFFERS, LiveAudio};
+        let (dev, shared) = LiveAudio::start(|rate| {
+            std::sync::Arc::new(std::sync::Mutex::new(gbc_pc::live::Live::new(
+                rate,
+                &gbc_pc::live::Tuning::default(),
+            )))
+        })?;
+        Ok(Self {
+            shared,
+            rate: dev.rate,
+            buffers: BUFFERS,
+            buffer_ms: BUFFER_MS,
+            dev,
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn start() -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "--audio needs the Windows build (scripts/gbc-pc.sh)",
+        ))
+    }
+
+    fn on_audio(&self, first: u32, held: u16, data: &[u8]) {
+        self.shared.lock().unwrap().on_audio(first, held, data);
+    }
+
+    #[cfg(windows)]
+    fn late(&self) -> u32 {
+        self.dev.late()
+    }
+
+    #[cfg(not(windows))]
+    fn late(&self) -> u32 {
+        0
+    }
+
+    #[cfg(windows)]
+    fn stop(self) -> std::io::Result<()> {
+        self.dev.stop()
+    }
+
+    #[cfg(not(windows))]
+    fn stop(self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// The `live:` line; `window` starts a new min/max window.
+    fn line(&self, window: bool) -> String {
+        use gbc_pc::live::Live;
+        let mut l = self.shared.lock().unwrap();
+        let p = if window {
+            l.play.take_window()
+        } else {
+            l.play.stats()
+        };
+        let f = l.feed.stats;
+        let min = if p.fill_min == usize::MAX {
+            0
+        } else {
+            p.fill_min
+        };
+        // Queued in the device: between BUFFERS - 1 and BUFFERS buffers.
+        let queued = (self.buffers as f64 - 0.5) * f64::from(self.buffer_ms);
+        format!(
+            "live: {:?} fill={:.1}ms (min {:.1} max {:.1}) ema={:.1}ms latency~{:.0}ms corr={:+.0}ppm underruns={} underrun_frames={} late={} skips={} skipped={} start_trim={} gaps={} missing={} filled={} held={} overflow={} frames={}",
+            p.state,
+            Live::ms(p.fill as f64),
+            Live::ms(min as f64),
+            Live::ms(p.fill_max as f64),
+            Live::ms(p.fill_ema),
+            Live::ms(p.fill_ema) + queued,
+            p.correction * 1e6,
+            p.underruns,
+            p.underrun_frames,
+            self.late(),
+            p.skips,
+            p.skipped_frames,
+            p.start_trimmed,
+            f.gaps,
+            f.missing,
+            f.filled,
+            f.held,
+            f.overflow,
+            f.frames,
+        )
+    }
+}
+
 #[cfg(windows)]
 fn keyboard() -> Box<dyn Keyboard> {
     Box::new(gbc_pc::keyboard::AsyncKeyboard)
@@ -255,6 +367,7 @@ fn run<T: Transport>(port: T, args: &Args, rom: Option<&[u8]>, sav: Option<&[u8]
             sav_out.as_deref(),
             *seconds,
             audio_wav.as_deref(),
+            args.audio,
             clock,
         ),
         _ => client.hello().map(|info| {
@@ -306,13 +419,27 @@ fn play<T: Transport>(
     sav_out: Option<&str>,
     seconds: Option<u64>,
     audio_wav: Option<&str>,
+    audio: bool,
     clock: Option<gbc_pc::rtc::WallClock>,
 ) -> Result<(), gbc_pc::Error> {
+    let mut live = if audio {
+        let l = LivePlayer::start().map_err(gbc_pc::Error::Io)?;
+        println!(
+            "live: device 16-bit stereo {} Hz (waveOut, {} x {} ms buffers), ring target {} ms",
+            l.rate,
+            l.buffers,
+            l.buffer_ms,
+            gbc_pc::live::Tuning::default().target_ms
+        );
+        Some(l)
+    } else {
+        None
+    };
     let mut capture = gbc_pc::audio::Capture::new();
     let mut audio_span: Option<(Instant, Instant)> = None;
     let mut last_extra = String::new();
     let opts = PlayOptions {
-        audio: audio_wav.is_some(),
+        audio: audio_wav.is_some() || audio,
         duration: seconds.map(Duration::from_secs),
         sav_out: sav_out.map(PathBuf::from),
         clock,
@@ -334,12 +461,20 @@ fn play<T: Transport>(
         }
         PlayEvent::Stats { extra, .. } => {
             println!("stats: {extra}");
+            if let Some(l) = &live {
+                println!("{}", l.line(true));
+            }
             last_extra = extra;
         }
         PlayEvent::Audio { first, held, data } => {
             let t = Instant::now();
             audio_span = Some(audio_span.map_or((t, t), |(a, _)| (a, t)));
-            capture.on_audio(first, held, &data);
+            if let Some(l) = &live {
+                l.on_audio(first, held, &data);
+            }
+            if audio_wav.is_some() {
+                capture.on_audio(first, held, &data);
+            }
         }
         PlayEvent::DumpStarted => println!("dump: started"),
         PlayEvent::DumpRetry(f) => println!("dump: retrying ({f})"),
@@ -351,7 +486,12 @@ fn play<T: Transport>(
         PlayEvent::NoSavOut => eprintln!("dump: no --sav-out given, nothing written"),
     };
     let (t0, rx0) = (Instant::now(), client.rx_bytes);
-    let r = gbc_pc::play::play(client, &mut *kb, &opts, &mut Instant::now, &mut event)?;
+    let r = gbc_pc::play::play(client, &mut *kb, &opts, &mut Instant::now, &mut event);
+    if let Some(l) = live.take() {
+        println!("{}", l.line(false));
+        l.stop().map_err(gbc_pc::Error::Io)?;
+    }
+    let r = r?;
     let rx_rate = (client.rx_bytes - rx0) as f64 / t0.elapsed().as_secs_f64().max(1e-9);
     println!(
         "play: {} ({} Input frames, {} saves, {} failed dumps, {} other Naks ignored)",
@@ -540,6 +680,9 @@ mod tests {
         ));
         assert!(parse("dump x --audio-wav a.wav").is_err());
         assert!(parse("play --audio-wav").is_err());
+        assert!(parse("play --audio --seconds 3").unwrap().audio);
+        assert!(!parse("play").unwrap().audio);
+        assert!(parse("load x.gbc --audio").is_err());
         let a = parse("play").unwrap();
         assert!(matches!(
             a.cmd,

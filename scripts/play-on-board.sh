@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Play a game on the dev board (plan Stage 2 M5; docs/reference/player.md):
 #
-#   scripts/play-on-board.sh <rom> [--sav <file.sav>] [--sav-out <file.sav>] [--seconds N] [--audio-wav <file.wav>]
+#   scripts/play-on-board.sh <rom> [--sav <file.sav>] [--sav-out <file.sav>] [--seconds N] [--audio] [--audio-wav <file.wav>]
 #
 # One board session (the board lock, scripts/lib/board-lock.sh, held from
 # the first probe to the end of play, so no other agent flashes in
@@ -22,6 +22,8 @@
 #      footer is stamped with the PC's time, so the desktop loads it right.
 #      --audio-wav: the board also streams its audio and gbc-pc writes it
 #      to <file.wav> at the end (ADR 0041; docs/reference/player.md).
+#      --audio: the board streams its audio and gbc-pc plays it live on
+#      the default Windows output device (~90 ms behind); both may be given.
 # Builds gbc-pc and the loader and player images first (crates/gbc-nucleo-h753/build.sh),
 # unless PLAY_NO_BUILD=1.
 #
@@ -37,17 +39,18 @@ root=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 fw=$root/crates/gbc-nucleo-h753
 die() { echo "play-on-board: ERROR $*" >&2; exit 2; }
 fail() { echo "play-on-board: FAIL $*" >&2; exit 1; }
-usage() { echo "usage: $0 <rom> [--sav <file.sav>] [--sav-out <file.sav>] [--seconds N] [--audio-wav <file.wav>]" >&2; exit 2; }
+usage() { echo "usage: $0 <rom> [--sav <file.sav>] [--sav-out <file.sav>] [--seconds N] [--audio] [--audio-wav <file.wav>]" >&2; exit 2; }
 
 [ $# -ge 1 ] || usage
 rom_in=$1; shift
-sav_in="" sav_out="" seconds="" audio_wav=""
+sav_in="" sav_out="" seconds="" audio_wav="" audio=""
 while [ $# -gt 0 ]; do
   case $1 in
     --sav) [ $# -ge 2 ] || usage; sav_in=$2; shift 2 ;;
     --sav-out) [ $# -ge 2 ] || usage; sav_out=$2; shift 2 ;;
     --seconds) [ $# -ge 2 ] || usage; seconds=$2; shift 2 ;;
     --audio-wav) [ $# -ge 2 ] || usage; audio_wav=$2; shift 2 ;;
+    --audio) audio=--audio; shift ;;
     *) usage ;;
   esac
 done
@@ -65,7 +68,7 @@ fi
 for f in "$fw/out/loader.bin" "$fw/out/player.bin"; do [ -f "$f" ] || die "$f missing (build.sh loader player)"; done
 
 . "$root/scripts/lib/board-lock.sh"
-board_lock_reexec "$rom_in" ${sav_in:+--sav "$sav_in"} ${sav_out:+--sav-out "$sav_out"} ${seconds:+--seconds "$seconds"} ${audio_wav:+--audio-wav "$audio_wav"}
+board_lock_reexec "$rom_in" ${sav_in:+--sav "$sav_in"} ${sav_out:+--sav-out "$sav_out"} ${seconds:+--seconds "$seconds"} ${audio_wav:+--audio-wav "$audio_wav"} $audio
 
 scratch=${PLAY_SCRATCH:-$(mktemp -d)}
 mkdir -p "$scratch" || die "cannot create $scratch"
@@ -113,7 +116,7 @@ fi
 
 # 5. Play.
 echo "play-on-board: playing${seconds:+ for $seconds s} (Esc ends; F5 dumps the save)"
-pc play --sav-out "$sav_out" ${seconds:+--seconds "$seconds"} ${audio_wav:+--audio-wav "$audio_wav"}
+pc play --sav-out "$sav_out" ${seconds:+--seconds "$seconds"} ${audio_wav:+--audio-wav "$audio_wav"} $audio
 rc=$?
 [ -f "$sav_out" ] && echo "play-on-board: save dump at $sav_out ($(stat -c %s "$sav_out") B)"
 exit $rc
