@@ -49,7 +49,7 @@
   of a frame. Live stack 12,968 of 22,912 B. Facts:
   `docs/reference/{player.md,link-protocol.md,m5-evidence.md}`, docs/perf.md
   "Player (M5)", ADR 0040 (PC syncs the RTC).
-- **Board state:** `lcd-dma-probe` flashed (colour test); `player` is one `scripts/play-on-board.sh` away (cgb-acid2 in the NOR). To play:
+- **Board state:** `player` flashed, Pokemon Red (scratch copy) in the NOR. To play:
   `scripts/play-on-board.sh <rom>` (see Needs human).
 - **Last updated:** 2026-11-26, session 26 (log
   `logs/2026-11-26-26-stage2-m5.md`; sessions 24-25: M3, M4).
@@ -148,7 +148,7 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0041).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0042).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
@@ -170,10 +170,12 @@ Open (sessions 24-26, 2026-11-25/26):
   copied in as `datasheets/st7789v-lcd-driver-datasheet.pdf` (gitignored).
   Your earlier uncommitted edits there (ADR 0001/0003, firmware-interface,
   requirements) are untouched.
-- **Open question from you:** audio over the PC link instead of the DAC.
-  Answer given: it fits (packed 12-bit stereo ~98 KB/s of ~200 KB/s; board
-  CPU < 1% of a frame); needs drift handling in gbc-pc and a check of
-  sustained board -> PC throughput through the ST-LINK. Not started.
+- **Audio over the PC link (your request, done; please listen):**
+  `scripts/play-on-board.sh <rom> --audio [--seconds N] [--audio-wav f]`
+  plays the board's exact DAC feed through Windows (waveOut, ~85 ms
+  behind, adaptive resampling absorbs the board's 0.33% fast clock).
+  Agent runs: Pokemon Red 60 s, 0 underruns/gaps/drops; captured WAVs equal
+  the host's DAC feed frame for frame. ADR 0041; `docs/reference/player.md`.
 - To play: `scripts/play-on-board.sh <rom> [--sav f] [--sav-out f]` (loads
   the ROM into the NOR only if needed, flashes `player`, runs `gbc-pc
   play`: arrows, Z = B, X = A, Enter = Start, Backspace/Right Shift =
