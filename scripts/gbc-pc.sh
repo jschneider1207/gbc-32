@@ -3,7 +3,7 @@
 #
 #   scripts/gbc-pc.sh load <rom> [--sav <file.sav>] [--raw-save] [link options]
 #   scripts/gbc-pc.sh dump <out.sav> [--raw-save] [link options]
-#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio-wav <file.wav>] [link options]
+#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [--raw-save] [--audio] [--audio-wav <file.wav>] [link options]
 #   scripts/gbc-pc.sh hello                                     [link options]
 #   link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 #

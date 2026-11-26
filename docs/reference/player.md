@@ -162,8 +162,46 @@ or, with the player already running, `scripts/gbc-pc.sh play --seconds
 60 --audio-wav out.wav`. The WAV (16-bit stereo, 32,768 Hz; the board
 plays at 32,768.675 Hz) holds the real frames the DAC was fed, from the
 first one received; `gbc-pc` prints `audio:` lines (bytes/s, `first_frame`,
-gaps, the board's `audio_*` counters). Without `--audio-wav` nothing is
-streamed.
+gaps, the board's `audio_*` counters). Without `--audio` or
+`--audio-wav` nothing is streamed.
+
+**Listening live** (`--audio`; ADR 0041, "Amendment: live playback"):
+
+    scripts/play-on-board.sh <rom> --audio [--seconds N] [--audio-wav out.wav]
+
+or `scripts/gbc-pc.sh play --audio` with the player running. The sound
+comes out of the PC's **default Windows output device** (waveOut), about
+**90 ms** behind the board: 50 ms in gbc-pc's ring plus ~35 ms queued in
+the device (4 x 10 ms buffers), plus whatever the Windows audio engine
+adds. Both options together play and record. The volume is the game's:
+use the Windows mixer.
+
+At start gbc-pc prints the device format (`live: device 16-bit stereo
+32768 Hz ...`; 48,000 or 44,100 Hz if the device refuses the board's
+rate), then a `live:` line after each board `stats:` line (every 5 s)
+and one at exit:
+
+| Field | Meaning |
+|---|---|
+| `Playing` / `Prefill` / `Rebuffer` | waiting for the first 90 ms; playing; refilling after a PC-side underrun |
+| `fill`, `min`, `max` | ring fill now and over the last window, ms of audio (target 50) |
+| `ema` | the low-pass filtered fill the controller steers (0.5 s) |
+| `latency~` | `ema` plus the device queue: the delay behind the board, Windows engine not counted |
+| `corr` | the resampling ratio correction, ppm (+3,300 = 0.33% faster: the board's clock runs about that much fast); held within +-1% |
+| `underruns`, `underrun_frames` | the ring ran dry while playing (the last frame is held until it is back at 50 ms); output frames held |
+| `late` | wakes that found every device buffer finished: the device may have run dry (Windows was late, not the board) |
+| `skips`, `skipped` | ring above 160 ms trimmed back to 50 ms (a PC stall); frames dropped |
+| `start_trim` | the start-up backlog dropped when playing began (latency, not sound) |
+| `gaps`, `missing`, `filled` | jumps in the board's frame counter (dropped halves); frames missing; frames filled with the last one (<= 125 ms per gap) |
+| `held` | board-side underrun filler (`held`), replayed as the DAC played it |
+| `overflow` | frames lost to a full 500 ms ring (should never happen) |
+| `frames` | real frames received |
+
+A clean session has `underruns=0 late=0 skips=0 gaps=0` and the board's
+`audio_dropped=0`.
+2026-11-26, Pokemon Red, 60 s: all of those 0, fill 30..94 ms (filtered
+45..51), latency~ 80..86 ms, `corr` settling toward +3,300 ppm after
+the start-up burst (ADR 0041).
 
 **Checking a capture against the host** (deterministic with no keys and
 no save): `headless <rom> --paced --frames N --dac-feed feed.bin` writes
