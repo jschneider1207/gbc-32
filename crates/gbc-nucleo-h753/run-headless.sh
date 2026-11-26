@@ -9,7 +9,21 @@
 # sent (src/bin/headless.rs: it re-sends its report after the run) and
 # diffs its lines starting `headless ` against the expected file's lines
 # starting `headless ` (a trailing `\r` stripped from both). Everything
-# else (`stats ` lines, the banner) is not compared.
+# else (`stats ` lines, the banner) is not compared, except:
+#
+# A display image (plan Stage 2 M3, src/bin/headless.rs `display`) must
+# also pass its self-test (M3 review T-1). The image is a display image if
+# its file name starts `headless-display-`, or the .bin contains the
+# `stats display start=` format text, or the report has a `stats display`
+# line (any one is enough, so a missing line cannot skip the check). Then
+# the report must have exactly one `stats display start=` line and one
+# `stats display cpu ` line, each field below exactly once, with:
+# frames, transfers and readbacks each equal to the number of compared
+# `headless frame=` lines with FRAME_READY (ev bit 0; at least 1),
+# mismatches=0, control_mismatches=2, transfer_errors=0,
+# start_timeouts=0, dead=0, and the cpu line's ok=1 (the 5% budget).
+# Otherwise exit 1, after the lines' comparison (so a `GBC_DISPLAY_START=off`
+# image, which reads nothing back, exits 1 even with equal lines).
 #
 # A report is complete when it runs from a `<prefix> headless report n=<k>`
 # line to the `<prefix> headless end n=<k> ... bytes=<len> cksum=<crc>
@@ -26,7 +40,8 @@
 # ST-LINK accepted the copy and did not program it, flash.sh) and the
 # script exits 2, whatever its lines say.
 #
-# Exit: 0 equal, 1 differ (the first differing line is printed), 2 tool
+# Exit: 0 equal (and a display image's self-test passed), 1 differ (the
+# first differing line is printed) or the display self-test failed, 2 tool
 # error (bad arguments, flash or serial failure, no complete report).
 #
 #   RUN_HEADLESS_ROM=<rom>  also require the report line's `rom_len=<n>
@@ -42,6 +57,8 @@
 #                           it after a 1 s pause)
 #   RUN_HEADLESS_CAPTURE    a saved serial capture to use instead of flashing
 #                           and reading the board (checks this script)
+#   RUN_HEADLESS_SAVE      also copy the serial read to this file (for a
+#                           later RUN_HEADLESS_CAPTURE); no other effect
 #   RUN_HEADLESS_NO_FLASH=1 read the board without flashing (debugging; the
 #                           image check still applies, so it passes only if
 #                           the board already runs <image.bin>)
@@ -96,6 +113,9 @@ else
     "$here/flash.sh" "$img" || die "flash.sh failed"
   fi
   "$here/../../tools/h7-bench/read-serial.sh" "$secs" > "$tmp/serial" || die "read-serial.sh failed"
+  if [ -n "${RUN_HEADLESS_SAVE:-}" ]; then
+    cp "$tmp/serial" "$RUN_HEADLESS_SAVE" || die "RUN_HEADLESS_SAVE=$RUN_HEADLESS_SAVE: copy failed"
+  fi
   echo "run-headless.sh: read in $(($(date +%s) - start)) s (flash included unless RUN_HEADLESS_NO_FLASH)"
 fi
 
@@ -163,10 +183,49 @@ if [ -n "$want_rom" ]; then
 fi
 
 grep '^headless ' "$chosen" > "$tmp/got"
+
+# The display self-test (header): exits 1 if a display image's figures
+# are missing, malformed or not a pass; returns for any other image.
+check_display() {
+  local display=0 bad=0 ready start cpu
+  case "$(basename "$img")" in headless-display-*) display=1 ;; esac
+  LC_ALL=C grep -aqF 'stats display start=' "$img" && display=1
+  grep -q '^stats display' "$chosen" && display=1
+  [ "$display" = 1 ] || return 0
+  # FRAME_READY frames among the compared lines: ev's last hex digit odd.
+  ready=$(grep -E '^headless frame=' "$tmp/got" | grep -cE ' ev=[0-9a-f]{3}[13579bdf]( |$)')
+  start=$(grep '^stats display start=' "$chosen")
+  cpu=$(grep '^stats display cpu ' "$chosen")
+  dbad() { echo "run-headless.sh: display self-test: $*" >&2; bad=1; }
+  # need <line name> <line> <key> <want>: the key exactly once, = want.
+  need() {
+    local got
+    got=$(tr ' ' '\n' <<< "$2" | sed -n "s/^$3=//p")
+    [ "$got" = "$4" ] || dbad "$1 line: $3=${got:-<missing>} (want $4)"
+  }
+  [ "$ready" -ge 1 ] || dbad "no compared frame has FRAME_READY"
+  [ "$(grep -c '^stats display start=' "$chosen")" = 1 ] ||
+    dbad "want exactly one 'stats display start=' line, the report has $(grep -c '^stats display start=' "$chosen")"
+  [ "$(grep -c '^stats display cpu ' "$chosen")" = 1 ] ||
+    dbad "want exactly one 'stats display cpu' line, the report has $(grep -c '^stats display cpu ' "$chosen")"
+  for k in frames transfers readbacks; do need start "$start" "$k" "$ready"; done
+  need start "$start" mismatches 0
+  need start "$start" control_mismatches 2
+  need start "$start" transfer_errors 0
+  need start "$start" start_timeouts 0
+  need start "$start" dead 0
+  need cpu "$cpu" ok 1
+  if [ "$bad" != 0 ]; then
+    echo "run-headless.sh: DISPLAY SELF-TEST FAILED (lines equal; the panel's readback check did not pass)"
+    exit 1
+  fi
+  echo "run-headless.sh: display self-test passed: $ready FRAME_READY frames, as many transfers and readbacks, 0 mismatches, control 2, 5% budget ok"
+}
 tr -d '\r' < "$expected" | grep '^headless ' > "$tmp/want"
 [ -s "$tmp/want" ] || die "$expected has no headless lines"
 if cmp -s "$tmp/want" "$tmp/got"; then
   echo "run-headless.sh: EQUAL: $(wc -l < "$tmp/got") headless lines match $expected"
+  check_display
   exit 0
 fi
 line=$(cmp "$tmp/want" "$tmp/got" 2>&1 | sed -n 's/.* line \([0-9]*\).*/\1/p')
