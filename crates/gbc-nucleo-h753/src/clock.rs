@@ -106,10 +106,23 @@ fn pll1_on(rcc: &pac::RCC, tries: u32) -> bool {
             .disabled()
     });
     // DIVN1 field = N - 1, DIVP1 field = P - 1 = 1 (/2). RM0433 section
-    // 8.7.13.
-    // SAFETY: documented field values (DIVN1 4 to 512, DIVP1 /2).
-    rcc.pll1divr
-        .modify(|_, w| unsafe { w.divn1().bits(PLL_N_FRAC.0).divp1().bits(1) });
+    // 8.7.13. DIVQ1 and DIVR1 are 0 (reset value 1): RM0433 section 8.5.5,
+    // "PLL description": for an unused post-divider "the application shall
+    // set the enable bit (DIVyEN) as well as the corresponding post-divider
+    // bits (DIVP, DIVQ or DIVR) to '0'. If the above rules are not
+    // respected, the PLL output frequency is not guaranteed."
+    // SAFETY: documented field values (DIVN1 4 to 512, DIVP1 /2, DIVQ1 and
+    // DIVR1 0 for a disabled output).
+    rcc.pll1divr.modify(|_, w| unsafe {
+        w.divn1()
+            .bits(PLL_N_FRAC.0)
+            .divp1()
+            .bits(1)
+            .divq1()
+            .bits(0)
+            .divr1()
+            .bits(0)
+    });
     rcc.cr.modify(|_, w| w.pll1on().set_bit());
     wait_for(tries, || rcc.cr.read().pll1rdy().bit_is_set())
 }
