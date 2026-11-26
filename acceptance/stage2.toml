@@ -1,0 +1,51 @@
+# Stage 2 acceptance manifest (NUCLEO-H753ZI + X-NUCLEO-GFX02Z1).
+#
+# OWNED BY THE HUMAN. Agents must not edit this file without explicit
+# approval. Created 2026-11-26 on the human's instruction ("Go ahead and do
+# it"), from the proposal in docs/plan/stage-2.md ("Proposed
+# `acceptance/stage2.toml`", decision D10) with the two placeholders filled
+# as proposed in docs/reference/m5-evidence.md.
+#
+# Paths are relative to test-roms/ (scripts/fetch-test-roms.sh), the same
+# pinned release as stage1.toml.
+#
+# Consumers: none read this file yet. Until one does,
+# crates/gbc-nucleo-h753/replay-set.txt (run-replay.sh) and soak-set.txt
+# carry the same entries and must be kept equal to it.
+
+roms_release = "v7.0"                  # same as stage1.toml
+model = "cgb-c"
+cpu_mhz = 472
+frame_budget_cycles = 7902557          # real time at 472 MHz; gated
+worst_case_report_cycles = 3951279     # 50% of a 472 MHz frame; REPORTED, not gated
+soak_minutes = 10                      # synth:worst-case in the player image
+
+# On-board equality set: each ROM runs on the host (`headless --paced`) and
+# on the board (`player-script`) with the same inputs; the frame-hash chain
+# and the DAC-feed hash must be identical, with 0 underruns and 0 frames
+# over budget.
+replay = [
+  { rom = "blargg/cpu_instrs/cpu_instrs.gb", run_frames = 3600 },
+  { rom = "cgb-acid2/cgb-acid2.gbc",         run_frames = 600 },
+  { rom = "dmg-acid2/dmg-acid2.gb",          run_frames = 600 },
+  { rom = "blargg/cgb_sound/cgb_sound.gb",   run_frames = 2400 },
+  { rom = "same-suite/dma/hdma_mode0.gb",    run_frames = 600 },
+  # Input and run length from stage1.toml group `rtc3test-sub-second`
+  # (its run_s = 30, i.e. 1793 frames), applied at exact clocks as romtest does.
+  { rom = "rtc3test/rtc3test.gb",            input_group = "rtc3test-sub-second" },
+]
+
+# Soak (B4): synth:worst-case, built from tools/bench (`bench --write-synth`),
+# in the player image for soak_minutes: 0 frames over budget, 0 underruns,
+# emulated speed within +-1000 ppm of the cycle counter.
+soak = [
+  { synth = "worst-case", run_frames = 35837, max_ppm = 1000 },
+]
+
+# Save round trip (B5): the generated MBC3+RAM+timer ROM and its fixture
+# (RTC halted, so emulated time doesn't change the footer), loaded into the
+# player and dumped back; both dumps byte-identical to the fixture.
+save_roundtrip = { fixture = "tools/gbc-pc/tests/fixtures/link-probe.sav", rom = "generated:link-probe" }
+
+# Optional, once the human records them (Stage 1 M10 E6): real-game replays
+# of the checklist games, ROMs copied from X:\gbc-roms, hashes committed.

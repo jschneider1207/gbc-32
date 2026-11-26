@@ -504,6 +504,13 @@ step H7 "Host unit tests of the firmware logic, named"
 sub "scripts/test-board-lock.sh (scripts/lib/board-lock.sh: serializes, re-enters, times out)"
 run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
+# The board run scripts' pass/fail logic, on synthetic and committed
+# captures (never the board, never the board lock; human, 2026-11-26).
+for t in test-run-headless test-check-report test-run-paced test-run-replay; do
+  sub "scripts/${t}.sh (every failure mode of the script it tests, plus a pass case)"
+  run_status "scripts/${t}.sh"
+  [ "${rc}" -eq 0 ] || fail "scripts/${t}.sh exited ${rc}"
+done
 NAMED_TESTS="
 gbc-firmware fnv::tests::known_vectors
 gbc-firmware fnv::tests::frame_is_little_endian_pixel_bytes

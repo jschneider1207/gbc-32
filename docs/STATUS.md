@@ -26,7 +26,7 @@
   of the 50% line). Facts: `docs/reference/qspi-nor.md`, `loader.md`,
   `m2-evidence.md`, docs/perf.md "QSPI ROM placement (M2)".
 - **M3 results:** the shield panel is an **ST7789V** (variant $AZ2), not
-  the ILI9341V. FMC 8-bit, timing SPEC (per_ck 64 MHz, 5 cycles/byte),
+  the ILI9341V (sticker `$AZ2` confirmed). FMC 8-bit, timing SPEC (per_ck 64 MHz, 5 cycles/byte),
   12.8 MB/s; MDMA from the TE ISR, 8.10 ms per 240x216 frame; TE tuned to
   16.735-16.749 ms (FRCTRL2 0Eh, PORCTRL 11h/11h). cgb-acid2 600 frames
   with the display: hash lines EQUAL, 587 readbacks 0 mismatches,
@@ -158,76 +158,51 @@ Working rules that matter here:
 
 ## Needs human
 
-Open (session 25, 2026-11-26):
-- **`acceptance/stage2.toml` (yours, D10):** the proposed replay set now
-  runs on the board, all 6 equal to the host (`docs/reference/m5-evidence.md`).
-  Concrete picks for the two placeholders: `same-suite/dma/hdma_mode0.gb`
-  600 frames, and `rtc3test/rtc3test.gb` with stage1's `rtc3test-sub-second`
-  input, 1,793 frames. Runner: `crates/gbc-nucleo-h753/run-replay.sh`
-  (reads `replay-set.txt` until the manifest exists). Write the toml when
-  you're happy with the set; agents won't.
-- **You can play on the board now** (sign-off items 1-4): `scripts/play-on-board.sh
-  <rom> [--sav f] [--sav-out f]` (copies the ROM to scratch, loads it into
-  the NOR only if needed, flashes `player`, runs `gbc-pc play`: arrows, Z =
-  B, X = A, Enter = Start, Backspace/Right Shift = Select, F5 = save dump,
-  Esc quits; the joystick is the D-pad, B1 = Start). `play` reads keys
-  globally (GetAsyncKeyState), so keys typed in other windows count too.
-  Details and limits: `docs/reference/player.md`. Measured: Wario Land 3
-  150 s, 0 frames over budget (busy max 29.7% of a frame), 0 underruns;
-  your LADX `.sav` (scratch copy) round-tripped byte-identically.
-- FYI (agent decisions, say if you object): the `player` image keeps the
-  core's `Frame` in DTCM (the ADR 0026 target), and its save buffer is
-  64 KiB, so a cart with 128 KiB of RAM runs but its save is refused (AXI
-  SRAM holds the 128 KiB-aligned panel buffer). Joystick and B1 were never
-  pressed by a human; B1 is assumed active high (UM2407 doesn't say).
-- **Gate hooks for three new script tests** (stricter only; not done
-  because gate edits prompt you): `scripts/test-run-headless.sh`,
-  `scripts/test-check-report.sh`, `scripts/test-run-paced.sh` all pass and
-  never touch the board. Hook each into `scripts/gate-stage2.sh` next to
-  the `scripts/test-board-lock.sh` block (~lines 504-506: `sub ...`,
-  `run_status <script>`, `[ "${rc}" -eq 0 ] || fail ...`). Say "hook them"
-  and an agent will do it (the edit will prompt).
-- FYI, no answer needed unless you object: the M5 save round-trip will use
-  a `.sav` fixture with the MBC3 RTC **halted** (DH bit 6). With a running
-  RTC the footer advances in emulated time, so "dump after a scripted run
-  equals the original" can't hold; a no-RTC cart is also covered.
-- FYI: `paced-*` images set DBGMCU_CR.DBGSLEEP_D1 so DWT counts in WFI
-  (needed for the speed figure). It survives a system reset until a power
-  cycle and keeps the CPU clock running in sleep (more power); dev-board
-  only, Stage 3 should time with a TIM (M4 P-5).
+Open (sessions 24-26, 2026-11-25/26):
+- **Still to look at / listen to:** cgb-acid2 and dmg-acid2 on the panel
+  (sign-off item 1; Wario Land 3 and the colour test are done), and audio
+  (item 2) once you have powered speakers or an amp: left PA4 = CN11 pin
+  32, right PA5 = CN12 pin 11, AGND CN12 pin 32; line level (>= 5 kOhm
+  load, not headphones), ~1.65 V DC bias, so AC-couple (e.g. 10 uF series,
+  100 kOhm to ground). `docs/reference/audio-dac.md`.
+- **Hardware repo, uncommitted for your review:** `datasheets/README.md`
+  now names the $AZ2 variant (ST7789V) and lists the ST7789V datasheet,
+  copied in as `datasheets/st7789v-lcd-driver-datasheet.pdf` (gitignored).
+  Your earlier uncommitted edits there (ADR 0001/0003, firmware-interface,
+  requirements) are untouched.
+- **Open question from you:** audio over the PC link instead of the DAC.
+  Answer given: it fits (packed 12-bit stereo ~98 KB/s of ~200 KB/s; board
+  CPU < 1% of a frame); needs drift handling in gbc-pc and a check of
+  sustained board -> PC throughput through the ST-LINK. Not started.
+- To play: `scripts/play-on-board.sh <rom> [--sav f] [--sav-out f]` (loads
+  the ROM into the NOR only if needed, flashes `player`, runs `gbc-pc
+  play`: arrows, Z = B, X = A, Enter = Start, Backspace/Right Shift =
+  Select, F5 = save dump, Esc quits; joystick = D-pad, B1 = Start). `play`
+  reads keys globally (GetAsyncKeyState). `docs/reference/player.md`.
+- FYI (agent decisions, say if you object): the `player` image keeps
+  `Frame` in DTCM (the ADR 0026 target) and a 64 KiB save buffer, so a
+  cart with 128 KiB of RAM runs but its save is refused (fixable by
+  section order, M5 P-2). The M5 save round trip uses a fixture with the
+  MBC3 RTC halted, and the run between the dumps was the live player with
+  no keys (the scripted build has the link off; that ROM reads no buttons
+  and never touches cart RAM). `paced-*`/`player` set DBGMCU_CR.DBGSLEEP_D1
+  (DWT counts in WFI; survives a reset until a power cycle). gbc-desktop
+  now depends on gbc-firmware (shared RTC sync, ADR 0040).
 
-Open (session 24, 2026-11-25):
-- **Audio-paced emulation runs ~0.33% fast in real time** (no answer
-  needed unless you object). The DAC trigger is the HSI-derived 236 MHz ÷
-  7202; against the LSE the sample rate measured 32,871.7-32,881.5 Hz
-  (+0.32-0.35%, the HSI's own error, within D11's accepted tolerance).
-  M4's ±0.1% speed check is against DWT (same HSI), so it can't see
-  this; ~6 cents sharp. Agent plan: keep ÷7202 and meet M4 as written.
-  Option if you want true real time: pick ARR at boot from an LSE
-  measurement (±70 ppm), and measure the M4 check against the LSE instead
-  of DWT (that changes the check's reference, so it's your call).
-- **Audio wiring** for sign-off item 2: left PA4 = CN11 pin 32, right PA5
-  = CN12 pin 11, AGND CN12 pin 32; line level (≥ 5 kΩ load: powered
-  speakers or an amp), ~1.65 V DC bias, so AC-couple (e.g. 10 µF series,
-  100 kΩ to ground). `docs/reference/audio-dac.md`.
-- **The shield's panel is an ST7789V, not the ILI9341V** (RDDID 85 85 52,
-  TE 60 Hz; UM2905 §6.2: variant XNGFX02Z1$AZ2 has the ST7789V, $AZ1 the
-  ILI9341V). Please read the shield sticker to confirm `$AZ2`. Plan and
-  architecture wording was corrected (chip name and commands only).
-- **Look at the panel** (sign-off item 1 early check; also check for
-  inverted colours or poor contrast: the init relies on ST7789V reset
-  values, M3 review P-5). The cgb-acid2 frame is left on it now; the
-  lcd-dma-probe test image (reflash `out/lcd-dma-probe.bin`) should show
-  8 vertical colour bars; with MADCTL BGR as planned the
-  first bar should be blue and the third red, and a white L-shaped
-  marker top-left. To show dmg-acid2: `cd crates/gbc-nucleo-h753 &&
-  ./build.sh headless-display-dmg-acid2 && ./flash.sh
-  out/headless-display-dmg-acid2.bin` (about 70 s until the last frame).
-  If red/blue are swapped or the marker isn't top-left as you hold the
-  board, say so (MADCTL changes; `docs/reference/lcd-panel.md`).
-- The ST7789V datasheet (Sitronix V1.3) is not in
-  `../gbc-32-hardware/datasheets/`; URL and sha256 are in
-  `docs/reference/lcd-panel.md` if you want to add it (agents can't).
+Decided in session 26 (2026-11-26), human:
+- Board speed: keep the HSI-derived DAC rate (~0.33% fast in real time vs
+  the LSE; the M4 check stays against DWT). "Thats fine".
+- `acceptance/stage2.toml`: "Go ahead and do it": created from the plan's
+  proposal with the concrete picks `same-suite/dma/hdma_mode0.gb` (600)
+  and `rtc3test/rtc3test.gb` with stage1 group `rtc3test-sub-second`. No
+  tool reads it yet; `replay-set.txt`/`soak-set.txt` must stay equal to it.
+- Gate hooks: "Go ahead and do it": `scripts/test-run-headless.sh`,
+  `test-check-report.sh`, `test-run-paced.sh`, `test-run-replay.sh` run in
+  gate H7 (seen failing on a broken test: exit 1).
+- Shield sticker confirmed `XNGFX02Z1$AZ2` (ST7789V); docs here re-cited
+  to the ST7789V (1c1f437). Panel colour test (photo): order, orientation,
+  not inverted all correct. Buttons: "I checked the buttons too, worked";
+  Wario Land 3 played on the panel with PC input: "amazing".
 
 Open (session 22, 2026-11-25):
 - **H735 ITCM reserve (C-P5, no answer needed now):** measured on the firmware
