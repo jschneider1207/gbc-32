@@ -223,16 +223,16 @@ over (Stage 3 loads from eMMC).
 - [x] (docs/perf.md "Display in the loop (M3)") Measure: conversion cycles, DMA time per frame, and the core's cycles per frame with the display running (AXI/FMC contention), against M2's figures
 - [ ] M3 review T-3 (low): the readback compares GRAM with the DMA buffer, not with the core frame (`lcd_dma.rs` readback); an on-target `scale_frame` miscompile would pass: add a sampled on-board check against the `video` reference math
 - [ ] M3 review T-4 (low): docs/perf.md M3 says the display "costs the core nothing measurable"; te-wait is +0.07% vs 0.054% boot-to-boot noise: reword; and say the 5% figure excludes the TE ISR's RAMWR+SWRQ (tens of cycles)
-- [ ] M3 review T-5 (low): stale ILI9341V names/sections in `gbc-firmware/src/video.rs` docs, the `gbc-nucleo-h753/Cargo.toml` lcd-probe comment, and `lcd.rs` 5->6-bit expansion docs mixing ILI9341V and ST7789V section numbers
-- [ ] M3 review P-1 (low): after a `LcdDma::wait()` timeout the channel stays enabled and STATE PENDING/RUNNING; `lcd()`/`buffer()`/`parts()`/`present()` then spin forever and a later TE still fires RAMWR+SWRQ (headless.rs works around it with `dead`); disable the channel and reset STATE on timeout; `new()` should wait for CTCIF per RM0433 14.5.5; `busy()` silently consumes TEIF
-- [ ] M3 review P-2 (low): the EXTI13 pending clear relies on a DSB through bufferable Device region 5; read CPUPR1 back after the clear so a late clear cannot re-enter `on_te` and skew TE_MIN
+- [x] (9c81d69) M3 review T-5 (low): stale ILI9341V names/sections in `gbc-firmware/src/video.rs` docs, the `gbc-nucleo-h753/Cargo.toml` lcd-probe comment, and `lcd.rs` 5->6-bit expansion docs mixing ILI9341V and ST7789V section numbers
+- [x] (9c81d69) M3 review P-1 (low): after a `LcdDma::wait()` timeout the channel stays enabled and STATE PENDING/RUNNING; `lcd()`/`buffer()`/`parts()`/`present()` then spin forever and a later TE still fires RAMWR+SWRQ (headless.rs works around it with `dead`); disable the channel and reset STATE on timeout; `new()` should wait for CTCIF per RM0433 14.5.5; `busy()` silently consumes TEIF
+- [x] (9c81d69) M3 review P-2 (low): the EXTI13 pending clear relies on a DSB through bufferable Device region 5; read CPUPR1 back after the clear so a late clear cannot re-enter `on_te` and skew TE_MIN
 - [ ] M3 review P-3 (low): `lcd::Timing::new` doesn't model trcsfm 355 ns / tcsf (CS setup for frame-memory reads); record which reading of the figure is assumed (readback passes at all three timings)
-- [ ] M3 review P-4 (low): `lcd.rs` cites DS12117 Tables 55/57 (rev Y section); this rev V part's are Tables 152/154 (values identical)
+- [x] (9c81d69) M3 review P-4 (low): `lcd.rs` cites DS12117 Tables 55/57 (rev Y section); this rev V part's are Tables 152/154 (values identical)
 - [ ] M3 review P-5 (low): the panel init sends no VCOM/gamma/power registers and no INVON; readback can't see the glass; the human look should check for inverted colours and poor contrast; compare with ST's BSP init for the ST7789V shield if it can be found (MIT/BSD-licensed only for copying)
 - [ ] M3 review P-6 (low): `Lcd::set_timing` resets the FMC while PD4/PD5/PD7 stay in AF12 (pin levels during reset undefined: a stray byte could reach the panel); lcd-probe only; switch the pins to GPIO high around the reset
-- [ ] M3 review P-7 (low): the NOLOAD DMA buffer is written with 32-bit non-cacheable stores into 64-bit ECC AXI SRAM (read-modify-write of uninitialised words after power-on, RM0433 3.2); zero the buffer once with 64-bit writes at init (ties to M1 F-5)
-- [ ] M3 review P-8 (low): `lcd_dma.rs` readback and headless.rs docs say "about 70 ms" per readback; measured 90.3 ms
-- [ ] M3 review P-9 (low): say in `lcd::SAFE`'s doc that it is a bus fallback only (7.1 MB/s, below the 10.1 MB/s write-ahead needs, so it tears)
+- [x] (9c81d69) M3 review P-7 (low): the NOLOAD DMA buffer is written with 32-bit non-cacheable stores into 64-bit ECC AXI SRAM (read-modify-write of uninitialised words after power-on, RM0433 3.2); zero the buffer once with 64-bit writes at init (ties to M1 F-5)
+- [x] (9c81d69) M3 review P-8 (low): `lcd_dma.rs` readback and headless.rs docs say "about 70 ms" per readback; measured 90.3 ms
+- [x] (9c81d69) M3 review P-9 (low): say in `lcd::SAFE`'s doc that it is a bus fallback only (7.1 MB/s, below the 10.1 MB/s write-ahead needs, so it tears)
 
 **Acceptance:** over 600 frames of `cgb-acid2` with the display running,
 the readback self-test reports 0 mismatches. The core's frame hashes still
