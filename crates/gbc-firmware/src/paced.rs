@@ -86,10 +86,16 @@
 //!
 //! - `RING: FeedRing` and `TAP: FeedTap` are statics. The DMA ISR is
 //!   `audio_dac::on_dma(|_, out| { TAP.pop_into(&RING, out); })`.
-//! - Start the DAC (`AudioDac::start`) right before [`run`]: its 250 ms
-//!   ramp comes before the first pop, and the loop fills the ring within
-//!   the first four calls.
-//! - [`Idle`] is `WFI`. A refill that lands between the room check and
+//! - Start the DAC (`AudioDac::start`) before [`run`]: its 250 ms ramp
+//!   comes before the first pop, and the loop fills the ring within the
+//!   first four calls. Started right before [`run`], the ramp counts in
+//!   `elapsed` with nothing consumed (-417 ppm over 10 minutes), so the
+//!   `paced` image waits until the ramp is four refills from its end
+//!   (src/bin/paced.rs).
+//! - [`Idle`] is `WFI`. With a DWT [`CycleClock`] the CPU clock must keep
+//!   running in Sleep (H7: DBGMCU_CR DBGSLEEP_D1), or the counter stops
+//!   during `WFI` and the speed figures count only the busy time
+//!   (docs/reference/audio-dac.md). A refill that lands between the room check and
 //!   the `WFI` delays the loop by at most one DMA half (7.8 ms) or until
 //!   any other interrupt, while the ring still holds over 1,498 frames
 //!   (45 ms).

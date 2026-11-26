@@ -9,6 +9,8 @@
 #                         loop on whatever ROM the QSPI NOR holds), and
 #                         headless-display-<rom> (the loop with the panel, M3) for
 #                         cgb-acid2 and dmg-acid2
+#                         and paced-<rom> (the audio-paced loop with display and
+#                         DAC, M4) for cgb_sound and the synthetic worst-case ROM
 #   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
 #                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
@@ -28,7 +30,11 @@
 # build per ROM (the ROM is embedded): out/headless-<rom>.{elf,bin}; and
 # once with `--features rom-qspi` (no ROM embedded): out/headless-qspi.{elf,bin};
 # and with `--features display`, one per display ROM:
-# out/headless-display-<rom>.{elf,bin}.
+# out/headless-display-<rom>.{elf,bin}; and with `--features paced`, one per
+# paced ROM: out/paced-<rom>.{elf,bin}. A paced ROM named `synth:<name>` is
+# the bench's synthetic ROM (tools/bench/src/synth.rs, as h7-bench embeds
+# it), written by `bench --write-synth` to out/<name>.gb first, so that the
+# host's `headless --paced` can run the identical file (run-paced.sh).
 #
 # Checks per image: the vector table (initial SP in DTCM and 8-byte
 # aligned, reset vector a Thumb address inside the image), the flash fit,
@@ -60,6 +66,8 @@ HEADLESS_ROMS=(cpu_instrs=blargg/cpu_instrs/cpu_instrs.gb cgb-acid2=cgb-acid2/cg
 # The M3 display ROMs: cgb-acid2 (the acceptance run) and dmg-acid2 (the
 # human's look, plan Stage 2 M3 acceptance).
 DISPLAY_ROMS=(cgb-acid2=cgb-acid2/cgb-acid2.gbc dmg-acid2=dmg-acid2/dmg-acid2.gb)
+# The M4 acceptance ROMs (plan Stage 2 M4): cgb_sound and synth:worst-case.
+PACED_ROMS=(cgb_sound=blargg/cgb_sound/cgb_sound.gb worst-case=synth:worst-case)
 ROMS=${GBC_TEST_ROMS:-../../test-roms}
 ITCM_DROP=${GBC_ITCM_DROP-plain tile path}
 MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
@@ -89,6 +97,7 @@ ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe lcd-dma-probe 
 for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%%=*}"; done
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
 for entry in "${DISPLAY_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-display-${entry%%=*}"; done
+for entry in "${PACED_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES paced-${entry%%=*}"; done
 for a in "$@"; do
   case " $ALL_IMAGES " in *" $a "*) ;; *) echo "build.sh: no image named $a (images: $ALL_IMAGES)" >&2; exit 2;; esac
 done
@@ -234,6 +243,30 @@ for entry in "${DISPLAY_ROMS[@]}"; do
   echo "  post-link ITCM check (--drop '$ITCM_DROP')"
   ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-display-$rom.elf" | sed 's/^/  /' ||
     bad "headless-display-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
+done
+
+# The audio-paced loop with the display and the DAC (plan Stage 2 M4,
+# `paced`): the same checks as the headless-<rom> images.
+for entry in "${PACED_ROMS[@]}"; do
+  rom=${entry%%=*} src=${entry#*=}
+  want "paced-$rom" || continue
+  case "$src" in
+    synth:*)
+      # The host build of the root workspace (its own target, not this
+      # package's thumbv7em config).
+      path=$OUT/$rom.gb
+      (cd ../.. && locked cargo run --quiet --release -p bench -- --write-synth "${src#synth:}" "$OLDPWD/$path") ||
+        { bad "paced-$rom: bench --write-synth ${src#synth:} failed"; continue; }
+      echo "  $path: bench --write-synth ${src#synth:} ($(stat -c %s "$path") B)" ;;
+    *)
+      path=$ROMS/$src
+      [ -f "$path" ] || { bad "paced-$rom: no ROM at $path (scripts/fetch-test-roms.sh, or set GBC_TEST_ROMS)"; continue; } ;;
+  esac
+  built=$(GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP build_bin paced locked cargo build --release --bin paced --features paced "${REMAP[@]}")
+  check_image "paced-$rom" "$built"
+  echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/paced-$rom.elf" | sed 's/^/  /' ||
+    bad "paced-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
 done
 
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }

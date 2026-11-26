@@ -86,6 +86,16 @@ required-features = ["headless"]
 test = false
 bench = false
 
+# The audio-paced main loop with the display and the DAC (plan Stage 2 M4
+# acceptance); built only with `--features paced` (build.sh:
+# out/paced-<rom>.bin), which implies `headless` (the ITCM placement and
+# the ROM embedding).
+[[bin]]
+name = "paced"
+required-features = ["paced"]
+test = false
+bench = false
+
 # The placement is per build, not per bin: every bin of a package shares
 # one build script and so one memory.x (ADR 0036). The `headless` feature
 # turns on the ITCM set of perf/itcm-sections.txt (the M6-target
@@ -105,6 +115,9 @@ rom-qspi = ["headless"]
 # loop: each frame scaled, sent by MDMA and read back (plan Stage 2 M3;
 # build.sh: out/headless-display-<rom>.bin).
 display = ["headless"]
+# `paced` (implies `headless`): the `paced` bin (src/bin/paced.rs; build.sh:
+# out/paced-<rom>.bin).
+paced = ["headless"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
