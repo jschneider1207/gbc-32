@@ -99,45 +99,14 @@ image() {
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
 }
 
-# itcm_check <name>: every glob of perf/itcm-sections.txt must name at least
-# one function that the linker put in ITCM (docs/perf.md "ITCM placement
-# plan", post-link check).
+# itcm_check <name>: the post-link ITCM check (scripts/check-itcm-elf.sh,
+# docs/perf.md "ITCM placement plan"), told the tiers build.rs left in flash
+# (same variable, same default) and the rlib the image was linked from.
 itcm_check() {
-  local elf=$OUT/$1.elf syms n=0 missing=0 in=0 bytes=0 out_fn=0 skip=0 dropped=0 unlinked=0 d
   local drop=${H7_BENCH_ITCM_DROP-plain tile path}
-  syms=$(readelf -sW "$elf" | awk '$4 == "FUNC" && $8 ~ /8gbc_core/ {print $2, $3, $8}')
-  while read -r glob rest; do
-    # The tiers build.rs left in flash (same variable, same default).
-    if [[ "$glob $rest" == "# Tier"* ]]; then
-      skip=0
-      while IFS= read -r -d , d; do
-        d=$(sed 's/^ *//; s/ *$//' <<< "$d")
-        [ -n "$d" ] && [[ "$glob $rest" == *"$d"* ]] && skip=1
-      done <<< "$drop,"
-    fi
-    case "$glob" in ''|'#'*|ITCM_BUDGET_BYTES=*|FLASH_OK) continue;; esac
-    if [ "$skip" -eq 1 ]; then dropped=$((dropped + 1)); continue; fi
-    n=$((n + 1))
-    # A glob whose functions are all absent from the ELF is fine: the
-    # linker dropped them as unused (this firmware only calls run_until).
-    # One with a function in flash and none in ITCM is a placement bug.
-    local pat=${glob#.text.} hit=0 flash=0
-    while read -r addr _ sym; do
-      # shellcheck disable=SC2053
-      if [[ $sym == $pat ]]; then
-        if [ $((16#$addr)) -lt $((0x10000)) ]; then hit=1; else flash=1; fi
-      fi
-    done <<< "$syms"
-    if [ "$hit" -eq 0 ] && [ "$flash" -eq 1 ]; then echo "  in flash, not in ITCM: $glob" >&2; missing=$((missing + 1)); fi
-    if [ "$hit" -eq 0 ] && [ "$flash" -eq 0 ]; then unlinked=$((unlinked + 1)); fi
-  done < ../../perf/itcm-sections.txt
-  while read -r addr sz _; do
-    if [ $((16#$addr)) -lt $((0x10000)) ]; then in=$((in + 1)); bytes=$((bytes + sz)); else out_fn=$((out_fn + 1)); fi
-  done <<< "$syms"
-  local thunks
-  thunks=$(readelf -sW "$elf" | grep -c 'Thumbv7ABSLongThunk' || true)
-  echo "  ITCM: $n globs kept ($dropped dropped: ${drop:-none}), $unlinked not linked (unused), $missing misplaced; gbc-core functions: $in in ITCM ($bytes B), $out_fn in flash; $thunks long-branch thunks"
-  [ "$missing" -eq 0 ] || bad "$1: $missing ITCM globs have their function in flash"
+  echo "  post-link ITCM check (--drop '${drop}')"
+  ../../scripts/check-itcm-elf.sh --drop "$drop" --rlib "target/$TARGET/release" "$OUT/$1.elf" | sed 's/^/  /' ||
+    bad "$1: post-link ITCM check (scripts/check-itcm-elf.sh)"
 }
 
 AXI_LO=0x24000000 AXI_HI=0x24080000 DTCM_LO=0x20000000 DTCM_HI=0x20020000

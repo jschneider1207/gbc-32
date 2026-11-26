@@ -1418,14 +1418,32 @@ Then two checks:
   5072 B"; removing the `cpu_blocked` glob exits 0 with a closure `WARN`
   naming the callee; a stale `FLASH_OK` line exits 0 with a `WARN`; a
   `FLASH_OK` line without a reason exits 1.
-- *Post-link (firmware ELF, Stage 2):* every demangled name in the file must
-  exist in `nm -C` of the ELF and have an address in
-  `[0x0000_0000, 0x0001_0000)`. A name inlined away under LTO fails, so
-  update the file. The check also reports `.itcm` size against 64 KiB and the
-  number of long-branch thunks (`__*_veneer` with GNU ld,
-  `__Thumbv7ABSLongThunk_*` with lld), and fails if `.itcm` overflows (the linker
-  also does this). The H735 version checks every gbc-core function against
-  `[0x0000_0000, 0x0002_0000)`.
+- *Post-link (firmware ELF, Stage 2): `scripts/check-itcm-elf.sh
+  [--drop <tiers>] [--rlib <file|dir>] <elf>`; h7-bench's `build.sh` runs
+  it on every `itcm` image.* The functions a glob names are the sections of
+  the gbc-core rlib the ELF was linked from that it matches (as the linker
+  matches them, so a `#[cold]` `.text.unlikely.*` copy is never taken for a
+  listed function), plus ELF symbols matching it that the rlib lacks. Fails
+  (exit 1): a function of a kept tier that the link kept outside
+  `[0x0000_0000, 0x0001_0000)`; a function of a `--drop` tier inside it
+  (the drop list disagrees with the link); a glob matching no section of
+  the rlib (stale); no `.itcm`, or one over 64 KiB. Reported only: a listed
+  function the rlib has and the ELF lacks (unused and garbage-collected, or
+  inlined under LTO; the plan's "that the link kept"), the dropped tiers,
+  `.itcm` size against 64 KiB, and the long-branch thunks by direction
+  (`__*LongThunk_*` with lld, `__*_veneer` with GNU ld). Exit 2: a tool
+  error. The dropped tiers come from the caller (`--drop`, the syntax of
+  `H7_BENCH_ITCM_DROP`; default none), not from the ELF: a check that
+  inferred them from where the functions landed would pass any
+  misplacement. The H735 version will check every gbc-core function
+  against `[0x0000_0000, 0x0002_0000)`.
+
+  Mutation-checked 2026-11-25 on `bench-itcm-dtcm-pll480`: built with
+  `H7_BENCH_ITCM_DROP="plain tile path,frame driver"` and checked with
+  `--drop "plain tile path"` exits 1 naming `Emulator::run` and
+  `Emulator::run_until` in flash; a misspelt `Ppu::cpu_blocked` glob
+  (`ITCM_SET_FILE`) exits 1 as stale; the normal build checked with an
+  extra `--drop "frame driver"` exits 1; the normal build exits 0.
 
 **Is a <= 40 KB target for `execute`/`execute_cb` still needed?** No. They
 are 31,404 B now. With the interpreter in ITCM, its I-cache footprint (the

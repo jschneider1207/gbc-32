@@ -134,7 +134,9 @@ gbc-core functions (61,284 B), the memory routines they call
 long-branch thunks to flash; 64,664 of 65,280 B (ITCM is used from 0x100,
 so nothing sits at address 0). Five globs match nothing in the ELF because
 the linker removed the functions as unused (`run_frame`, `run_cycles`,
-`halt_begin`, `halt_end`, `idle_halted`).
+`halt_begin`, `halt_end`, `idle_halted`). `build.sh` checks each `itcm` image with
+`scripts/check-itcm-elf.sh` (docs/perf.md "ITCM placement plan"): every
+kept function the link kept in ITCM, the dropped tiers, `.itcm` size, thunks.
 
 Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 0x100 whose load address is in flash, which only the `.bin` flattens.
