@@ -35,7 +35,7 @@
 //!
 //! ```text
 //! stats display paced presented=<n> skipped=<n> transfers=<n> transfer_errors=<n> stuck=<n> aborts=<n> te_edges=<n> scale_mean=<c> scale_max=<c> present_mean=<c> present_max=<c> [first_error=frame<n>:<e>]
-//! stats dac refills=<n> late=<n> spurious=<n> te=<n> dme=<n> fe=<n> udr1=<n> udr2=<n> isr_min=<c> isr_max=<c> stop=<ok|timeout>
+//! stats dac refills=<n> late=<n> spurious=<n> te=<n> dme=<n> fe=<n> udr1=<n> udr2=<n> restarts=<n> isr_min=<c> isr_max=<c> stop=<ok|timeout>
 //! stats paced board run_cycles=<c> run_refills=<n> dac_rate_millihz=<r> ramp_wait=<c> stack_used=<b>/<b> dbgmcu_cr_boot=<hex> sleep_gate_te=<c|untested> sleep_keep_te=<c|untested>
 //! ```
 //!
@@ -223,12 +223,18 @@ impl CycleClock for Dwt {
 }
 
 /// `WFI`: the DAC refill interrupt (128 per second) or TE (60 per second)
-/// wakes it.
-struct Wfi;
+/// wakes it. Then the DAC's stall check (M4 review P-2): after an
+/// underrun or a stream error the refills stop, and the loop would wait
+/// for ring space forever; TE still wakes it, and the watchdog restarts
+/// the DAC path (counted: `restarts=` in `stats dac`).
+struct Wfi<'d> {
+    dac: &'d mut AudioDac,
+}
 
-impl Idle for Wfi {
+impl Idle for Wfi<'_> {
     fn idle(&mut self) {
         cortex_m::asm::wfi();
+        self.dac.watchdog(audio_dac::STALL_CYCLES);
     }
 }
 
@@ -435,7 +441,7 @@ fn main() -> ! {
         Hooks {
             clock: &clock,
             sink: &mut display,
-            idle: &mut Wfi,
+            idle: &mut Wfi { dac: &mut dac },
         },
         &mut cap,
     );
@@ -448,7 +454,7 @@ fn main() -> ! {
     let _ = writeln!(
         cap,
         "stats dac refills={} late={} spurious={} te={} dme={} fe={} udr1={} udr2={} \
-         isr_min={} isr_max={} stop={}",
+         restarts={} isr_min={} isr_max={} stop={}",
         s.refills,
         s.late,
         s.spurious,
@@ -457,6 +463,7 @@ fn main() -> ! {
         s.fe,
         s.udr1,
         s.udr2,
+        s.restarts,
         s.isr_min,
         s.isr_max,
         if stop.is_ok() { "ok" } else { "timeout" }

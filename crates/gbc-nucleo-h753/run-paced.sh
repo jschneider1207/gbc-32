@@ -36,8 +36,9 @@
 #      steady_ppm is printed;
 #    - `stats display paced`: transfer_errors=0 stuck=0 and presented >= 1
 #      (the display was on); presented and skipped are printed;
-#    - `stats dac`: late=0 te=0 dme=0 fe=0 udr1=0 udr2=0 stop=ok (the DMA
-#      and the DAC saw no error, no refill was missed, the stop ramp
+#    - `stats dac`: late=0 te=0 dme=0 fe=0 udr1=0 udr2=0 restarts=0 stop=ok (the DMA
+#      and the DAC saw no error, no refill was missed, no stall was
+#      recovered by the watchdog (M4 review P-2), the stop ramp
 #      finished).
 #
 # A report is complete when it runs from a `<prefix> paced report n=<k>`
@@ -219,7 +220,7 @@ V[speed.elapsed]=$(val "$speed" elapsed) || exit 2
 for k in presented skipped transfers transfer_errors stuck; do
   V[display.$k]=$(val "$display" "$k") || exit 2
 done
-for k in late te dme fe udr1 udr2; do
+for k in late te dme fe udr1 udr2 restarts; do
   V[dac.$k]=$(val "$dac" "$k") || exit 2
 done
 V[dac.stop]=$(val "$dac" stop '^(ok|timeout)$') || exit 2
@@ -248,7 +249,7 @@ for k in transfer_errors stuck; do
   [ "${V[display.$k]}" = 0 ] || bad "stats display paced $k=${V[display.$k]} (want 0)"
 done
 [ "${V[display.presented]}" -ge 1 ] || bad "stats display paced presented=0 (the display was not on)"
-for k in late te dme fe udr1 udr2; do
+for k in late te dme fe udr1 udr2 restarts; do
   [ "${V[dac.$k]}" = 0 ] || bad "stats dac $k=${V[dac.$k]} (want 0)"
 done
 [ "${V[dac.stop]}" = ok ] || bad "stats dac stop=${V[dac.stop]} (want ok)"

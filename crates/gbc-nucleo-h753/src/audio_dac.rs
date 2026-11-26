@@ -61,9 +61,16 @@
 //! FEIF (direct mode: a memory port not granted in time, RM0433 15.3.20),
 //! and the DAC's DMAUDR1/DMAUDR2 (a trigger before the previous request
 //! was served; the DAC then stops requesting, 26.4.8) are counted in
-//! [`stats`]. Recovery from an underrun is [`AudioDac::stop`] then
-//! [`AudioDac::start`] (stop times out on a stalled stream and shuts it
-//! down anyway). ES0392 2.10.2 (DMAUDR missed when a trigger coincides
+//! [`stats`]. After an underrun the DAC issues no new request until it is
+//! re-initialised (26.4.8), and after TEIF the stream is off: either way
+//! the refills stop, and with them anything waiting for one. Recovery
+//! (M4 review P-2) is [`AudioDac::watchdog`], called by the main loop
+//! while it waits (each WFI wake: TE, 60 per second, still comes): with
+//! no refill for longer than its bound it counts the flags the ISR never
+//! saw, re-initialises the stream and the DAC's request, holding the
+//! output's current level, and counts a restart ([`Stats::restarts`]).
+//! [`AudioDac::stop`] times out on a stalled stream and shuts it down
+//! anyway. ES0392 2.10.2 (DMAUDR missed when a trigger coincides
 //! with a DMA acknowledge) only concerns mixed software and hardware
 //! triggers; only TIM6 triggers here.
 //!
@@ -253,6 +260,7 @@ static DME: AtomicU32 = AtomicU32::new(0);
 static FE: AtomicU32 = AtomicU32::new(0);
 static UDR1: AtomicU32 = AtomicU32::new(0);
 static UDR2: AtomicU32 = AtomicU32::new(0);
+static RESTARTS: AtomicU32 = AtomicU32::new(0);
 static ISR_MIN: AtomicU32 = AtomicU32::new(u32::MAX);
 static ISR_MAX: AtomicU32 = AtomicU32::new(0);
 
@@ -296,6 +304,9 @@ pub struct Stats {
     /// DAC DMA underruns, channel 1 and 2 (DMAUDR1/2).
     pub udr1: u32,
     pub udr2: u32,
+    /// Stalls recovered by [`AudioDac::watchdog`] (each also lost audio:
+    /// the run is not clean).
+    pub restarts: u32,
     /// The interrupt's cost, entry to exit, in CPU cycles (min, max; min
     /// is `u32::MAX` before the first).
     pub isr_min: u32,
@@ -314,6 +325,7 @@ pub fn stats() -> Stats {
         fe: FE.load(Ordering::Relaxed),
         udr1: UDR1.load(Ordering::Relaxed),
         udr2: UDR2.load(Ordering::Relaxed),
+        restarts: RESTARTS.load(Ordering::Relaxed),
         isr_min: ISR_MIN.load(Ordering::Relaxed),
         isr_max: ISR_MAX.load(Ordering::Relaxed),
     })
@@ -380,21 +392,13 @@ fn ramp(out: &mut [u32], from: u32, to: u32) -> bool {
     pos >= RAMP_FRAMES
 }
 
-/// The DMA1 stream 0 interrupt: counts and clears the flags, then fills
-/// the half the DMA is not reading: from the start ramp, from `fill`
-/// (`fill(half, frames)`: half 0 or 1, [`HALF`] frames of [`frame`]s), from
-/// the stop ramp or with zeros, by phase (module docs).
-///
-/// The free half is chosen from NDTR, not from which flag is set, so a
-/// late interrupt (both flags) still refills the half the DMA has left.
-pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
-    let t0 = cycles();
-    let d = dma();
-    let flags = d.lisr.read().bits() & ISR_ALL;
-    // SAFETY: LIFCR is write-1-to-clear; only stream 0's bits.
-    d.lifcr.write(|w| unsafe { w.bits(flags) });
-    let bump =
-        |c: &AtomicU32| c.store(c.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+fn bump(c: &AtomicU32) {
+    c.store(c.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+}
+
+/// Counts stream 0's error flags in `flags` (from LISR) and the DAC's
+/// underrun flags, which it clears (DAC_SR).
+fn count_errors(flags: u32) {
     if flags & ISR_TEIF != 0 {
         bump(&TE);
     }
@@ -415,6 +419,22 @@ pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
             bump(&UDR2);
         }
     }
+}
+
+/// The DMA1 stream 0 interrupt: counts and clears the flags, then fills
+/// the half the DMA is not reading: from the start ramp, from `fill`
+/// (`fill(half, frames)`: half 0 or 1, [`HALF`] frames of [`frame`]s), from
+/// the stop ramp or with zeros, by phase (module docs).
+///
+/// The free half is chosen from NDTR, not from which flag is set, so a
+/// late interrupt (both flags) still refills the half the DMA has left.
+pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
+    let t0 = cycles();
+    let d = dma();
+    let flags = d.lisr.read().bits() & ISR_ALL;
+    // SAFETY: LIFCR is write-1-to-clear; only stream 0's bits.
+    d.lifcr.write(|w| unsafe { w.bits(flags) });
+    count_errors(flags);
     let ht_tc = flags & (ISR_HTIF | ISR_TCIF);
     if ht_tc == 0 {
         bump(&SPURIOUS);
@@ -615,45 +635,7 @@ impl AudioDac {
         // SAFETY: as above.
         let done = done | ramp(unsafe { half_mut(1) }, 0, SILENCE);
         PHASE.store(if done { PLAY } else { RAMP_UP }, Ordering::Relaxed);
-        let dac = dac();
-        // The first trigger moves DHR (code 0, as DOR) out; its request
-        // then brings frame 0 (26.4.8: DHR must hold data before the
-        // first trigger).
-        // SAFETY: a data write; the DMA is not running.
-        dac.dhr12rd.write(|w| unsafe { w.bits(frame(0, 0)) });
-        let st = &dma().st[STREAM];
-        let dhr12rd = &dac.dhr12rd as *const _ as u32;
-        // SAFETY: the stream is disabled (`new` or `stop` waited for EN =
-        // 0), so its registers accept the configuration (15.3.19): the
-        // DAC's dual data register, the buffer, FRAMES words, direct mode,
-        // DMA_SCR; flags cleared before EN (15.4 note).
-        unsafe {
-            dma().lifcr.write(|w| w.bits(ISR_ALL));
-            st.par.write(|w| w.bits(dhr12rd));
-            st.m0ar.write(|w| w.bits(buffer_addr() as u32));
-            st.ndtr.write(|w| w.bits(FRAMES as u32));
-            st.fcr.write(|w| w.bits(DMA_SFCR));
-            st.cr.write(|w| w.bits(DMA_SCR));
-            st.cr.write(|w| w.bits(DMA_SCR | SCR_EN));
-        }
-        // SAFETY: underrun flags cleared (write 1), then DMAEN1 set on top
-        // of DAC_CR (TSEL unchanged while enabled).
-        unsafe {
-            dac.sr.write(|w| w.bits(SR_DMAUDR1 | SR_DMAUDR2));
-            dac.cr.write(|w| w.bits(DAC_CR | CR_DMAEN1));
-        }
-        cortex_m::asm::dsb();
-        // SAFETY: the image defines DMA1_STR0 (module docs; without it the
-        // lib's DefaultHandler reports it and stops); `on_dma` touches only
-        // this module's atomics, stream 0's flags and NDTR, DAC_SR and the
-        // free half of the buffer.
-        unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::DMA1_STR0) };
-        let t = tim();
-        // SAFETY: CNT reset, then CEN (ARPE kept).
-        unsafe {
-            t.cnt.write(|w| w.bits(0));
-            t.cr1.write(|w| w.bits(TIM_CR1_ARPE | TIM_CR1_CEN));
-        }
+        arm(frame(0, 0));
     }
 
     /// Whether playback is running (from `start` until `stop` returns).
@@ -693,26 +675,7 @@ impl AudioDac {
                 break;
             }
         }
-        // Triggers off first, then the stream (and wait for it), only then
-        // the DAC's request (RM0433 15.3.19 warning).
-        let t = tim();
-        // SAFETY: CEN cleared (ARPE kept).
-        t.cr1.write(|w| unsafe { w.bits(TIM_CR1_ARPE) });
-        let st = &dma().st[STREAM];
-        // SAFETY: EN cleared, other bits kept.
-        st.cr.modify(|r, w| unsafe { w.bits(r.bits() & !SCR_EN) });
-        let mut n = 0u32;
-        while st.cr.read().bits() & SCR_EN != 0 && n < 1_000_000 {
-            n += 1;
-        }
-        cortex_m::peripheral::NVIC::mask(pac::Interrupt::DMA1_STR0);
-        // SAFETY: DMAEN1 cleared (DAC_CR without it), stream flags and the
-        // NVIC pending bit cleared: no stale interrupt on the next start.
-        unsafe {
-            dac().cr.write(|w| w.bits(DAC_CR));
-            dma().lifcr.write(|w| w.bits(ISR_ALL));
-        }
-        cortex_m::peripheral::NVIC::unpend(pac::Interrupt::DMA1_STR0);
+        halt();
         PHASE.store(IDLE, Ordering::Release);
         result
     }
@@ -742,8 +705,121 @@ impl AudioDac {
         ]
     }
 
+    /// The stall check (M4 review P-2, module docs "Errors"), for the main
+    /// loop to call while it waits (each wake): while playing (start ramp
+    /// or source), if no refill came for more than `max_gap` CPU cycles
+    /// (below the cycle counter's 9.1 s wrap), counts the flags the ISR
+    /// never saw (DAC_SR's DMAUDRx, the stream's errors), then shuts the
+    /// path down as [`AudioDac::stop`] does and re-initialises it (26.4.8:
+    /// "clear the DMAUDRx flag ..., clear the DMAEN bit of the used DMA
+    /// stream and re-initialize both DMA and DAC channel x"), both halves
+    /// holding the output's current level (no click; the first refill
+    /// comes a half later), and counts a restart in [`Stats::restarts`].
+    /// Returns whether it restarted. [`STALL_CYCLES`] is the usual bound.
+    pub fn watchdog(&mut self, max_gap: u32) -> bool {
+        if !matches!(PHASE.load(Ordering::Acquire), RAMP_UP | PLAY) {
+            return false;
+        }
+        if cycles().wrapping_sub(LAST_AT.load(Ordering::Relaxed)) <= max_gap {
+            return false;
+        }
+        // No refill interrupt from here on: the buffer and the stream are
+        // the main thread's.
+        cortex_m::peripheral::NVIC::mask(pac::Interrupt::DMA1_STR0);
+        count_errors(dma().lisr.read().bits() & ISR_ALL);
+        halt();
+        let level = frame(
+            dac().dor1.read().bits() as u16,
+            dac().dor2.read().bits() as u16,
+        );
+        for h in 0..2 {
+            // SAFETY: the stream is disabled and the interrupt masked.
+            unsafe { half_mut(h) }.fill(level);
+        }
+        arm(level);
+        bump(&RESTARTS);
+        true
+    }
+
     /// The buffer's address (AXI SRAM) and size in bytes.
     pub fn buffer(&self) -> (usize, usize) {
         (buffer_addr(), BUFFER_BYTES)
+    }
+}
+
+/// No refill for this long (50 ms, six refill periods of 7.8 ms) is a
+/// stall for [`AudioDac::watchdog`]; a refill interrupt takes at most
+/// about 8,300 cycles (17 us, `isr_max` of a paced run).
+pub const STALL_CYCLES: u32 = crate::CPU_HZ / 20;
+
+/// Stops TIM6, then the stream (waiting for it), then the DAC's DMA
+/// request, and masks and unpends the interrupt; the DAC stays enabled.
+fn halt() {
+    // Triggers off first, then the stream (and wait for it), only then
+    // the DAC's request (RM0433 15.3.19 warning).
+    let t = tim();
+    // SAFETY: CEN cleared (ARPE kept).
+    t.cr1.write(|w| unsafe { w.bits(TIM_CR1_ARPE) });
+    let st = &dma().st[STREAM];
+    // SAFETY: EN cleared, other bits kept.
+    st.cr.modify(|r, w| unsafe { w.bits(r.bits() & !SCR_EN) });
+    let mut n = 0u32;
+    while st.cr.read().bits() & SCR_EN != 0 && n < 1_000_000 {
+        n += 1;
+    }
+    cortex_m::peripheral::NVIC::mask(pac::Interrupt::DMA1_STR0);
+    // SAFETY: DMAEN1 cleared (DAC_CR without it), stream flags and the
+    // NVIC pending bit cleared: no stale interrupt on the next start.
+    unsafe {
+        dac().cr.write(|w| w.bits(DAC_CR));
+        dma().lifcr.write(|w| w.bits(ISR_ALL));
+    }
+    cortex_m::peripheral::NVIC::unpend(pac::Interrupt::DMA1_STR0);
+}
+
+/// Starts the path with the buffer as it is: DHR = `first`, the stream
+/// configured and enabled, DMAEN1, the interrupt unmasked, TIM6 started.
+/// The refill clock ([`Stats::last_at`]) starts now, for
+/// [`AudioDac::watchdog`].
+fn arm(first: u32) {
+    LAST_AT.store(cycles(), Ordering::Relaxed);
+    let dac = dac();
+    // The first trigger moves DHR (`first`, as DOR) out; its request
+    // then brings frame 0 (26.4.8: DHR must hold data before the
+    // first trigger).
+    // SAFETY: a data write; the DMA is not running.
+    dac.dhr12rd.write(|w| unsafe { w.bits(first) });
+    let st = &dma().st[STREAM];
+    let dhr12rd = &dac.dhr12rd as *const _ as u32;
+    // SAFETY: the stream is disabled (`new` or `halt` waited for EN =
+    // 0), so its registers accept the configuration (15.3.19): the
+    // DAC's dual data register, the buffer, FRAMES words, direct mode,
+    // DMA_SCR; flags cleared before EN (15.4 note).
+    unsafe {
+        dma().lifcr.write(|w| w.bits(ISR_ALL));
+        st.par.write(|w| w.bits(dhr12rd));
+        st.m0ar.write(|w| w.bits(buffer_addr() as u32));
+        st.ndtr.write(|w| w.bits(FRAMES as u32));
+        st.fcr.write(|w| w.bits(DMA_SFCR));
+        st.cr.write(|w| w.bits(DMA_SCR));
+        st.cr.write(|w| w.bits(DMA_SCR | SCR_EN));
+    }
+    // SAFETY: underrun flags cleared (write 1), then DMAEN1 set on top
+    // of DAC_CR (TSEL unchanged while enabled).
+    unsafe {
+        dac.sr.write(|w| w.bits(SR_DMAUDR1 | SR_DMAUDR2));
+        dac.cr.write(|w| w.bits(DAC_CR | CR_DMAEN1));
+    }
+    cortex_m::asm::dsb();
+    // SAFETY: the image defines DMA1_STR0 (module docs; without it the
+    // lib's DefaultHandler reports it and stops); `on_dma` touches only
+    // this module's atomics, stream 0's flags and NDTR, DAC_SR and the
+    // free half of the buffer.
+    unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::DMA1_STR0) };
+    let t = tim();
+    // SAFETY: CNT reset, then CEN (ARPE kept).
+    unsafe {
+        t.cnt.write(|w| w.bits(0));
+        t.cr1.write(|w| w.bits(TIM_CR1_ARPE | TIM_CR1_CEN));
     }
 }
