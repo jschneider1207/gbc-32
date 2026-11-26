@@ -110,13 +110,21 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0036).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0038).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None.
+- Session 23 (2026-11-25), M2 in progress. Landed: ADR 0037 image format
+  (23bd089), `crates/gbc-link` (fc89592), `tools/gbc-pc` + `scripts/gbc-pc.sh`
+  (11dfa11), QSPI indirect/ID (b325187: MX25L6433F, QE already set),
+  memory-mapped 0xEB + MPU window + F-4 (ac757d6, 105c9dd), NOR write side +
+  UART RX/baud (edcd218..d62bcb5), T-7 and the h7-bench image-range check.
+  Facts: `docs/reference/qspi-nor.md`. Running: the board `loader` bin and a
+  4 MiB gbc-pc round trip, baud measurement (branch `m2-loader`, scratch
+  worktree `wt-loader`). Left in M2 after it: headless from QSPI, bench
+  placement `itcm-dtcm-qspi`, then the milestone review and tag.
 
 ## Needs human
 
