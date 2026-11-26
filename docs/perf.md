@@ -721,6 +721,72 @@ read and write was 32,928 B (34,504 with `#[cold]`), an extra match bit
 50,376 B. With the chosen layout `run` was back under the pre-DMA
 30,920 B; its cap then became 30,000 B.
 
+### Firmware-link size (Stage 2 M1, C-P5)
+
+Measured 2026-11-25 on `e91faae` (rustc 1.100.0, the release profile with
+`codegen-units = 1`, no LTO) on `crates/gbc-nucleo-h753/out/headless-cpu_instrs.elf`
+(`build.sh`; the cgb-acid2 image gives the same figures) with
+`elixir scripts/report-firmware-size.exs <elf> --rlib <the rlib it was
+linked from>` (report only, exit 0; readelf, ar and the Arm GNU objdump
+under `~/.local/opt`, or `$ARM_OBJDUMP`). gbc-core code is every function
+whose v0 path is rooted in `gbc_core`, the set the H735's
+`8gbc_core`-segment ITCM rule would take. The closure is what those
+functions reach through branches, `movw`/`movt` address pairs and
+4-aligned data words (literal pools, vtables); its "panic/fmt" part is what
+lies only behind `core::panicking`, the `*_fail`/unwrap failures, the panic
+handler, or gbc-core's own `Debug` impls (formatted by the front end, never
+by the emulation).
+
+| Item | Bytes |
+|---|---|
+| rlib `.text*` (the `check-code-size.sh` gate) | 116,150 |
+| of it not in the link (42 functions the headless loop does not use, GC'd) | -5,088 |
+| gbc-core in the link (177 functions; 60,150 in ITCM, 50,872 in flash on the H753) | 111,022 |
+| of which in-function alignment `nop`s (already inside both figures above) | 6,140 |
+| inter-function padding before gbc-core functions, as linked | 494 |
+| normal-path extras: compiler_builtins (`memmove` 1,410, `u64_div_rem` 864, `memcpy` 660, `__aeabi_mem*`, `memcmp`, `__aeabi_uldivmod`), 15 functions + 2 B padding | 4,278 |
+| panic/fmt-path extras: core::fmt and panicking 5,522, the board's panic handler and UART writer 1,028, `rust_begin_unwind` 36, + 16 B padding | 6,602 |
+| veneers if the panic/fmt path stays in flash (6 targets, 10 B each) | 60 |
+| gbc-core `.rodata` in the link: `SPREAD`/`ATTR_FETCH`/`POP8` (`.dtcm_rodata`) + 304 B of panic locations and strings (flash) | 2,608 |
+| other crates' `.rodata` the core reaches (fmt and panic tables) | 519 |
+
+Against the gate figure (122,880 B) and the whole 128 KiB ITCM (131,072 B):
+
+| H735 ITCM content | Bytes | Gate margin | ITCM margin |
+|---|---|---|---|
+| A: this link's gbc-core + normal path, panic/fmt in flash | 115,854 | 7,026 | 15,218 |
+| B: this link's gbc-core + the whole closure | 122,396 | 484 | 8,676 |
+| C: every rlib function + normal path, panic/fmt in flash | 120,488 | 2,392 | 10,584 |
+| D: every rlib function + the whole closure | 127,030 | -4,150 | 4,042 |
+
+There is no cross-crate inlining without LTO, so each linked gbc-core
+function has its rlib size (rlib = link + dropped, to within one 40 B
+generic emitted in gbc-core's unit under core's path); the rlib-to-link
+difference is only what the link garbage-collects, and that depends on the
+front end: the handheld will use API the headless loop does not (saves,
+input, audio). No other crate instantiates gbc-core code. The 6,140 B of
+`nop`s are LLVM's loop and branch-target alignment for the cortex-m7; on
+zero-wait ITCM they may buy nothing (a later size lever to measure, not a
+gate question). The rlib gate stays an upper bound for gbc-core's own code.
+
+**What the numbers say.** The 8 KiB reserve was to hold ISRs, the frame
+blit, compiler_builtins and veneers. The builtins the core needs on its
+normal path are 4,278 B, so at today's size (C) the platform has 10,584 B
+of ITCM left, and a core grown to the gate would leave 8,192 - 4,278 - 60
+= 3,854 B for the ISRs and the blit. That holds only with the panic and
+fmt code in flash (D does not fit the gate), which costs nothing at run
+time: it runs only on a panic or when the front end prints an error.
+
+**Recommendation: (c)** keep the rlib gate as is (conservative for any
+front end, no firmware build, ~1 s) and add the firmware-link report
+(`scripts/report-firmware-size.exs`) as a report line on the firmware
+images. The H735 linker script should take `compiler_builtins`' `mem*` and
+division helpers into `.itcm` with the core and leave core::fmt,
+core::panicking and the panic handler in flash. The 122,880 B figure does
+not need to change for this; whether 3,854 B for ISRs and blit at a full
+gate is enough, or the gate should drop by the builtins' 4 KiB (to
+118,784 B), is the human's call once the H735 front end exists.
+
 ### CPU write path (M10, review B8 / inventory A1)
 
 `Ctx::write_mapped` is still one out-of-line function, but its tests now
