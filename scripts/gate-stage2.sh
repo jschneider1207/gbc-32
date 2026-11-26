@@ -845,7 +845,9 @@ step B3 "Replay set in the player image (and the display readback), equal to the
 sets_check
 sub "run-headless.sh headless-display-cgb-acid2 (display readback self-test, against tools/headless/expected/cgb-acid2.txt)"
 set +e
-${FW}/run-headless.sh "${DISPLAY_BIN}" tools/headless/expected/cgb-acid2.txt > "${TMP}/b3-display.log" 2>&1
+# 120 s: 600 frames with a 90 ms readback each take about a minute before
+# the first report (the default 20 s read sees none).
+RUN_HEADLESS_READ_SECS=120 ${FW}/run-headless.sh "${DISPLAY_BIN}" tools/headless/expected/cgb-acid2.txt > "${TMP}/b3-display.log" 2>&1
 rc=$?
 set -e
 grep -E '^run-headless.sh: ' "${TMP}/b3-display.log" | sed 's/^/  /' || true
