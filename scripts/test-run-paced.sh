@@ -28,6 +28,10 @@ imgf="image_bytes=$ibytes image_cksum=$icrc"
 
 # body = the real report between its markers; host = its three paced lines.
 head -n -1 "$real" | tail -n +2 > "$tmp/body"
+# The committed M4 reports predate `restarts=` in `stats dac` (M4 review
+# P-2): add it where the image now prints it, after udr2.
+add_restarts() { sed -i -E 's/^(stats dac .* udr2=[0-9]+) /\1 restarts=0 /' "$1"; }
+add_restarts "$tmp/body"
 grep '^paced ' "$tmp/body" > "$tmp/host"
 [ "$(wc -l < "$tmp/host")" = 3 ] || { echo "FAIL: committed report lacks 3 paced lines"; exit 1; }
 
@@ -93,7 +97,7 @@ for k in transfer_errors stuck; do
   mut "display $k=1" 1 "s/ $k=0/ $k=1/" "stats display paced $k=1"
 done
 mut "display presented=0" 1 's/ presented=[0-9]+/ presented=0/' "presented=0"
-for k in late te dme fe udr1 udr2; do
+for k in late te dme fe udr1 udr2 restarts; do
   mut "dac $k=1" 1 "s/^(stats dac .* $k=)0/\11/" "stats dac $k=1"
 done
 mut "dac stop=timeout" 1 's/stop=ok/stop=timeout/' "stop=timeout"
@@ -125,6 +129,7 @@ mut "ppm without a sign" 2 's/ppm=\+82/ppm=82/' "malformed"
 mut "ppm not a number" 2 's/ppm=\+82/ppm=+8x/' "malformed"
 mut "stop value unknown" 2 's/stop=ok/stop=maybe/' "malformed"
 mut "field missing (udr2)" 2 's/ udr2=0//' "appears 0 times"
+mut "field missing (restarts: an image before M4 review P-2)" 2 's/ restarts=0//' "appears 0 times"
 mut "field repeated (late)" 2 's/ late=0/ late=0 late=0/' "appears 2 times"
 mut "display field missing" 2 's/ stuck=0//' "appears 0 times"
 mut "steady_ppm garbage" 2 's/steady_ppm=\+9/steady_ppm=q/' "malformed"
@@ -162,7 +167,7 @@ for r in cgb_sound worst-case; do
   e=$(tail -n 1 "$f"); wb=$(sed -n 's/.* bytes=\([0-9]*\).*/\1/p' <<< "$e"); wc=$(sed -n 's/.* cksum=\([0-9]*\).*/\1/p' <<< "$e")
   read -r c b < <(head -n -1 "$f" | tail -n +2 | cksum)
   [ "$b $c" = "$wb $wc" ] && ok "committed $r report: framing cksum" || bad "committed $r report: framing cksum"
-  head -n -1 "$f" | tail -n +2 > "$tmp/b3"; grep '^paced ' "$tmp/b3" > "$tmp/host"
+  head -n -1 "$f" | tail -n +2 > "$tmp/b3"; add_restarts "$tmp/b3"; grep '^paced ' "$tmp/b3" > "$tmp/host"
   rep "$tmp/b3" "$imgf" > "$tmp/c"; run "committed $r report passes (image fields swapped for the synthetic one)" 0 "PASS"
 done
 
