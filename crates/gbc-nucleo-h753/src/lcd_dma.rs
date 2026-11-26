@@ -172,6 +172,14 @@ static TE_MIN: AtomicU32 = AtomicU32::new(u32::MAX);
 static TE_MAX: AtomicU32 = AtomicU32::new(0);
 /// Transfers abandoned by [`LcdDma::abort`] (a timeout), since boot.
 static ABORTS: AtomicU32 = AtomicU32::new(0);
+/// [`LcdDma::last_abort`], packed: running bit 31, CxISR flags 28..24,
+/// cycles waited 23..0.
+static LAST_ABORT: AtomicU32 = AtomicU32::new(0);
+/// The most [`LcdDma::abort`] waits for the channel to stop: 1 ms. One
+/// 128-byte buffer to the panel takes about 4,700 cycles (36.9 per byte,
+/// lcd-dma-probe); the probe's abort-while-running self-test measured
+/// 8,754 cycles from the disable to CTCIF (EN reads 0 after 32).
+const ABORT_CYCLES: u32 = CPU_HZ / 1000;
 /// How long the accessors that wait ([`LcdDma::lcd`], [`LcdDma::buffer`],
 /// [`LcdDma::parts`], [`LcdDma::present`]) give a transfer before they
 /// abandon it: 250 ms, 15 TE periods and 30 transfers.
@@ -225,6 +233,18 @@ pub enum Error {
         cr: u32,
         bndtr: u32,
     },
+}
+
+/// What [`LcdDma::abort`] saw ([`LcdDma::last_abort`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Abort {
+    /// The transfer was running (SWRQ given), not just pending.
+    pub running: bool,
+    /// CxISR (TEIF bit 0, CTCIF 1, BRTIF 2, BTIF 3, TCIF 4) when the wait
+    /// ended.
+    pub isr: u32,
+    /// Cycles from the disable to the end of the wait.
+    pub cycles: u32,
 }
 
 /// The panel with its transfer. Owns the [`Lcd`]: while a transfer is
@@ -500,28 +520,60 @@ impl LcdDma {
         }
     }
 
-    /// Abandons a pending or running transfer (M3 review P-1): the state
-    /// goes to IDLE first, with interrupts off, so a TE interrupt cannot
-    /// then start it (its compare-exchange from PENDING fails; one that
-    /// already did has set SWRQ, and the disable below stops that run);
-    /// then EN is cleared and waited for (bounded), and the flags cleared.
-    /// The panel may be left inside a RAMWR; the next window command ends
-    /// it. Counted in [`LcdDma::aborts`].
+    /// Abandons a pending or running transfer (M3 review P-1, M4 review
+    /// P-1). With interrupts off, and only for that: the state goes to IDLE,
+    /// so a TE interrupt cannot then start it (its compare-exchange from
+    /// PENDING fails; one that already did has set SWRQ, and the disable
+    /// stops that run), and EN is cleared. Then, interrupts on again (the
+    /// state is IDLE, so `on_te` writes nothing; nothing else touches the
+    /// channel): EN is waited for, and for a transfer that was running,
+    /// CTCIF (or TEIF) too, at most [`ABORT_CYCLES`] in all. RM0433 14.5.5
+    /// (MDMA_CxCR EN): clearing EN lets "the ongoing buffer transfer" (up
+    /// to 128 bytes to the panel's data address) complete, and CTCIF says
+    /// it has; reprogramming or sending window commands before that would
+    /// interleave the tail with them (and a late CTCIF would survive the
+    /// flag clear). Only then are the flags cleared. The panel may be left
+    /// inside a RAMWR; the next window command ends it. Counted in
+    /// [`LcdDma::aborts`]; [`LcdDma::last_abort`] has what the wait saw.
     fn abort(&mut self) {
-        cortex_m::interrupt::free(|_| {
-            STATE.store(IDLE, Ordering::SeqCst);
-            let ch = mdma();
+        let ch = mdma();
+        let was = cortex_m::interrupt::free(|_| {
+            let was = STATE.swap(IDLE, Ordering::SeqCst);
             // SAFETY: EN cleared, the other bits kept; the interrupt is off
             // and the state IDLE, so nothing else writes CR.
             ch.cr.modify(|r, w| unsafe { w.bits(r.bits() & !CR_EN) });
-            let mut n = 0u32;
-            while ch.cr.read().bits() & CR_EN != 0 && n < 100_000 {
-                n += 1;
-            }
-            // SAFETY: the clear-flag register, write-1-to-clear.
-            ch.ifcr.write(|w| unsafe { w.bits(IFCR_ALL) });
+            was
         });
+        let t0 = cycles();
+        let within = || cycles().wrapping_sub(t0) < ABORT_CYCLES;
+        while ch.cr.read().bits() & CR_EN != 0 && within() {}
+        let mut flags = ch.isr.read().bits();
+        if was == RUNNING {
+            while flags & (ISR_CTCIF | ISR_TEIF) == 0 && within() {
+                flags = ch.isr.read().bits();
+            }
+        }
+        let waited = cycles().wrapping_sub(t0);
+        // SAFETY: the clear-flag register, write-1-to-clear.
+        ch.ifcr.write(|w| unsafe { w.bits(IFCR_ALL) });
+        LAST_ABORT.store(
+            (u32::from(was == RUNNING) << 31) | (flags & 0x1F) << 24 | waited.min(0xFF_FFFF),
+            Ordering::Relaxed,
+        );
         ABORTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// What the last [`LcdDma::abort`] saw: whether the transfer was
+    /// running (SWRQ given), CxISR's flags when the wait ended (CTCIF bit
+    /// 1 once a running transfer's buffer finished), and the cycles it
+    /// waited; zeros before the first.
+    pub fn last_abort(&self) -> Abort {
+        let v = LAST_ABORT.load(Ordering::Relaxed);
+        Abort {
+            running: v >> 31 != 0,
+            isr: v >> 24 & 0x1F,
+            cycles: v & 0xFF_FFFF,
+        }
     }
 
     /// Transfers abandoned after a timeout since boot ([`LcdDma::wait`]

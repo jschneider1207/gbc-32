@@ -432,6 +432,53 @@ fn main() -> ! {
         );
     }
 
+    // Abort-while-running self-test (M4 review P-1): queue the buffer, let
+    // TE start it, then time out about 10 us into the transfer, so `abort`
+    // disables a channel that is streaming. It must wait for that buffer to
+    // finish (CTCIF) before returning; the buffer is then presented again
+    // at once (window commands right after the abort) and read back: 0
+    // mismatches shows CASET/RASET were not interleaved with the tail of
+    // the old data. (Measured: EN reads 0 about 32 cycles after the clear,
+    // CTCIF about 8,700 cycles later, 18 us.)
+    {
+        for (i, p) in frame.iter_mut().enumerate() {
+            *p = noise(u32::MAX, i);
+        }
+        scale_frame(frame, dma.buffer());
+        dma.present();
+        let started = dma.wait_started(2 * TE_PERIOD_CYCLES);
+        let r = dma.wait(CPU_HZ / 50_000);
+        let timed_out = matches!(r, Err(lcd_dma::Error::Timeout { pending: false, .. }));
+        let a = dma.last_abort();
+        let en = dma.registers()[4] & 1;
+        // At once: the window commands, a whole transfer, the readback.
+        dma.present();
+        let next = dma.wait(TIMEOUT);
+        let (l, buf) = dma.parts();
+        let (next_bad, _) = readback(l, buf);
+        let next_ok = matches!(next, Ok(Some(_))) && next_bad == 0;
+        let _ = writeln!(
+            out,
+            "{PREFIX} lcd dma abort-running-selftest started={} timed_out={} aborts={} running={} \
+             isr={:#x} abort_cycles={} en_after={en} next_mismatches={next_bad} ok={}\r",
+            u8::from(started),
+            u8::from(timed_out),
+            dma.aborts(),
+            u8::from(a.running),
+            a.isr,
+            a.cycles,
+            u8::from(
+                started
+                    && timed_out
+                    && dma.aborts() == 2
+                    && a.running
+                    && a.isr & 0b10 != 0
+                    && en == 0
+                    && next_ok
+            )
+        );
+    }
+
     // Frames with readback.
     for n in 0..FRAMES {
         for (i, p) in frame.iter_mut().enumerate() {
