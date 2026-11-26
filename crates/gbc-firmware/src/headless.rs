@@ -54,7 +54,8 @@
 //!
 //! The caller lends every large buffer ([`Buffers`]); on the board they
 //! are statics in `.axisram`/DTCM, placed by the board crate (ADR 0036):
-//! [`Memory`] (~50 KiB, all zeros, so `.bss`), the [`Frame`] (46,080 B),
+//! [`Memory`] (~50 KiB; `Memory::new()` is not all zeros, so a static
+//! one is `.data` and its initializer costs ~51 KB of flash), the [`Frame`] (46,080 B),
 //! the audio buffer (at least [`MIN_AUDIO_SLOTS`] samples of 4 B), and
 //! cartridge RAM (`gbc_core::cart_ram_size(rom)` bytes; 0 for cpu_instrs
 //! and cgb-acid2). The `Emulator` itself (952 B on thumbv7em,
