@@ -101,8 +101,14 @@ requires it). Core changes still move counts ~+-1.7% (ITCM), up to ~4% on
 storms; decision: keep +3% on every workload, layout-only failures go to the
 human like check-bench. The cycle baseline must be taken after ADR 0042 and
 from the main checkout path (crate hashes in mangled names are path-
-dependent). LTO/opt-level: nothing faster (perf.md). Next: QSPI tuning, render A/B,
-baseline + check, worst-case report, soak, performance review.
+dependent). LTO/opt-level: nothing faster (perf.md). QSPI: memory-mapped reads at
+100 MHz from PLL2 + SIOO/enhance mode (c9c6d14): miss 770 -> 419 cycles,
+worst-case QSPI cost +2.38% -> +1.23% (docs/perf.md "QSPI tuning (M6)").
+`tools/h7-bench/check-cycles.sh` (5916aa0; +3% ratchet, test in gate H7)
+exists; `expected-cycles.txt` not yet recorded. Next: ITCM tier A/B
+(running, branch `m6-tier`), then record the baseline from the main
+checkout (both passes, bench pack in the NOR, reload Pokemon Red after),
+worst-case report, 10-min soak on the shipped player, performance review.
 
 Stage 1 leftovers (low value, any time): open M10 lows C-H1..C-H5;
 unplayed checklist rows (Pokemon Crystal, Alone in the Dark). Stage 1 close
@@ -162,9 +168,17 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
+- ITCM tier A/B (branch `m6-tier`, scratch worktree). (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
 
 ## Needs human
+
+Open (session 27, 2026-11-26):
+- FYI, agent decision: the QSPI now uses the NOR's enhance mode (SIOO), which
+  survives an MCU reset. Images built before c9c6d14 panic in QSPI init
+  ("QUADSPI busy after the ES0392 2.7.4 sequence") if the NOR is still in
+  that mode; running any current image clears it, and a power cycle should
+  (untested). Only flash current images. Dropping SIOO would cost ~0.2 points
+  on the worst case if you object.
 
 Open (sessions 24-26, 2026-11-25/26):
 - **Still to look at / listen to:** cgb-acid2 and dmg-acid2 on the panel
