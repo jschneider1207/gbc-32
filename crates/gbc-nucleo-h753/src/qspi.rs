@@ -55,6 +55,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::clock::{HCLK_HZ, wait_for};
+use crate::gpio::pin_af;
 use crate::pac;
 
 /// The NOR's size: 64 Mbit (UM2905 section 5.3.1).
@@ -272,42 +273,6 @@ fn regs() -> &'static pac::quadspi::RegisterBlock {
     // access through the PAC, and only the [`Qspi`] owner touches it (no
     // interrupt, no second thread in this firmware).
     unsafe { &*pac::QUADSPI::ptr() }
-}
-
-/// Configures one pin of a port as alternate function `af`, very high
-/// speed, push-pull, with a pull-up if `pull_up`. The order is that of
-/// `uart::init`: AF and output settings first, MODER last, so the pin
-/// never drives the AF signal with stale settings.
-fn pin_af(gpio: &pac::gpioa::RegisterBlock, pin: u32, af: u32, pull_up: bool) {
-    // `field(r, shift, mask, v)`: `r` with one pin's field set to `v`.
-    let field = |r: u32, shift: u32, mask: u32, v: u32| (r & !(mask << shift)) | (v << shift);
-    let two = pin * 2;
-    let pupd = u32::from(pull_up);
-    // Each write below is a read-modify-write of one pin's field with a
-    // value valid for it (RM0433 section 11.4: AF 0..15; OTYPER 0
-    // push-pull; OSPEEDR 0b11 very high; PUPDR 0b00 none or 0b01 pull-up;
-    // MODER 0b10 alternate function); the other pins' fields are kept.
-    if pin < 8 {
-        // SAFETY: see above.
-        gpio.afrl
-            .modify(|r, w| unsafe { w.bits(field(r.bits(), pin * 4, 0xF, af)) });
-    } else {
-        // SAFETY: see above.
-        gpio.afrh
-            .modify(|r, w| unsafe { w.bits(field(r.bits(), (pin - 8) * 4, 0xF, af)) });
-    }
-    // SAFETY: see above.
-    gpio.otyper
-        .modify(|r, w| unsafe { w.bits(field(r.bits(), pin, 1, 0)) });
-    // SAFETY: see above.
-    gpio.ospeedr
-        .modify(|r, w| unsafe { w.bits(field(r.bits(), two, 0b11, 0b11)) });
-    // SAFETY: see above.
-    gpio.pupdr
-        .modify(|r, w| unsafe { w.bits(field(r.bits(), two, 0b11, pupd)) });
-    // SAFETY: see above.
-    gpio.moder
-        .modify(|r, w| unsafe { w.bits(field(r.bits(), two, 0b11, 0b10)) });
 }
 
 /// Writes QUADSPI_CR.

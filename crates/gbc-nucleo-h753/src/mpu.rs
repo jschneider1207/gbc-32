@@ -31,22 +31,26 @@
 //! the QUADSPI is in memory-mapped mode, and closed again before it leaves
 //! it (`qspi_window`; the order is in the [`crate::qspi`] docs).
 //!
+//! Region [`REGION_FMC`] is the FMC bank 1 LCD window at 0x6000_0000
+//! (Device, read/write, execute-never, 2 MiB: the command address
+//! 0x6000_0000 and the data address 0x6010_0000, A20 = D/CX; the rest of
+//! the 256 MB bank stays region 0's). Disabled at [`init`], opened by
+//! [`crate::lcd`] once the FMC bank is configured and enabled, closed
+//! before it is reconfigured (`fmc_window`).
+//!
 //! The MPU stays on in HardFault and NMI (HFNMIENA, see
 //! `CTRL_ENABLE_HFNMIENA`).
 //!
 //! Not mapped yet, so no-access through region 0 (and no speculative
 //! access can reach them):
-//! - M3: the FMC bank 1 LCD window at 0x6000_0000 (Device or
-//!   strongly-ordered, so the command and data writes are neither cached,
-//!   merged nor reordered) on [`REGION_FMC`];
 //! - D2 SRAM1-3 (0x3000_0000) and SRAM4 (0x3800_0000), for the first DMA
 //!   buffer that needs them (non-cacheable, or cache maintenance around
 //!   the transfers).
 
 use cortex_m::peripheral::MPU;
 
-/// The regions of the QUADSPI window (M2) and the FMC LCD window (M3; not
-/// used yet), see the module docs.
+/// The regions of the QUADSPI window (M2) and the FMC LCD window (M3),
+/// see the module docs.
 pub const REGION_QSPI: u32 = 6;
 /// See [`REGION_QSPI`].
 pub const REGION_FMC: u32 = 7;
@@ -212,6 +216,42 @@ pub(crate) fn qspi_window(w: Window) {
     }
     // B3.5.10: the new attributes apply from the next access and the next
     // instruction fetch.
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+}
+
+/// The FMC LCD window: 0x6000_0000, 2 MiB ([`crate::lcd::WINDOW`],
+/// [`crate::lcd::WINDOW_BYTES`]), read/write, execute-never, Device (TEX
+/// 000 C 0 B 1; RM0433 section 22.6: the FMC banks are Normal memory in
+/// the default map, which allows speculative reads, merged writes and
+/// reordering, none of which an 8080 command/data register tolerates).
+/// Device keeps the accesses in program order and at their size, and
+/// never speculates; it lets the write buffer post writes, which
+/// strongly-ordered would not (Armv7-M A3.5.5 and A3.7). Unaligned
+/// accesses to Device memory fault (A3.2.1), which also keeps clear of
+/// ES0392 2.6.4 (unaligned FMC reads unsupported).
+const FMC_RASR: u32 = size(crate::lcd::WINDOW_BYTES as u64) | XN | AP_RW | DEVICE;
+const FMC_BASE: u32 = crate::lcd::WINDOW as u32;
+const _: () = assert!(FMC_BASE.is_multiple_of(crate::lcd::WINDOW_BYTES));
+
+/// Opens or closes the FMC LCD window on [`REGION_FMC`]. Only
+/// [`crate::lcd`] calls it: open only while FMC bank 1 is enabled and
+/// configured (an access to a disabled bank is an AXI error, RM0433
+/// 22.7.6 FMC_BCRx MBKEN).
+pub(crate) fn fmc_window(open: bool) {
+    let rasr = if open { FMC_RASR | 1 } else { 0 };
+    // Every access before the change completes under the old map.
+    cortex_m::asm::dsb();
+    // SAFETY: as in `qspi_window`: one region's RBAR and RASR, written as
+    // Armv7-M B3.5 lays them out, while the MPU is enabled (B3.5.4); the
+    // region only adds or removes access to the window, and the caller
+    // ensures the FMC answers there whenever it is open. One thread, no
+    // interrupt.
+    unsafe {
+        let mpu = &*MPU::PTR;
+        mpu.rbar.write(FMC_BASE | (1 << 4) | REGION_FMC);
+        mpu.rasr.write(rasr);
+    }
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
 }
