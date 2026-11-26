@@ -46,6 +46,13 @@ name = "qspi-write"
 test = false
 bench = false
 
+# The ROM loader: receives a ROM over the VCP (gbc-link) into the NOR
+# (plan Stage 2 M2 "Loader", ADR 0038); built as `boot`.
+[[bin]]
+name = "loader"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
@@ -62,7 +69,7 @@ bench = false
 # fail its ASSERT). build.sh builds `--bin boot` and `--bin headless
 # --features headless` separately.
 [features]
-headless = ["dep:gbc-core", "dep:gbc-firmware"]
+headless = ["dep:gbc-core"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -84,7 +91,10 @@ cortex-m-rt = { version = "=0.7.7", features = ["paint-stack"] }
 stm32h7 = { version = "=0.15.1", features = ["stm32h753v"] }
 # The emulator and the headless loop (ADR 0036), for the `headless` image.
 gbc-core = { path = "../gbc-core", optional = true }
-gbc-firmware = { path = "../gbc-firmware", optional = true }
+# The image header (ADR 0037) for the loader, and the headless loop.
+gbc-firmware = { path = "../gbc-firmware" }
+# The PC <-> board protocol, for the loader (ADR 0036).
+gbc-link = { path = "../gbc-link" }
 
 # The memory.x generator (ADR 0036), shared with tools/h7-bench.
 [build-dependencies]

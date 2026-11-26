@@ -168,6 +168,18 @@ impl Uart {
         uart_byte(b);
     }
 
+    /// Sends one raw byte if the transmitter takes it now (TXE; TXFNF in
+    /// FIFO mode), without waiting: false if it is full.
+    pub fn try_write(&mut self, b: u8) -> bool {
+        let usart = regs();
+        if usart.isr.read().txe().bit_is_set() {
+            usart.tdr.write(|w| w.tdr().bits(u16::from(b)));
+            true
+        } else {
+            false
+        }
+    }
+
     /// One received byte if there is one, without waiting. Counts and
     /// clears any overrun, framing or noise error first.
     pub fn try_read(&mut self) -> Option<u8> {

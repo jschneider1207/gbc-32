@@ -3,7 +3,7 @@
 # section sizes and checks what can be checked without the board, as
 # tools/h7-bench/build.sh does.
 #
-#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, and headless-<rom>
+#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader, and headless-<rom>
 #                         for each acceptance ROM (cpu_instrs, cgb-acid2)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
 #                         (agents: the shared build lock)
@@ -153,6 +153,10 @@ check_image qspi-mmap "$built"
 # The NOR write side and UART receive (plan Stage 2 M2), built as `boot`.
 built=$(build_bin qspi-write locked cargo build --release --bin qspi-write "${REMAP[@]}")
 check_image qspi-write "$built"
+# The ROM loader (plan Stage 2 M2), built as `boot`; GBC_LOADER_BAUD sets
+# its serving rate (src/bin/loader.rs).
+built=$(build_bin loader locked cargo build --release --bin loader "${REMAP[@]}")
+check_image loader "$built"
 
 for entry in "${HEADLESS_ROMS[@]}"; do
   rom=${entry%%=*} path=$ROMS/${entry#*=}

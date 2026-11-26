@@ -14,7 +14,9 @@
 //! ES0392 section 2.1.1) and the DWT cycle counter. [`clockcheck`]
 //! measures the clock against the LSE crystal. [`image`] identifies the
 //! flashed image (in the banner). [`qspi`] drives the shield's QSPI NOR
-//! (not part of `init`: only the images that use it call it).
+//! (not part of `init`: only the images that use it call it). [`loader`] is
+//! the board side of the ROM loader protocol (`gbc-link`), behind a NOR
+//! trait.
 //!
 //! Only the H753 at the D11 clock: no board or clock features. The image's
 //! `memory.x` comes from `memory_x::firmware_memory_x`, which defines the
@@ -26,6 +28,7 @@ pub mod clockcheck;
 mod fault;
 pub mod image;
 pub mod led;
+pub mod loader;
 pub mod mpu;
 pub mod power;
 pub mod qspi;

@@ -103,6 +103,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gbc-link"
+version = "0.1.0"
+
+[[package]]
 name = "gbc-nucleo-h753"
 version = "0.1.0"
 dependencies = [
@@ -110,6 +114,7 @@ dependencies = [
  "cortex-m-rt",
  "gbc-core",
  "gbc-firmware",
+ "gbc-link",
  "memory-x",
  "stm32h7",
 ]
