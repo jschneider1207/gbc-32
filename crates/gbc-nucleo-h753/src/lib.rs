@@ -15,7 +15,8 @@
 //! measures the clock against the LSE crystal. [`image`] identifies the
 //! flashed image (in the banner). [`qspi`] drives the shield's QSPI NOR
 //! (not part of `init`: only the images that use it call it), [`lcd`] the
-//! shield's ILI9341V panel on the FMC (likewise). [`loader`] is
+//! shield's ST7789V panel on the FMC (likewise), [`lcd_dma`] its MDMA
+//! frame transfer synced to TE. [`loader`] is
 //! the board side of the ROM loader protocol (`gbc-link`), behind a NOR
 //! trait.
 //!
@@ -31,6 +32,7 @@ mod fault;
 mod gpio;
 pub mod image;
 pub mod lcd;
+pub mod lcd_dma;
 pub mod led;
 pub mod loader;
 pub mod mpu;

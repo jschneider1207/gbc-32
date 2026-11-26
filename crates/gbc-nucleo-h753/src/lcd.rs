@@ -630,6 +630,16 @@ impl Lcd {
         self.write_data(lo);
     }
 
+    /// The ST7789V normal-mode frame rate: PORCTRL (B2h; BPA, FPA, PSEN 0,
+    /// and the idle and partial porches at their reset value 33h) and
+    /// FRCTRL2 (C6h; NLA 000, dot inversion, the reset value 0Fh has it, and
+    /// RTNA). ST7789V datasheet V1.3 sections 9.2.3 and 9.2.16. Not an
+    /// ILI9341V command set (its B2h is FRMCTR2, C6h undefined).
+    pub fn set_frame_rate(&mut self, f: FrameRate) {
+        self.command(0xB2, &[f.bpa, f.fpa, 0x00, 0x33, 0x33]);
+        self.command(0xC6, &[f.rtna]);
+    }
+
     /// The TE (FMARK) pin's level.
     pub fn te(&self) -> bool {
         gpioe().idr.read().bits() & (1 << 13) != 0
@@ -654,3 +664,91 @@ pub const fn expected_readback(rgb565: u16) -> [u8; 3] {
 
 /// The bits of a readback byte that carry data (D7..D2).
 pub const READBACK_MASK: u8 = 0xFC;
+
+/// The ST7789V's normal-mode frame timing (datasheet V1.3 9.2.16 note 1):
+/// a frame is `320 + FPA + BPA` lines of `250 + 16 RTNA` clocks of the
+/// panel's internal oscillator (nominally 10 MHz, so the reset values
+/// FPA = BPA = 0Ch, RTNA = 0Fh give 10 MHz / (344 x 490) = 59.3 Hz; the
+/// datasheet's table rounds that to 60). TE is high for the porch lines
+/// (V-blank, section 8.15).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FrameRate {
+    /// FRCTRL2 RTNA[4:0], 0..=31.
+    pub rtna: u8,
+    /// PORCTRL FPA[6:0], front porch lines, 1..=127.
+    pub fpa: u8,
+    /// PORCTRL BPA[6:0], back porch lines, 1..=127.
+    pub bpa: u8,
+}
+
+impl FrameRate {
+    /// The reset values (9.2.3, 9.2.16).
+    pub const DEFAULT: FrameRate = FrameRate {
+        rtna: 0x0F,
+        fpa: 0x0C,
+        bpa: 0x0C,
+    };
+
+    /// The setting closest to the Game Boy's 59.7275 Hz (16,742.7 µs) on
+    /// this board's panel: RTNA 0Eh (474-clock lines), FPA = BPA = 11h
+    /// (354 lines). Its oscillator measured 10.02 MHz (the reset setting
+    /// gave 16,811 to 16,823 µs, 59.45 Hz), and this one 16,735 to 16,749
+    /// µs (mean of 120 TE periods, four runs of `lcd-dma-probe`; ADR
+    /// 0039): within 0.04% of the target, less than the oscillator's own
+    /// run-to-run drift (0.08%). One porch line moves the frame 0.28%, one
+    /// RTNA step 3.3%.
+    pub const GAME_BOY: FrameRate = FrameRate {
+        rtna: 0x0E,
+        fpa: 0x11,
+        bpa: 0x11,
+    };
+
+    /// Oscillator clocks per line.
+    pub const fn line_clocks(&self) -> u32 {
+        250 + 16 * self.rtna as u32
+    }
+
+    /// Lines per frame, the porches included.
+    pub const fn lines(&self) -> u32 {
+        HEIGHT as u32 + self.fpa as u32 + self.bpa as u32
+    }
+
+    /// Oscillator clocks per frame.
+    pub const fn frame_clocks(&self) -> u32 {
+        self.lines() * self.line_clocks()
+    }
+
+    /// The setting whose frame is closest to `target_ns` with a panel
+    /// oscillator of `osc_hz`, among those whose line lasts at least
+    /// `min_line_ns` and whose porches add up to at most `max_porch` lines
+    /// (split evenly, the back porch taking the odd line). On a tie the
+    /// RTNA nearest the reset value wins, then the shorter porch.
+    pub fn closest(osc_hz: u32, target_ns: u32, min_line_ns: u32, max_porch: u32) -> Option<Self> {
+        let ns = |clocks: u32| clocks as u64 * 1_000_000_000 / osc_hz.max(1) as u64;
+        let mut best: Option<(u64, FrameRate)> = None;
+        // RTNA in the order 15, 14, 16, 13, 17, ...: on a tie the one
+        // nearest the reset value wins.
+        for step in 0..64u32 {
+            let off = step.div_ceil(2) as i32 * if step % 2 == 1 { -1 } else { 1 };
+            let rtna = 0x0F + off;
+            if !(0..=31).contains(&rtna) {
+                continue;
+            }
+            for porch in 2..=max_porch.min(254) {
+                let f = FrameRate {
+                    rtna: rtna as u8,
+                    fpa: (porch / 2) as u8,
+                    bpa: porch.div_ceil(2) as u8,
+                };
+                if ns(f.line_clocks()) < min_line_ns as u64 {
+                    continue;
+                }
+                let err = ns(f.frame_clocks()).abs_diff(target_ns as u64);
+                if best.is_none_or(|(e, _)| err < e) {
+                    best = Some((err, f));
+                }
+            }
+        }
+        best.map(|(_, f)| f)
+    }
+}

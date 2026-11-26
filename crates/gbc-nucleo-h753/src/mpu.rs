@@ -38,6 +38,12 @@
 //! [`crate::lcd`] once the FMC bank is configured and enabled, closed
 //! before it is reconfigured (`fmc_window`).
 //!
+//! Region [`REGION_DMA_BUF`] makes the LCD transfer buffer (128 KiB of AXI
+//! SRAM, [`crate::lcd_dma`]) Normal non-cacheable. It lies inside region 4,
+//! so it adds no access, it only changes the attributes there (a higher
+//! region number wins). Disabled at [`init`], set once by
+//! [`crate::lcd_dma::LcdDma::new`] (`dma_buffer_window`).
+//!
 //! The MPU stays on in HardFault and NMI (HFNMIENA, see
 //! `CTRL_ENABLE_HFNMIENA`).
 //!
@@ -54,6 +60,8 @@ use cortex_m::peripheral::MPU;
 pub const REGION_QSPI: u32 = 6;
 /// See [`REGION_QSPI`].
 pub const REGION_FMC: u32 = 7;
+/// The LCD transfer buffer (M3), see the module docs.
+pub const REGION_DMA_BUF: u32 = 8;
 
 const XN: u32 = 1 << 28;
 /// AP: no access at any privilege level.
@@ -260,4 +268,47 @@ pub(crate) fn fmc_window(open: bool) {
 pub fn enabled() -> bool {
     // SAFETY: a read of MPU_CTRL, a core register.
     unsafe { (*MPU::PTR).ctrl.read() & 1 != 0 }
+}
+
+/// Makes `bytes` (a power of two, at least 32) at `base` (aligned to
+/// `bytes`, inside AXI SRAM) Normal, not cacheable, read/write,
+/// execute-never on [`REGION_DMA_BUF`]: the buffer a DMA reads while the
+/// CPU writes it, so no cache maintenance is needed per frame (plan Stage 2
+/// M3: the 100 KB of writes also do not evict the core's D-cache lines).
+/// Region 4 (AXI SRAM, write-back) already allows the access; this region
+/// only overrides the attributes.
+///
+/// Armv7-M (B3.5, and the Cortex-M7 TRM "MPU"): a cache line allocated
+/// under the old attributes must not survive the change. The range is
+/// cleaned and invalidated before the region is enabled (any line the CPU
+/// or a speculative read allocated) and again after it (a line a
+/// speculative read could have allocated in between: clean, since nothing
+/// writes the buffer before this returns).
+pub(crate) fn dma_buffer_window(base: usize, bytes: usize) {
+    assert!(bytes.is_power_of_two() && bytes >= 32 && base.is_multiple_of(bytes));
+    assert!(
+        base >= 0x2400_0000 && base + bytes <= 0x2408_0000,
+        "not in AXI SRAM"
+    );
+    // SAFETY: SCB is a core peripheral; the by-address cache maintenance
+    // operations only write the maintenance registers (DCCIMVAC), and no
+    // other code runs cache maintenance concurrently (one thread; the
+    // only ISR, `lcd_dma::on_te`, does none).
+    let scb = unsafe { &mut cortex_m::Peripherals::steal().SCB };
+    scb.clean_invalidate_dcache_by_address(base, bytes);
+    let rasr = size(bytes as u64) | XN | AP_RW | NORMAL_NC | 1;
+    cortex_m::asm::dsb();
+    // SAFETY: as in `qspi_window`: one region's RBAR and RASR, written as
+    // Armv7-M B3.5 lays them out, while the MPU is enabled (B3.5.4). The
+    // region covers memory region 4 already opens, so it grants no new
+    // access. Called before the TE interrupt is enabled, so no ISR
+    // interleaves with the two writes.
+    unsafe {
+        let mpu = &*MPU::PTR;
+        mpu.rbar.write(base as u32 | (1 << 4) | REGION_DMA_BUF);
+        mpu.rasr.write(rasr);
+    }
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+    scb.clean_invalidate_dcache_by_address(base, bytes);
 }
