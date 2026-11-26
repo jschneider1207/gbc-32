@@ -175,6 +175,8 @@ of M3.
 `cgb-acid2` (internal-flash ROMs, 600 frames each) equal the host's byte
 for byte.
 
+**Met (session 22, 2026-11-25; tag `stage2-m1`):** `--host-only` H1-H8 all OK on f1e1406 plus docs; on the board both ROMs EQUAL (602 lines) with the image CRC matched. Review: 3 mediums fixed (c2e8e2b, f1e1406, 953e829), 1 rejected, lows as tasks above.
+
 ## M2: ROM in QSPI NOR (memory-mapped)
 
 - [ ] QUADSPI driver: JEDEC ID read (record the part, its max clock, quad-enable bit, DTR support in `docs/reference/`), sector erase, page program (no dummy cycles in indirect write: ES0392 §2.7.1), status polling; memory-mapped quad read (`0xEB` or the part's equivalent), FSIZE for 8 MiB, prefetch/timeout settings
