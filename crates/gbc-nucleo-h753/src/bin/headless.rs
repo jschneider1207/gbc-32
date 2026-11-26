@@ -33,6 +33,26 @@
 //! placement puts in DTCM with the stack; the frame buffer, audio buffer,
 //! cartridge RAM and
 //! capture buffer in `.axisram` (AXI SRAM, write-back cached).
+//!
+//! With the `rom-qspi` feature (plan Stage 2 M2; `out/headless-qspi.bin`)
+//! the ROM is not embedded: at boot the image maps the QSPI NOR
+//! (`qspi::Qspi::memory_mapped`, 0xEB at [`qspi::PRESCALER_MMAP`]) and
+//! checks the ADR 0037 image there with `rom_image::validate`; the run's
+//! ROM slice is the image's data in the 0x9000_0000 window (cached), which
+//! stays mapped for the life of the program. On any QSPI or image error it
+//! prints `<prefix> headless qspi error stage=<map|header|validate>
+//! error=<e>` once a second and never runs a frame: there is no embedded
+//! ROM to fall back to. Its banner is followed by
+//!
+//! ```text
+//! gbc-nucleo-h753 headless qspi image rom_len=<n> rom_hash=<16 hex> title=<t> validate_cycles=<c> qspi_hz=<hz> exit_fallbacks=<k>
+//! ```
+//!
+//! (`rom_hash` the header's FNV-1a 64 of the data, which `validate`
+//! checked; `title` the header's, non-graphic bytes as `_`), and its report
+//! line ends with `rom_len=<n> rom_hash=<16 hex> exit_fallbacks=<k>`:
+//! `run-headless.sh` with `RUN_HEADLESS_ROM` requires them to be the ROM
+//! file's, so a stale NOR image cannot pass.
 #![no_std]
 #![no_main]
 
@@ -46,14 +66,27 @@ use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, image, led, stack, wait_since};
 
+#[cfg(feature = "rom-qspi")]
+use gbc_firmware::rom_image::{self, ImageHeader};
+#[cfg(feature = "rom-qspi")]
+use gbc_nucleo_h753::qspi::{self, Qspi};
+
 const PREFIX: &str = "gbc-nucleo-h753";
+#[cfg(not(feature = "rom-qspi"))]
 const IMAGE: &str = "headless";
+#[cfg(feature = "rom-qspi")]
+const IMAGE: &str = "headless-qspi";
 
 /// The ROM, embedded by build.rs from `GBC_HEADLESS_ROM` (in `.rodata`,
 /// internal flash).
+#[cfg(not(feature = "rom-qspi"))]
 static ROM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/headless.gb"));
 /// The ROM's file stem, for the report lines.
+#[cfg(not(feature = "rom-qspi"))]
 const ROM_NAME: &str = env!("GBC_HEADLESS_ROM_NAME");
+/// The ROM is whatever the NOR holds; its header identifies it.
+#[cfg(feature = "rom-qspi")]
+const ROM_NAME: &str = "qspi";
 /// The input program from `GBC_HEADLESS_INPUT` (empty: no input).
 const INPUT: &str = include_str!(concat!(env!("OUT_DIR"), "/headless-input.txt"));
 /// `GBC_HEADLESS_FRAMES`, or empty.
@@ -201,19 +234,39 @@ struct Run {
     frames: u32,
     cycles: u64,
     stack: (usize, usize),
+    /// Where the ROM came from.
+    #[cfg(feature = "rom-qspi")]
+    qspi: QspiRom,
 }
 
 fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
     board.banner(IMAGE);
+    #[cfg(feature = "rom-qspi")]
+    run.qspi.print(board);
     let (image_bytes, image_cksum) = board.image();
     let ms = run.cycles * 1000 / u64::from(CPU_HZ);
     let out = &mut board.uart;
     // The UART writer never fails.
+    #[cfg(not(feature = "rom-qspi"))]
     let _ = writeln!(
         out,
         "{PREFIX} headless report n={n} rom={ROM_NAME} frames={} run_cycles={} run_ms={ms} \
          stack_used={}/{} image_bytes={image_bytes} image_cksum={image_cksum}\r",
         run.frames, run.cycles, run.stack.0, run.stack.1
+    );
+    #[cfg(feature = "rom-qspi")]
+    let _ = writeln!(
+        out,
+        "{PREFIX} headless report n={n} rom={ROM_NAME} frames={} run_cycles={} run_ms={ms} \
+         stack_used={}/{} image_bytes={image_bytes} image_cksum={image_cksum} \
+         rom_len={} rom_hash={:016x} exit_fallbacks={}\r",
+        run.frames,
+        run.cycles,
+        run.stack.0,
+        run.stack.1,
+        run.qspi.header.len,
+        run.qspi.header.hash,
+        qspi::exit_fallbacks()
     );
     // The captured lines end in `\n` alone; the UART sends `\r\n`, as
     // every other line of the board does.
@@ -237,6 +290,94 @@ fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
     );
 }
 
+/// The QSPI image the run's ROM came from.
+#[cfg(feature = "rom-qspi")]
+struct QspiRom {
+    header: ImageHeader,
+    /// Cycles of `rom_image::validate` (header checks and the data hash,
+    /// through the cold window).
+    validate_cycles: u32,
+    qspi_hz: u32,
+}
+
+#[cfg(feature = "rom-qspi")]
+impl QspiRom {
+    /// The `headless qspi image` line.
+    fn print(&self, board: &mut board::Board) {
+        let h = &self.header;
+        let out = &mut board.uart;
+        let _ = write!(
+            out,
+            "{PREFIX} headless qspi image rom_len={} rom_hash={:016x} title=",
+            h.len, h.hash
+        );
+        // Up to the first NUL; anything but a graphic ASCII byte as `_`, so
+        // the field has no spaces and the line stays ASCII.
+        for &b in h.title.iter().take_while(|&&b| b != 0) {
+            let c = if b.is_ascii_graphic() { b as char } else { '_' };
+            let _ = out.write_char(c);
+        }
+        let _ = writeln!(
+            out,
+            " validate_cycles={} qspi_hz={} exit_fallbacks={}\r",
+            self.validate_cycles,
+            self.qspi_hz,
+            qspi::exit_fallbacks()
+        );
+    }
+}
+
+/// Prints the QSPI error once a second, forever: no frame runs without a
+/// valid image (and there is no embedded ROM to fall back to).
+#[cfg(feature = "rom-qspi")]
+fn qspi_error(board: &mut board::Board, stage: &str, error: &dyn fmt::Debug) -> ! {
+    loop {
+        let _ = writeln!(
+            board.uart,
+            "{PREFIX} headless qspi error stage={stage} error={error:?}\r"
+        );
+        let t0 = cycles();
+        wait_since(t0, CPU_HZ);
+        led::toggle();
+    }
+}
+
+/// Maps the NOR and validates the image in it. The returned [`qspi::Mapped`]
+/// must outlive every use of the ROM slice (`rom_image::validate` over its
+/// window), which `main` guarantees by never returning.
+#[cfg(feature = "rom-qspi")]
+fn map_qspi(board: &mut board::Board) -> qspi::Mapped {
+    let mut q = Qspi::init(qspi::PRESCALER_SAFE);
+    if let Err(e) = q.set_prescaler(qspi::PRESCALER_MMAP) {
+        qspi_error(board, "map", &e);
+    }
+    match q.memory_mapped(&qspi::QUAD_IO_READ) {
+        Ok(m) => m,
+        Err((_, e)) => qspi_error(board, "map", &e),
+    }
+}
+
+#[cfg(feature = "rom-qspi")]
+fn validate_qspi<'a>(board: &mut board::Board, m: &'a qspi::Mapped) -> (&'a [u8], QspiRom) {
+    let window = m.bytes();
+    let t0 = cycles();
+    let header = match rom_image::read_header(window) {
+        Ok(h) => h,
+        Err(e) => qspi_error(board, "header", &e),
+    };
+    let rom = match rom_image::validate(window) {
+        Ok(r) => r,
+        Err(e) => qspi_error(board, "validate", &e),
+    };
+    let info = QspiRom {
+        header,
+        validate_cycles: cycles().wrapping_sub(t0),
+        qspi_hz: m.clock_hz(),
+    };
+    info.print(board);
+    (rom, info)
+}
+
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let mut board = board::init(PREFIX);
@@ -246,6 +387,13 @@ fn main() -> ! {
     );
     board.measure_clock();
     board.banner(IMAGE);
+    #[cfg(not(feature = "rom-qspi"))]
+    let rom = ROM;
+    // Mapped for good: `main` never returns, so the slice stays valid.
+    #[cfg(feature = "rom-qspi")]
+    let mapped = map_qspi(&mut board);
+    #[cfg(feature = "rom-qspi")]
+    let (rom, qspi_rom) = validate_qspi(&mut board, &mapped);
 
     let mut presses = [Press::NONE; MAX_PRESSES];
     let (count, end) = match input::parse(INPUT, &mut presses) {
@@ -266,7 +414,7 @@ fn main() -> ! {
     let _ = writeln!(
         board.uart,
         "{PREFIX} headless running rom={ROM_NAME} rom_bytes={} presses={count} frames={frames}\r",
-        ROM.len()
+        rom.len()
     );
 
     let b = buffers::take();
@@ -285,7 +433,7 @@ fn main() -> ! {
     // The result is in the captured lines (`headless error ...`, or the
     // lines stopping short); the host compares those.
     let _ = headless::run(
-        ROM,
+        rom,
         Script::new(&presses[..count]),
         frames,
         bufs,
@@ -296,6 +444,8 @@ fn main() -> ! {
         frames,
         cycles: clock.total(),
         stack: stack::usage(),
+        #[cfg(feature = "rom-qspi")]
+        qspi: qspi_rom,
     };
 
     let mut n = 0u32;

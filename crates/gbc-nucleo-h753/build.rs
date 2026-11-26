@@ -28,8 +28,10 @@
 //! switch h7-bench uses (`itcm`).
 //!
 //! The `headless` image's inputs (ROMs are never committed):
-//! - `GBC_HEADLESS_ROM`: the ROM's path (required), copied to
-//!   `OUT_DIR/headless.gb`; its file stem is the image's `rom=` name;
+//! - `GBC_HEADLESS_ROM`: the ROM's path (required, except with the
+//!   `rom-qspi` feature, which reads its ROM from the QSPI NOR at boot and
+//!   ignores this), copied to `OUT_DIR/headless.gb`; its file stem is the
+//!   image's `rom=` name;
 //! - `GBC_HEADLESS_INPUT`: an input program (`gbc_firmware::input` text
 //!   format), copied to `OUT_DIR/headless-input.txt` and parsed at boot;
 //!   unset: no input;
@@ -62,33 +64,18 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-L{}", out.display());
 
     if headless {
-        headless_inputs(&out);
+        headless_inputs(&out, env::var_os("CARGO_FEATURE_ROM_QSPI").is_none());
     }
 }
 
-fn headless_inputs(out: &Path) {
-    for v in [
-        "GBC_HEADLESS_ROM",
-        "GBC_HEADLESS_INPUT",
-        "GBC_HEADLESS_FRAMES",
-    ] {
+/// `embed_rom`: false for `rom-qspi`, whose ROM is not part of the image.
+fn headless_inputs(out: &Path, embed_rom: bool) {
+    for v in ["GBC_HEADLESS_INPUT", "GBC_HEADLESS_FRAMES"] {
         println!("cargo:rerun-if-env-changed={v}");
     }
-    let rom_path = env::var("GBC_HEADLESS_ROM").unwrap_or_else(|_| {
-        panic!(
-            "\n\ngbc-nucleo-h753: the `headless` image needs GBC_HEADLESS_ROM, the path of \
-             the ROM to embed (build.sh sets it; ROMs come from test-roms/, never git).\n\n"
-        )
-    });
-    println!("cargo:rerun-if-changed={rom_path}");
-    let rom = fs::read(&rom_path).unwrap_or_else(|e| panic!("GBC_HEADLESS_ROM={rom_path}: {e}"));
-    fs::write(out.join("headless.gb"), rom).expect("write ROM");
-    let name = Path::new(&rom_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()))
-        .unwrap_or_else(|| panic!("GBC_HEADLESS_ROM={rom_path}: no printable file stem"));
-    println!("cargo:rustc-env=GBC_HEADLESS_ROM_NAME={name}");
+    if embed_rom {
+        embedded_rom(out);
+    }
 
     let input = match env::var("GBC_HEADLESS_INPUT") {
         Ok(p) if !p.is_empty() => {
@@ -105,4 +92,25 @@ fn headless_inputs(out: &Path) {
         "GBC_HEADLESS_FRAMES={frames:?} is not a u32"
     );
     println!("cargo:rustc-env=GBC_HEADLESS_FRAMES={frames}");
+}
+
+/// The ROM of the internal-flash `headless` image: `OUT_DIR/headless.gb`
+/// and its `rom=` name.
+fn embedded_rom(out: &Path) {
+    println!("cargo:rerun-if-env-changed=GBC_HEADLESS_ROM");
+    let rom_path = env::var("GBC_HEADLESS_ROM").unwrap_or_else(|_| {
+        panic!(
+            "\n\ngbc-nucleo-h753: the `headless` image needs GBC_HEADLESS_ROM, the path of \
+             the ROM to embed (build.sh sets it; ROMs come from test-roms/, never git).\n\n"
+        )
+    });
+    println!("cargo:rerun-if-changed={rom_path}");
+    let rom = fs::read(&rom_path).unwrap_or_else(|e| panic!("GBC_HEADLESS_ROM={rom_path}: {e}"));
+    fs::write(out.join("headless.gb"), rom).expect("write ROM");
+    let name = Path::new(&rom_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()))
+        .unwrap_or_else(|| panic!("GBC_HEADLESS_ROM={rom_path}: no printable file stem"));
+    println!("cargo:rustc-env=GBC_HEADLESS_ROM_NAME={name}");
 }

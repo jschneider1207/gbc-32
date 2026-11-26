@@ -3,8 +3,9 @@
 # section sizes and checks what can be checked without the board, as
 # tools/h7-bench/build.sh does.
 #
-#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader, and headless-<rom>
-#                         for each acceptance ROM (cpu_instrs, cgb-acid2)
+#   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader, headless-<rom>
+#                         for each acceptance ROM (cpu_instrs, cgb-acid2), and headless-qspi
+#                         (the headless loop on whatever ROM the QSPI NOR holds)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
 #                         (agents: the shared build lock)
 #   GBC_TEST_ROMS=<dir>   where the test ROMs are (default: the repo's
@@ -17,7 +18,8 @@
 #
 # The `boot` image is built without features, the `headless` ones with
 # `--features headless`, which selects the ITCM placement (build.rs), one
-# build per ROM (the ROM is embedded): out/headless-<rom>.{elf,bin}.
+# build per ROM (the ROM is embedded): out/headless-<rom>.{elf,bin}; and
+# once with `--features rom-qspi` (no ROM embedded): out/headless-qspi.{elf,bin}.
 #
 # Checks per image: the vector table (initial SP in DTCM and 8-byte
 # aligned, reset vector a Thumb address inside the image), the flash fit,
@@ -170,6 +172,15 @@ for entry in "${HEADLESS_ROMS[@]}"; do
   ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-$rom.elf" | sed 's/^/  /' ||
     bad "headless-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
 done
+
+# The headless image with its ROM from the QSPI NOR (plan Stage 2 M2,
+# `rom-qspi`): no ROM embedded, so one image for every ROM; the same checks
+# as the headless-<rom> images.
+built=$(GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked env -u GBC_HEADLESS_ROM cargo build --release --bin headless --features rom-qspi "${REMAP[@]}")
+check_image headless-qspi "$built"
+echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-qspi.elf" | sed 's/^/  /' ||
+  bad "headless-qspi: post-link ITCM check (scripts/check-itcm-elf.sh)"
 
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
 echo "build.sh: OK; images in $(pwd)/$OUT"

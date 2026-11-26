@@ -68,8 +68,14 @@ bench = false
 # so it is built without it (the set would leave `.itcm` nearly empty and
 # fail its ASSERT). build.sh builds `--bin boot` and `--bin headless
 # --features headless` separately.
+#
+# `rom-qspi` (implies `headless`): the same `headless` bin with its ROM read
+# from the QSPI NOR window (an ADR 0037 image the loader put there) instead
+# of embedded in internal flash. build.rs then embeds no ROM, so one image
+# runs whatever ROM is loaded (build.sh: out/headless-qspi.bin).
 [features]
 headless = ["dep:gbc-core"]
+rom-qspi = ["headless"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
