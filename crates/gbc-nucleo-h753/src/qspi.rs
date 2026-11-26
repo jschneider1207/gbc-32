@@ -1,8 +1,9 @@
 //! QUADSPI in indirect and memory-mapped mode: the X-NUCLEO-GFX02Z1
-//! shield's 64-Mbit NOR flash (plan Stage 2 M2). Read commands only, so
-//! far: nothing here writes the NOR (no write enable, no register write,
-//! no program or erase). The part, its commands and limits:
-//! `docs/reference/qspi-nor.md`.
+//! shield's 64-Mbit NOR flash (plan Stage 2 M2). Reads, and in indirect
+//! mode only, write enable, page program and 4 KiB / 64 KiB erase (the
+//! write side, at the end of this file; [`NorError`]). Never chip erase,
+//! never a status or configuration register write. The part, its
+//! commands and limits: `docs/reference/qspi-nor.md`.
 //!
 //! Memory-mapped mode ([`Qspi::memory_mapped`], [`Mapped`]): the NOR
 //! appears read-only at [`WINDOW`], [`NOR_BYTES`] long, through MPU region
@@ -316,9 +317,15 @@ fn write_cr(v: u32) {
     regs().cr.write(|w| unsafe { w.bits(v) });
 }
 
-/// Writes QUADSPI_CCR. Never with 0 (ES0392 2.7.3).
+/// Writes QUADSPI_CCR. Never with 0 (ES0392 2.7.3), and never with a chip
+/// erase or WRSR instruction ([`FORBIDDEN`]), in any mode: an indirect
+/// read with one of them would send it too.
 fn write_ccr(v: u32) {
     assert!(v != 0, "QUADSPI_CCR = 0 hangs the QUADSPI (ES0392 2.7.3)");
+    assert!(
+        !FORBIDDEN.contains(&(v as u8)),
+        "chip erase and WRSR are never sent"
+    );
     // SAFETY: any non-zero CCR value selects a valid frame format.
     regs().ccr.write(|w| unsafe { w.bits(v) });
 }
@@ -716,4 +723,399 @@ static EXIT_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 /// stayed high after the abort (a diagnostic for the test images).
 pub fn exit_fallbacks() -> u32 {
     EXIT_FALLBACKS.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------
+// The write side: write enable, program and erase (indirect mode only).
+//
+// Only a [`Qspi`] can send these, and a [`Qspi`] exists only while the
+// QUADSPI is not in memory-mapped mode: [`Qspi::memory_mapped`] consumes
+// it and [`Mapped::exit`] hands it back (memory-mapped mode is read-only,
+// RM0433 23.3.12). [`Qspi::require_indirect`] checks FMODE as well.
+//
+// Never sent: chip erase (0x60, 0xC7) and WRSR (0x01). QE is already 1 on
+// this board (`docs/reference/qspi-nor.md` "The quad-enable bit") and
+// status-register writes are non-volatile, so this driver never writes
+// the status or configuration register ([`write_ccr`] refuses all three
+// opcodes).
+//
+// Source for the commands, bits and times: MX25L6433F datasheet PM2130
+// Rev. 1.4, Table 4 (command set), section 10-4 (status register: WIP bit
+// 0, WEL bit 1; WEL clears when a program or erase completes; program and
+// erase are ignored without WEL), 10-19 (PP: the CS# rise starts tPP; data
+// past the page end wraps to the page start, so the driver never sends
+// it), 10-26 and Table 10 (security register: P_FAIL bit 5, E_FAIL bit 6,
+// cleared by the next successful operation), and the AC table (p. 66: tPP,
+// tSE, tBE; tSHSL >= 50 ns after write, erase and program, which DCSHT
+// gives, [`write_dcr`]).
+// ---------------------------------------------------------------------
+
+/// The NOR's page: a program never crosses one (MX25L6433F 10-19).
+pub const PAGE_BYTES: u32 = 256;
+/// The 4 KiB sector of [`Qspi::erase_4k`] (SE, 0x20).
+pub const SECTOR_BYTES: u32 = 4096;
+/// The 64 KiB block of [`Qspi::erase_64k`] (BE, 0xD8).
+pub const BLOCK_BYTES: u32 = 65536;
+
+const CMD_PP: u8 = 0x02;
+const CMD_RDSR: u8 = 0x05;
+const CMD_WREN: u8 = 0x06;
+const CMD_SE: u8 = 0x20;
+const CMD_RDSCUR: u8 = 0x2B;
+const CMD_BE: u8 = 0xD8;
+/// Opcodes [`write_ccr`] refuses in every mode: chip erase (0x60, 0xC7)
+/// and WRSR (0x01).
+const FORBIDDEN: [u8; 3] = [0x60, 0xC7, 0x01];
+
+/// Status register (RDSR): write in progress, write enable latch.
+const STATUS_WIP: u8 = 1 << 0;
+const STATUS_WEL: u8 = 1 << 1;
+/// Security register (RDSCUR, Table 10): the last program or erase failed.
+const SCUR_P_FAIL: u8 = 1 << 5;
+const SCUR_E_FAIL: u8 = 1 << 6;
+
+// QUADSPI_CR (23.5.1), QUADSPI_SR (23.5.3), QUADSPI_FCR (23.5.4),
+// QUADSPI_CCR (23.5.6) fields of the write side.
+const CR_APMS: u32 = 1 << 22;
+const CR_PMM: u32 = 1 << 23;
+const SR_SMF: u32 = 1 << 3;
+const FCR_CSMF: u32 = 1 << 3;
+const CCR_FMODE_INDIRECT_WRITE: u32 = 0b00 << 26;
+const CCR_FMODE_AUTO_POLL: u32 = 0b10 << 26;
+const CCR_FMODE_MASK: u32 = 0b11 << 26;
+/// The FIFO's depth in bytes (FLEVEL counts up to 32, RM0433 23.5.3).
+const FIFO_BYTES: u32 = 32;
+/// PIR (23.5.12): QUADSPI clocks between two status reads of
+/// [`Qspi::wait_idle`]; 64 clocks is 1.6 us at 39 MHz, far below the
+/// shortest wait (a page program, 0.33 ms typ).
+const POLL_INTERVAL: u32 = 64;
+
+/// The operations [`Qspi::wait_idle`] waits for, with the MX25L6433F's
+/// typical and maximum times (AC table, p. 66).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Op {
+    /// PP (0x02), one page: tPP 0.33 ms typ, 1.2 ms max.
+    PageProgram,
+    /// SE (0x20), 4 KiB: tSE 25 ms typ, 200 ms max.
+    SectorErase,
+    /// BE (0xD8), 64 KiB: tBE 0.25 s typ, 1 s max.
+    BlockErase,
+}
+
+impl Op {
+    /// The datasheet's typical time, in microseconds.
+    pub const fn typ_us(self) -> u32 {
+        match self {
+            Op::PageProgram => 330,
+            Op::SectorErase => 25_000,
+            Op::BlockErase => 250_000,
+        }
+    }
+
+    /// The datasheet's maximum time, in microseconds.
+    pub const fn max_us(self) -> u32 {
+        match self {
+            Op::PageProgram => 1_200,
+            Op::SectorErase => 200_000,
+            Op::BlockErase => 1_000_000,
+        }
+    }
+
+    /// [`Qspi::wait_idle`]'s timeout: twice the datasheet maximum, in CPU
+    /// cycles (2 s at most, well inside the DWT counter's 9.1 s wrap).
+    pub const fn timeout_cycles(self) -> u32 {
+        2 * self.max_us() * (crate::CPU_HZ / 1_000_000)
+    }
+}
+
+/// What went wrong in a write-side operation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NorError {
+    /// A command failed in the QUADSPI ([`Error`]).
+    Qspi(Error),
+    /// An erase address not on its sector or block boundary, or a page
+    /// program longer than a page or crossing a page boundary.
+    Alignment,
+    /// The address, or address plus length, runs past [`NOR_BYTES`].
+    OutOfRange,
+    /// WIP stayed 1 past [`Op::timeout_cycles`]; the polling was aborted.
+    Timeout,
+    /// WEL read 0 after WREN; the status register value.
+    WelNotSet(u8),
+    /// RDSCUR flagged P_FAIL or E_FAIL after the operation; its value.
+    Failed(u8),
+    /// The QUADSPI is in memory-mapped mode (CCR.FMODE = 11).
+    MemoryMapped,
+}
+
+impl From<Error> for NorError {
+    fn from(e: Error) -> Self {
+        NorError::Qspi(e)
+    }
+}
+
+impl Qspi {
+    /// The runtime half of the indirect-only rule: FMODE must not be 11.
+    /// (The type is the other half: no [`Qspi`] exists in memory-mapped
+    /// mode.)
+    fn require_indirect(&self) -> Result<(), NorError> {
+        if regs().ccr.read().bits() & CCR_FMODE_MASK == CCR_FMODE_MEMORY_MAPPED {
+            return Err(NorError::MemoryMapped);
+        }
+        Ok(())
+    }
+
+    /// One 1-line command in indirect-write mode (RM0433 23.3.12): the
+    /// instruction, an optional 24-bit address, and `data` (none if
+    /// empty). Never dummy cycles: ES0392 2.7.1, the first data nibble is
+    /// lost after a dummy phase in indirect write mode. The command starts
+    /// at the CCR write (no address, no data), the AR write (address, no
+    /// data) or the first DR write (data), 23.3.12.
+    fn write_command(
+        &mut self,
+        instruction: u8,
+        addr: Option<u32>,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let q = regs();
+        if !not_busy() {
+            return Err(Error::Busy);
+        }
+        // SAFETY: write-1-to-clear flags.
+        q.fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
+        if !data.is_empty() {
+            // SAFETY: DL is any 32-bit value (number of bytes - 1).
+            q.dlr.write(|w| unsafe { w.bits(data.len() as u32 - 1) });
+        }
+        let (admode, adsize) = match addr {
+            Some(_) => (Lines::Single as u32, CCR_ADSIZE_24),
+            None => (0, 0),
+        };
+        let dmode = if data.is_empty() {
+            0
+        } else {
+            Lines::Single as u32
+        };
+        // DCYC 0, ABMODE 00 (no alternate bytes), SDR.
+        write_ccr(
+            CCR_FMODE_INDIRECT_WRITE
+                | dmode << CCR_DMODE_SHIFT
+                | adsize
+                | admode << CCR_ADMODE_SHIFT
+                | (Lines::Single as u32) << CCR_IMODE_SHIFT
+                | u32::from(instruction),
+        );
+        if let Some(a) = addr {
+            // SAFETY: ADDRESS is any 32-bit value; 24 bits are sent.
+            q.ar.write(|w| unsafe { w.bits(a) });
+        }
+        // Byte writes of DR: each pushes one byte into the FIFO (RM0433
+        // 23.3.5, 23.5.9).
+        let dr = q.dr.as_ptr() as *mut u8;
+        let mut r = Ok(());
+        for &b in data {
+            let mut err = false;
+            let ok = wait_for(POLLS, || {
+                let s = sr();
+                err = s & SR_TEF != 0;
+                err || (s >> SR_FLEVEL_SHIFT) & SR_FLEVEL_MASK < FIFO_BYTES
+            });
+            if err || !ok {
+                r = Err(if err { Error::Transfer } else { Error::Timeout });
+                break;
+            }
+            // SAFETY: an aligned volatile byte write of QUADSPI_DR's least
+            // significant byte, a valid MMIO address (RM0433 23.5.9); the
+            // FIFO has room (FLEVEL < 32).
+            unsafe { dr.write_volatile(b) };
+        }
+        if r.is_ok() {
+            r = if !wait_for(POLLS, || sr() & (SR_TCF | SR_TEF) != 0) {
+                Err(Error::Timeout)
+            } else if sr() & SR_TEF != 0 {
+                Err(Error::Transfer)
+            } else if !not_busy() {
+                Err(Error::Timeout)
+            } else {
+                Ok(())
+            };
+        }
+        if r.is_err() {
+            abort();
+        }
+        // SAFETY: write-1-to-clear flags.
+        q.fcr.write(|w| unsafe { w.bits(FCR_CTCF) });
+        r
+    }
+
+    /// One register byte read with a 1-line instruction (RDSR, RDSCUR).
+    fn read_reg(&mut self, instruction: u8) -> Result<u8, Error> {
+        let mut b = [0u8];
+        self.read(&Read::single(instruction), &mut b)?;
+        Ok(b[0])
+    }
+
+    /// WREN (0x06), then RDSR to check that WEL is set (MX25L6433F 10-4:
+    /// program and erase are ignored without it).
+    pub fn write_enable(&mut self) -> Result<(), NorError> {
+        self.require_indirect()?;
+        self.write_command(CMD_WREN, None, &[])?;
+        let status = self.read_reg(CMD_RDSR)?;
+        if status & STATUS_WEL == 0 {
+            return Err(NorError::WelNotSet(status));
+        }
+        Ok(())
+    }
+
+    /// Waits for WIP = 0 in automatic status-polling mode (RM0433 23.3.6:
+    /// RDSR every [`POLL_INTERVAL`] clocks, mask WIP, match 0, AND mode,
+    /// APMS: the QUADSPI stops by itself on the match). Gives up after
+    /// `op`'s [`Op::timeout_cycles`] (DWT), aborting the polling. Returns
+    /// the last status byte read.
+    pub fn wait_idle(&mut self, op: Op) -> Result<u8, NorError> {
+        self.require_indirect()?;
+        let q = regs();
+        if !not_busy() {
+            return Err(Error::Busy.into());
+        }
+        // APMS and PMM, PIR, PSMKR and PSMAR only while BUSY = 0 (23.5.1,
+        // 23.5.10 to 23.5.12).
+        let cr = q.cr.read().bits();
+        write_cr((cr | CR_APMS) & !CR_PMM);
+        // SAFETY: INTERVAL is any 16-bit value, MASK and MATCH any 32-bit
+        // values (only the first status byte is read, DLR 0).
+        unsafe {
+            q.pir.write(|w| w.bits(POLL_INTERVAL));
+            q.psmkr.write(|w| w.bits(u32::from(STATUS_WIP)));
+            q.psmar.write(|w| w.bits(0));
+            q.fcr.write(|w| w.bits(FCR_CSMF | FCR_CTEF | FCR_CTCF));
+            q.dlr.write(|w| w.bits(0));
+        }
+        // No address: the polling starts with this write (23.3.6).
+        write_ccr(
+            CCR_FMODE_AUTO_POLL
+                | (Lines::Single as u32) << CCR_DMODE_SHIFT
+                | (Lines::Single as u32) << CCR_IMODE_SHIFT
+                | u32::from(CMD_RDSR),
+        );
+        let t0 = crate::cycles();
+        let limit = op.timeout_cycles();
+        let matched = loop {
+            let s = sr();
+            if s & SR_SMF != 0 {
+                break true;
+            }
+            if crate::cycles().wrapping_sub(t0) > limit {
+                break false;
+            }
+        };
+        let r = if matched {
+            // DR holds the last status bytes read (23.3.6); byte read.
+            let dr = q.dr.as_ptr() as *const u8;
+            // SAFETY: an aligned volatile byte read of QUADSPI_DR, a valid
+            // MMIO address (RM0433 23.5.9).
+            let status = unsafe { dr.read_volatile() };
+            if not_busy() {
+                Ok(status)
+            } else {
+                abort();
+                Err(Error::Timeout.into())
+            }
+        } else {
+            abort();
+            Err(NorError::Timeout)
+        };
+        // SAFETY: write-1-to-clear flags.
+        q.fcr.write(|w| unsafe { w.bits(FCR_CSMF | FCR_CTCF) });
+        // BUSY is 0 here (stopped on the match, or aborted): CR back to
+        // its indirect value.
+        write_cr(cr);
+        r
+    }
+
+    /// RDSCUR after a program or erase: `fail` (P_FAIL or E_FAIL) set
+    /// means the operation failed (MX25L6433F Figure "program/erase flow",
+    /// 10-26).
+    fn check_failed(&mut self, fail: u8) -> Result<(), NorError> {
+        let scur = self.read_reg(CMD_RDSCUR)?;
+        if scur & fail != 0 {
+            return Err(NorError::Failed(scur));
+        }
+        Ok(())
+    }
+
+    /// WIP = 0 (a previous operation, e.g. one cut by a reset, may still
+    /// run: the NOR ignores WREN meanwhile), WREN, the command, the wait,
+    /// RDSCUR.
+    fn write_op(&mut self, cmd: u8, addr: u32, data: &[u8], op: Op) -> Result<(), NorError> {
+        self.require_indirect()?;
+        self.wait_idle(Op::BlockErase)?;
+        self.write_enable()?;
+        self.write_command(cmd, Some(addr), data)?;
+        self.wait_idle(op)?;
+        self.check_failed(if op == Op::PageProgram {
+            SCUR_P_FAIL
+        } else {
+            SCUR_E_FAIL
+        })
+    }
+
+    fn erase(&mut self, addr: u32, size: u32, cmd: u8, op: Op) -> Result<(), NorError> {
+        if addr >= NOR_BYTES {
+            return Err(NorError::OutOfRange);
+        }
+        if !addr.is_multiple_of(size) {
+            return Err(NorError::Alignment);
+        }
+        self.write_op(cmd, addr, &[], op)
+    }
+
+    /// Erases the 4 KiB sector at `addr` (SE, 0x20) to 0xFF; `addr` must
+    /// be a multiple of [`SECTOR_BYTES`].
+    pub fn erase_4k(&mut self, addr: u32) -> Result<(), NorError> {
+        self.erase(addr, SECTOR_BYTES, CMD_SE, Op::SectorErase)
+    }
+
+    /// Erases the 64 KiB block at `addr` (BE, 0xD8) to 0xFF; `addr` must
+    /// be a multiple of [`BLOCK_BYTES`].
+    pub fn erase_64k(&mut self, addr: u32) -> Result<(), NorError> {
+        self.erase(addr, BLOCK_BYTES, CMD_BE, Op::BlockErase)
+    }
+
+    /// Programs `data` at `addr` (PP, 0x02, 1-1-1), inside one page: at
+    /// most [`PAGE_BYTES`], and `addr % 256 + len <= 256` (the NOR would
+    /// wrap the rest to the page start, MX25L6433F 10-19). Programming
+    /// only clears bits: the bytes should be erased first. Empty: nothing
+    /// is sent.
+    pub fn program_page(&mut self, addr: u32, data: &[u8]) -> Result<(), NorError> {
+        if addr as usize + data.len() > NOR_BYTES as usize {
+            return Err(NorError::OutOfRange);
+        }
+        if (addr % PAGE_BYTES) as usize + data.len() > PAGE_BYTES as usize {
+            return Err(NorError::Alignment);
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.write_op(CMD_PP, addr, data, Op::PageProgram)
+    }
+
+    /// Programs `data` at `addr`, split on page boundaries into
+    /// [`Qspi::program_page`] calls. The range is checked whole first:
+    /// nothing is written if it runs past [`NOR_BYTES`].
+    pub fn program(&mut self, addr: u32, data: &[u8]) -> Result<(), NorError> {
+        if addr as usize + data.len() > NOR_BYTES as usize {
+            return Err(NorError::OutOfRange);
+        }
+        let mut a = addr;
+        let mut rest = data;
+        while !rest.is_empty() {
+            let n = ((PAGE_BYTES - a % PAGE_BYTES) as usize).min(rest.len());
+            let (page, tail) = rest.split_at(n);
+            self.program_page(a, page)?;
+            a += n as u32;
+            rest = tail;
+        }
+        Ok(())
+    }
 }
