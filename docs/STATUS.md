@@ -146,11 +146,18 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Running: `m5-replay` (acceptance-schema scripted input, `run-replay.sh`, the proposed replay set on the player). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
+- Session 25: merged gbc-pc (b303636), paced smoothing (cf86d75), board link session + save round trip (ad690b8..ca9f3cc, `run-save-roundtrip.sh` PASS), the `player` image + `scripts/play-on-board.sh` (d1aaae6..2b53f9c; full host gate passed). Merged: scripted clock-table input + `run-replay.sh` (f2d0c50..24c318d; romtest split into lib + bin, module moves only). Running: `m5-soak` (10-min worst-case soak in the player, RTC save round trip). Stale branch `m5-link` = pre-squash copy of the merged work; delete it with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
 
 Open (session 25, 2026-11-26):
+- **`acceptance/stage2.toml` (yours, D10):** the proposed replay set now
+  runs on the board, all 6 equal to the host (`docs/reference/m5-evidence.md`).
+  Concrete picks for the two placeholders: `same-suite/dma/hdma_mode0.gb`
+  600 frames, and `rtc3test/rtc3test.gb` with stage1's `rtc3test-sub-second`
+  input, 1,793 frames. Runner: `crates/gbc-nucleo-h753/run-replay.sh`
+  (reads `replay-set.txt` until the manifest exists). Write the toml when
+  you're happy with the set; agents won't.
 - **You can play on the board now** (sign-off items 1-4): `scripts/play-on-board.sh
   <rom> [--sav f] [--sav-out f]` (copies the ROM to scratch, loads it into
   the NOR only if needed, flashes `player`, runs `gbc-pc play`: arrows, Z =
