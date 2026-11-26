@@ -49,6 +49,31 @@ HashMismatch)`). A new `SaveBegin` discards a save load in progress.
 The PC writes the file only once the whole dump has arrived and hashes
 to `SaveBegin.hash`, via `<out>.part` and a rename.
 
+## Who syncs the RTC (ADR 0040)
+
+The board has no wall clock: it never advances a loaded clock by the
+time since the footer's stamp, and it stamps dumps with the stamp of the
+save it loaded. The PC does both ends, with the desktop's rule
+(`gbc_firmware::save::Clock::sync`, ADR 0023), in `tools/gbc-pc/src/rtc.rs`:
+
+- `load --sav`: the PC checks the save as the board will
+  (`save::check`, refusing locally what the board would refuse), advances
+  the live clock (MBC3 RTC or HuC3) by now − stamp (halted clocks stay
+  put; day overflow sets the carry) and stamps it now. The board starts
+  from real time. A 44-byte VBA footer goes as the 48-byte one.
+- `dump` and `play`'s dumps: a clock footer is restamped with the PC's
+  time when the dump arrived (the board's registers are the time then);
+  RAM and clock registers are written as received. The footer is found
+  from the length (RAM sizes are 0 or powers of two ≥ 512: mod 512 = 48
+  MBC3, 17 HuC3); anything else is written as received.
+- `--raw-save` (load, dump, play): neither; the bytes go and come
+  unchanged. The round-trip scripts (`run-save-roundtrip.sh`,
+  `run-player-save.sh`) use it: they check the transport.
+
+Losses: MBC3 drops the part second, HuC3 the seconds into the current
+minute, on each board load and each dump; the board clock is only as true
+as its emulation keeps real time.
+
 ## Input (PC → board), `gbc-pc play`
 
 - `Input { buttons }`: the held buttons (`gbc_link::buttons`, decoded by
@@ -108,7 +133,8 @@ dump goes out as whole frames, up to 4 KiB per TX transfer.
   48 or 44 for MBC3, RAM + 17 for HuC3), checked at once; the content
   (hash, footer) at the verdict. Applying is `save::reload` (a power cycle
   of the running game); the footer time of the applied save is stamped
-  back on dumps, so load then dump is byte-identical.
+  back on dumps, so load then dump is byte-identical (with
+  `--raw-save`; without it the PC restamps, see "Who syncs the RTC").
 - One save buffer (AXI SRAM; 128 KiB + 64 in link-probe, 64 KiB + 64 in the player) serves load and dump: a
   `SaveDumpRequest` drops a load in progress, a `SaveBegin` stops a dump
   being sent.

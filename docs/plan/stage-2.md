@@ -296,6 +296,7 @@ b, an SAI/I2S driver partly would).
 - [ ] M5 review P-6 (low): link_session.rs ~292 keeps the stored reply after a chord dump drops a load; clear last_req_len in start_dump
 - [ ] M5 review P-7 (low): B1 active-high polarity assumed; open until the human's button check
 - [ ] M5 review gate note (low): proposed B3 wants display readback 0 mismatches; player-script does no readback and run-paced.sh doesn't check it
+- [x] (8b3a2e6) M5 review T-2 (medium): gbc-pc syncs the RTC footer to real time on `load --sav` and restamps dumps (desktop rule shared as `gbc_firmware::save::Clock::sync`, fb94fda); `--raw-save` for the byte-identity round trips (ADR 0040)
 
 **Acceptance:** the `player` image in scripted mode with display and
 audio running gives frame-hash and DAC-feed-hash lists equal to the

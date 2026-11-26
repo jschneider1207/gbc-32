@@ -126,3 +126,12 @@ are interchangeable with SameBoy and BGB, like the MBC3 ones.
   `save::sync_rtc` became `Clock::sync`.
 - Not covered: the input recording (ADR 0030) has no field for the HuC3
   clock, so a replay of a HuC3 game starts its clock at zero.
+
+## Amendment (2026-11-26, Stage 2 board): the PC syncs for the board
+
+Files move between the desktop and the dev board through `tools/gbc-pc`.
+The board has no wall clock, so `gbc-pc` applies this ADR's sync on
+load when it sends a save to the board (the same function: `Clock::sync`
+now lives in `gbc_firmware::save` and the desktop calls it) and restamps
+dumps with the PC's time. The desktop's own load and save are unchanged.
+Details and the `--raw-save` mode: ADR 0040.

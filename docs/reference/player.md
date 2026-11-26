@@ -75,7 +75,10 @@ debounced over 2 frames). The PC repeats its state every 500 ms; with no
   frame superseded before TE is counted as skipped (M4 review P-7).
 - Saves: loaded with the ROM or any time (`gbc-pc load <rom> --sav`, a
   power cycle of the game with the new RAM and RTC), dumped on request or
-  on the chord. A dump of a just-loaded save is byte-identical.
+  on the chord. A dump of a just-loaded save is byte-identical
+  (`--raw-save`). The board never reads a wall clock; `gbc-pc` syncs the
+  clock footer to real time on load and restamps it on dump, as the
+  desktop does (ADR 0040, `link-protocol.md` "Who syncs the RTC").
 
 ## Statistics
 
