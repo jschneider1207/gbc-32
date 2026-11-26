@@ -13,7 +13,8 @@
 //! UART ([`uart`]), the MPU ([`mpu`]), the I- and D-cache (write-back,
 //! ES0392 section 2.1.1) and the DWT cycle counter. [`clockcheck`]
 //! measures the clock against the LSE crystal. [`image`] identifies the
-//! flashed image (in the banner).
+//! flashed image (in the banner). [`qspi`] drives the shield's QSPI NOR
+//! (not part of `init`: only the images that use it call it).
 //!
 //! Only the H753 at the D11 clock: no board or clock features. The image's
 //! `memory.x` comes from `memory_x::firmware_memory_x`, which defines the
@@ -27,6 +28,7 @@ pub mod image;
 pub mod led;
 pub mod mpu;
 pub mod power;
+pub mod qspi;
 pub mod stack;
 pub mod tcm;
 pub mod uart;

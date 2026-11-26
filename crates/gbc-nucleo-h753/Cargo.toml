@@ -24,6 +24,13 @@ name = "boot"
 test = false
 bench = false
 
+# The shield's QSPI NOR, read commands only (plan Stage 2 M2); built
+# without features, as `boot`.
+[[bin]]
+name = "qspi-probe"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
