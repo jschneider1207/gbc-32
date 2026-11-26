@@ -130,6 +130,21 @@ RUN_PACED_FRAMES=<n> RUN_PACED_READ_SECS=<s> crates/gbc-nucleo-h753/run-paced.sh
 compares its `paced` lines with the host's `headless --paced` (without
 `--input`, so build it without `GBC_HEADLESS_INPUT` for that check).
 
+The script may also be a `clocks v1` table (`gbc_firmware::replay`): an
+`acceptance/*.toml` group's `input`, converted with romtest's own code by
+`target/release/replay-input table --manifest acceptance/stage1.toml
+--group <id>`. Its changes are scheduled at their exact clocks as romtest
+does (not on frame starts), and a `stats input clock_changes= handed=
+late=` line follows the run. `replay-input check ... --rom <rom>` shows
+on the host that this loop gives romtest's frames.
+
+The M5 replay check runs a whole list (build, NOR load, run, compare per
+ROM; docs/reference/m5-evidence.md):
+
+```
+GBC_BUILD_LOCK=<lock> crates/gbc-nucleo-h753/run-replay.sh   # replay-set.txt
+```
+
 ## Limits
 
 - Saves up to 64 KiB of cartridge RAM (+ the RTC footer): AXI SRAM has

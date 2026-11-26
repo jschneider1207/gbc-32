@@ -1,0 +1,14 @@
+gbc-nucleo-h753 paced report n=60 rom=qspi frames=600 image_bytes=265392 image_cksum=2001460834
+paced v1 rom_bytes=32768 rom_fnv=71f06b6982f4558d input_fnv=cbf29ce484222325 frames=600
+paced end frames=600 clock=42030476 ready=596 fbs=9e715d5737062c81 feed_frames=328363 feed=ac02af63243bea39
+paced drain feed_frames=328363 feed=ac02af63243bea39
+stats paced core min=130701 mean=414899 max=1053747 max_frame=4 hz=472000000
+stats paced frontend push_mean=34018 push_max=34701 hash_mean=170624 hash_max=170974 sink_mean=136387 sink_max=184636
+stats paced idle calls=1863 drain_calls=10
+stats paced ring min_fill=1243 max_fill=2047 underrun_events=0 underrun_frames=0 overrun_events=0 overrun_frames=0
+stats paced drain underrun_events=1 underrun_frames=85
+stats paced speed elapsed=4712868914 ppm=+3601 steady_ppm=-947
+stats display paced presented=586 skipped=10 transfers=586 transfer_errors=0 stuck=0 aborts=0 te_edges=632 scale_mean=186792 scale_max=194979 present_mean=278 present_max=292 replaced=10 deferred=181 copy_mean=26175 copy_max=26863
+stats dac refills=1354 late=0 spurious=0 te=0 dme=0 fe=0 udr1=0 udr2=0 restarts=0 isr_min=609 isr_max=8296 stop=ok
+stats player image=player-script frames=599 core_min=130701 core_mean=414905 core_p99=655359 core_max=1053747 fe_mean=415617 fe_max=450954 busy_mean=830523 busy_max=1498339 slack_min=6404218 over_budget=0 budget=7902557 underruns=6 underrun_frames=1365 overruns=0 presented=586 skipped=10 display_errors=0 stuck=0 dac_restarts=0 total_frames=599 total_over_budget=0 total_core_max=1053747 total_busy_max=1498339 reloads=0 rom_len=32768 rom_hash=71f06b6982f4558d link_frames=0 bad_frames=0 hellos=0 inputs=0 saves_applied=0 saves_refused=0 dumps=0 dumps_done=0 naks=0 replies_dropped=0 sessions=0 stats_sent=0 stats_dropped=0 stack_used=19800/23140
+gbc-nucleo-h753 paced report-end n=60 rom=qspi bytes=1714 cksum=2353252284 overflow=0
