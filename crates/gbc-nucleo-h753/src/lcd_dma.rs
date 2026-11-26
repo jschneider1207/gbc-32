@@ -255,7 +255,11 @@ impl LcdDma {
         // only reference to BUF; MDMA reads it only between `present` and
         // the completion, while `LcdDma` hands out no reference to it.
         let buf = unsafe { &mut *BUF.0.get() };
-        mpu::dma_buffer_window(buf as *mut DmaBuffer as usize, DMA_BUFFER_BYTES);
+        mpu::dma_buffer_window(
+            mpu::REGION_DMA_BUF,
+            buf as *mut DmaBuffer as usize,
+            DMA_BUFFER_BYTES,
+        );
 
         // SAFETY: RCC_AHB3ENR (MDMAEN) and APB4ENR (SYSCFGEN) by
         // read-modify-write, the same single thread as `lcd`'s FMCEN; no

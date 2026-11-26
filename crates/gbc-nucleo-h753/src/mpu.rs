@@ -44,6 +44,11 @@
 //! region number wins). Disabled at [`init`], set once by
 //! [`crate::lcd_dma::LcdDma::new`] (`dma_buffer_window`).
 //!
+//! Region [`REGION_AUDIO_BUF`] does the same for the DAC's circular sample
+//! buffer (2 KiB of AXI SRAM, [`crate::audio_dac`]; DMA1 reads it, and
+//! DMA1 cannot reach the TCMs, RM0433 Table 3). Disabled at [`init`], set
+//! once by [`crate::audio_dac::AudioDac::new`] (`dma_buffer_window`).
+//!
 //! The MPU stays on in HardFault and NMI (HFNMIENA, see
 //! `CTRL_ENABLE_HFNMIENA`).
 //!
@@ -62,6 +67,8 @@ pub const REGION_QSPI: u32 = 6;
 pub const REGION_FMC: u32 = 7;
 /// The LCD transfer buffer (M3), see the module docs.
 pub const REGION_DMA_BUF: u32 = 8;
+/// The audio DAC's sample buffer (M4), see the module docs.
+pub const REGION_AUDIO_BUF: u32 = 9;
 
 const XN: u32 = 1 << 28;
 /// AP: no access at any privilege level.
@@ -272,9 +279,11 @@ pub fn enabled() -> bool {
 
 /// Makes `bytes` (a power of two, at least 32) at `base` (aligned to
 /// `bytes`, inside AXI SRAM) Normal, not cacheable, read/write,
-/// execute-never on [`REGION_DMA_BUF`]: the buffer a DMA reads while the
+/// execute-never on `region` ([`REGION_DMA_BUF`] for the LCD buffer,
+/// [`REGION_AUDIO_BUF`] for the DAC's): the buffer a DMA reads while the
 /// CPU writes it, so no cache maintenance is needed per frame (plan Stage 2
-/// M3: the 100 KB of writes also do not evict the core's D-cache lines).
+/// M3: the 100 KB of writes also do not evict the core's D-cache lines) or
+/// per audio refill.
 /// Region 4 (AXI SRAM, write-back) already allows the access; this region
 /// only overrides the attributes.
 ///
@@ -284,7 +293,8 @@ pub fn enabled() -> bool {
 /// or a speculative read allocated) and again after it (a line a
 /// speculative read could have allocated in between: clean, since nothing
 /// writes the buffer before this returns).
-pub(crate) fn dma_buffer_window(base: usize, bytes: usize) {
+pub(crate) fn dma_buffer_window(region: u32, base: usize, bytes: usize) {
+    assert!(region == REGION_DMA_BUF || region == REGION_AUDIO_BUF);
     assert!(bytes.is_power_of_two() && bytes >= 32 && base.is_multiple_of(bytes));
     assert!(
         base >= 0x2400_0000 && base + bytes <= 0x2408_0000,
@@ -293,7 +303,7 @@ pub(crate) fn dma_buffer_window(base: usize, bytes: usize) {
     // SAFETY: SCB is a core peripheral; the by-address cache maintenance
     // operations only write the maintenance registers (DCCIMVAC), and no
     // other code runs cache maintenance concurrently (one thread; the
-    // only ISR, `lcd_dma::on_te`, does none).
+    // ISRs, `lcd_dma::on_te` and `audio_dac::on_dma`, do none).
     let scb = unsafe { &mut cortex_m::Peripherals::steal().SCB };
     scb.clean_invalidate_dcache_by_address(base, bytes);
     let rasr = size(bytes as u64) | XN | AP_RW | NORMAL_NC | 1;
@@ -301,14 +311,30 @@ pub(crate) fn dma_buffer_window(base: usize, bytes: usize) {
     // SAFETY: as in `qspi_window`: one region's RBAR and RASR, written as
     // Armv7-M B3.5 lays them out, while the MPU is enabled (B3.5.4). The
     // region covers memory region 4 already opens, so it grants no new
-    // access. Called before the TE interrupt is enabled, so no ISR
-    // interleaves with the two writes.
+    // access. Called before the TE or the DMA interrupt is enabled
+    // (`LcdDma::new`, `AudioDac::new`), from the main thread, so no other
+    // MPU update interleaves with the two writes.
     unsafe {
         let mpu = &*MPU::PTR;
-        mpu.rbar.write(base as u32 | (1 << 4) | REGION_DMA_BUF);
+        mpu.rbar.write(base as u32 | (1 << 4) | region);
         mpu.rasr.write(rasr);
     }
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
     scb.clean_invalidate_dcache_by_address(base, bytes);
+}
+
+/// Region `n`'s (MPU_RBAR, MPU_RASR) as they read now (for a report).
+pub fn region(n: u32) -> (u32, u32) {
+    cortex_m::interrupt::free(|_| {
+        // SAFETY: MPU_RNR selects the region the RBAR/RASR reads return;
+        // with interrupts off no other code changes RNR in between (the
+        // region writes in this module go through RBAR's VALID field,
+        // which also sets RNR, and run in the main thread only).
+        unsafe {
+            let mpu = &*MPU::PTR;
+            mpu.rnr.write(n);
+            (mpu.rbar.read(), mpu.rasr.read())
+        }
+    })
 }

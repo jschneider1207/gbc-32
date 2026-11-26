@@ -69,6 +69,14 @@ name = "lcd-dma-probe"
 test = false
 bench = false
 
+# Audio out: DAC1 on PA4/PA5 at 32,768 Hz from TIM6, DMA1 circular from
+# AXI SRAM; rate, refill cost, buffer-half and error checks (plan Stage 2
+# M4); built as `boot`.
+[[bin]]
+name = "dac-probe"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]

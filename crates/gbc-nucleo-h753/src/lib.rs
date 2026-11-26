@@ -16,7 +16,8 @@
 //! flashed image (in the banner). [`qspi`] drives the shield's QSPI NOR
 //! (not part of `init`: only the images that use it call it), [`lcd`] the
 //! shield's ST7789V panel on the FMC (likewise), [`lcd_dma`] its MDMA
-//! frame transfer synced to TE. [`loader`] is
+//! frame transfer synced to TE, [`audio_dac`] the DAC1 audio output
+//! (TIM6-triggered, DMA1 from a circular buffer; likewise). [`loader`] is
 //! the board side of the ROM loader protocol (`gbc-link`), behind a NOR
 //! trait.
 //!
@@ -25,6 +26,7 @@
 //! linker symbols [`tcm`] and [`fault`] read.
 #![no_std]
 
+pub mod audio_dac;
 mod baud;
 pub mod clock;
 pub mod clockcheck;

@@ -4,7 +4,7 @@
 # tools/h7-bench/build.sh does.
 #
 #   ./build.sh            every image: boot, qspi-probe, qspi-mmap, qspi-write, loader,
-#                         lcd-probe, lcd-dma-probe, headless-<rom> for each acceptance
+#                         lcd-probe, lcd-dma-probe, dac-probe, headless-<rom> for each acceptance
 #                         ROM (cpu_instrs, cgb-acid2), headless-qspi (the headless
 #                         loop on whatever ROM the QSPI NOR holds), and
 #                         headless-display-<rom> (the loop with the panel, M3) for
@@ -85,7 +85,7 @@ fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
 
 # The images to build: the arguments, or all of them.
-ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe lcd-dma-probe"
+ALL_IMAGES="boot qspi-probe qspi-mmap qspi-write loader lcd-probe lcd-dma-probe dac-probe"
 for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%%=*}"; done
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
 for entry in "${DISPLAY_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-display-${entry%%=*}"; done
@@ -194,6 +194,8 @@ plain loader
 plain lcd-probe
 # The MDMA frame transfer on TE (plan Stage 2 M3).
 plain lcd-dma-probe
+# DAC1 audio out (plan Stage 2 M4).
+plain dac-probe
 
 for entry in "${HEADLESS_ROMS[@]}"; do
   rom=${entry%%=*} path=$ROMS/${entry#*=}
