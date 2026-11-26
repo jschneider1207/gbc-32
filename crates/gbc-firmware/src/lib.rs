@@ -5,20 +5,22 @@
 //! here; the host counterpart (`tools/headless`) calls the same code, so the
 //! two print the same lines.
 //!
-//! What is here now (M1):
+//! What is here now (M1-M4):
 //! - [`CycleClock`], the one board trait M1 needs (ADR 0036, "Board
-//!   boundary"). Output goes to any [`core::fmt::Write`].
+//!   boundary"), and [`paced::Idle`] (M4). Output goes to any
+//!   [`core::fmt::Write`].
 //! - [`input`]: scripted button input, a `&[Press]` table and a no-alloc
 //!   parser for the text format of `scripts/inputs/*.txt`.
 //! - [`audio`]: DC blocker, 12-bit DAC conversion, the sample ring and the
 //!   DAC-feed hash (M4).
 //! - [`fnv`]: 64-bit FNV-1a, the hash on every output line.
 //! - [`headless`]: the headless frame loop and its line format.
+//! - [`paced`]: the audio-paced main loop (M4): runs the core while the
+//!   sample ring has room, idles (`WFI`) otherwise; its line format.
 //! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
 //! - [`video`]: the RGB555 to RGB565 1.5x scaler (240x216) for the panel (M3).
 //!
-//! Display, audio-out and button traits arrive with their drivers (M3, M4,
-//! M5).
+//! Button traits arrive with their drivers (M5).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -27,6 +29,7 @@ pub mod audio;
 pub mod fnv;
 pub mod headless;
 pub mod input;
+pub mod paced;
 pub mod rom_image;
 pub mod video;
 

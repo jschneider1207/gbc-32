@@ -192,6 +192,83 @@ pub fn dac_feed_hash(samples: &[StereoSample]) -> u64 {
     h.get()
 }
 
+/// The consumer side of the DAC feed: pops from an [`AudioRing`] and folds
+/// the real frames (`out[..n]`, never the underrun filler) into a
+/// [`FeedHash`], so the board can show that what the DMA buffer got is what
+/// the main loop pushed. A `static` shared by `&'static` like the ring; the
+/// board's DMA ISR calls [`pop_into`](Self::pop_into) instead of the
+/// ring's:
+///
+/// ```ignore
+/// gbc_nucleo_h753::audio_dac::on_dma(|_half, out| {
+///     TAP.pop_into(&RING, out);
+/// });
+/// ```
+///
+/// Exactly one context (the consumer) may call `pop_into`. The hash lives
+/// in two `AtomicU32`s (thumbv7em has no 64-bit atomics), written only by
+/// the consumer, then the frame count with `Release`; a reader that sees
+/// [`frames`](Self::frames) equal to every frame pushed (`Acquire`) sees
+/// the hash of all of them, and it stops changing (later pops are empty;
+/// an empty pop writes nothing). [`crate::paced`] reads it that way after
+/// draining the ring. Folding 256 frames costs about 1,024 FNV steps per
+/// DMA half (128 a second).
+pub struct FeedTap {
+    lo: AtomicU32,
+    hi: AtomicU32,
+    /// Real frames popped (wraps at 2^32, 36 hours at 32,768 Hz).
+    frames: AtomicU32,
+}
+
+impl FeedTap {
+    /// Nothing popped yet: the hash of no frames.
+    pub const fn new() -> Self {
+        let h = FeedHash::new().get();
+        Self {
+            lo: AtomicU32::new(h as u32),
+            hi: AtomicU32::new((h >> 32) as u32),
+            frames: AtomicU32::new(0),
+        }
+    }
+
+    /// Consumer: [`AudioRing::pop_into`], then folds `out[..n]`. Returns
+    /// `n`.
+    pub fn pop_into<const N: usize>(&self, ring: &AudioRing<N>, out: &mut [u32]) -> usize {
+        let n = ring.pop_into(out);
+        if let Some(real) = out.get(..n).filter(|r| !r.is_empty()) {
+            let state = u64::from(self.lo.load(Ordering::Relaxed))
+                | u64::from(self.hi.load(Ordering::Relaxed)) << 32;
+            let mut h = FeedHash(Fnv1a::resume(state));
+            h.fold(real);
+            let state = h.get();
+            self.lo.store(state as u32, Ordering::Relaxed);
+            self.hi.store((state >> 32) as u32, Ordering::Relaxed);
+            let f = self.frames.load(Ordering::Relaxed);
+            self.frames
+                .store(f.wrapping_add(n as u32), Ordering::Release);
+        }
+        n
+    }
+
+    /// Real frames popped so far.
+    pub fn frames(&self) -> u32 {
+        self.frames.load(Ordering::Acquire)
+    }
+
+    /// The hash of every real frame popped so far (stable once the
+    /// producer has stopped and the ring is empty; type docs).
+    pub fn hash(&self) -> u64 {
+        u64::from(self.lo.load(Ordering::Relaxed))
+            | u64::from(self.hi.load(Ordering::Relaxed)) << 32
+    }
+}
+
+impl Default for FeedTap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Ring capacity in frames: 2048 = 62.5 ms at 32,768 Hz, 8 KiB. A video
 /// frame yields at most 550 samples, so the pacing rule "run while
 /// `free() >= 550`" keeps the ring between about 1,500 and 2,048 frames
@@ -683,6 +760,32 @@ mod tests {
         let n = r.pop_into(&mut out[..rest]);
         h.fold(&out[..n]);
         assert_eq!(h.get(), dac_feed_hash(&s));
+    }
+
+    /// The tap hashes exactly the real frames, across underruns (the
+    /// filler is not hashed) and odd pop sizes.
+    #[test]
+    fn feed_tap_hashes_real_frames_only() {
+        let s: Vec<StereoSample> = (0..2000)
+            .map(|i| ss(((i * 77) % 50_000 - 25_000) as i16, (i * 29) as i16))
+            .collect();
+        let r = FeedRing::new();
+        let tap = FeedTap::new();
+        assert_eq!(tap.hash(), FeedHash::new().get());
+        let mut c = Conditioner::new();
+        let mut out = [0u32; DMA_HALF_FRAMES];
+        // Pop more than is there each time: every pop but the first
+        // underruns.
+        let mut pops = 0;
+        for chunk in s.chunks(100) {
+            r.push_slice(&mut c, chunk);
+            tap.pop_into(&r, &mut out[..150]);
+            pops += 1;
+        }
+        assert!(r.stats().underrun_events >= pops - 1);
+        assert_eq!(tap.pop_into(&r, &mut out), 0, "drained");
+        assert_eq!(tap.frames(), 2000);
+        assert_eq!(tap.hash(), dac_feed_hash(&s));
     }
 
     #[test]

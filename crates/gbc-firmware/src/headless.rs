@@ -205,7 +205,7 @@ where
     let (mut emu, frame, audio) = match started {
         Ok(s) => s,
         Err(e) => {
-            error_line(out, e)?;
+            error_line(out, "headless", e)?;
             return Err(e);
         }
     };
@@ -273,7 +273,7 @@ where
 
 /// Checks the buffers, resets them to the run conditions and loads the
 /// cartridge.
-fn start<'a>(
+pub(crate) fn start<'a>(
     rom: &'a [u8],
     bufs: Buffers<'a>,
 ) -> Result<(Emulator<'a>, &'a mut Frame, &'a mut [StereoSample]), Error> {
@@ -298,17 +298,23 @@ fn start<'a>(
     }
 }
 
-fn error_line<W: Write + ?Sized>(out: &mut W, e: Error) -> Result<(), Error> {
+/// The `<prefix> error ...` line for `e` (`headless`, or `paced` for
+/// [`crate::paced`]).
+pub(crate) fn error_line<W: Write + ?Sized>(
+    out: &mut W,
+    prefix: &str,
+    e: Error,
+) -> Result<(), Error> {
     match e {
-        Error::RomHeader(k) => writeln!(out, "headless error rom_header {k:?}")?,
+        Error::RomHeader(k) => writeln!(out, "{prefix} error rom_header {k:?}")?,
         Error::SaveRam { need, have } => {
-            writeln!(out, "headless error save_ram need={need} have={have}")?;
+            writeln!(out, "{prefix} error save_ram need={need} have={have}")?;
         }
         Error::AudioBuffer { have } => writeln!(
             out,
-            "headless error audio_buffer need={MIN_AUDIO_SLOTS} have={have}"
+            "{prefix} error audio_buffer need={MIN_AUDIO_SLOTS} have={have}"
         )?,
-        Error::Load(k) => writeln!(out, "headless error load {k:?}")?,
+        Error::Load(k) => writeln!(out, "{prefix} error load {k:?}")?,
         Error::Write => {}
     }
     Ok(())
@@ -473,7 +479,7 @@ mod tests {
             ),
         ] {
             let mut s = String::new();
-            error_line(&mut s, e).unwrap();
+            error_line(&mut s, "headless", e).unwrap();
             assert_eq!(s, line);
         }
     }

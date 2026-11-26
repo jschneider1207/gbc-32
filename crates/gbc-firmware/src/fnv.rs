@@ -31,6 +31,12 @@ impl Fnv1a {
         Self(OFFSET_BASIS)
     }
 
+    /// Resumes a hash from a state [`get`](Self::get) returned (the ISR
+    /// side of `audio::FeedTap` keeps its state in two atomics).
+    pub(crate) const fn resume(state: u64) -> Self {
+        Self(state)
+    }
+
     /// The hash of everything folded in so far.
     pub const fn get(self) -> u64 {
         self.0
@@ -49,6 +55,10 @@ impl Fnv1a {
     }
 
     pub fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    pub fn u64(&mut self, v: u64) {
         self.bytes(&v.to_le_bytes());
     }
 
