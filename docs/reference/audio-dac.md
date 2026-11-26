@@ -38,9 +38,9 @@ dac summary config=1 ok=1
 - **Measured against the cycle counter: 32,768.675 Hz exactly** (262,400
   frames over 8.007 s of refill interrupts). The DWT and TIM6 both come
   from the HSI, so this proves the divider, not the absolute rate.
-- **Measured against the LSE crystal: 32,876.3 to 32,881.5 Hz, +3,304 to
-  +3,462 ppm** over three runs (`lse_cpu_hz` 473.55 to 473.62 MHz: the
-  HSI runs +0.33 to +0.35% fast on this board and drifts as it warms).
+- **Measured against the LSE crystal: 32,871.7 to 32,881.5 Hz, +3,165 to
+  +3,462 ppm** over four runs (`lse_cpu_hz` 473.48 to 473.62 MHz: the
+  HSI runs +0.32 to +0.35% fast on this board and drifts as it warms).
   DS12117 Table 133 allows 63.7 to 64.3 MHz at 30 °C plus -2% to +1%
   over temperature, so -2.6% to +1.5% is in spec.
 
