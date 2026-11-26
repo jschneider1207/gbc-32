@@ -47,3 +47,22 @@ board_lock_reexec() {
   with_board_lock "${BASH_SOURCE[1]}" "$@"
   exit $?
 }
+
+# board_lock_hold: takes the lock in the calling shell itself (on fd 9) and
+# keeps it until that shell exits; exports GBC_BOARD_LOCK_HELD=1 so every
+# board script it then runs skips taking it again. For a long sequence of
+# board steps in one script (scripts/gate-stage2.sh). Returns 2 on
+# timeout or an unopenable lock file (message as with_board_lock's), 0 if
+# the lock is already held.
+board_lock_hold() {
+  [ "${GBC_BOARD_LOCK_HELD:-}" = 1 ] && return 0
+  local lock=${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock}
+  local wait=${GBC_BOARD_LOCK_WAIT:-1800}
+  exec 9>>"$lock" || { echo "board-lock: cannot open $lock" >&2; return 2; }
+  if ! flock -x -w "$wait" 9; then
+    echo "board-lock: timed out after ${wait}s waiting for the board lock $lock (another agent is using the board)" >&2
+    exec 9>&-
+    return 2
+  fi
+  export GBC_BOARD_LOCK_HELD=1
+}
