@@ -558,3 +558,91 @@ fn reply_type_matches_the_client() {
     let info = Client::new(&mut b, cfg()).hello().unwrap();
     assert_eq!((info.max_chunk, info.flash_len), (1024, FLASH as u32));
 }
+
+// The AlreadyLoaded guard in `Loader::begin` has three parts (the image
+// validates, the length matches, the hash matches). Each test below makes
+// exactly one part fail while the other two hold.
+
+/// A fresh load of `new` over a stored `old` must erase and rewrite.
+fn assert_full_reload(b: &mut Board, new: &[u8]) {
+    let begins = b.loader.counters.begins;
+    let already = b.loader.counters.already_loaded;
+    assert_eq!(
+        load(b, new).unwrap(),
+        LoadOutcome::Loaded {
+            hash: fnv::hash(new)
+        }
+    );
+    assert_eq!(b.loader.counters.begins, begins + 1);
+    assert_eq!(b.loader.counters.already_loaded, already);
+    assert_eq!(rom_image::validate(&b.nor().flash).unwrap(), new);
+}
+
+#[test]
+fn same_length_different_hash_is_a_full_load() {
+    let old = rom(10_000, 21);
+    let new = rom(10_000, 22);
+    assert_ne!(fnv::hash(&old), fnv::hash(&new));
+    let mut b = Board::new();
+    load(&mut b, &old).unwrap();
+    assert_full_reload(&mut b, &new);
+}
+
+#[test]
+fn same_hash_different_length_is_a_full_load() {
+    let old = rom(10_000, 23);
+    let mut b = Board::new();
+    load(&mut b, &old).unwrap();
+    // The client derives the hash from the file, so send RomBegin by hand:
+    // the stored image's hash with another length.
+    hello(&mut b);
+    let begin = Message::RomBegin {
+        len: old.len() as u32 + 1,
+        hash: fnv::hash(&old),
+    };
+    assert_eq!(answer(&mut b, &encode(&begin, 1)).1, Message::Ack);
+    assert_eq!(b.loader.counters.already_loaded, 0);
+    assert_eq!(b.loader.counters.begins, 2);
+    assert_eq!(rom_image::validate(&b.nor().flash), Err(ImageError::Erased));
+}
+
+#[test]
+fn stored_image_with_a_corrupt_data_byte_is_reloaded() {
+    let rom = rom(10_000, 24);
+    let mut b = Board::new();
+    load(&mut b, &rom).unwrap();
+    // The header (len and hash) still matches the request; the data does not.
+    b.loader.nor.flash[256 + 5000] ^= 0x10;
+    assert!(rom_image::validate(&b.nor().flash).is_err());
+    assert_full_reload(&mut b, &rom);
+}
+
+#[test]
+fn header_programmed_wrong_is_naked_and_leaves_no_image() {
+    let rom = rom(900, 25);
+    let mut nor = FakeNor::new();
+    // Bit 0 of the header's first byte flips when the header is programmed
+    // (data is at 256.., so only the final header program reaches it).
+    nor.corrupt_at = Some(0);
+    let mut b = Board::with(nor);
+    hello(&mut b);
+    let begin = Message::RomBegin {
+        len: rom.len() as u32,
+        hash: fnv::hash(&rom),
+    };
+    assert_eq!(answer(&mut b, &encode(&begin, 1)).1, Message::Ack);
+    let chunk = Message::RomChunk {
+        offset: 0,
+        data: &rom,
+    };
+    assert_eq!(answer(&mut b, &encode(&chunk, 2)).1, Message::Ack);
+    assert_eq!(
+        answer(&mut b, &encode(&Message::RomEnd, 3)).1,
+        Message::Nak {
+            code: NakCode::FlashError
+        }
+    );
+    assert_eq!(b.loader.counters.verify_failures, 1);
+    assert_eq!(b.loader.counters.loads_ok, 0);
+    assert!(rom_image::validate(&b.nor().flash).is_err());
+}
