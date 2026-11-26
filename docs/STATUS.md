@@ -49,7 +49,7 @@
   of a frame. Live stack 12,968 of 22,912 B. Facts:
   `docs/reference/{player.md,link-protocol.md,m5-evidence.md}`, docs/perf.md
   "Player (M5)", ADR 0040 (PC syncs the RTC).
-- **Board state:** `player` flashed, cgb-acid2 in the NOR. To play:
+- **Board state:** `lcd-dma-probe` flashed (colour test); `player` is one `scripts/play-on-board.sh` away (cgb-acid2 in the NOR). To play:
   `scripts/play-on-board.sh <rom>` (see Needs human).
 - **Last updated:** 2026-11-26, session 26 (log
   `logs/2026-11-26-26-stage2-m5.md`; sessions 24-25: M3, M4).
