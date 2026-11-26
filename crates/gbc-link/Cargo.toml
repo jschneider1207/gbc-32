@@ -1,0 +1,14 @@
+[package]
+name = "gbc-link"
+description = "PC <-> board serial protocol: COBS frames with CRC-32 and the v1 message set (Stage 2 M2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies at all (D9); tests/hard_rules.rs enforces it.
+[dependencies]
