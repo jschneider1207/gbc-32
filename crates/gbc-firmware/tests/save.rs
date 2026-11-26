@@ -314,3 +314,62 @@ fn reload_replaces_ram_and_clock_of_a_running_game() {
     );
     assert_eq!(emu.cart_ram(), &image[..0x2000]);
 }
+
+/// The `link-probe` image's ROM, byte for byte as
+/// `crates/gbc-nucleo-h753/build.sh` (`link_probe_rom`) writes it: 32 KiB
+/// of zeros, `nop; jr -2` at 0x100, MBC3+TIMER+RAM+BATTERY, 32 KiB RAM.
+fn link_probe_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x100..0x104].copy_from_slice(&[0x00, 0x18, 0xFE, 0x00]);
+    rom[0x147] = MBC3_RTC;
+    rom[0x149] = 0x03;
+    rom
+}
+
+/// The board round trip's save (`run-save-roundtrip.sh`): a RAM pattern
+/// and an MBC3 footer with the clock **halted** (DH bit 6) and latched
+/// equal to live, so neither emulated time nor a latch can change it; a
+/// non-zero unix time, so the stamp on the dump is checked too.
+fn link_probe_sav() -> Vec<u8> {
+    let mut s: Vec<u8> = (0..0x8000usize).map(|i| (i * 7 + i / 251) as u8).collect();
+    for v in [12u32, 34, 5, 0x89, 0x41, 12, 34, 5, 0x89, 0x41] {
+        s.extend_from_slice(&v.to_le_bytes());
+    }
+    s.extend_from_slice(&1_700_000_000u64.to_le_bytes());
+    s
+}
+
+const LINK_PROBE_FIXTURE: &str = "../../tools/gbc-pc/tests/fixtures/link-probe.sav";
+
+/// The committed fixture is `link_probe_sav()` (`GBC_WRITE_FIXTURE=1`
+/// rewrites it), and on the probe's ROM it survives 600 frames: load,
+/// run, take with the image's own timestamp gives the same bytes.
+#[test]
+fn link_probe_fixture_round_trips_across_frames() {
+    let want = link_probe_sav();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(LINK_PROBE_FIXTURE);
+    if std::env::var_os("GBC_WRITE_FIXTURE").is_some() {
+        std::fs::write(&path, &want).unwrap();
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), want, "{}", path.display());
+
+    let rom = link_probe_rom();
+    let layout = Layout::of_rom(&rom).unwrap();
+    assert_eq!(layout.len(), want.len());
+    let img = save::check(layout, &want).unwrap();
+    let mut buf = vec![0u8; layout.ram_size];
+    let mut mem = Box::new(Memory::new());
+    let mut emu = Emulator::new(&mut mem);
+    assert!(emu.load(&rom, &mut buf, Config::default()).is_ok());
+    // As the board applies it: into the running emulator.
+    save::reload(&mut emu, &img, Config::default()).unwrap();
+    let mut fb: Frame = [0; gbc_core::SCREEN_WIDTH * gbc_core::SCREEN_HEIGHT];
+    let mut audio = [StereoSample { left: 0, right: 0 }; 0];
+    for _ in 0..600 {
+        let _ = emu.run_frame(&mut fb, &mut audio);
+    }
+    let mut out = vec![0u8; want.len()];
+    let n = save::take(&emu, img.unix_time(), &mut out).unwrap();
+    assert_eq!(n, want.len());
+    assert_eq!(out, want);
+}

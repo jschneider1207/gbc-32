@@ -3,6 +3,9 @@
 # User-supplied game ROMs and saves (never committed)
 /roms/
 *.sav
+# ...except the generated save fixtures of the host and board tests (not
+# user saves: built by crates/gbc-firmware/tests/save.rs)
+!tools/gbc-pc/tests/fixtures/*.sav
 # Build output
 /target/
 # Downloaded by scripts/fetch-sm83-tests.sh

@@ -78,6 +78,16 @@ name = "dac-probe"
 test = false
 bench = false
 
+# The M5 serial-link probe: a real emulator on an embedded ROM, the link
+# session over DMA, joystick input (plan Stage 2 M5); built only with
+# `--features link` (build.sh: out/link-probe.bin), which implies
+# `headless` (the ITCM placement and the ROM embedding).
+[[bin]]
+name = "link-probe"
+required-features = ["link"]
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
@@ -118,6 +128,8 @@ display = ["headless"]
 # `paced` (implies `headless`): the `paced` bin (src/bin/paced.rs; build.sh:
 # out/paced-<rom>.bin).
 paced = ["headless"]
+# `link` (implies `headless`): the `link-probe` bin (src/bin/link-probe.rs).
+link = ["headless"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

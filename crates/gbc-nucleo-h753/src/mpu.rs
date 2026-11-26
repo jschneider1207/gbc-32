@@ -49,6 +49,11 @@
 //! DMA1 cannot reach the TCMs, RM0433 Table 3). Disabled at [`init`], set
 //! once by [`crate::audio_dac::AudioDac::new`] (`dma_buffer_window`).
 //!
+//! Region [`REGION_LINK_BUF`] does the same for the serial link's DMA
+//! buffers (8 KiB of AXI SRAM, [`crate::link_uart`]: DMA1 writes the receive
+//! ring and reads the transmit buffer). Disabled at [`init`], set once by
+//! [`crate::link_uart::LinkUart::new`].
+//!
 //! The MPU stays on in HardFault and NMI (HFNMIENA, see
 //! `CTRL_ENABLE_HFNMIENA`).
 //!
@@ -69,6 +74,9 @@ pub const REGION_FMC: u32 = 7;
 pub const REGION_DMA_BUF: u32 = 8;
 /// The audio DAC's sample buffer (M4), see the module docs.
 pub const REGION_AUDIO_BUF: u32 = 9;
+/// The serial link's DMA receive ring and transmit buffer (M5, 8 KiB of AXI
+/// SRAM, [`crate::link_uart`]), see the module docs.
+pub const REGION_LINK_BUF: u32 = 10;
 
 const XN: u32 = 1 << 28;
 /// AP: no access at any privilege level.
@@ -297,7 +305,7 @@ pub fn enabled() -> bool {
 /// The buffer is then zeroed with 64-bit stores (M3 review P-7: first writes
 /// to uninitialised 64-bit-ECC SRAM must be whole words).
 pub(crate) fn dma_buffer_window(region: u32, base: usize, bytes: usize) {
-    assert!(region == REGION_DMA_BUF || region == REGION_AUDIO_BUF);
+    assert!(region == REGION_DMA_BUF || region == REGION_AUDIO_BUF || region == REGION_LINK_BUF);
     assert!(bytes.is_power_of_two() && bytes >= 32 && base.is_multiple_of(bytes));
     assert!(
         base >= 0x2400_0000 && base + bytes <= 0x2408_0000,

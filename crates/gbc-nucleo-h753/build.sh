@@ -11,6 +11,8 @@
 #                         cgb-acid2 and dmg-acid2
 #                         and paced-<rom> (the audio-paced loop with display and
 #                         DAC, M4) for cgb_sound and the synthetic worst-case ROM
+#                         and link-probe (the serial link with a running emulator
+#                         and the joystick, M5; ROM: GBC_LINK_ROM, else generated)
 #   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
 #                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
@@ -75,6 +77,22 @@ DTCM_LO=0x20000000 DTCM_HI=0x20020000 AXI_LO=0x24000000 AXI_HI=0x24080000
 FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
 
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
+# link_probe_rom <out>: the link probe's ROM (plan Stage 2 M5). No test ROM
+# fits: rtc3test is MBC3+TIMER+BATTERY with no RAM, and mealybug's
+# mbc3_rtc rewrites the clock as its test, so a save could not round-trip
+# across a run. This one is 32 KiB of zeros with `nop; jr -2` at 0x100
+# (it never touches cartridge RAM or the clock), cartridge type 0x10
+# (MBC3+TIMER+RAM+BATTERY) and RAM size code 3 (32 KiB): its save is
+# 32,768 + 48 bytes. The same bytes as `link_probe_rom()` in
+# crates/gbc-firmware/tests/save.rs, which checks the save fixture
+# (tools/gbc-pc/tests/fixtures/link-probe.sav) against it on the host.
+link_probe_rom() {
+  head -c 32768 /dev/zero > "$1.tmp"
+  printf '\000\030\376\000' | dd of="$1.tmp" bs=1 seek=256 conv=notrunc status=none
+  printf '\020' | dd of="$1.tmp" bs=1 seek=$((0x147)) conv=notrunc status=none
+  printf '\003' | dd of="$1.tmp" bs=1 seek=$((0x149)) conv=notrunc status=none
+  mv "$1.tmp" "$1"
+}
 # build_bin: the ELF path as cargo reports it (not an assumed target/ path).
 . ../../scripts/lib/cargo-bin.sh
 # check_image_range: the image's hashed range equals the .bin.
@@ -98,6 +116,7 @@ for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
 for entry in "${DISPLAY_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-display-${entry%%=*}"; done
 for entry in "${PACED_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES paced-${entry%%=*}"; done
+ALL_IMAGES="$ALL_IMAGES link-probe"
 for a in "$@"; do
   case " $ALL_IMAGES " in *" $a "*) ;; *) echo "build.sh: no image named $a (images: $ALL_IMAGES)" >&2; exit 2;; esac
 done
@@ -268,6 +287,26 @@ for entry in "${PACED_ROMS[@]}"; do
   ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/paced-$rom.elf" | sed 's/^/  /' ||
     bad "paced-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
 done
+
+# The serial-link probe (plan Stage 2 M5, `link`): the same checks as the
+# headless-<rom> images. Its ROM is GBC_LINK_ROM if set, else generated
+# here (link_probe_rom), so the run scripts and gbc-pc have the same file.
+if want link-probe; then
+  path=${GBC_LINK_ROM:-$OUT/link-probe.gb}
+  if [ -z "${GBC_LINK_ROM:-}" ]; then
+    link_probe_rom "$path"
+    echo "  $path: generated MBC3+TIMER+RAM+BATTERY test ROM ($(stat -c %s "$path") B)"
+  fi
+  if [ -f "$path" ]; then
+    built=$(GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP build_bin link-probe locked cargo build --release --bin link-probe --features link "${REMAP[@]}")
+    check_image link-probe "$built"
+    echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+    ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/link-probe.elf" | sed 's/^/  /' ||
+      bad "link-probe: post-link ITCM check (scripts/check-itcm-elf.sh)"
+  else
+    bad "link-probe: no ROM at $path (GBC_LINK_ROM)"
+  fi
+fi
 
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
 echo "build.sh: OK; images in $(pwd)/$OUT"
