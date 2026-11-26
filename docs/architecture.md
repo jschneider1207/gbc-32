@@ -25,6 +25,7 @@ tools/
   bench/                   headless runs for check-bench.sh (Ir), the behavior fingerprint, synthetic ROMs (docs/perf.md)
   fuzz/                    fuzz targets over the public API: no panic, no hang (scripts/check-fuzz.sh)
   headless/                host counterpart of the board's headless image: calls gbc-firmware's loop, so it prints the same `headless ` lines for a ROM + input script; expected/ holds the 600-frame board targets (cpu_instrs, cgb-acid2), checked by its tests
+  headless-qemu/           not a workspace member (thumbv7em only): the same gbc-firmware headless call on QEMU mps2-an500 (Cortex-M7), board placement with a stand-in ITCM, semihosting output; run.sh diffs its `headless ` lines with headless/expected/ (plan Stage 2 M1, gate H6). A test harness, not a board: no PAC, no gbc-nucleo-h753
   h7-bench/                not a workspace member: bare-metal cycle measurement on a NUCLEO-H753ZI (first on a NUCLEO-H755ZI-Q; its README); from Stage 2 M1 it takes its bring-up from gbc-nucleo-h753's lib (ADR 0036)
   memory-x/                (Stage 2, not yet created) host lib, build-dependency of gbc-nucleo-h753 and h7-bench: generates memory.x (chip maps, placements, .itcm rules from perf/itcm-sections.txt; ADR 0026, 0036)
   gbc-pc/                  (Stage 2, not yet created) PC companion, native Windows .exe (x86_64-pc-windows-gnu): sends ROM/.sav, pulls saves, forwards keys, prints stats; deps gbc-link + windows-sys (plan D9: no serialport)

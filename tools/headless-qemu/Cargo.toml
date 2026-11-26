@@ -1,0 +1,45 @@
+[package]
+name = "headless-qemu"
+description = "The gbc-firmware headless loop on QEMU mps2-an500 (Cortex-M7), semihosting output: the board-free smoke run of plan Stage 2 M1 / gate H6"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license = "MIT"
+
+# Not a member of the root workspace: it only builds for thumbv7em and has
+# its own profile and rustflags (.cargo/config.toml), as gbc-nucleo-h753
+# and tools/h7-bench.
+[workspace]
+
+[[bin]]
+name = "headless-qemu"
+test = false
+bench = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+# The runtime pinned as in gbc-nucleo-h753 (its Cargo.toml), so the QEMU
+# image starts up through the same cortex-m-rt as the board image. No PAC:
+# mps2-an500 has no STM32 peripherals, and cortex-m-rt without `device`
+# supplies a default interrupt table.
+[dependencies]
+cortex-m = "=0.7.10"
+cortex-m-rt = { version = "=0.7.7", features = ["paint-stack"] }
+# As tools/h7-bench's `qemu` image: QEMU prints semihosting writes on its
+# stdout and turns SYS_EXIT into its exit status.
+cortex-m-semihosting = "=0.5.0"
+gbc-core = { path = "../../crates/gbc-core" }
+gbc-firmware = { path = "../../crates/gbc-firmware" }
+
+[build-dependencies]
+memory-x = { path = "../memory-x" }
+
+# As gbc-nucleo-h753's release profile (and the root workspace's).
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
