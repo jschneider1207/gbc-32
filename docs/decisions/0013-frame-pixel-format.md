@@ -8,7 +8,7 @@ ADR 0006 fixed `Frame` as `[u16; 160 * 144]` RGB555 (bits 0-4 red, 5-9
 green, 10-14 blue). The M1 API review (finding 4) asked that the format and
 stride be confirmed before the PPU is written, because the MCU displays
 want something else: STM32 LTDC takes RGB565 or ARGB1555 (with blue in the
-low bits), and the dev board's ILI9341V takes RGB565 over the 8080 bus.
+low bits), and the dev board's ST7789V (shield variant $AZ2) takes RGB565 over the 8080 bus.
 Changing the format after the renderer exists means touching every pixel
 write.
 
@@ -37,7 +37,7 @@ Facts that decide it:
   CGB palette RAM are kept as ready RGB555 `u16` entries. The pixel loop
   only indexes a color table; it never converts.
 - Conversion to the display's format (RGB565, byte-swapped RGB565 for
-  the ILI9341V, ARGB1555, ...) is the platform's job, fused with scaling.
+  the ST7789V, ARGB1555, ...) is the platform's job, fused with scaling.
 
 ## Consequences
 - No public API change; ADR 0006 stands.
@@ -48,3 +48,5 @@ Facts that decide it:
   fix is a per-platform output format chosen at `load`, applied in the
   palette-write path. That would be a new ADR amending 0006, needing the
   human.
+
+Correction (2026-11-26): the dev board's panel is an ST7789V (shield variant $AZ2), not an ILI9341V; wording only, the decision is unchanged.

@@ -29,25 +29,25 @@ lcd te rising_edges_per_s=60
   left 32 written pixels reading back unchanged. The ST7789V has no
   RGBSET command.
 
-**Unverified:** the board's sticker (`XNGFX02Z1$AZ2` expected). A human
-can read it.
+**Confirmed (human, 2026-11-26):** the board's sticker reads `XNGFX02Z1$AZ2` (also visible in a photo), so this is the ST7789V variant.
 
-The ST7789V datasheet is not in `../gbc-32-hardware/datasheets/`. The copy
-used here is Sitronix "ST7789V Datasheet Version 1.3, 2014/03", 316 pages,
+The lcd-dma-probe colour test was also checked by eye on 2026-11-26 (photo): the bars are in the expected order (blue, green, red, cyan, yellow, magenta, white, grey ramp), the white marker is top-left, and nothing is inverted. So MADCTL 0x08 (BGR) and the orientation are right, and no INVON is needed.
+
+The ST7789V datasheet is in the hardware repo:
+`../gbc-32-hardware/datasheets/st7789v-lcd-driver-datasheet.pdf` (read-only
+to agents). It is Sitronix "ST7789V Datasheet Version 1.3, 2014/03", 316 pages,
 fetched 2026-11-25 from
 `https://www.newhavendisplay.com/appnotes/datasheets/LCDs/ST7789V.pdf`
 (sha256 `8ecf0e438aa25554efc473a4cfe6e436f3fb33e68cd876b25041557235d04ca1`).
-It should be added to the hardware repo's datasheet list (human; that repo
-is read-only to agents).
 
 The driver only sends what both controllers define the same way: the MIPI
 DCS commands SWRESET 01, SLPOUT 11, DISPON 29, CASET 2A, PASET 2B, RAMWR
 2C, RAMRD 2E, TEON 35, MADCTL 36 (same bit layout: MY MX MV ML RGB/BGR
 MH), COLMOD 3A (same fields), and the reads 04, 0A, 0B, 0C, DA-DC. The
 8080-I timing tables of the two datasheets have the same numbers
-(ILI9341V section 18.3.1; ST7789V section 7.4.1 Table 4, which adds TAHT
-and TCSH, 10 ns each). The reset timing is the same too (ILI9341V 15.4,
-ST7789V 7.4.5). So the driver should run either variant. Only the
+(ST7789V section 7.4.1 Table 4, which adds TAHT and TCSH, 10 ns each;
+the ILI9341V's is section 18.3.1). The reset timing is the same too
+(ST7789V 7.4.5; ILI9341V 15.4). So the driver should run either variant. Only the
 ST7789V was tested.
 
 ## Pins and alternate functions
@@ -180,9 +180,9 @@ the M3 tearing plan needs.
 ## Init sequence (`Lcd::init_panel`)
 
 1. RESX (PE11) low 1 ms (tRW ≥ 10 µs), high, wait 120 ms (tRT max, the
-   NV load). ILI9341V 15.4, ST7789V 7.4.5.
+   NV load). ST7789V 7.4.5.
 2. SWRESET (0x01), wait 120 ms (5 ms, or 120 ms before SLPOUT if sent in
-   sleep-out mode; ILI9341V 8.2.2).
+   sleep-out mode; ST7789V 9.1.2).
 3. COLMOD (0x3A) = 0x55: 16 bits per pixel on the MCU interface (and the
    unused RGB-interface field 101). Read back with RDDCOLMOD: 0x05 (the
    ST7789V reports the RGB-interface field as 0 here; the MCU field is
@@ -224,9 +224,9 @@ at the panel while `lcd-probe` runs:
 ## Readback (RAMRD, 0x2E)
 
 RAMRD returns a dummy byte, then 3 bytes per pixel, R, G, B, each a 6-bit
-value in D7..D2 (ILI9341V 8.2.24 and 7.6.3; ST7789V 9.1.23); D1..D0 are
+value in D7..D2 (ST7789V 9.1.23, 8.8.3); D1..D0 are
 masked. Frame memory holds the data as written: MADCTL's BGR bit only
-changes the panel output (ILI9341V 8.2.29), and readback confirms it.
+changes the panel output (ST7789V 9.1.28), and readback confirms it.
 
 The 16 → 18 bit expansion of the 5-bit red and blue fields is not stated
 in text in either datasheet (the ST7789V shows a "look-up table" box in a

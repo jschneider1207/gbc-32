@@ -13,19 +13,18 @@
 //! ILI9341V's default is 70 Hz). Everything this driver sends is common to
 //! both: the MIPI DCS commands (SWRESET, SLPOUT, DISPON, CASET, PASET,
 //! RAMWR, RAMRD, MADCTL, COLMOD, TEON and the status reads) with the same
-//! bit layouts, and the 8080-I timing tables are the same numbers
-//! (ILI9341V section 18.3.1; ST7789V section 7.4.1 Table 4, which adds
-//! TAHT and TCSH, 10 ns each). Section numbers below are the ILI9341V's
-//! unless marked ST7789V.
+//! bit layouts, and the 8080-I timing minimums are the same numbers in
+//! both datasheets (ST7789V Table 4, section 7.4.1, which adds TAHT and
+//! TCSH, 10 ns each). Section numbers below are the ST7789V datasheet's.
 //!
 //! Sources: RM0433 Rev 9 chapter 22 (FMC) and section 8.7 (RCC); DS12117
 //! Rev 10 Table 9 (alternate functions) and Tables 55/57 (FMC asynchronous
 //! timings; the rev V part's are Tables 152/154 in the same datasheet, same
 //! values); ES0392 Rev 16 section 2.6 (FMC errata); UM2905 Rev 2 Table 2
-//! (the shield's LCD wiring); ILI9341V datasheet V1.00 (section 7.6.3
-//! 8-bit data formats, 8 commands, 15.4 reset, 18.3.1 8080-I timing);
-//! ST7789V datasheet V1.3 (Sitronix, 2014; not in the hardware repo's
-//! datasheet folder: `docs/reference/lcd-panel.md` says where from).
+//! (the shield's LCD wiring); ST7789V datasheet V1.3 (Sitronix, 2014-03;
+//! `../gbc-32-hardware/datasheets/st7789v-lcd-driver-datasheet.pdf`:
+//! 7.4.1 8080-I timing, 7.4.5 reset, 8.8 data formats, 9.1 and 9.2
+//! commands).
 //!
 //! Pins (UM2905 Table 2; AF12 is the FMC on every one, DS12117 Table 9):
 //!
@@ -78,7 +77,7 @@ pub const WIDTH: u16 = 240;
 /// See [`WIDTH`].
 pub const HEIGHT: u16 = 320;
 
-/// MADCTL (0x36, §8.2.29; ST7789V 9.1.28, the same bits): MY = MX = MV = 0, the native portrait
+/// MADCTL (0x36, ST7789V §9.1.28): MY = MX = MV = 0, the native portrait
 /// scan (240-pixel rows written in the order the panel scans them, which
 /// the M3 tearing plan relies on), ML = MH = 0 (refresh top to bottom,
 /// left to right), BGR = 1 (plan M3: the core's R-low RGB555 order goes
@@ -86,9 +85,9 @@ pub const HEIGHT: u16 = 320;
 /// colour the top 5-bit field shows, is a human check
 /// (`docs/reference/lcd-panel.md`).
 pub const MADCTL: u8 = 0x08;
-/// COLMOD (0x3A, §8.2.33; ST7789V 9.1.32): RGB-interface and MCU-interface
+/// COLMOD (0x3A, ST7789V §9.1.32): RGB-interface and MCU-interface
 /// formats 101, 16 bits per pixel (RGB565, two bytes per pixel on the
-/// 8-bit bus, high byte first, §7.6.3; ST7789V 8.8.3).
+/// 8-bit bus, high byte first, ST7789V §8.8.3).
 pub const COLMOD: u8 = 0x55;
 
 // FMC_BCR1 (RM0433 22.7.6), mode A/D asynchronous SRAM (Table 174).
@@ -176,9 +175,9 @@ impl Kernel {
     }
 }
 
-/// The 8080-I minimum times this driver meets, in ns: ILI9341V §18.3.1,
-/// the same values in ST7789V Table 4.
-mod ili {
+/// The 8080-I minimum times this driver meets, in ns: ST7789V Table 4
+/// (section 7.4.1; the ILI9341V's §18.3.1 has the same values).
+mod bus {
     /// Write cycle.
     pub const TWC: u32 = 66;
     /// WRX low / high.
@@ -250,13 +249,13 @@ impl Timing {
         // ADDSET + DATAST + 1 >= twc; data, valid Tker + 2.5 ns after NE
         // low, set up tdst before WR rises at (ADDSET + DATAST) Tker. The
         // spare cycles go half to each phase.
-        let datast_min = cyc(stretch(ili::TWRL, slack_pct), hz);
+        let datast_min = cyc(stretch(bus::TWRL, slack_pct), hz);
         let addset_min = max(
-            cyc(stretch(ili::TCS, slack_pct), hz),
-            cyc(stretch(ili::TWRH, slack_pct), hz).saturating_sub(1),
+            cyc(stretch(bus::TCS, slack_pct), hz),
+            cyc(stretch(bus::TWRH, slack_pct), hz).saturating_sub(1),
         );
         let total = max(
-            cyc(stretch(ili::TWC, slack_pct), hz),
+            cyc(stretch(bus::TWC, slack_pct), hz),
             addset_min + datast_min + 1,
         );
         let rest = total - 1;
@@ -266,7 +265,7 @@ impl Timing {
         let t_ps = 1_000_000_000_000 / hz as u64;
         assert!(
             (w_addset + w_datast) as u64 * t_ps
-                >= t_ps + FMC_TV_DATA_NE_PS as u64 + stretch(ili::TDST, slack_pct) as u64 * 1000
+                >= t_ps + FMC_TV_DATA_NE_PS as u64 + stretch(bus::TDST, slack_pct) as u64 * 1000
         );
         assert!(w_addset <= 15 && w_datast >= 1 && w_datast <= 255);
         // Read: DATAST >= trdlfm and >= tratfm + the FMC's data setup;
@@ -274,19 +273,19 @@ impl Timing {
         // D); the cycle >= trcfm; BUSTURN covers trod, so the panel has
         // let go of the bus before the FMC drives it again (at most 15).
         let r_datast = max(
-            cyc(stretch(ili::TRDLFM, slack_pct), hz),
-            cyc(ili::TRATFM + FMC_TSU_DATA_NOE, hz),
+            cyc(stretch(bus::TRDLFM, slack_pct), hz),
+            cyc(bus::TRATFM + FMC_TSU_DATA_NOE, hz),
         );
         let high = max(
-            max(cyc(stretch(ili::TRDHFM, slack_pct), hz), 2),
-            cyc(stretch(ili::TRCFM, slack_pct), hz).saturating_sub(r_datast),
+            max(cyc(stretch(bus::TRDHFM, slack_pct), hz), 2),
+            cyc(stretch(bus::TRCFM, slack_pct), hz).saturating_sub(r_datast),
         );
         let r_addset = high.div_ceil(2);
         let r_addhld = high - r_addset;
-        let r_busturn = if cyc(ili::TROD, hz) > 15 {
+        let r_busturn = if cyc(bus::TROD, hz) > 15 {
             15
         } else {
-            cyc(ili::TROD, hz)
+            cyc(bus::TROD, hz)
         };
         assert!(r_addset >= 1 && r_addset <= 15 && r_addhld >= 1 && r_addhld <= 15);
         assert!(r_datast >= 1 && r_datast <= 255);
@@ -497,14 +496,14 @@ impl Lcd {
     }
 
     /// Hardware reset and the init sequence: RESX low 1 ms (tRW >= 10 us,
-    /// §15.4; ST7789V 7.4.5), high and 120 ms (tRT, the NV-memory load);
-    /// SWRESET (0x01) and 120 ms (§8.2.2: 5 ms, 120 ms before SLPOUT if it
+    /// ST7789V §7.4.5), high and 120 ms (tRT, the NV-memory load);
+    /// SWRESET (0x01) and 120 ms (§9.1.2: 5 ms, 120 ms before SLPOUT if it
     /// was sent in sleep-out mode); COLMOD
-    /// [`COLMOD`]; MADCTL [`MADCTL`]; SLPOUT (0x11) and 120 ms (§8.2.12:
+    /// [`COLMOD`]; MADCTL [`MADCTL`]; SLPOUT (0x11) and 120 ms (§9.1.12:
     /// 5 ms before the next command, 120 ms before SLPIN); DISPON (0x29);
     /// TEON (0x35, mode 0: V-blank only). The power, VCOM and gamma
     /// registers keep their reset values (loaded from the module's NV
-    /// memory at reset, §15.4 note 1).
+    /// memory at reset, §7.4.5 Table 9 note 1).
     pub fn init_panel(&mut self) {
         let e = gpioe();
         // SAFETY: BSRR is write-only; bit 27 resets PE11, bit 11 sets it.
@@ -583,7 +582,7 @@ impl Lcd {
     }
 
     /// After the last read of a burst: the panel may drive the bus up to
-    /// trod = 80 ns after RD rises (§18.3.1; ST7789V TODH), longer than BUSTURN
+    /// trod = 80 ns after RD rises (ST7789V Table 4, TODH), longer than BUSTURN
     /// covers at 236 MHz (15 cycles, 64 ns); 1 us before the next write.
     pub fn end_read(&mut self) {
         delay_us(1);
@@ -626,7 +625,7 @@ impl Lcd {
         }
     }
 
-    /// One RGB565 pixel, high byte first (§7.6.3; ST7789V 8.8.3).
+    /// One RGB565 pixel, high byte first (ST7789V §8.8.3).
     #[inline(always)]
     pub fn pixel(&mut self, rgb565: u16) {
         let [hi, lo] = rgb565.to_be_bytes();

@@ -284,7 +284,7 @@ nops.
   `ili9341v-lcd-driver-datasheet.pdf`), a 240x216 image is 103,680 writes,
   about 6.8 ms, 41% of a frame if the CPU blocks on it. So the push must be
   DMA-driven from a converted buffer, which is one more reason the `Frame`
-  itself need not be DMA-reachable.
+  itself need not be DMA-reachable. [Correction 2026-11-26: the shield on this board is the $AZ2 variant with an ST7789V; same 66 ns write cycle.]
 - Proposed change: in the placement plan, put `Frame` in DTCM and scale and
   convert right after `FRAME_READY` into a DMA-reachable buffer; one `Frame`
   is then enough (no double buffering, 46 KB saved, which matters on the

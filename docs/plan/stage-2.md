@@ -348,7 +348,7 @@ ITCM tiering does not carry over (the H735 puts the whole core in ITCM).
 ## M7: Stage 2 review and sign-off
 
 - [ ] Full `gate-stage2.sh` (host and board) passes
-- [ ] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ST7789V (and ILI9341V): clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
+- [ ] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ST7789V: clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
 - [ ] Turn lows into one-line Stage 3 plan tasks; write the carry-over list into `docs/architecture.md` "Targets"
 - [ ] Human sign-off checklist (bottom)
 
@@ -532,10 +532,7 @@ shown. D8 is a note.
 ## Facts not verified (each has a task above)
 
 The shield's QSPI part number, maximum clock, DTR/QPI support and
-quad-enable bit. Whether the 66 ns write cycle is reachable through the
-shield. PE4 as FMC_A20 and the 0x6010_0000 data address. A panel rate
-near 59.7 Hz with DIVA = 01. The panel's native scan direction relative to
-how the shield is mounted. VCP baud rates above 115200.
+quad-enable bit. VCP baud rates above 115200.
 The HSE/MCO finding is settled (D11). An ST app-note citation for the M7 MPU setup of
 the QSPI and FMC regions. Unaligned loads from the QSPI window (tested in
 M2). Whether the Cortex-M7 DWT has a branch-mispredict counter (believed
@@ -548,8 +545,8 @@ reliably on the H753 after the 2026-11-25 USB drop.
 
 | # | Check | How | Result |
 |---|---|---|---|
-| 1 | Display | cgb-acid2 and dmg-acid2 look like their references; a game in motion looks acceptable (tearing, judder) | |
+| 1 | Display | cgb-acid2 and dmg-acid2 look like their references; a game in motion looks acceptable (tearing, judder) | Partial (human, 2026-11-26): Wario Land 3 looked okay; colour test photo correct (order, orientation, not inverted). cgb-acid2/dmg-acid2 look not yet done. |
 | 2 | Audio | `cgb_sound`'s tones plus a game's music: no crackle or drift, right pitch | |
-| 3 | Input | every Game Boy button works on the input-test screen and in a game, with the joystick for the D-pad and PC input for the rest (and for all 8 on their own) | |
+| 3 | Input | every Game Boy button works on the input-test screen and in a game, with the joystick for the D-pad and PC input for the rest (and for all 8 on their own) | Done (human, 2026-11-26): buttons worked, PC input too. |
 | 4 | Real games at full speed | about 10 minutes each: Shantae, Alone in the Dark, Wario Land 3, LADX, Pokémon Crystal (save load and dump over the serial link, D6) | |
 | 5 | Power cycle | unplug and replug USB, then the banner shows `supply=ldo actvosrdy=1` and VOS0 (the supply write is only really exercised by a power-on reset) | |
