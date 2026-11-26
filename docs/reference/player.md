@@ -112,6 +112,29 @@ ring short; 0 = no audible gap), `overruns`, `presented`/`skipped`
 `replies_dropped`, `sessions`, `stats_sent`, `stats_dropped`, `rx_high`,
 `tx_errors`, `baud`.
 
+`stack_used=<used>/<size>` (also since boot, in both modes; between
+`stats_dropped` and `rx_high`): the deepest stack use in bytes, from the
+paint high-water mark (`stack::usage`), of the DTCM stack region. **Stack
+figures** (M5 review P-1, 2026-11-26, branch `m5-fix-stack`; region
+22,912 B with the guard): live mode 12,968 B after boot and the first
+`Stats`, and still 12,968 after a save load (`reload`), two dumps
+(`save::take` + FNV) and more `Stats` windows (`gbc-pc load --sav`,
+`dump`, `play`; run-player-save.sh PASS at 12,968): 9.9 KB of headroom,
+the save paths are not the deepest. Scripted mode measured 19,800 B
+before the guard (its end-of-run report path; about 3.1 KB headroom).
+
+**Stack guard** (M1 review F-2): 128 B of no-access MPU region
+(`mpu::REGION_STACK_GUARD`, region 11) at `__stack_guard`, between the
+statics and `_stack_end` (memory_x::firmware_memory_x; every image of
+this crate and h7-bench; build.sh checks the layout). An overflow that
+reaches it faults; a deliberate recursion on the `boot` image
+(2026-11-26) gave `hardfault sp=0x20000150 frame=ok pc=0 cfsr=0x00000092
+hfsr=0x40000000 mmfar=0x2000017c`: DACCVIOL with MMFAR in the guard
+(0x20000100..0x20000180), MSTKERR (the HardFault frame stacked into the
+guard too, refused; the handler then skips the frame, and now prints
+`frame=none` for it), no lockup. A frame larger than the guard can still
+skip it, so the headroom above still matters.
+
 **Over budget** means the loop could not keep real time if every frame
 cost that much (plan D7, M6 "the whole loop fits real time"). The ring
 (about 75 ms of audio) absorbs single slow frames, so an over-budget
