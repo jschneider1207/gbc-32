@@ -57,9 +57,9 @@ Last `Stats`: `total_frames=39702` (over 10 minutes),
 `total_core_max=3385726` (42.8% of budget), `total_busy_max=3902609`, last
 window `slack_min=4062939`, `presented=37839 skipped=1862`,
 `display_errors=0 stuck=0 dac_restarts=0`, link `bad_frames=0 naks=0`,
+`inputs=1259`, `rom_hash=8813cb5d7ea113b3`, `stack_used=12904/22912`.
 Counters run since boot with no drain or stop, so 0 underruns covers the
 whole run. Audio streaming to the PC was off
-underruns covers the whole run. Audio streaming to the PC was off
 (`audio_on=0`); the DAC path itself runs on the board as in M5.
 
 ## Board state left
