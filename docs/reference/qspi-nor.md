@@ -338,7 +338,9 @@ The receiver's whole tolerance for 8N1 is 3.75% or 3.33% at 16x and
 2.50% or 2% at 8x (RM0433 48.5.8, Tables 406 and 407: BRR[3:0] zero or
 not). It covers both ends' errors, so 8 M and 12 M are not usable.
 Which rates the ST-LINK/V3's VCP can produce on its side is
-**unverified** (its user manual is not local).
+**unverified** (its user manual is not local). The loader's full-load
+measurements at 115,200 to 4,000,000 (all clean; 4 M chosen) are in
+`loader.md`.
 
 **Verified on the board (2026-11-25)** with a PowerShell
 `System.IO.Ports.SerialPort` on COM5, under the board lock: a 23-byte
