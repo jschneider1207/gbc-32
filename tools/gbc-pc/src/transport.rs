@@ -23,3 +23,29 @@ impl<T: Transport + ?Sized> Transport for &mut T {
         (**self).read_timeout(buf, timeout)
     }
 }
+
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        (**self).write_all(data)
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        (**self).read_timeout(buf, timeout)
+    }
+}
+
+/// `--port null`: no board. Writes go nowhere and reads wait out their
+/// timeout with nothing, so `play --port null --seconds N` exercises the
+/// keyboard and the loop without opening a COM port.
+pub struct NullPort;
+
+impl Transport for NullPort {
+    fn write_all(&mut self, _data: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn read_timeout(&mut self, _buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        std::thread::sleep(timeout);
+        Ok(0)
+    }
+}

@@ -1,5 +1,7 @@
-//! A simulated board for tests: [`SimBoard`] follows the loader side of
-//! the protocol over a fake flash, and [`Faulty`] sits in front of it and
+//! A simulated board for tests: [`SimBoard`] follows the board side of
+//! the protocol (the loader over a fake flash, plus the M5 save load,
+//! save dump and `Input`, `docs/reference/link-protocol.md`), and
+//! [`Faulty`] sits in front of it and
 //! injects link faults. Both are [`Transport`]s whose reads never block:
 //! a read with nothing queued returns 0 at once, which the client treats
 //! as the timeout passing.
@@ -25,7 +27,28 @@ pub struct Work {
     pub duplicates: u32,
     /// Frames that failed to decode (answered `Nak`).
     pub bad_frames: u32,
+    pub save_begins: u32,
+    pub save_chunks: u32,
+    /// `SaveDumpRequest`s answered (with a dump or a `Nak`).
+    pub dumps: u32,
 }
+
+/// A fault in a dump the board sends (see [`SimBoard::dump_faults`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DumpFault {
+    /// Only the first `n` chunks are sent.
+    Truncate(usize),
+    /// One byte of chunk frame `i` is changed (fails its CRC).
+    CorruptChunk(usize),
+    /// `SaveBegin.hash` is off by one.
+    BadHash,
+    /// A `Stats` frame goes out before every chunk (not a fault: the PC
+    /// must skip it).
+    StatsBetween,
+}
+
+/// [`SimBoard::dump_faults`] index for "every dump".
+pub const EVERY_DUMP: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -44,6 +67,25 @@ pub struct SimBoard {
     /// Flips bit 0 of this ROM offset as it is programmed (bad flash).
     pub corrupt_flash_at: Option<u32>,
     pub work: Work,
+    /// The save the running game has (what a dump sends); a verified
+    /// save load replaces it.
+    pub save: Option<Vec<u8>>,
+    /// The cartridge's save size: a `SaveBegin` of another length is
+    /// refused `Nak OutOfRange` (as `gbc_firmware::save::check` would).
+    /// `None` takes any non-zero length.
+    pub save_len: Option<u32>,
+    /// Flips bit 0 of this save offset as it arrives (the board's hash
+    /// check then refuses the save).
+    pub corrupt_save_at: Option<u32>,
+    /// Chunk data size of dumps.
+    pub dump_chunk: usize,
+    /// Faults by dump number (0 = the first `SaveDumpRequest`, or
+    /// [`EVERY_DUMP`]).
+    pub dump_faults: Vec<(u32, DumpFault)>,
+    /// Every `Input` bitmap received, in order.
+    pub inputs: Vec<u8>,
+    /// The save load in progress: length, hash, bytes so far.
+    save_load: Option<(u32, u64, Vec<u8>)>,
     state: State,
     raw: Vec<u8>,
     /// The last request frame answered and its reply, both as on the wire.
@@ -61,6 +103,13 @@ impl SimBoard {
             stored: None,
             corrupt_flash_at: None,
             work: Work::default(),
+            save: None,
+            save_len: None,
+            corrupt_save_at: None,
+            dump_chunk: gbc_link::MAX_CHUNK,
+            dump_faults: Vec::new(),
+            inputs: Vec::new(),
+            save_load: None,
             state: State::Idle,
             raw: Vec::new(),
             last: None,
@@ -72,6 +121,17 @@ impl SimBoard {
     pub fn rom(&self, len: usize) -> &[u8] {
         let start = IMAGE_HEADER_LEN as usize;
         &self.flash[start..start + len]
+    }
+
+    /// Queues a `Stats` frame, as the running game sends them.
+    pub fn push_stats(&mut self, frames: u32, cycles_mean: u32, cycles_max: u32) {
+        let m = Message::Stats {
+            frames,
+            cycles_mean,
+            cycles_max,
+            extra: &[],
+        };
+        self.out.extend(encode(&m, 0));
     }
 
     /// Everything the board has sent and the client has not read.
@@ -110,6 +170,19 @@ impl SimBoard {
             }
             None => return,
         };
+        // `Input` is not answered (and not a request to repeat); a dump
+        // is a stream, every request a fresh snapshot.
+        match msg {
+            Req::Input { buttons } => {
+                self.inputs.push(buttons);
+                return;
+            }
+            Req::SaveDumpRequest => {
+                self.dump(seq);
+                return;
+            }
+            _ => {}
+        }
         // A repeat of the last answered frame is a resend: answer again,
         // don't redo the work. `Hello` opens a session, so it is always
         // handled afresh and forgets the last frame (a new session's
@@ -199,7 +272,93 @@ impl SimBoard {
                 self.state = State::Idle;
                 Ans::RomDone { hash: read_back }
             }
-            Req::Other => nak(NakCode::UnexpectedType),
+            Req::SaveBegin { len, hash } => {
+                if len == 0 || self.save_len.is_some_and(|n| n != len) {
+                    return nak(NakCode::OutOfRange);
+                }
+                self.work.save_begins += 1;
+                self.save_load = Some((len, hash, Vec::with_capacity(len as usize)));
+                Ans::Ack
+            }
+            Req::SaveChunk { offset, data } => {
+                let Some((len, hash, buf)) = &mut self.save_load else {
+                    return nak(NakCode::UnexpectedType);
+                };
+                let end = u64::from(offset) + data.len() as u64;
+                if offset as usize != buf.len()
+                    || data.is_empty()
+                    || end > u64::from(*len)
+                    || data.len() > usize::from(self.max_chunk)
+                {
+                    return nak(NakCode::OutOfRange);
+                }
+                self.work.save_chunks += 1;
+                buf.extend_from_slice(&data);
+                if let Some(bad) = self.corrupt_save_at
+                    && (offset..end as u32).contains(&bad)
+                {
+                    buf[bad as usize] ^= 1;
+                }
+                if buf.len() < *len as usize {
+                    return Ans::Ack;
+                }
+                // The whole save is here: verify, then apply or refuse
+                // (never half-applied).
+                let hash = *hash;
+                let (_, _, buf) = self.save_load.take().expect("checked above");
+                if fnv::hash(&buf) != hash {
+                    return nak(NakCode::HashMismatch);
+                }
+                self.save = Some(buf);
+                Ans::Ack
+            }
+            Req::Input { .. } | Req::SaveDumpRequest | Req::Other => nak(NakCode::UnexpectedType),
+        }
+    }
+
+    /// Answers `SaveDumpRequest` `seq`: `SaveBegin` then the chunks, all
+    /// with `seq`; `Nak UnexpectedType` when there is no save.
+    fn dump(&mut self, seq: u8) {
+        let n = self.work.dumps;
+        self.work.dumps += 1;
+        let faults: Vec<DumpFault> = self
+            .dump_faults
+            .iter()
+            .filter(|&&(i, _)| i == n || i == EVERY_DUMP)
+            .map(|&(_, f)| f)
+            .collect();
+        let Some(save) = self.save.clone() else {
+            let nak = Message::Nak {
+                code: NakCode::UnexpectedType,
+            };
+            self.out.extend(encode(&nak, seq));
+            return;
+        };
+        let mut hash = fnv::hash(&save);
+        if faults.contains(&DumpFault::BadHash) {
+            hash ^= 1;
+        }
+        let begin = Message::SaveBegin {
+            len: save.len() as u32,
+            hash,
+        };
+        self.out.extend(encode(&begin, seq));
+        for (i, data) in save.chunks(self.dump_chunk).enumerate() {
+            if faults.contains(&DumpFault::Truncate(i)) {
+                break;
+            }
+            if faults.contains(&DumpFault::StatsBetween) {
+                self.push_stats(i as u32, 1, 2);
+            }
+            let msg = Message::SaveChunk {
+                offset: (i * self.dump_chunk) as u32,
+                data,
+            };
+            let mut frame = encode(&msg, seq);
+            if faults.contains(&DumpFault::CorruptChunk(i)) {
+                flip(&mut frame);
+            }
+            self.out.extend(frame);
         }
     }
 }
@@ -225,6 +384,10 @@ enum Req {
     RomBegin { len: u32, hash: u64 },
     RomChunk { offset: u32, data: Vec<u8> },
     RomEnd,
+    SaveBegin { len: u32, hash: u64 },
+    SaveChunk { offset: u32, data: Vec<u8> },
+    SaveDumpRequest,
+    Input { buttons: u8 },
     Other,
 }
 
@@ -237,6 +400,13 @@ fn owned(m: &Message<'_>) -> Req {
             data: data.to_vec(),
         },
         Message::RomEnd => Req::RomEnd,
+        Message::SaveBegin { len, hash } => Req::SaveBegin { len, hash },
+        Message::SaveChunk { offset, data } => Req::SaveChunk {
+            offset,
+            data: data.to_vec(),
+        },
+        Message::SaveDumpRequest => Req::SaveDumpRequest,
+        Message::Input { buttons } => Req::Input { buttons },
         _ => Req::Other,
     }
 }

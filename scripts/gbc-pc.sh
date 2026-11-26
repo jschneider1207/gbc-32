@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Run the PC companion (tools/gbc-pc) against the board from WSL.
 #
-#   scripts/gbc-pc.sh load <rom> [--port COM5] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
-#   scripts/gbc-pc.sh hello      [--port COM5] [--baud 2000000]
+#   scripts/gbc-pc.sh load <rom> [--sav <file.sav>]             [link options]
+#   scripts/gbc-pc.sh dump <out.sav>                            [link options]
+#   scripts/gbc-pc.sh play [--sav-out <file.sav>] [--seconds N] [link options]
+#   scripts/gbc-pc.sh hello                                     [link options]
+#   link options: [--port COM5|null] [--baud 2000000] [--retries 5] [--timeout-ms 2000]
 #
 # WSL has poor COM-port access, so gbc-pc is a native Windows console .exe
 # (plan stage-2.md, "Crate layout"). This cross-builds it for
@@ -10,7 +13,16 @@
 # scratch dir under the Windows %TEMP% (as scripts/run-windows.sh does),
 # runs it through WSL interop with the given arguments while holding the
 # board lock (scripts/lib/board-lock.sh), deletes the scratch dir and exits
-# with the exe's exit code (0 ok, 1 link/load failure, 2 usage error).
+# with the exe's exit code (0 ok, 1 link/load/dump failure, 2 usage error).
+#
+# Saves (M5, docs/reference/link-protocol.md): `--sav` is copied into the
+# scratch dir like the ROM. `dump` and `play --sav-out` write into the
+# scratch dir (the exe writes only a complete, verified save, via a
+# `.part` file and a rename), and the file is copied to the given path
+# after the exe exits (again via `<path>.part` and mv), so in `play` an
+# F5 dump reaches the WSL path only when play ends. `--port null` runs
+# without a board (no COM port, no board lock), e.g. the interop smoke
+# test `scripts/gbc-pc.sh play --port null --seconds 2`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,23 +32,57 @@ root=$PWD
 . "$root/scripts/lib/board-lock.sh"
 
 usage() {
-  echo "usage: $0 load <rom> [--port COM5] [--baud N] [--retries N] [--timeout-ms N]" >&2
-  echo "       $0 hello [--port COM5] [--baud N] [--retries N] [--timeout-ms N]" >&2
+  echo "usage: $0 load <rom> [--sav <file.sav>] [link options]" >&2
+  echo "       $0 dump <out.sav> [link options]" >&2
+  echo "       $0 play [--sav-out <file.sav>] [--seconds N] [link options]" >&2
+  echo "       $0 hello [link options]" >&2
+  echo "link options: [--port COM5|null] [--baud N] [--retries N] [--timeout-ms N]" >&2
   exit 2
 }
 
 [ $# -ge 1 ] || usage
 cmd=$1; shift
 rom=""
+out=""   # where a dumped save goes (dump <out>, play --sav-out <out>)
 case $cmd in
   load)
     [ $# -ge 1 ] || usage
     rom=$1; shift
     [ -f "$rom" ] || { echo "gbc-pc.sh: no such ROM: $rom" >&2; exit 2; }
     ;;
-  hello) ;;
+  dump)
+    [ $# -ge 1 ] || usage
+    out=$1; shift
+    ;;
+  play|hello) ;;
   *) usage ;;
 esac
+
+sav=""
+null_port=0
+rest=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --sav)
+      [ $# -ge 2 ] || usage
+      sav=$2; shift 2
+      [ -f "$sav" ] || { echo "gbc-pc.sh: no such save: $sav" >&2; exit 2; }
+      ;;
+    --sav-out)
+      [ $# -ge 2 ] || usage
+      out=$2; shift 2
+      ;;
+    --port)
+      [ $# -ge 2 ] || usage
+      [ "${2,,}" = null ] && null_port=1
+      rest+=("$1" "$2"); shift 2
+      ;;
+    *) rest+=("$1"); shift ;;
+  esac
+done
+if [ -n "$out" ]; then
+  [ -d "$(dirname "$out")" ] || { echo "gbc-pc.sh: no such directory for $out" >&2; exit 2; }
+fi
 
 exe=$(cargo build -p gbc-pc --release --target x86_64-pc-windows-gnu \
   --message-format=json-render-diagnostics \
@@ -55,13 +101,34 @@ if [ -n "$rom" ]; then
   cp "$rom" "$scratch/$rom_name"
   args+=("$(wslpath -w "$scratch/$rom_name")")
 fi
-args+=("$@")
+if [ -n "$sav" ]; then
+  mkdir "$scratch/sav-in"
+  cp "$sav" "$scratch/sav-in/$(basename "$sav")"
+  args+=(--sav "$(wslpath -w "$scratch/sav-in/$(basename "$sav")")")
+fi
+win_out=""
+if [ -n "$out" ]; then
+  win_out=$(wslpath -w "$scratch")'\out.sav'
+  case $cmd in
+    dump) args+=("$win_out") ;;
+    play) args+=(--sav-out "$win_out") ;;
+  esac
+fi
+args+=("${rest[@]}")
 
 run_exe() { (cd "$scratch" && ./gbc-pc.exe "${args[@]}"); }
 
 set +e
-with_board_lock run_exe
+if [ "$null_port" = 1 ]; then
+  run_exe
+else
+  with_board_lock run_exe
+fi
 code=$?
 set -e
+if [ -n "$out" ] && [ -f "$scratch/out.sav" ]; then
+  cp "$scratch/out.sav" "$out.part" && mv "$out.part" "$out"
+  echo "gbc-pc.sh: save written to $out"
+fi
 echo "gbc-pc.sh: exit code $code"
 exit "$code"

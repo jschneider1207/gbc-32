@@ -43,6 +43,8 @@ impl Default for Config {
 pub enum Failure {
     Timeout,
     Nak(NakCode),
+    /// A save dump arrived broken ([`crate::save::DumpError`]).
+    Dump(crate::save::DumpError),
 }
 
 impl fmt::Display for Failure {
@@ -50,6 +52,7 @@ impl fmt::Display for Failure {
         match self {
             Self::Timeout => f.write_str("no answer (timeout)"),
             Self::Nak(code) => write!(f, "Nak {}", nak_name(*code)),
+            Self::Dump(e) => write!(f, "{e}"),
         }
     }
 }
@@ -94,6 +97,11 @@ pub enum Error {
         sent: u64,
         board: u64,
     },
+    SaveEmpty,
+    /// Over [`crate::save::MAX_SAVE_LEN`].
+    SaveTooLarge {
+        len: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -125,6 +133,12 @@ impl fmt::Display for Error {
                 f,
                 "hash mismatch: ROM {sent:#018x}, board read back {board:#018x}"
             ),
+            Self::SaveEmpty => f.write_str("save is empty"),
+            Self::SaveTooLarge { len } => write!(
+                f,
+                "save is {len} bytes, over the {} this tool accepts",
+                crate::save::MAX_SAVE_LEN
+            ),
         }
     }
 }
@@ -153,7 +167,7 @@ pub enum Reply {
 }
 
 impl Reply {
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Ack => "Ack",
             Self::HelloReply { .. } => "HelloReply",
@@ -194,6 +208,78 @@ pub struct Stats {
     pub other: u32,
 }
 
+/// A board -> PC frame, owned. PC -> board types (other than the save
+/// frames, which go both ways) are `Other`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Incoming {
+    Reply(Reply),
+    Nak(NakCode),
+    SaveBegin {
+        len: u32,
+        hash: u64,
+    },
+    SaveChunk {
+        offset: u32,
+        data: Vec<u8>,
+    },
+    Stats {
+        frames: u32,
+        cycles_mean: u32,
+        cycles_max: u32,
+    },
+    Other,
+}
+
+impl Incoming {
+    fn from_message(m: &Message<'_>) -> Self {
+        match *m {
+            Message::Nak { code } => Self::Nak(code),
+            Message::Ack => Self::Reply(Reply::Ack),
+            Message::HelloReply {
+                protocol,
+                max_chunk,
+                flash_len,
+            } => Self::Reply(Reply::HelloReply {
+                protocol,
+                max_chunk,
+                flash_len,
+            }),
+            Message::AlreadyLoaded => Self::Reply(Reply::AlreadyLoaded),
+            Message::RomDone { hash } => Self::Reply(Reply::RomDone { hash }),
+            Message::SaveBegin { len, hash } => Self::SaveBegin { len, hash },
+            Message::SaveChunk { offset, data } => Self::SaveChunk {
+                offset,
+                data: data.to_vec(),
+            },
+            Message::Stats {
+                frames,
+                cycles_mean,
+                cycles_max,
+                ..
+            } => Self::Stats {
+                frames,
+                cycles_mean,
+                cycles_max,
+            },
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What [`Client::recv`] got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Received {
+    Frame {
+        seq: u8,
+        msg: Incoming,
+    },
+    /// A frame that failed COBS, CRC or length checks (counted in
+    /// [`Stats::corrupt`]).
+    Corrupt,
+    /// Nothing within the timeout.
+    Timeout,
+}
+
 enum Wait {
     Reply(Reply),
     Nak(NakCode),
@@ -210,6 +296,8 @@ pub struct Client<T: Transport> {
     rx_pos: usize,
     rx_len: usize,
     pub stats: Stats,
+    /// The last `HelloReply`, once [`Client::hello`] has run.
+    pub info: Option<BoardInfo>,
 }
 
 impl<T: Transport> Client<T> {
@@ -224,6 +312,65 @@ impl<T: Transport> Client<T> {
             rx_pos: 0,
             rx_len: 0,
             stats: Stats::default(),
+            info: None,
+        }
+    }
+
+    pub fn config(&self) -> Config {
+        self.cfg
+    }
+
+    /// Sends `msg` once with the next `seq`, waiting for nothing (for
+    /// `Input`, which the board does not answer, and for requests whose
+    /// answer the caller collects with [`Client::recv`]). Returns the seq.
+    pub fn send(&mut self, msg: &Message<'_>) -> Result<u8, Error> {
+        let seq = self.next_seq;
+        self.next_seq = seq.wrapping_add(1);
+        let n = self.encode(msg, seq)?;
+        self.t.write_all(&self.frame[..n])?;
+        Ok(seq)
+    }
+
+    fn encode(&mut self, msg: &Message<'_>, seq: u8) -> Result<usize, Error> {
+        gbc_link::encode(msg, seq, &mut self.frame).map_err(|e| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot encode {}: {e:?}", msg_name(msg)),
+            ))
+        })
+    }
+
+    /// The next frame from the board, waiting up to `timeout` for bytes
+    /// (bytes already received are decoded first, even with a zero
+    /// timeout).
+    pub fn recv(&mut self, timeout: Duration) -> Result<Received, Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            while self.rx_pos < self.rx_len {
+                let (used, frame) = self.dec.feed_slice(&self.rx[self.rx_pos..self.rx_len]);
+                self.rx_pos += used;
+                match frame {
+                    None => {}
+                    Some(Ok((seq, m))) => {
+                        let msg = Incoming::from_message(&m);
+                        return Ok(Received::Frame { seq, msg });
+                    }
+                    Some(Err(_)) => {
+                        self.stats.corrupt += 1;
+                        return Ok(Received::Corrupt);
+                    }
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(Received::Timeout);
+            }
+            let n = self.t.read_timeout(&mut self.rx, left)?;
+            if n == 0 {
+                return Ok(Received::Timeout);
+            }
+            self.rx_pos = 0;
+            self.rx_len = n;
         }
     }
 
@@ -240,12 +387,7 @@ impl<T: Transport> Client<T> {
     pub fn request(&mut self, msg: &Message<'_>) -> Result<Reply, Error> {
         let seq = self.next_seq;
         self.next_seq = seq.wrapping_add(1);
-        let n = gbc_link::encode(msg, seq, &mut self.frame).map_err(|e| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot encode {}: {e:?}", msg_name(msg)),
-            ))
-        })?;
+        let n = self.encode(msg, seq)?;
         let mut attempts = 0;
         loop {
             if attempts > 0 {
@@ -278,53 +420,18 @@ impl<T: Transport> Client<T> {
     fn wait(&mut self, seq: u8) -> Result<Wait, Error> {
         let deadline = Instant::now() + self.cfg.timeout;
         loop {
-            while self.rx_pos < self.rx_len {
-                let (used, frame) = self.dec.feed_slice(&self.rx[self.rx_pos..self.rx_len]);
-                self.rx_pos += used;
-                let Some(frame) = frame else { continue };
-                let (s, m) = match frame {
-                    Ok(f) => f,
-                    Err(_) => {
-                        self.stats.corrupt += 1;
-                        continue;
-                    }
-                };
-                let reply = match m {
-                    // Any seq: see the module docs.
-                    Message::Nak { code } => return Ok(Wait::Nak(code)),
-                    Message::Ack => Reply::Ack,
-                    Message::HelloReply {
-                        protocol,
-                        max_chunk,
-                        flash_len,
-                    } => Reply::HelloReply {
-                        protocol,
-                        max_chunk,
-                        flash_len,
-                    },
-                    Message::AlreadyLoaded => Reply::AlreadyLoaded,
-                    Message::RomDone { hash } => Reply::RomDone { hash },
-                    _ => {
-                        self.stats.other += 1;
-                        continue;
-                    }
-                };
-                if s != seq {
-                    self.stats.stale += 1;
-                    continue;
-                }
-                return Ok(Wait::Reply(reply));
-            }
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Ok(Wait::Timeout);
+            match self.recv(left)? {
+                Received::Timeout => return Ok(Wait::Timeout),
+                Received::Corrupt => {}
+                Received::Frame { seq: s, msg } => match msg {
+                    // Any seq: see the module docs.
+                    Incoming::Nak(code) => return Ok(Wait::Nak(code)),
+                    Incoming::Reply(r) if s == seq => return Ok(Wait::Reply(r)),
+                    Incoming::Reply(_) => self.stats.stale += 1,
+                    _ => self.stats.other += 1,
+                },
             }
-            let n = self.t.read_timeout(&mut self.rx, left)?;
-            if n == 0 {
-                return Ok(Wait::Timeout);
-            }
-            self.rx_pos = 0;
-            self.rx_len = n;
         }
     }
 
@@ -347,11 +454,13 @@ impl<T: Transport> Client<T> {
                         ours: PROTOCOL_VERSION,
                     });
                 }
-                Ok(BoardInfo {
+                let info = BoardInfo {
                     protocol,
                     max_chunk,
                     flash_len,
-                })
+                };
+                self.info = Some(info);
+                Ok(info)
             }
             r => Err(Error::Unexpected {
                 request,
@@ -420,7 +529,7 @@ impl<T: Transport> Client<T> {
     }
 }
 
-fn unexpected(request: &'static str, r: Reply) -> Error {
+pub(crate) fn unexpected(request: &'static str, r: Reply) -> Error {
     Error::Unexpected {
         request,
         reply: r.name(),

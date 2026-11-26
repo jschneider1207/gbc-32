@@ -44,3 +44,31 @@ fn input_frames_carry_the_bitmap_unchanged() {
         assert_eq!(got, (7, Message::Input { buttons: bits }));
     }
 }
+
+/// `gbc-pc play`'s keys (the desktop front end's, docs/STATUS.md) give the
+/// firmware the right button, each alone and all together.
+#[test]
+fn play_keys_map_to_all_eight_buttons() {
+    use gbc_pc::input::{Key, KeySet};
+    let pairs = [
+        (Key::Up, Buttons::UP),
+        (Key::Down, Buttons::DOWN),
+        (Key::Left, Buttons::LEFT),
+        (Key::Right, Buttons::RIGHT),
+        (Key::Z, Buttons::B),
+        (Key::X, Buttons::A),
+        (Key::Enter, Buttons::START),
+        (Key::RightShift, Buttons::SELECT),
+        (Key::Backspace, Buttons::SELECT),
+    ];
+    for (k, b) in pairs {
+        assert_eq!(from_pc(KeySet::of(&[k]).buttons()), b, "{k:?}");
+    }
+    assert_eq!(KeySet::of(&[Key::Esc, Key::F5]).buttons(), 0);
+    let all: Vec<Key> = pairs.iter().map(|p| p.0).collect();
+    assert_eq!(KeySet::of(&all).buttons(), 0xFF);
+    assert_eq!(
+        from_pc(KeySet::of(&[Key::X, Key::Down, Key::Esc]).buttons()),
+        Buttons::A | Buttons::DOWN
+    );
+}
