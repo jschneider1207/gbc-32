@@ -58,6 +58,8 @@
 #                            <dir>/<name>.bin, .host and .serial (as saved
 #                            in RUN_REPLAY_OUT) and run only steps 5-6 on
 #                            them (RUN_PACED_CAPTURE); for tests
+#   RUN_REPLAY_RUN_PACED=<script>  the checker (default: run-paced.sh next
+#                            to this script; for tests)
 #   GBC_TEST_ROMS=<dir>      test ROMs (default: the repo's test-roms/)
 #   GBC_BUILD_LOCK=<file>    run every cargo command under `flock -x <file>`
 #   H7_DRIVE, H7_LABEL, H7_COM  as for flash.sh and read-serial.sh
@@ -144,8 +146,19 @@ check_entry() {
   return $rc6
 }
 
+# The entries the list selects, counted up front: the loop must check
+# exactly these (an entry lost to a shell error, or to a command reading
+# the list, is a tool error, never a pass).
+expected=$(awk -v only="${RUN_REPLAY_ONLY:-}" '
+  $1 == "" || substr($1, 1, 1) == "#" { next }
+  { name = $1; sub(/.*\//, "", name); sub(/\.[^.]*$/, "", name); if ($3 != "") name = $3
+    if (only == "" || index("," only ",", "," name ",")) n++ }
+  END { print n + 0 }' "$list")
+run_paced=${RUN_REPLAY_RUN_PACED:-$here/run-paced.sh}
 entries=0 checked=0
-while read -r rom_rel frames group extra; do
+# The list is read on fd 3: flash.sh, gbc-pc.sh and read-serial.sh get
+# /dev/null as stdin, so none of them can eat the rest of the list.
+while read -r rom_rel frames group extra <&3; do
   case "$rom_rel" in ''|'#'*) continue;; esac
   [ -z "${extra:-}" ] || die "$list: too many fields: $rom_rel $frames $group $extra"
   name=$(basename "${rom_rel%.*}"); [ -n "${group:-}" ] && name=$group
@@ -188,10 +201,10 @@ while read -r rom_rel frames group extra; do
   secs=$((frames / 59 + 50))
   if [ -n "$caps" ]; then
     RUN_PACED_CAPTURE=$serial RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=999999999 \
-      bash "$here/run-paced.sh" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
+      bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   else
     RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=999999999 RUN_PACED_READ_SECS=$secs \
-      RUN_PACED_SAVE=$serial bash "$here/run-paced.sh" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
+      RUN_PACED_SAVE=$serial bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   fi
   rc=$?
   sed 's/^/  /' "$out/$name.run-paced.log"
@@ -200,10 +213,11 @@ while read -r rom_rel frames group extra; do
   [ "$rc" = 2 ] && summary+=("$name: TOOL ERROR (see above)")
   result "$rc"
   checked=$((checked + 1))
-done < "$list"
+done 3< "$list" < /dev/null
 [ "$entries" -gt 0 ] || die "no entries selected from $list"
 # An entry the loop left early (a shell error) was never checked.
-[ "$checked" = "$entries" ] || die "only $checked of $entries entries were checked"
+[ "$checked" = "$entries" ] && [ "$checked" = "$expected" ] ||
+  die "only $checked of $expected selected entries were checked ($entries started)"
 
 echo "run-replay.sh: summary"
 printf '  %s\n' "${summary[@]}"

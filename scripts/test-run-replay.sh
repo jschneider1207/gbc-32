@@ -17,7 +17,7 @@ real=$here/../docs/reference/m5-evidence/report-rtc3test-sub-second.txt
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GBC_BOARD_LOCK=$tmp/lock
-unset RUN_REPLAY_ONLY RUN_REPLAY_OUT
+unset RUN_REPLAY_ONLY RUN_REPLAY_OUT RUN_REPLAY_RUN_PACED
 fails=0
 ok()  { echo "ok: $*"; }
 bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
@@ -109,6 +109,15 @@ export RUN_REPLAY_ONLY
 run "RUN_REPLAY_ONLY selects" 0 "$CLOCKED
 rtc3test/rtc3test.gb - h" 'PASS \(1 entries\)'
 unset RUN_REPLAY_ONLY
+# A checker that reads stdin must not eat the rest of the list (the first
+# board run lost 5 of 6 entries that way).
+entry g "$tmp/body"; entry h "$tmp/body"
+printf '#!/usr/bin/env bash\ncat > /dev/null\nexec bash "%s" "$@"\n' "$here/../crates/gbc-nucleo-h753/run-paced.sh" > "$tmp/eat-stdin.sh"
+RUN_REPLAY_RUN_PACED=$tmp/eat-stdin.sh
+export RUN_REPLAY_RUN_PACED
+run "a checker reading stdin sees no list" 0 "$CLOCKED
+rtc3test/rtc3test.gb - h" 'PASS \(2 entries\)'
+unset RUN_REPLAY_RUN_PACED
 # A non-numeric frame count is a tool error, never a skipped entry.
 run "bad frames" 2 "rtc3test/rtc3test.gb 6x0 g" "is not a number"
 
