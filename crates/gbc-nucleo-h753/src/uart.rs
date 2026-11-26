@@ -20,6 +20,7 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+pub use crate::baud::{BaudSetting, MAX_ERROR_PPM, baud_setting, brr_rate, effective_divisor};
 use crate::clock::{pclk1_hz, wait_for};
 use crate::pac;
 
@@ -37,18 +38,6 @@ static OVERRUNS: AtomicU32 = AtomicU32::new(0);
 static FRAMING: AtomicU32 = AtomicU32::new(0);
 static NOISE: AtomicU32 = AtomicU32::new(0);
 
-/// The largest baud-rate error [`Uart::set_baud`] accepts, in parts per
-/// million: 2%. The receiver's total tolerance for 8N1 (M = 00, ONEBIT =
-/// 0; RM0433 48.5.8, Tables 406 and 407) is 3.75% (16x, BRR[3:0] = 0) or
-/// 3.33% (16x, otherwise), and 2.50% or 2% with 8x: that budget covers
-/// both ends' errors, so an 8x setting should come out exact (as 4 Mbit/s
-/// does at 118 MHz).
-pub const MAX_ERROR_PPM: u32 = 20_000;
-
-/// [`baud_setting`] keeps 16x oversampling while its error is at most
-/// this (1%), even if 8x would be closer.
-const PREFER_16X_PPM: u32 = 10_000;
-
 // USART_ISR (RM0433 48.7.10), USART_ICR (48.7.11) bits.
 const ISR_FE: u32 = 1 << 1;
 const ISR_NE: u32 = 1 << 2;
@@ -58,67 +47,6 @@ const ISR_TC: u32 = 1 << 6;
 const ICR_FECF: u32 = 1 << 1;
 const ICR_NECF: u32 = 1 << 2;
 const ICR_ORECF: u32 = 1 << 3;
-
-/// A BRR value for a rate (RM0433 section 48.5.7).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BaudSetting {
-    /// The requested rate.
-    pub bps: u32,
-    /// USART_BRR as written (with OVER8 = 1: USARTDIV[3:0] >> 1 in
-    /// BRR[2:0], BRR[3] = 0).
-    pub brr: u32,
-    /// Oversampling by 8 (CR1.OVER8) instead of 16.
-    pub over8: bool,
-    /// The rate the setting gives, rounded.
-    pub actual: u32,
-    /// (actual - bps) / bps, in parts per million.
-    pub error_ppm: i32,
-}
-
-/// The best setting for `bps` at kernel clock `ker_hz`, or `None` if no
-/// USARTDIV of at least 16 exists (48.5.7: "USARTDIV must be greater than
-/// or equal to 16"). Oversampling by 16 (more tolerance and better noise
-/// immunity, 48.5.6 and 48.5.8) unless its error is over
-/// [`PREFER_16X_PPM`] and 8x does better.
-pub fn baud_setting(ker_hz: u32, bps: u32) -> Option<BaudSetting> {
-    if bps == 0 {
-        return None;
-    }
-    // USARTDIV for oversampling `n`: baud = (16 / n) * f / USARTDIV, so
-    // USARTDIV = (16 / n) * f / baud, rounded.
-    let try_os = |over8: bool| -> Option<BaudSetting> {
-        let num = u64::from(ker_hz) * if over8 { 2 } else { 1 };
-        let div = (num + u64::from(bps) / 2) / u64::from(bps);
-        if !(16..=0xFFFF).contains(&div) {
-            return None;
-        }
-        let div = div as u32;
-        let actual = ((num + u64::from(div) / 2) / u64::from(div)) as u32;
-        let error_ppm = ((i64::from(actual) - i64::from(bps)) * 1_000_000 / i64::from(bps)) as i32;
-        let brr = if over8 {
-            (div & !0xF) | ((div & 0xF) >> 1)
-        } else {
-            div
-        };
-        Some(BaudSetting {
-            bps,
-            brr,
-            over8,
-            actual,
-            error_ppm,
-        })
-    };
-    match (try_os(false), try_os(true)) {
-        (Some(a), Some(b))
-            if a.error_ppm.unsigned_abs() > PREFER_16X_PPM
-                && b.error_ppm.unsigned_abs() < a.error_ppm.unsigned_abs() =>
-        {
-            Some(b)
-        }
-        (Some(a), _) => Some(a),
-        (None, b) => b,
-    }
-}
 
 /// USART3's kernel clock as the clock registers stand (rcc_pclk1).
 pub fn kernel_hz() -> u32 {

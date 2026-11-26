@@ -23,6 +23,7 @@
 //! linker symbols [`tcm`] and [`fault`] read.
 #![no_std]
 
+mod baud;
 pub mod clock;
 pub mod clockcheck;
 mod fault;
