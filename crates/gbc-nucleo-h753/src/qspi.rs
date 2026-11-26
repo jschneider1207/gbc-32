@@ -399,8 +399,9 @@ impl Qspi {
     ///
     /// # Panics
     /// If `prescaler` is even (an odd division factor, ES0392 2.7.6 and
-    /// RM0433 23.5.1), or if the QUADSPI stays busy through the ES0392
-    /// 2.7.4 sequence.
+    /// RM0433 23.5.1), if the QUADSPI stays busy through the ES0392
+    /// 2.7.4 sequence, or if taking the NOR out of enhance mode fails
+    /// ([`Qspi::release_enhance`]: busy, or no completion).
     pub fn init(prescaler: u8) -> Qspi {
         assert!(
             prescaler % 2 == 1,
@@ -466,8 +467,12 @@ impl Qspi {
         let mut q = Qspi { prescaler };
         // The NOR may still be in enhance mode from an image that ran
         // before this reset (it has no reset pin and the MCU reset does
-        // not reach it). A failure shows in the first real command.
-        let _ = q.release_enhance();
+        // not reach it). Panics, as [`Mapped::exit`] does, rather than
+        // hand back a NOR that may take the next instruction (the
+        // loader's WREN, PP, SE) as an address.
+        if let Err(e) = q.release_enhance() {
+            panic!("QUADSPI init: leaving 0xEB enhance mode failed: {e:?}");
+        }
         q
     }
 
