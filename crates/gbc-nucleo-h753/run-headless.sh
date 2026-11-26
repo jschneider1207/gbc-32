@@ -29,6 +29,14 @@
 # Exit: 0 equal, 1 differ (the first differing line is printed), 2 tool
 # error (bad arguments, flash or serial failure, no complete report).
 #
+#   RUN_HEADLESS_ROM=<rom>  also require the report line's `rom_len=<n>
+#                           rom_hash=<16 hex>` (the `headless-qspi` image's:
+#                           the ADR 0037 header of the image in the NOR) to be
+#                           the length and FNV-1a 64 of <rom> as computed here
+#                           from the file, else exit 2: a stale or different
+#                           NOR image cannot pass. Also require its
+#                           `exit_fallbacks=` field (reported). Unset: no ROM
+#                           check (the internal-flash images embed theirs).
 #   RUN_HEADLESS_READ_SECS  seconds of serial to read (default 20; a 600-frame
 #                           report takes about 3.5 s, and the image re-sends
 #                           it after a 1 s pause)
@@ -60,6 +68,22 @@ trap 'rm -rf "$tmp"' EXIT
 [ -f "$img" ] || die "$img: no such file"
 read -r img_crc img_bytes < <(cksum < "$img") || die "cksum $img failed"
 want_image="image_bytes=$img_bytes image_cksum=$img_crc"
+
+# fnv1a64 <file>: FNV-1a 64 of the file's bytes, 16 hex digits (bash
+# arithmetic is 64-bit and wraps, which is the FNV modulus; about 4 s per
+# MiB).
+fnv1a64() {
+  local h=$((0xcbf29ce484222325)) b bs
+  while read -r -a bs; do
+    for b in "${bs[@]}"; do h=$(((h ^ b) * 0x100000001b3)); done
+  done < <(od -An -v -tu1 -w32 "$1")
+  printf '%016x\n' "$h"
+}
+want_rom=""
+if [ -n "${RUN_HEADLESS_ROM:-}" ]; then
+  [ -f "$RUN_HEADLESS_ROM" ] || die "RUN_HEADLESS_ROM=$RUN_HEADLESS_ROM: no such file"
+  want_rom="rom_len=$(stat -c %s "$RUN_HEADLESS_ROM") rom_hash=$(fnv1a64 "$RUN_HEADLESS_ROM")"
+fi
 
 if [ -n "${RUN_HEADLESS_CAPTURE:-}" ]; then
   [ -f "$RUN_HEADLESS_CAPTURE" ] || die "RUN_HEADLESS_CAPTURE=$RUN_HEADLESS_CAPTURE: no such file"
@@ -112,8 +136,14 @@ for f in $(ls "$tmp"/report.* 2>/dev/null | grep -E '/report\.[0-9]+$' | sort -t
     echo "run-headless.sh: a report failed its check (got $bytes B cksum $crc; $end)" >&2
   fi
 done
+# An image that refuses to run (a bad input program, or for headless-qspi
+# no valid image in the NOR) says why instead of reporting.
+if [ -z "$chosen" ]; then
+  grep -E "^$PREFIX headless (qspi |input )?error " "$tmp/serial" | tail -n 1 | sed 's/^/run-headless.sh: the board says: /' >&2
+fi
 [ -n "$chosen" ] || die "no complete report in ${secs} s of serial ($partial incomplete); serial: $(wc -l < "$tmp/serial") lines"
 echo "run-headless.sh: $complete complete report(s), $partial incomplete; comparing the last"
+grep "^$PREFIX headless qspi image " "$tmp/serial" | tail -n 1
 cat "$chosen.start"
 grep '^stats ' "$chosen"
 cat "$chosen.end"
@@ -123,6 +153,14 @@ got_image=$(grep -oE ' image_bytes=[0-9]+ image_cksum=[0-9]+( |$)' "$chosen.star
 [ "$got_image" = "$want_image" ] ||
   die "the board is not running the flashed image: its report has '${got_image:-no image_bytes/image_cksum}', $img has '$want_image'"
 echo "run-headless.sh: image matched: $want_image"
+if [ -n "$want_rom" ]; then
+  got_rom=$(grep -oE ' rom_len=[0-9]+ rom_hash=[0-9a-f]{16}( |$)' "$chosen.start" | sed 's/^ //; s/ $//')
+  [ "$got_rom" = "$want_rom" ] ||
+    die "the board's ROM is not $RUN_HEADLESS_ROM: its report has '${got_rom:-no rom_len/rom_hash}', the file is '$want_rom'"
+  fallbacks=$(grep -oE ' exit_fallbacks=[0-9]+( |$)' "$chosen.start" | tr -d ' ')
+  [ -n "$fallbacks" ] || die "the report has no exit_fallbacks field"
+  echo "run-headless.sh: ROM matched: $want_rom ($fallbacks)"
+fi
 
 grep '^headless ' "$chosen" > "$tmp/got"
 tr -d '\r' < "$expected" | grep '^headless ' > "$tmp/want"
