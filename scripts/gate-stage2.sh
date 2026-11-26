@@ -7,20 +7,48 @@
 #                                        steps B1-B5
 #   scripts/gate-stage2.sh --host-only   host steps H1-H8 only, for per-commit
 #                                        use; never a Stage 2 pass
-#   --step H4,H6   (development) H1 plus the listed host steps only. A
-#                  partial run is never a pass: it ends as --host-only does
-#                  (exit 3) or, without --host-only, at the board steps
-#                  (exit 1). H8 reports on the ELFs of the last H4.
+#   --step H4,B2   (development) H1 plus the listed steps only (host steps
+#                  H1-H8, board steps B1-B5; with --host-only, host steps
+#                  only). A partial run is never a pass: when every step
+#                  that ran passed it ends with exit 3, as --host-only does.
+#                  H8 reports on the ELFs of the last H4.
+#
+# Board steps (plan "Proposed scripts/gate-stage2.sh"; the board is the
+# NUCLEO-H753ZI on H7_DRIVE / H7_COM, default E: / COM5). The images they
+# flash are built by this run (H4, or the board steps' own build first);
+# then the whole board phase holds the board lock
+# (scripts/lib/board-lock.sh), and the board must be there (the ST-LINK
+# drive with its label and DETAILS.TXT, and the COM port): a missing board
+# is exit 1, never a pass. Every flash is followed by a serial read whose
+# checker ignores the lines before the flashed image's own output (its
+# banner's image cksum, or its fresh run):
+#   B1  selftest-pll480: tools/h7-bench/check-selftest.sh (clock=pll472,
+#       cpu_hz, VOS0/ODEN, actvosrdy, flash_acr, constant cycles=, tcmprobe)
+#   B2  bench-itcm-dtcm-pll480 with the bench pack in the NOR
+#       (tools/h7-bench/run-qspi.sh): internal-flash and QSPI hashes equal
+#       expected-hashes.txt (check-report.sh); check-cycles.sh --fresh:
+#       every line <= expected-cycles.txt + 3% (two agreeing reports),
+#       worst-case and cpu_instrs max < 7,902,557 (real time); the
+#       worst-case max against 3,951,279 is a REPORT line, not a check
+#   B3  scripts/check-stage2-sets.sh (the run lists equal
+#       acceptance/stage2.toml); the display readback self-test
+#       (run-headless.sh, headless-display-cgb-acid2: 0 mismatches); the
+#       replay set in the player-script image (run-replay.sh replay-set.txt:
+#       paced lines equal the host's, 0 underruns, 0 frames over budget),
+#       every entry PASS. Loads each replay ROM into the QSPI NOR.
+#   B4  the 10-minute synth:worst-case soak (run-replay.sh soak-set.txt):
+#       as B3, plus |ppm| <= 1000 of the board's cycle counter
+#   B5  the save round trip on the player image (run-player-save.sh, the
+#       manifest's fixture). Leaves `player` flashed, link-probe in the NOR.
+# The stack paint depth of the board runs is printed at the end (report).
 #
 # Exit status:
-#   0  Stage 2 gate passed. NOT REACHABLE in this version: the board steps
-#      B1-B5 are not implemented yet (they come with M2-M5), so a run
-#      without --host-only always ends with exit 1 after the host steps. A
-#      missing board will be exit 1 too, never a pass.
-#   1  a check failed
+#   0  Stage 2 gate passed: every host and board step, in one full run.
+#   1  a check failed (also: the board is not attached)
 #   2  a tool or runner error (missing tool, unreadable output, a script
-#      reporting its own tool error); results are not meaningful
-#   3  --host-only (or --step): every host step that ran passed. The run
+#      reporting its own tool error, serial unreadable, flash refused, a
+#      malformed line); results are not meaningful
+#   3  --host-only (or --step): every step that ran passed. The run
 #      always ends with the line `NOT A STAGE 2 GATE PASS`.
 #
 # Heavy: H2 is the whole Stage 1 gate (valgrind, fuzz, the 30-minute
@@ -36,7 +64,9 @@ cd "${ROOT}"
 
 # ---- arguments ------------------------------------------------------------
 
-ALL_STEPS="H1 H2 H3 H4 H5 H6 H7 H8"
+HOST_STEPS="H1 H2 H3 H4 H5 H6 H7 H8"
+BOARD_STEPS="B1 B2 B3 B4 B5"
+ALL_STEPS="${HOST_STEPS} ${BOARD_STEPS}"
 host_only=0
 steps=""
 usage() {
@@ -58,16 +88,23 @@ done
 partial=0
 if [ -n "${steps}" ]; then
   for s in ${steps}; do
-    case " ${ALL_STEPS} " in *" $s "*) ;; *) echo "gate-stage2.sh: unknown step '$s' (H1-H8)" >&2; exit 2 ;; esac
+    case " ${ALL_STEPS} " in *" $s "*) ;; *) echo "gate-stage2.sh: unknown step '$s' (H1-H8, B1-B5)" >&2; exit 2 ;; esac
+    if [ "${host_only}" = 1 ]; then
+      case " ${BOARD_STEPS} " in *" $s "*) echo "gate-stage2.sh: --host-only runs no board step ('$s')" >&2; exit 2 ;; esac
+    fi
   done
   partial=1
-  # H1 (the preconditions) always runs, first; the rest in H order.
+  # H1 (the preconditions) always runs, first; the rest in H, then B order.
   steps=$(for s in ${ALL_STEPS}; do case " H1 ${steps} " in *" $s "*) printf '%s ' "$s" ;; esac; done)
   steps=${steps% }
+elif [ "${host_only}" = 1 ]; then
+  steps=${HOST_STEPS}
 else
   steps=${ALL_STEPS}
 fi
 want() { case " ${steps} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+board_wanted=0
+for s in ${BOARD_STEPS}; do want "$s" && board_wanted=1; done
 
 # ---- the whole run under the build lock, if one is given -------------------
 
@@ -127,6 +164,8 @@ run_status() { set +e; "$@"; rc=$?; set -e; }
 
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 TMP=$(mktemp -d)
+# The images the board steps flash must be newer than this (built by this run).
+: > "${TMP}/gate-start"
 gate_start=$(date +%s)
 
 # The M1 acceptance ROMs (plan Stage 2 M1), name=path under test-roms/.
@@ -207,14 +246,19 @@ done
 # instead), GBC_FRAME_LOG and the other desktop variables. Plus the
 # overrides without those prefixes: TEST_ROMS, CODE_SIZE_BUDGETS_FILE,
 # ITCM_SET_FILE (gate-stage1.sh's), HEADLESS_EXPECTED, HEADLESS_QEMU_TIMEOUT,
-# QEMU (tools/headless-qemu/run.sh), RUN_HEADLESS_CAPTURE,
-# RUN_HEADLESS_READ_SECS (crates/gbc-nucleo-h753/run-headless.sh).
+# QEMU (tools/headless-qemu/run.sh), and every RUN_* and PLAY_* variable:
+# the board run scripts' overrides (RUN_HEADLESS_*, RUN_PACED_*,
+# RUN_REPLAY_*, RUN_SAVE_*, PLAY_*: a RUN_REPLAY_CAPTURES or
+# RUN_PACED_CAPTURE would replace the board with a saved capture), and
+# with CHECK_* the H7 tests' script overrides (RUN_HEADLESS, RUN_PACED,
+# RUN_REPLAY, CHECK_REPORT, CHECK_CYCLES, CHECK_ITCM_ELF, CHECK_SELFTEST,
+# CHECK_SETS: each would make its test test another script).
 # ARM_OBJDUMP (a tool path for the report-only H8) is left alone.
 unset_list=()
 for v in $(compgen -e); do
   case $v in
     H7_DRIVE | H7_LABEL | H7_COM | GBC_BOARD_LOCK | GBC_BOARD_LOCK_WAIT) ;;
-    H7_* | GBC_* | TEST_ROMS | CODE_SIZE_BUDGETS_FILE | ITCM_SET_FILE | HEADLESS_* | QEMU | RUN_HEADLESS_*)
+    H7_* | GBC_* | TEST_ROMS | CODE_SIZE_BUDGETS_FILE | ITCM_SET_FILE | HEADLESS_* | QEMU | RUN_* | PLAY_* | CHECK_*)
       unset_list+=("$v") ;;
   esac
 done
@@ -506,7 +550,8 @@ run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
 # The board run scripts' pass/fail logic, on synthetic and committed
 # captures (never the board, never the board lock; human, 2026-11-26).
-for t in test-run-headless test-check-report test-check-cycles test-check-itcm-elf test-run-paced test-run-replay; do
+for t in test-run-headless test-check-report test-check-cycles test-check-itcm-elf test-run-paced test-run-replay \
+  test-check-selftest test-check-stage2-sets; do
   sub "scripts/${t}.sh (every failure mode of the script it tests, plus a pass case)"
   run_status "scripts/${t}.sh"
   [ "${rc}" -eq 0 ] || fail "scripts/${t}.sh exited ${rc}"
@@ -612,7 +657,11 @@ for elf in crates/gbc-nucleo-h753/out/headless-cpu_instrs.elf crates/gbc-nucleo-
   [ -f "${elf}" ] || tool_error "${elf} missing (built by H4)"
   region_use "${elf}"
 done
-echo "  stack paint depth: n/a (needs a board run; the board steps B1-B5 are not implemented)"
+if [ "${board_wanted}" = 1 ]; then
+  echo "  stack paint depth: from this run's board steps, printed after them"
+else
+  echo "  stack paint depth: n/a (no board step in this run)"
+fi
 sub "scripts/report-firmware-size.exs crates/gbc-nucleo-h753/out/headless-cpu_instrs.elf"
 # The rlib the image was linked from: the newest gbc-core rlib of that
 # target directory (cargo keeps it under release/build/gbc-core/<hash>/out/).
@@ -624,11 +673,10 @@ run_status elixir scripts/report-firmware-size.exs crates/gbc-nucleo-h753/out/he
 fi
 
 # =============================================================================
-step_secs[${current}]=$(($(date +%s) - step_start))
-printf '\n==> Summary (%s s in all)\n' "$(($(date +%s) - gate_start))"
-for s in ${steps}; do printf '  %s OK  %6s s\n' "$s" "${step_secs[$s]:-?}"; done
-
 if [ "${host_only}" = 1 ]; then
+  step_secs[${current}]=$(($(date +%s) - step_start))
+  printf '\n==> Summary (%s s in all)\n' "$(($(date +%s) - gate_start))"
+  for s in ${steps}; do printf '  %s OK  %6s s\n' "$s" "${step_secs[$s]:-?}"; done
   if [ "${partial}" = 1 ]; then
     printf '\nHOST STEPS PASSED (partial run: %s)\n' "${steps}"
   else
@@ -636,11 +684,228 @@ if [ "${host_only}" = 1 ]; then
   fi
   finish 3
 fi
-[ "${partial}" = 1 ] && printf '\nHOST STEPS PASSED (partial run: %s); a partial run is never a pass\n' "${steps}"
-# Board steps B1-B5 (plan "Proposed scripts/gate-stage2.sh"): the selftest
-# image's clock and registers, the bench hashes and cycles, the replay set
-# in the player image, the soak and the save round trip. They need the
-# images of M2-M5 and are serialized under the board lock
-# (scripts/lib/board-lock.sh). Until they exist, the gate cannot pass.
-printf '\nGATE FAILED (B1-B5): board steps not implemented (B1-B5); this version of the gate cannot pass\n' >&2
-finish 1
+
+# =============================================================================
+# Board steps B1-B5 (header; plan "Proposed scripts/gate-stage2.sh")
+# =============================================================================
+FW=crates/gbc-nucleo-h753
+H7B=tools/h7-bench
+SELFTEST_BIN=${H7B}/out/h753/selftest-pll480.bin
+BENCH_BIN=${H7B}/out/h753/bench-itcm-dtcm-pll480.bin
+DISPLAY_BIN=${FW}/out/headless-display-cgb-acid2.bin
+stack_lines=()
+
+if [ "${board_wanted:-0}" = 1 ]; then
+# board_rc <what> <rc>: a board script's exit: 0 on, 1 a check failed, else
+# a tool error (the scripts' own contract: 2, or a crash).
+board_rc() {
+  case $2 in
+    0) ;;
+    1) fail "$1: a check failed (exit 1)" ;;
+    *) tool_error "$1 exited $2" ;;
+  esac
+}
+# fresh_image <file>...: each was built by this run (H4 or the build below).
+fresh_image() {
+  local f
+  for f in "$@"; do
+    { [ -s "$f" ] && [ "$f" -nt "${TMP}/gate-start" ]; } || tool_error "$f missing or not built by this run"
+  done
+}
+
+step BUILD "Builds for the board steps (before the board lock)"
+# The run scripts build nothing while the gate holds the board lock (their
+# builds are skipped under GBC_BOARD_LOCK_HELD, or are images and tools
+# named here), so everything they flash or run is built now, from this
+# tree. h7-bench's images come from H4 when it ran; else they are built here.
+if want B1 || want B2; then
+  if ! want H4; then
+    sub "tools/h7-bench/build.sh (selftest, the bench images, the bench pack)"
+    run_status ${H7B}/build.sh
+    [ "${rc}" -eq 0 ] || fail "tools/h7-bench/build.sh exited ${rc}"
+  fi
+  want B1 && fresh_image "${SELFTEST_BIN}"
+  want B2 && fresh_image "${BENCH_BIN}" "${H7B}/out/h753/bench-pack.bin"
+fi
+fw_images=()
+{ want B2 || want B3 || want B4 || want B5; } && fw_images+=(loader)
+want B3 && fw_images+=(headless-display-cgb-acid2)
+want B5 && fw_images+=(player link-probe)
+if [ ${#fw_images[@]} -gt 0 ]; then
+  sub "crates/gbc-nucleo-h753/build.sh ${fw_images[*]}"
+  run_status ${FW}/build.sh "${fw_images[@]}"
+  [ "${rc}" -eq 0 ] || fail "crates/gbc-nucleo-h753/build.sh ${fw_images[*]} exited ${rc}"
+  for i in "${fw_images[@]}"; do
+    case $i in link-probe) fresh_image "${FW}/out/link-probe.bin" "${FW}/out/link-probe.gb" ;; *) fresh_image "${FW}/out/$i.bin" ;; esac
+  done
+  sub "gbc-pc (x86_64-pc-windows-gnu), headless, replay-input, bench"
+  cargo build -q -p gbc-pc --release --target x86_64-pc-windows-gnu || fail "building gbc-pc failed"
+  cargo build -q --release -p headless -p replay-input -p bench || fail "building headless, replay-input and bench failed"
+fi
+
+step LOCK "Board lock and board presence"
+command -v cmd.exe > /dev/null || tool_error "cmd.exe not found (the board is reached through Windows interop)"
+command -v powershell.exe > /dev/null || tool_error "powershell.exe not found (read-serial.sh needs it)"
+# shellcheck source=lib/board-lock.sh
+. scripts/lib/board-lock.sh
+run_status board_lock_hold
+[ "${rc}" -eq 0 ] || tool_error "could not take the board lock (${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock})"
+echo "  holding the board lock ${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock} until the gate exits"
+# The board, as flash.sh and read-serial.sh find it: the ST-LINK drive with
+# its label and DETAILS.TXT, and the COM port. Missing: exit 1, never a pass.
+drive=${H7_DRIVE:-E:} label=${H7_LABEL:-NOD_H753ZI} port=${H7_COM:-COM5}
+win() { (cd /mnt/c && cmd.exe /c "$1" 2> /dev/null || true) | tr -d '\r'; }
+case "${drive}" in [A-Za-z]:) ;; *) tool_error "H7_DRIVE=${drive} is not a drive letter like E:" ;; esac
+case "${port}" in COM[0-9] | COM[0-9][0-9]) ;; *) tool_error "H7_COM=${port} is not a port like COM5" ;; esac
+vol=$(win "vol ${drive}")
+case "${vol}" in *"${label}"*) ;; *) fail "no board: volume ${drive} is not labelled ${label} (${vol:-no answer}); attach the NUCLEO-H753ZI" ;; esac
+case "$(win "if exist ${drive}\\DETAILS.TXT echo yes")" in
+  *yes*) ;; *) fail "no board: ${drive} has no DETAILS.TXT (not an ST-LINK drive)" ;;
+esac
+ports=$(powershell.exe -NoProfile -NonInteractive -Command "[System.IO.Ports.SerialPort]::GetPortNames()" 2> /dev/null | tr -d '\r' || true)
+grep -qx "${port}" <<< "${ports}" || fail "no board: serial port ${port} is not present (ports: $(tr '\n' ' ' <<< "${ports}"))"
+echo "  board: ${drive} (${label}), ${port}"
+
+# sets_check: the run lists equal acceptance/stage2.toml; sets SAVE_FIXTURE.
+sets_check() {
+  sub "scripts/check-stage2-sets.sh (replay-set.txt, soak-set.txt and the save fixture vs acceptance/stage2.toml)"
+  set +e
+  scripts/check-stage2-sets.sh > "${TMP}/sets.log" 2>&1
+  rc=$?
+  set -e
+  sed 's/^/  /' "${TMP}/sets.log"
+  board_rc "scripts/check-stage2-sets.sh" "${rc}"
+  SAVE_FIXTURE=$(sed -n 's/^save_fixture=//p' "${TMP}/sets.log")
+  [ -n "${SAVE_FIXTURE}" ] || tool_error "scripts/check-stage2-sets.sh printed no save_fixture="
+}
+# replay_run <dir> <list> <label>: run-replay.sh over a list; every entry
+# of the list must be in its summary as PASS with equal=yes.
+replay_run() {
+  local out=$1 list=$2 n_want n_pass
+  set +e
+  RUN_REPLAY_OUT=${out} ${FW}/run-replay.sh "${list}" > "${out}.log" 2>&1
+  rc=$?
+  set -e
+  grep -E '^run-replay.sh: (===|summary|PASS|FAILED|TOOL ERROR)|^  [^ ]+: (PASS|FAIL|TOOL ERROR)|^  run-paced.sh: (speed|CHECK FAILED)|CHECK FAILED' "${out}.log" || true
+  board_rc "run-replay.sh $3" "${rc}"
+  n_want=$(sed 's/#.*//' "${list}" | awk 'NF' | wc -l)
+  n_pass=$(grep -cE '^  [^ ]+: PASS equal=yes underruns=0 over_budget=0 ' "${out}.log" || true)
+  [ "${n_pass}" = "${n_want}" ] || tool_error "run-replay.sh $3 exited 0 with ${n_pass} PASS lines for ${n_want} entries"
+  stack_lines+=("$(grep -ho 'stack_used=[0-9]*/[0-9]*' "${out}"/*.run-paced.log 2> /dev/null |
+    sort -t= -k2 -n | tail -n 1 | sed "s|^|$3 player-script, deepest of the entries: |" || true)")
+}
+
+# =============================================================================
+if want B1; then
+step B1 "selftest-pll480: clock, VOS0 and ODEN, flash latency, cycle counter, TCM probe"
+# =============================================================================
+run_status ${H7B}/flash.sh "${SELFTEST_BIN}"
+[ "${rc}" -eq 0 ] || tool_error "flash.sh ${SELFTEST_BIN} exited ${rc} (flash refused)"
+set +e
+${H7B}/read-serial.sh 30 > "${TMP}/b1-serial.txt"
+rc=$?
+set -e
+[ "${rc}" -eq 0 ] || tool_error "read-serial.sh exited ${rc} (serial unreadable)"
+run_status ${H7B}/check-selftest.sh "${TMP}/b1-serial.txt" "${SELFTEST_BIN}"
+board_rc "check-selftest.sh" "${rc}"
+stack_lines+=("B1 selftest: $(grep -o 'stack_used=[0-9]*' "${TMP}/b1-serial.txt" | tail -n 1 || true)")
+fi
+
+# =============================================================================
+if want B2; then
+step B2 "bench-itcm-dtcm-pll480, ROMs in internal flash and in the QSPI NOR: hashes, +3% cycles, real time"
+# =============================================================================
+mkdir -p "${TMP}/b2"
+set +e
+H7_BENCH_RUNS=${TMP}/b2 ${H7B}/run-qspi.sh "${BENCH_BIN}" 100 > "${TMP}/b2.log" 2>&1
+rc=$?
+set -e
+sed 's/^/  /' "${TMP}/b2.log"
+board_rc "run-qspi.sh (check-report.sh --qspi: expected-hashes.txt, both passes)" "${rc}"
+caps=("${TMP}"/b2/*.txt)
+[ ${#caps[@]} -eq 1 ] && [ -f "${caps[0]}" ] || tool_error "run-qspi.sh left ${#caps[@]} captures in ${TMP}/b2, not 1"
+grep -q '^check-report.sh: OK' "${TMP}/b2.log" || tool_error "run-qspi.sh exited 0 without check-report.sh's OK"
+sub "check-cycles.sh --fresh (expected-cycles.txt +3%, two agreeing reports, real time)"
+set +e
+${H7B}/check-cycles.sh --fresh "${caps[0]}" "${BENCH_BIN}" > "${TMP}/b2-cycles.log" 2>&1
+rc=$?
+set -e
+grep -v '^check-report.sh: ' "${TMP}/b2-cycles.log" | sed 's/^/  /' || true
+board_rc "check-cycles.sh" "${rc}"
+grep -q '^check-cycles.sh: OK' "${TMP}/b2-cycles.log" || tool_error "check-cycles.sh exited 0 without its OK"
+grep -q '^REPORT: flash worst-case ' "${TMP}/b2-cycles.log" && grep -q '^REPORT: qspi worst-case ' "${TMP}/b2-cycles.log" ||
+  tool_error "check-cycles.sh printed no worst-case REPORT line for both passes"
+stack_lines+=("B2 bench: $(tr -d '\000\r' < "${caps[0]}" | grep '^h7bench v1 stack used=' | tail -n 1 | sed 's/^h7bench v1 stack //' || true)")
+fi
+
+# =============================================================================
+if want B3; then
+step B3 "Replay set in the player image (and the display readback), equal to the host"
+# =============================================================================
+sets_check
+sub "run-headless.sh headless-display-cgb-acid2 (display readback self-test, against tools/headless/expected/cgb-acid2.txt)"
+set +e
+${FW}/run-headless.sh "${DISPLAY_BIN}" tools/headless/expected/cgb-acid2.txt > "${TMP}/b3-display.log" 2>&1
+rc=$?
+set -e
+grep -E '^run-headless.sh: ' "${TMP}/b3-display.log" | sed 's/^/  /' || true
+board_rc "run-headless.sh (display readback)" "${rc}"
+grep -q '^run-headless.sh: display self-test passed: .* 0 mismatches' "${TMP}/b3-display.log" ||
+  tool_error "run-headless.sh exited 0 without its display self-test line"
+sub "run-replay.sh replay-set.txt (loads each ROM into the QSPI NOR)"
+replay_run "${TMP}/b3" ${FW}/replay-set.txt B3
+fi
+
+# =============================================================================
+if want B4; then
+step B4 "10-minute synth:worst-case soak in the player image (soak-set.txt)"
+# =============================================================================
+sets_check
+sub "run-replay.sh soak-set.txt (35,837 frames; about 12 minutes)"
+replay_run "${TMP}/b4" ${FW}/soak-set.txt B4
+# Emulated speed against the board's own cycle counter (`stats paced
+# speed` ppm, run-paced.sh): the entry's bound must be the +-0.1%.
+speed=$(grep -h '^run-paced.sh: speed ppm=' "${TMP}/b4.log" "${TMP}"/b4/*.run-paced.log 2> /dev/null | tail -n 1 || true)
+[[ "${speed}" =~ ppm=([+-][0-9]+)\ \(bound\ ([0-9]+)\) ]] || tool_error "B4: no 'run-paced.sh: speed ppm=' line"
+ppm=${BASH_REMATCH[1]} bound=${BASH_REMATCH[2]}
+[ "${bound}" -le 1000 ] || fail "B4: the soak's speed bound was ${bound} ppm, not <= 1000 (soak-set.txt max_ppm)"
+[ "${ppm#[+-]}" -le 1000 ] || fail "B4: emulated speed ${ppm} ppm of the cycle counter (want within +-1000)"
+echo "  emulated speed ${ppm} ppm of the board's cycle counter (bound ${bound})"
+fi
+
+# =============================================================================
+if want B5; then
+step B5 "Save round trip on the player image (PC -> board -> PC)"
+# =============================================================================
+sets_check
+mkdir -p "${TMP}/b5"
+set +e
+RUN_SAVE_FIXTURE=${ROOT}/${SAVE_FIXTURE} RUN_SAVE_SCRATCH=${TMP}/b5 ${FW}/run-player-save.sh > "${TMP}/b5.log" 2>&1
+rc=$?
+set -e
+sed 's/^/  /' "${TMP}/b5.log"
+board_rc "run-player-save.sh" "${rc}"
+grep -q "^run-player-save: PASS fixture " "${TMP}/b5.log" || tool_error "run-player-save.sh exited 0 without its PASS line"
+stack_lines+=("B5 player (live): $(grep -ao 'stack_used=[0-9]*/[0-9]*' "${TMP}/b5/play.txt" 2> /dev/null | tail -n 1 || true)")
+fi
+fi
+
+# =============================================================================
+step_secs[${current}]=$(($(date +%s) - step_start))
+printf '\n==> Summary (%s s in all)\n' "$(($(date +%s) - gate_start))"
+for s in ${HOST_STEPS} BUILD LOCK ${BOARD_STEPS}; do
+  case " ${steps} BUILD LOCK " in *" $s "*) ;; *) continue ;; esac
+  [ -n "${step_secs[$s]:-}" ] || { want "$s" || continue; }
+  printf '  %s OK  %6s s\n' "$s" "${step_secs[$s]:-?}"
+done
+if [ ${#stack_lines[@]} -gt 0 ]; then
+  printf '\n==> Stack paint depth on the board (report only; H8)\n'
+  printf '  %s\n' "${stack_lines[@]}"
+fi
+if [ "${partial}" = 1 ]; then
+  printf '\nSTEPS PASSED (partial run: %s); a partial run is never a pass\n' "${steps}"
+  finish 3
+fi
+for s in ${ALL_STEPS}; do want "$s" || tool_error "step $s did not run in a full run"; done
+printf '\nSTAGE 2 GATE PASSED (H1-H8, B1-B5)\n'
+finish 0
