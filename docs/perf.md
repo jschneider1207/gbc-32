@@ -1240,6 +1240,49 @@ nowhere near a full frame, so the M6 ROM-placement task stays optional.
   `itcm-dtcm` run (h7-bench README "After the switch onto the lib";
   +0.12% on the worst case), the usual rebuild band.
 
+### QSPI tuning (M6, `itcm-dtcm-qspi`, 472 MHz)
+
+Plan Stage 2 M6 "QSPI tuning". What the NOR and the STM32 allow, with
+sources: `docs/reference/qspi-nor.md` "Tuning (M6)". In short: 0xEB at
+CR.DC = 0 goes to 104 MHz; DTR and QPI don't exist on the MX25L6433F;
+10 dummy cycles (133 MHz) would need a status-register write every boot
+(rejected); HCLK3 with an even divider gives only 59 or 118 MHz, so the
+kernel clock moved to PLL2 (200 MHz, /2 = 100 MHz). Adopted: **100 MHz
+plus SIOO with the 0xA5 enhance-mode byte**.
+
+Miss cost (`qspi-mmap`, DWT cycles, median of 64) and the bench's
+within-boot QSPI-vs-internal figures (`bench-itcm-dtcm-pll480`,
+`run-qspi.sh`, every run `check-report.sh` OK: 30 hashes, pack ROMs
+equal the embedded ones, `exit_fallbacks=0`), mean / max:
+
+| Setting | cold line miss | worst-case | storm-gdma | cgb-raster | dmg-raster | event-storm | cpu_instrs | pack validate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 59 MHz, mode 0xFF (M2 setting, rebuilt at main 9ab334d) | 770 | +2.38% / +2.42% | +14.38% / +28.54% | | | | | 8,408,308 |
+| 100 MHz, mode 0xFF | 463 | +1.41% / +1.39% | +8.67% / +17.27% | +0.08% / +0.13% | +0.09% / +0.18% | +0.09% / +0.15% | +0.04% / +0.00% | 4,961,980 |
+| **100 MHz, SIOO + 0xA5 (adopted)** | **419** | **+1.23% / +1.27%** | **+7.56% / +15.04%** | +0.07% / +0.12% | +0.08% / +0.12% | +0.08% / +0.13% | +0.03% / +0.00% | 4,961,520 |
+
+The adopted row is run 2 of three boots of one binary. Across the three,
+the worst case's QSPI mean was 3,345,137 / 3,345,076 / 3,345,059 (0.002%
+spread), storm-gdma's 3,089,295 / 3,089,346 / 3,089,402. The other bound
+workloads moved by at most 0.01 points. The rest stay at 0.0-0.2% (halt-irq
++0.16-0.18%). `storm-spsw`'s internal figure itself jumped between boots
+(14.89M vs 14.99M, both passes alike), as in earlier runs, so it says
+nothing about the QSPI.
+
+- A random miss costs 46% fewer cycles than at 59 MHz (770 to 419). The
+  QSPI overhead on the worst case roughly halves (+2.38% to +1.23%), and
+  on storm-gdma it does too (+14.4% to +7.6% mean, +28.5% to +15.0% max).
+  The worst case's QSPI max is 3,384,337 cycles, 85.7% of 3,951,279.
+- SIOO adds about 0.2 points on the worst case and 1.1 on storm-gdma
+  over the clock alone, for a lib-side cost: `Qspi::init` and
+  `Mapped::exit` take the NOR out of enhance mode. Images built before
+  this change panic in `init` if they boot while the NOR is still in
+  enhance mode (seen; `qspi-nor.md` "Enhance mode and resets").
+- Also run on this build: `run-replay.sh` on cgb-acid2 (600 frames,
+  `player-script`): PASS, hashes equal, 0 over budget; the `player` image
+  with Pokemon Red (reloaded, hash 0x0bfa5d71919acbbc) for 60 s: 0 over
+  budget, 0 display errors, core max 1,348,228 cycles.
+
 ### Display in the loop (M3, `headless-display`, 472 MHz)
 
 Plan Stage 2 M3 "Measure": the `headless` loop on `cgb-acid2`, 600

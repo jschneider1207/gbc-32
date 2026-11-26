@@ -112,11 +112,11 @@ NOR.
 
 | Setting | Value | Why |
 |---|---|---|
-| Command | 0xEB 1-4-4: instruction on 1 line, 24-bit address on 4, one alternate byte 0xFF on 4 (2 cycles), DCYC 4, data on 4 | 6 dummy cycles in all at CR.DC = 0 (Table 7). 0xFF doesn't enter enhance mode (see above) |
-| CCR | `0x0F10EDEB` (FMODE 11, DMODE 11, DCYC 4, ABSIZE 00, ABMODE 11, ADSIZE 10, ADMODE 11, IMODE 01, 0xEB); SIOO, DDRM, DHHC, FRCM all 0 | RM0433 23.5.6 |
-| ABR | `0xFF` | |
-| Clock | HCLK3 236 MHz / 4 = 59 MHz (PRESCALER 3; CR = `0x03000011`: SSHIFT, EN) | an even divider (ES0392 2.7.6). Faster clocks are M6 tuning |
-| DCR | `0x00170200`: FSIZE 23 (**16 MiB**), CSHT 2 (3 cycles, 51 ns) | ES0392 2.7.5: a memory-mapped read of the last byte of the FSIZE region reads 0x00, and the next read of it stalls the AXI bus. The margin puts that byte at 0x90FF_FFFF, outside the MPU window. Seen on the board: with FSIZE 22 (exactly 8 MiB), the image hung in its first compare round |
+| Command | **M6:** `QUAD_IO_READ_XIP`: 0xEB 1-4-4, instruction on 1 line (first command only, SIOO), 24-bit address on 4, one alternate byte 0xA5 on 4 (2 cycles, enhance mode), DCYC 4, data on 4. (M2 to M5: `QUAD_IO_READ`, mode byte 0xFF, no SIOO) | 6 dummy cycles in all at CR.DC = 0 (Table 7). "Tuning (M6)" below |
+| CCR | `0x1F10EDEB` (SIOO, FMODE 11, DMODE 11, DCYC 4, ABSIZE 00, ABMODE 11, ADSIZE 10, ADMODE 11, IMODE 01, 0xEB); DDRM, DHHC, FRCM 0. (M2: `0x0F10EDEB`) | RM0433 23.5.6, 23.3.13 |
+| ABR | `0xA5` (M2: `0xFF`) | |
+| Clock | **M6:** pll2_r_ck 200 MHz / 2 = 100 MHz (QSPISEL 10, PRESCALER 1; CR = `0x01000011`: SSHIFT, EN). (M2: HCLK3 236 MHz / 4 = 59 MHz) | an even divider (RM0433 23.5.1, DS12117 Table 170). "Tuning (M6)" |
+| DCR | `0x00170400` at 100 MHz: FSIZE 23 (**16 MiB**), CSHT 4 (5 cycles, 50 ns). (59 MHz: `0x00170200`, CSHT 2) | ES0392 2.7.5: a memory-mapped read of the last byte of the FSIZE region reads 0x00, and the next read of it stalls the AXI bus. The margin puts that byte at 0x90FF_FFFF, outside the MPU window. Seen on the board: with FSIZE 22 (exactly 8 MiB), the image hung in its first compare round |
 | TCEN | **0** (no timeout, LPTR unused) | after an access the QUADSPI fills its FIFO and then holds NCS low with the clock stopped, so the next sequential read skips the 20-clock command (instruction 8 + address 6 + mode 2 + dummy 4 = 0.34 us at 59 MHz). TCEN = 1 would save the NOR's selected-idle current and pay that cost again after every idle period. The NUCLEO is USB-powered, so latency wins. Stage 3 can revisit |
 | Prefetch | always on in memory-mapped mode (RM0433 23.3.7; there is no switch) | |
 | MPU | region 6: base 0x9000_0000, 8 MiB, Normal write-back no write-allocate (TEX 000 C 1 B 1), not shareable, read-only at both privilege levels (AP 110), XN. RASR = `0x1603002D` | Normal memory is needed for unaligned loads. The other 248 MB of the bank stay region 0's (no-access, XN, strongly-ordered) |
@@ -204,7 +204,64 @@ is the figure the plan wants as a stand-in for Stage 3 HyperRAM. At
 59 MHz it is roughly 85% wire time, so a faster clock (M6) scales it
 almost linearly.
 
+## Tuning (M6, 2026-11-26)
+
+What the parts allow (sources: MX25L6433F datasheet PM2130 Rev. 1.4 as
+in "Facts" above; DS12117 Rev 10; RM0433 Rev 9; ES0392):
+
+| Option | Legal? | Source |
+|---|---|---|
+| 0xEB at CR.DC = 0 (6 dummy cycles) | up to **104 MHz** at VCC >= 3 V | MX25L6433F Table 7 |
+| 0xEB at CR.DC = 1 (10 dummy cycles) | up to 133 MHz, but DC is volatile and WRSR writes the non-volatile status byte with it: a status-register write (tW up to 40 ms, 100k-cycle endurance, and QE is in that byte) on every boot. **Not used** | Table 7, "The quad-enable bit" above |
+| 0x6B (1-1-4, 8 dummy) | up to 133 MHz, no configuration; but 8 + 24 + 8 + 64 = 104 clocks per 32-byte line, against 84 for 0xEB, and no enhance mode (SIOO needs one) | Table 7 |
+| DTR (0xED etc.), QPI (4-4-4) | **no** (not in the part) | BFPT dwords 1 and 5, Table 4 |
+| STM32 pins, SDR | 133 MHz at 2.7 to 3.6 V, CL 20 pF, OSPEEDR 11 (the driver sets very high speed on all six pins, `gpio::pin_af`); ts(IN) 2 ns, th(IN) 1 ns | DS12117 Table 170 |
+| Kernel clock | rcc_hclk3 (236 MHz: even factors give 118 or 59 MHz only), pll1_q_ck, pll2_r_ck, per_ck (QSPISEL) | RM0433 8.7.19 |
+| Divider | even division factors only (PRESCALER odd): an odd one is not 50% duty, the NOR needs tCH, tCL >= 45% | RM0433 23.5.1, DS12117 Table 170 note, ES0392 2.7.6 |
+| SSHIFT | kept (sample half a cycle later; SDR only) | RM0433 23.3.10 |
+| SIOO + enhance mode | yes: the mode byte 0xA5 keeps the NOR in enhance mode, so a command after the first is address, mode and dummy only (8 clocks fewer) | RM0433 23.3.13; MX25L6433F 10-12, 10-13 |
+| DHHC | DDR only: n/a | RM0433 23.5.1 |
+| TCEN / LPTR | kept off (see the table above: an idle timeout costs a new command after every pause) | RM0433 23.3.7 |
+| Prefetch | always on in memory-mapped mode, no switch | RM0433 23.3.7 |
+
+Adopted: **pll2_r_ck = 200 MHz** (HSI 64 MHz / DIVM2 4 x DIVN2 50 = 800
+MHz VCO, wide range 192 to 836 MHz, DS12117 Table 39; / DIVR2 4), **/2 =
+100 MHz**, and **SIOO with mode byte 0xA5** for memory-mapped mode
+(`qspi::QUAD_IO_READ_XIP`). The HSI is within +-0.5% at 30 C plus +-1%
+over -20 to 105 C (DS12117 Table 36), so the clock stays under 104 MHz
+with margin. PLL2 is otherwise unused; `Qspi::init` starts it. Indirect
+commands (ID, status, program, erase, the loader's reads) keep their
+prescalers: PRESCALER_SAFE 5 is now 33.3 MHz (was 39.3).
+
+**Enhance mode and resets.** In enhance mode the NOR takes the next
+command's first byte as an address. It has no reset pin and the MCU reset
+does not reach it, so after a reset (a flash, a debugger) it may still be
+in enhance mode. So `Qspi::init` and `Mapped::exit` send
+`release_enhance`: one 0xEB read without instruction, mode byte 0xFF
+(which leaves the mode), address 0x7F_FFFF. In normal mode IO0 sees that
+as instruction 0xFF (not a command of the part) and NCS rises after 14
+clocks. **Seen on the board:** an image built before this change (no
+release) that boots while the NOR is in enhance mode panics in `init`
+with "QUADSPI busy after the ES0392 2.7.4 sequence" (three boots, two
+different old binaries). Any image of the new lib (here `qspi-probe`)
+clears it (a power cycle should too: unverified); after that the old binary ran
+normally. Images built from this lib are not affected.
+
+Measured with `qspi-mmap` (CPU 472 MHz; DWT cycles, median of 64, the NOR
+holding the bench pack, compare and unaligned checks all PASS):
+
+| Setting | cold u32 | cold 32-byte line | uncached u32 | uncached next u32 | 64 KiB copy |
+|---|---:|---:|---:|---:|---:|
+| 59 MHz, mode 0xFF (M2) | 362-385 | 770 | 376-388 | 120 | 28.1 MB/s |
+| 100 MHz, mode 0xFF | 237 | 463 | 242 | 68 | 47.7 MB/s |
+| 100 MHz, SIOO + 0xA5 (adopted) | 194 | 419 | 206 | 68 | 47.7 MB/s |
+
+A random 32-byte miss is now **~420 cycles (0.89 us)**, against 770. The
+copy is at 95% of the 50 MB/s wire limit. Bench figures: docs/perf.md
+"QSPI tuning (M6)".
+
 ## Write side: program and erase (as set up on 2026-11-25)
+
 
 The driver is the end of `crates/gbc-nucleo-h753/src/qspi.rs`, the
 on-board checks are the `qspi-write` image (`src/bin/qspi-write.rs`).
