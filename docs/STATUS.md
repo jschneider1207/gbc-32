@@ -4,10 +4,9 @@
 > each session so a fresh session can pick up from here.
 
 - **Stage:** 1 is **COMPLETE** (human, 2026-11-25; tag `stage1-m10`).
-  **Stage 2 (STM32H753 firmware): M0, M1 and M2 done** (M2: gate
-  `--host-only` passed, milestone review fixed, tag `stage2-m2`).
-  **M3 (display, FMC -> ILI9341V) is next.** Plan: `docs/plan/stage-2.md`
-  (D1-D11).
+  **Stage 2 (STM32H753 firmware): M0-M3 done** (M3: acceptance run on the
+  board, milestone review fixed, tag `stage2-m3`). **M4 (audio out) is
+  next.** Plan: `docs/plan/stage-2.md` (D1-D11).
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
@@ -19,40 +18,44 @@
   `.itcm` 64,080 B of 64 KiB (1,200 B free). H735 size: docs/perf.md
   "Firmware-link size". M0 bench numbers: `tools/h7-bench/README.md`.
 - **M2 results:** shield NOR = Macronix MX25L6433F (8 MiB, QE set),
-  memory-mapped 0xEB at 59 MHz (FSIZE 16 MiB for ES0392 2.7.5; MPU
-  exposes 8 MiB), ~770 cycles per random 32-byte miss. Loader at 2 Mbit/s
-  (exact; 4 MiB in ~50 s, half of it erase). headless from QSPI EQUAL for
-  both ROMs; h7-bench from QSPI (same binary): worst-case 3,417,095 max
-  (+2.4%, 86.5% of the 50% line), storm-gdma +14%/+28%. Facts:
-  `docs/reference/qspi-nor.md`, `loader.md`, `m2-evidence.md` (re-run
-  commands), docs/perf.md "QSPI ROM placement (M2)".
-- **Board state:** `bench-itcm-dtcm-pll480` flashed, bench pack in the NOR.
-  `out/loader.bin` must be rebuilt from main before use (old builds serve
-  the wrong rate; gbc-pc defaults to 2 M).
-- **Last updated:** 2026-11-25, session 23 (log
-  `logs/2026-11-25-23-stage2-m2.md`; session 22:
-  `logs/2026-11-25-22-stage2-m1.md`).
+  memory-mapped 0xEB at 59 MHz, ~770 cycles per random 32-byte miss.
+  Loader at 2 Mbit/s. h7-bench from QSPI: worst-case 3,417,095 max (86.5%
+  of the 50% line). Facts: `docs/reference/qspi-nor.md`, `loader.md`,
+  `m2-evidence.md`, docs/perf.md "QSPI ROM placement (M2)".
+- **M3 results:** the shield panel is an **ST7789V** (variant $AZ2), not
+  the ILI9341V. FMC 8-bit, timing SPEC (per_ck 64 MHz, 5 cycles/byte),
+  12.8 MB/s; MDMA from the TE ISR, 8.10 ms per 240x216 frame; TE tuned to
+  16.735-16.749 ms (FRCTRL2 0Eh, PORCTRL 11h/11h). cgb-acid2 600 frames
+  with the display: hash lines EQUAL, 587 readbacks 0 mismatches,
+  scale+present max 196,480 cycles (2.5% of a frame), core +0.07%.
+  Facts: `docs/reference/lcd-panel.md`, ADR 0039, docs/perf.md "Display
+  in the loop (M3)".
+- **Board state:** `headless-display-cgb-acid2` flashed (its last frame
+  stays on the panel); bench pack in the NOR. `out/loader.bin` must be
+  rebuilt from main before use.
+- **Last updated:** 2026-11-26, session 24 (log
+  `logs/2026-11-25-24-stage2-m3.md`; session 23:
+  `logs/2026-11-25-23-stage2-m2.md`).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M3 (display on the shield TFT)
+## Next up: Stage 2 M4 (audio out)
 
-Tasks and acceptance: `docs/plan/stage-2.md` M3 (FMC bank 1 8-bit, MPU
-region 7 for the LCD as Device, ILI9341V init, RGB555 -> RGB565 1.5x scaler
-in `gbc-firmware`, TE-synced MDMA, readback self-test, ≤ 5% of a frame).
-The Board facts table lists the LCD pins; the PE4/FMC_A20 mapping is
-unverified (check first). Open lows: M1 (T-4, T-8, F-2, F-3, F-5..F-7) and
-M2 (H-2..H-5, T-3..T-5) sit at the end of their milestones in the plan;
-H-2/H-3 (QSPI opcode allow-list, NOR reset at init) are cheap.
+Tasks and acceptance: `docs/plan/stage-2.md` M4 (DAC1 on PA4/PA5, TIM6
+32,768 Hz trigger, DMA1 circular buffer in AXI SRAM; DC blocker, i16 ->
+12-bit, sample ring in `gbc-firmware`; audio-driven pacing; DAC-feed hash
+equal to the host's). Open lows: M1 (T-4, T-8, F-2, F-3, F-5..F-7), M2
+(H-2..H-5, T-3..T-5) and M3 (T-3..T-5, P-1..P-9) sit at the end of their
+milestones in the plan.
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
-`CycleClock`, `rom_image` (ADR 0037); root workspace), `crates/gbc-link`
+`CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`; root workspace), `crates/gbc-link`
 (COBS + CRC-32 serial protocol, no deps), `tools/gbc-pc` (Windows .exe
 loader client; `scripts/gbc-pc.sh` builds, runs it via interop, takes the
 board lock; host tests incl. the board's own `loader.rs` and `baud.rs` via
 `#[path]`), `crates/gbc-nucleo-h753` (own workspace: lib bring-up incl.
-`qspi.rs`, `loader.rs`, `baud.rs`; bins `boot`, `qspi-probe`, `qspi-mmap`,
+`qspi.rs`, `loader.rs`, `baud.rs`, `lcd.rs`, `lcd_dma.rs`, `gpio.rs`; bins `boot`, `lcd-probe`, `lcd-dma-probe`, `qspi-probe`, `qspi-mmap`,
 `qspi-write`, `loader`, `headless` (feature `headless`; `rom-qspi` = ROM
-from the NOR); `build.sh`, `flash.sh`, `run-headless.sh`,
+from the NOR; `display` = panel + readback self-test, images `headless-display-<rom>`); `build.sh [image...]`, `flash.sh`, `run-headless.sh`,
 `run-headless-qspi.sh`, `run-loader-roundtrip.sh`, `gen-test-image.sh`),
 `tools/headless` (host counterpart, `expected/`), `tools/headless-qemu`,
 `tools/memory-x`, `tools/h7-bench` (cycle bench; QSPI pass from a ROM pack,
@@ -125,16 +128,13 @@ Working rules that matter here:
 - Resources: at most 2 concurrent builds; heavy steps (check-bench,
   diff-fingerprint, gate) alone; launch at most 2 building agents.
 - Core work in scratch worktrees, merged by rebase + `--ff-only`.
-- ADR numbers: check `docs/decisions/` before committing one (next free 0039).
+- ADR numbers: check `docs/decisions/` before committing one (next free 0040).
 - `end pass=N` in h7-bench is a repeat counter, not a verdict; the first
   report after a flash is often truncated by the ST-LINK. Don't time with
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 24 (2026-11-25): M3. Merged: scaler (`gbc-firmware::video`,
-  b943740) and the FMC LCD driver + `lcd-probe` (d9d5655..81548ae).
-  Running: branch `m3-lcd-dma` (MDMA transfer on TE, `lcd-dma-probe`,
-  ADR 0039) in a scratch worktree.
+- None.
 
 ## Needs human
 
@@ -143,9 +143,15 @@ Open (session 24, 2026-11-25):
   TE 60 Hz; UM2905 §6.2: variant XNGFX02Z1$AZ2 has the ST7789V, $AZ1 the
   ILI9341V). Please read the shield sticker to confirm `$AZ2`. Plan and
   architecture wording was corrected (chip name and commands only).
-- **Look at the panel** (sign-off item 1 early check): the image left on
-  it should show 8 vertical colour bars; with MADCTL BGR as planned the
-  first bar should be blue and the third red, and a marker top-left.
+- **Look at the panel** (sign-off item 1 early check; also check for
+  inverted colours or poor contrast: the init relies on ST7789V reset
+  values, M3 review P-5). The cgb-acid2 frame is left on it now; the
+  lcd-dma-probe test image (reflash `out/lcd-dma-probe.bin`) should show
+  8 vertical colour bars; with MADCTL BGR as planned the
+  first bar should be blue and the third red, and a white L-shaped
+  marker top-left. To show dmg-acid2: `cd crates/gbc-nucleo-h753 &&
+  ./build.sh headless-display-dmg-acid2 && ./flash.sh
+  out/headless-display-dmg-acid2.bin` (about 70 s until the last frame).
   If red/blue are swapped or the marker isn't top-left as you hold the
   board, say so (MADCTL changes; `docs/reference/lcd-panel.md`).
 - The ST7789V datasheet (Sitronix V1.3) is not in
