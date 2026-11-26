@@ -263,7 +263,11 @@ fn play<T: Transport>(
             frames,
             cycles_mean,
             cycles_max,
-        } => println!("stats: frames {frames}, cycles mean {cycles_mean}, max {cycles_max}"),
+            extra,
+        } if extra.is_empty() => {
+            println!("stats: frames {frames}, cycles mean {cycles_mean}, max {cycles_max}")
+        }
+        PlayEvent::Stats { extra, .. } => println!("stats: {extra}"),
         PlayEvent::DumpStarted => println!("dump: started"),
         PlayEvent::DumpRetry(f) => println!("dump: retrying ({f})"),
         PlayEvent::DumpFailed(f) => eprintln!("dump: failed ({f})"),

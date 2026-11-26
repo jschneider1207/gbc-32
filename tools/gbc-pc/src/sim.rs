@@ -125,11 +125,13 @@ impl SimBoard {
 
     /// Queues a `Stats` frame, as the running game sends them.
     pub fn push_stats(&mut self, frames: u32, cycles_mean: u32, cycles_max: u32) {
+        // Text fields in `extra`, as the player image sends them.
+        let extra = format!("image=sim frames={frames}");
         let m = Message::Stats {
             frames,
             cycles_mean,
             cycles_max,
-            extra: &[],
+            extra: extra.as_bytes(),
         };
         self.out.extend(encode(&m, 0));
     }

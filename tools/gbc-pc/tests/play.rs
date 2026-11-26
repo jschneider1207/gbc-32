@@ -156,7 +156,8 @@ fn f5_dumps_the_save_once_per_press() {
     assert!(events.contains(&PlayEvent::Stats {
         frames: 60,
         cycles_mean: 1000,
-        cycles_max: 2000
+        cycles_max: 2000,
+        extra: "image=sim frames=60".to_string(),
     }));
     assert!(events.contains(&PlayEvent::Saved {
         path: out,

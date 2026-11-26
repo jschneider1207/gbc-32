@@ -57,6 +57,8 @@ pub enum PlayEvent {
         frames: u32,
         cycles_mean: u32,
         cycles_max: u32,
+        /// The board's extra fields as text (empty if none).
+        extra: String,
     },
     /// A dump was asked for (F5) or a board-started one began.
     DumpStarted,
@@ -156,14 +158,16 @@ pub fn play<T: Transport>(
         let mut step = DumpStep::Pending;
         match &r {
             Received::Frame { msg, seq } => match msg {
-                &Incoming::Stats {
+                Incoming::Stats {
                     frames,
                     cycles_mean,
                     cycles_max,
+                    extra,
                 } => event(PlayEvent::Stats {
-                    frames,
-                    cycles_mean,
-                    cycles_max,
+                    frames: *frames,
+                    cycles_mean: *cycles_mean,
+                    cycles_max: *cycles_max,
+                    extra: extra.clone(),
                 }),
                 Incoming::Nak(_) => match &mut job {
                     Some(j) if j.rx.seq() == Some(*seq) => step = j.rx.on_received(&r),

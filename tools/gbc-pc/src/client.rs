@@ -226,6 +226,9 @@ pub enum Incoming {
         frames: u32,
         cycles_mean: u32,
         cycles_max: u32,
+        /// `Stats.extra` as text (the player's `key=value` fields,
+        /// docs/reference/player.md; lossy UTF-8, empty from a v1 board).
+        extra: String,
     },
     Other,
 }
@@ -255,11 +258,12 @@ impl Incoming {
                 frames,
                 cycles_mean,
                 cycles_max,
-                ..
+                extra,
             } => Self::Stats {
                 frames,
                 cycles_mean,
                 cycles_max,
+                extra: String::from_utf8_lossy(extra).into_owned(),
             },
             _ => Self::Other,
         }
