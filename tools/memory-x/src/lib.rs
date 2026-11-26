@@ -300,6 +300,17 @@ pub const FAULT_STACK_BYTES: u32 = 2048;
 /// MMFSR.MSTKERR, and nothing is written).
 pub const STACK_GUARD_BYTES: u32 = 128;
 
+/// The least stack, in bytes, a firmware image may link with
+/// (`_stack_start - _stack_end`, from the guard's top to the top of the
+/// `RAM` region; the linker ASSERTs it, [`firmware_memory_x`]). The
+/// stack is whatever the statics leave of its region, so a static that
+/// grows shrinks it silently, and the guard only catches an overflow
+/// whose frame does not jump over its 128 B (M6 review). 22 KiB: the
+/// smallest image, gbc-nucleo-h753's `player` (DTCM fully committed),
+/// had 22,912 B at M6 close, and its scripted mode used 19,800 B
+/// (painted); every other image has more than 60 KiB.
+pub const STACK_MIN_BYTES: u32 = 22 * 1024;
+
 /// The `memory.x` text for an image that links `gbc-nucleo-h753`'s lib
 /// (ADR 0036): [`memory_x`]'s map, plus what the lib reads from every
 /// image whatever its placement, so the lib needs no placement features:
@@ -351,6 +362,7 @@ fn stack_guard_symbols() -> String {
 /* Stack guard: {STACK_GUARD_BYTES} B, no-access MPU region, below the stack. */
 __stack_guard = ALIGN(__euninit, {STACK_GUARD_BYTES});
 _stack_end = __stack_guard + {STACK_GUARD_BYTES};
+ASSERT(_stack_start - _stack_end >= {STACK_MIN_BYTES}, \"the stack is under memory_x::STACK_MIN_BYTES: statics grew into it\");
 "
     )
 }
@@ -598,6 +610,21 @@ mod tests {
         // The plain map defines none of the fallbacks or the fault stack.
         let plain = memory_x(Chip::H753, Data::AxiSram, None);
         assert!(LIB_SYMBOLS.iter().all(|sym| !plain.contains(sym)));
+    }
+
+    #[test]
+    fn firmware_map_asserts_the_stack_floor() {
+        let floor = format!("ASSERT(_stack_start - _stack_end >= {STACK_MIN_BYTES},");
+        for data in [Data::AxiSram, Data::Dtcm] {
+            assert_eq!(
+                firmware_memory_x(Chip::H753, data, None)
+                    .matches(&floor)
+                    .count(),
+                1,
+                "{data:?}"
+            );
+        }
+        assert!(!memory_x(Chip::H753, Data::Dtcm, None).contains("_stack_start"));
     }
 
     #[test]
