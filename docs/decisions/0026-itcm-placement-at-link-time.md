@@ -176,3 +176,11 @@ from flash (a Stage 3 measurement).
   front-end choices).
 - The player refuses saves of 128 KiB cart RAM (64 KiB save buffer;
   fixable by section order, M5 P-2).
+
+### 2026-11-26: the plain tile path drop, measured (closes the first open item above)
+
+Measured on the board (docs/perf.md "ITCM tier A/B (M6)"): the only fitting
+ways to keep the plain tile path in ITCM are dropping Tier B per-event or
+Tier C (APU) instead. Both are slower on the bound set (worst case +1.42% /
++2.35%, event-storm +1.14% / +1.86%) for at most -0.2% on cgb-raster. The
+plain tile path stays the dropped tier.
