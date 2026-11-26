@@ -38,6 +38,14 @@ name = "qspi-mmap"
 test = false
 bench = false
 
+# The NOR write side and UART receive: erases and programs only the
+# NOR's last 64 KiB block, then echoes the UART (plan Stage 2 M2); built
+# as `boot`.
+[[bin]]
+name = "qspi-write"
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
 # ITCM set in build.rs; see the feature.
 [[bin]]
