@@ -251,6 +251,11 @@ repo).
 - [x] (`gbc_firmware::audio`, 54bdc05: k = 9, ~10 Hz; ring 2048 frames; `dac_feed_hash`) `gbc-firmware`: DC blocker (integer one-pole high-pass, ADR 0035 leaves it to the platform), i16 → 12-bit, sample ring with underrun/overrun counters; host unit tests (step response, no overflow at ±full scale)
 - [x] (`gbc_firmware::paced` 4ddf563, host `headless --paced` 4ee61aa, board `paced-<rom>` 6485873 + `run-paced.sh` fab1e5a; docs/perf.md "Paced loop (M4)", docs/reference/m4-evidence.md) Audio-driven pacing (as desktop ADR 0024): the main loop runs the core while the ring has room for a frame's samples (≤ 550), else `WFI`. Statistics: underruns, ring-fill min/max, emulated clocks vs elapsed DWT cycles
 - [x] (`paced drain` = host, cgb_sound and synth:worst-case, 35,837 frames, run-paced.sh; docs/perf.md "Paced loop (M4)") The sample stream the DAC ISR writes into the DMA half buffer (after DC blocking; the consumer side, not a read of the DAC output) hashes equal to the host's for the same ROM and inputs
+- [x] (20fde08) M4 review T-1 (medium): `scripts/test-run-paced.sh` tests run-paced.sh on captures from the real M4 report (pass and every exit-1/exit-2 path; mutation-checked)
+- [x] (20fde08) M4 review T-2 (medium): M4 evidence committed in docs/reference/m4-evidence.md (+ m4-evidence/); docs cite main's 6485873 / fab1e5a, not the pre-rebase commits
+- [x] (20fde08) M4 review T-4 (low): docs/perf.md first-pop wait is about 30 ms (-50 ppm), recomputed from paced.rs `RAMP_LEFT`
+- [x] (20fde08) M4 review T-5 (low): run-paced.sh header notes the host run passes no `--input` (a `GBC_HEADLESS_INPUT` image false-fails on input_fnv)
+- [x] (20fde08) M4 review T-6 (low): the `paced drain` hash is what the ISR wrote into the DMA half buffer (consumer side), not a read of the DAC output
 
 **Acceptance:** a 10-minute run of `cgb_sound` plus `synth:worst-case`
 with the display on: 0 underruns. Emulated speed is within ±0.1% of real
