@@ -257,11 +257,163 @@ Each timing in turn, full panel re-init per timing, two rounds each read:
   run, before the LSB rule was known: no bus error at any timing.
 - TE: 60 rising edges in 1 s at every timing (±1 from the gate).
 
+## MDMA and TE (`lcd_dma`, `lcd-dma-probe`)
+
+The frame path: the CPU scales the core's 160x144 frame into a 240x216
+RGB565 buffer in AXI SRAM (`gbc_firmware::video::scale_frame`, wire byte
+order), then MDMA copies the buffer to the data address, started from the
+TE interrupt. Code: `crates/gbc-nucleo-h753/src/lcd_dma.rs`; probe:
+`src/bin/lcd-dma-probe.rs`; decision: ADR 0039. Measured 2026-11-25 at
+472 MHz, FMC timing `SPEC` (per_ck 64 MHz, 5 cycles per byte), four runs.
+
+### Scheme
+
+1. The main loop takes the buffer (`LcdDma::buffer`: waits only for the
+   previous transfer), converts into it, calls `LcdDma::present`: CASET/PASET
+   for the window, the channel programmed and enabled (its registers only
+   take writes with EN = 0), the transfer marked pending.
+2. TE rises (start of V-blank). The EXTI15_10 handler (`lcd_dma::on_te`)
+   clears EXTI13's pending bit, and if a transfer is pending writes RAMWR
+   (2Ch) to the command address, DSB, then SWRQ.
+3. MDMA streams 103,680 bytes; the channel disables itself and sets CTCIF.
+   The main loop sees it at its next `busy`/`buffer`/`wait` (polled; the
+   MDMA interrupt stays off in the NVIC).
+
+### MDMA channel 0 (RM0433 Rev 9 chapter 14, registers 14.5)
+
+| Register | Value | Fields |
+|---|---|---|
+| CxTCR | 0xE3FC_4222 | BWM 1, SWRM 1, TRGM 10 (one request = the whole repeated block), PAM 00, PKE 1, TLEN 127 (128-byte buffer), DBURST 000, SBURST 100 (16 beats), DINCOS 00, SINCOS 10, DSIZE 00 (byte), SSIZE 10 (word), DINC 00 (fixed), SINC 10 (increment) |
+| CxBNDTR | 0x0010_CA80 | BRC 1 (2 blocks), BNDT 51,840 (BNDT is at most 65,536, so the frame takes two blocks) |
+| CxBRUR, CxLAR, CxTBR | 0 | the source runs on across the block boundary, destination fixed; no linked list; SBUS = DBUS = 0 (AXI: AXI SRAM and the FMC) |
+| CxSAR / CxDAR | buffer / 0x6010_0000 | the buffer (word aligned, 0x2400_0000 here) / the data address |
+| CxCR | 0xC1, then 0x1_00C1 | PL very high, EN; SWRQ from the interrupt |
+
+Read back after a transfer: TCR 0xE3FC4222, BNDTR 0 (BRC 0, BNDT 0), SAR
+0x2401_9500 (= base + 103,680), DAR 0x6010_0000, CR 0xC0 (EN cleared by
+hardware), ISR 0 (flags cleared), ESR 0.
+
+**PKE behaves as designed:** each 32-bit read is unpacked into four byte
+writes, lowest address first (RM0433 14.5.6 PKE: "right aligned, in
+little-endian mode"), so the buffer's memory order is the wire order.
+Verified by readback: 0 mismatching pixels in 60 + 1 frames x 51,840
+pixels in every run. Not tried: DSIZE = word without packing (not needed).
+
+**The FMC write FIFO keeps the bus busy:** the transfer takes **3,822,720
+to 3,822,742 CPU cycles = 8.099 ms** (from SWRQ to CTCIF; 810 buffer transfers of 128 B),
+exactly 103,680 B at the `SPEC` bus rate of 12.80 MB/s (8.100 ms). Byte
+writes from MDMA with BWM = 1 do not starve the FMC. (BWM = 1 because the
+MDMA AXI master has one outstanding non-bufferable write; not measured
+with BWM = 0.) No transfer error (TEIF) in any run.
+
+### The buffer and its MPU region
+
+`lcd_dma::DmaBuffer`: `#[repr(align(131072))]`, 128 KiB, in `.axisram`
+(NOLOAD) at 0x2400_0000. MPU region 8 (`mpu::REGION_DMA_BUF`, set by
+`LcdDma::new`): 128 KiB over exactly it, Normal non-cacheable (TEX 001 C 0
+B 0), RW, XN; inside region 4 (AXI SRAM), so it grants no new access. The
+D-cache is cleaned and invalidated over the range before and after the
+region is enabled. **Checked by mutation:** with the region left out (the
+buffer write-back cached, no maintenance) the readback gave 474,387
+mismatching pixels over 60 frames and the control 7,887 instead of 2;
+with it, 0. MDMA does not go through the MPU.
+
+### TE: EXTI13 on PE13
+
+PE13 input, no pull. SYSCFG_EXTICR4 EXTI13 = 0100 (port E, RM0433
+12.3.5); EXTI_RTSR1 bit 13 = 1, FTSR1 bit 13 = 0; EXTI_CPUIMR1 bit 13 =
+1; pending cleared by writing bit 13 of EXTI_CPUPR1 (then DSB); NVIC IRQ
+40 (EXTI15_10). TEON (35h) parameter 00h: mode 1, V-blank only (ST7789V
+9.1.27, 8.15.1).
+
+- **TE high time = the porch lines.** 1,154 µs with the reset porches
+  (24 lines x 48.9 µs = 1,175 µs), 1,588 µs with 34 (34 x 47.3 =
+  1,608 µs): TE is high for FPA + BPA lines (and so, presumably, falls
+  when the scan of row 0 begins).
+- **TE to transfer start:** 57 to 85 CPU cycles (0.12 to 0.18 µs) from the
+  handler's entry to the SWRQ write; the exception entry before it (12
+  cycles plus the vector fetch) is not counted.
+
+### Frame rate: FRCTRL2 and PORCTRL
+
+ST7789V 9.2.16 note 1: frame = (320 + FPA + BPA) lines x (250 + 16 RTNA)
+clocks of the internal oscillator (nominally 10 MHz). FRCTRL2 (C6h)
+parameter: NLA[2:0] (000, dot inversion, as in the reset value 0Fh) and
+RTNA[4:0]; PORCTRL (B2h): BPA, FPA, PSEN 0, then the idle and partial
+porches at their reset value 33h, 33h (9.2.3). `Lcd::set_frame_rate`.
+
+| Setting | Lines x clocks | TE period (mean of 120, 4 runs) | Rate |
+|---|---|---|---|
+| reset: RTNA 0Fh, FPA = BPA = 0Ch | 344 x 490 | 16,811 to 16,823 µs (single periods within ±10 µs of the mean) | 59.44-59.48 Hz |
+| **`FrameRate::GAME_BOY`: RTNA 0Eh, FPA = BPA = 11h** | 354 x 474 | **16,735 to 16,749 µs** | 59.71-59.76 Hz |
+| target (70,224 / 4,194,304 Hz) | | 16,742.7 µs | 59.7275 Hz |
+
+The oscillator these imply is 10.018 to 10.021 MHz. The tuned setting is
+what `FrameRate::closest` picks for it (the probe searches RTNA 0 to 31
+and porch sums 2 to 64 for the period closest to the target, with a line
+of at least 45 µs; both rounds agree with the constant). Its error,
+0.04% or less, is under the run-to-run drift of the oscillator itself
+(0.08%), and one porch line is a 0.28% step, so no setting does
+better. The panel's frame and the Game Boy's will still drift apart
+slowly (about one frame in 2,500 at 0.04%); pacing is M4/M5's
+decision (ADR 0039).
+
+### Write-ahead of the scan (tuned setting)
+
+W = one 240-pixel row (480 B) at 12.8 MB/s = 37.5 µs; L = a scanned line
+= 16,748.6 µs / 354 = 47.3 µs; d = TE to start, under 2 µs (budgeted 2 µs).
+The window is panel rows 52..267 (`Y0` = (320 - 216) / 2). Taking the
+scan of row 0 to start when TE falls (1,588 µs after the rising edge, the
+measured high time), panel row 52 + k is scanned at 1,588 + (52 + k) L µs
+and window row k is complete at d + (k + 1) W µs after the edge. The
+margin, 1,588 + 52 L - d - W + k (L - W), is smallest at k = 0:
+**4,049 - 39.5 = 4,009 µs**, and grows by L - W = 9.8 µs per row. The last
+row is written at 8,102 µs, scanned at 14,221 µs. Even if the scan started
+at TE's rising edge, the margin would be 52 L - d - W = 2,420 µs. The
+condition holds with the reset rate too (L = 48.9 µs). It needs W < L,
+that is a bus faster than 480 B / 47.3 µs = 10.1 MB/s, or the margin
+shrinks by W - L per row (`SAFE`'s 7.1 MB/s: W = 67.5 µs > L, the scan would
+overtake the write near the window's bottom unless the transfer starts
+earlier).
+
+What the probe cannot show is tearing itself (that is a human look at
+moving content in M3's acceptance). It shows that the writes are where
+the arithmetic puts them.
+
+### Conversion and the main loop
+
+- `scale_frame` (in flash, I-cache on; the frame in DTCM, the output in
+  the non-cacheable AXI buffer): **178,128 to 179,124 cycles (377 to 380
+  µs)** in the committed build (181,772 to 183,362 in an earlier build of
+  the same code, a layout effect), about 45% of M3's 402k-cycle budget for conversion plus DMA
+  setup. The headless image's ITCM placement may change this.
+- `present` (window, 8 channel registers): included in the TE-to-start
+  path only as SWRQ; its own cost was not timed separately (about 20
+  register writes and 10 FMC bytes, about 1 µs).
+- Back to back (120 frames, no readback): 120 transfers in 120 TE periods,
+  none missed; the main loop's wait for the previous transfer averaged
+  16.0 ms (it has nothing else to do in the probe) and was at most 22.3
+  ms (presenting just after an edge waits a frame plus the transfer).
+
+### Test image
+
+After the readback phase the probe leaves a frame up (sent by MDMA like
+the others): rows 0-51 and 268-319 black; in the window 8 vertical bars of
+30 panel pixels (20 core pixels), in `lcd-probe`'s order of panel fields
+(field 15-11 alone, 10-5, 4-0, 15-11 + 10-5, 10-5 + 4-0, 15-11 + 4-0,
+white, a grey ramp the other way), fading to black towards the bottom,
+and a white Γ at the frame's top-left: an 18x18-pixel square with an arm
+along the top edge to 72 panel pixels (the core's 12x12 square and 48x4
+arm, scaled). The plan wants the first bar blue and the third red, and
+the Γ in the top-left corner reading as a Γ (not mirrored); a human check,
+like `lcd-probe`'s.
+
 ## Sources
 
 - RM0433 Rev 9: 22.6 (Figure 98, Tables 156-158), 22.7.2 (Table 171),
   22.7.4 (Figures 102, 108; Tables 174-176), 22.7.6 (BCR, BTR, BWTR), 8.7.19
-  (D1CCIPR FMCSEL, CKPERSEL).
+  (D1CCIPR FMCSEL, CKPERSEL); chapter 14 (MDMA, registers 14.5), 12.3.5
+  (SYSCFG_EXTICR4), 20.6 (EXTI registers), 8.7.40 (AHB3ENR MDMAEN).
 - DS12117 Rev 10: Table 9 (AF), Tables 55 and 57 (FMC asynchronous
   timings).
 - ES0392 Rev 16: section 2.6.
@@ -270,4 +422,5 @@ Each timing in turn, full panel re-init per timing, two rounds each read:
 - ILI9341V datasheet V1.00: 7.4, 7.6.3, 8.2.2, 8.2.3, 8.2.24, 8.2.29,
   8.2.33, 8.3.23, 15.4, 18.3.1.
 - ST7789V datasheet V1.3 (Sitronix, see above): 7.4.1 Table 4, 7.4.5, 8.8.3,
-  9.1.3, 9.1.7, 9.1.23, 9.1.28, 9.1.32, 9.1.46-48, 9.2.16.
+  8.15 (TE modes and timing), 9.1.3, 9.1.7, 9.1.23, 9.1.27 (TEON), 9.1.28,
+  9.1.32, 9.1.46-48, 9.2.3 (PORCTRL), 9.2.16 (FRCTRL2).
