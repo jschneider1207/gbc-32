@@ -5,7 +5,7 @@
 //! this tool cannot print different lines for the same ROM and script.
 //!
 //! ```text
-//! headless <rom> [--input <program.txt>] [--frames <N>] [--paced]
+//! headless <rom> [--input <program.txt>] [--frames <N>] [--paced [--dac-feed <out.bin>]]
 //! ```
 //!
 //! `--paced` runs `gbc_firmware::paced` instead (the audio-paced main
@@ -14,7 +14,11 @@
 //! these. The consumer is simulated: the idle hook pops one DMA half
 //! (256 frames) through a `FeedTap`, as the board's DMA ISR would during
 //! `WFI`. The `stats paced speed` line is meaningless here (no real-time
-//! consumer).
+//! consumer). `--dac-feed <out.bin>` also writes every real frame that
+//! consumer popped, in order, as little-endian `u32` DAC words (left code
+//! in bits 11:0, right in 27:16): what the board's DAC is fed and streams
+//! to the PC (ADR 0041), to compare with a `gbc-pc play --audio-wav`
+//! capture.
 //!
 //! With `--paced`, `--input` may also be a `clocks v1` table
 //! (`gbc_firmware::replay`: an `acceptance/*.toml` `input` script as
@@ -80,12 +84,17 @@ struct HostConsumer<'a> {
     ring: &'a FeedRing,
     tap: &'a FeedTap,
     half: [u32; DMA_HALF_FRAMES],
+    /// `--dac-feed`: every real frame popped.
+    feed: Option<Vec<u32>>,
 }
 
 impl Idle for HostConsumer<'_> {
     // The host never sleeps: it pops at once, whatever the condition.
     fn idle(&mut self, _waiting: &dyn Fn() -> bool) {
-        self.tap.pop_into(self.ring, &mut self.half);
+        let n = self.tap.pop_into(self.ring, &mut self.half);
+        if let Some(f) = &mut self.feed {
+            f.extend_from_slice(&self.half[..n]);
+        }
     }
 }
 
@@ -94,18 +103,22 @@ struct Args {
     input: Option<String>,
     frames: Option<u32>,
     paced: bool,
+    dac_feed: Option<String>,
 }
 
-const USAGE: &str = "usage: headless <rom> [--input <program.txt>] [--frames <N>] [--paced]";
+const USAGE: &str =
+    "usage: headless <rom> [--input <program.txt>] [--frames <N>] [--paced [--dac-feed <out.bin>]]";
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut rom = None;
     let mut input = None;
     let mut frames = None;
     let mut paced = false;
+    let mut dac_feed = None;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--paced" => paced = true,
+            "--dac-feed" => dac_feed = Some(it.next().ok_or("--dac-feed needs a file")?),
             "--input" => input = Some(it.next().ok_or("--input needs a file")?),
             "--frames" => {
                 let n = it.next().ok_or("--frames needs a number")?;
@@ -121,6 +134,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         input,
         frames,
         paced,
+        dac_feed,
     })
 }
 
@@ -142,6 +156,10 @@ fn main() -> ExitCode {
             }
         },
     };
+    if args.dac_feed.is_some() && !args.paced {
+        eprintln!("headless: --dac-feed needs --paced\n{USAGE}");
+        return ExitCode::from(2);
+    }
     if changes.is_some() && !args.paced {
         eprintln!("headless: a `clocks v1` input needs --paced\n{USAGE}");
         return ExitCode::from(2);
@@ -182,6 +200,7 @@ fn main() -> ExitCode {
             ring: &ring,
             tap: &tap,
             half: [0; DMA_HALF_FRAMES],
+            feed: args.dac_feed.as_ref().map(|_| Vec::new()),
         };
         let hooks = Hooks {
             clock: &clock,
@@ -192,7 +211,7 @@ fn main() -> ExitCode {
             ring: &ring,
             tap: &tap,
         };
-        match &changes {
+        let r = match &changes {
             None => paced::run(&rom, script, frames, bufs, feed, hooks, &mut out)
                 .map(drop)
                 .map_err(|e| format!("{e:?}")),
@@ -211,6 +230,17 @@ fn main() -> ExitCode {
                 let _ = cs.report(&mut out);
                 r.map(drop).map_err(|e| format!("{e:?}"))
             }
+        };
+        match (&args.dac_feed, consumer.feed.take()) {
+            (Some(path), Some(f)) => {
+                let bytes: Vec<u8> = f.iter().flat_map(|w| w.to_le_bytes()).collect();
+                if let Err(e) = std::fs::write(path, bytes) {
+                    eprintln!("headless: {path}: {e}");
+                    return ExitCode::from(1);
+                }
+                r
+            }
+            _ => r,
         }
     } else {
         headless::run(&rom, script, frames, bufs, &clock, &mut out)
