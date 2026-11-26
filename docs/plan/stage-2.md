@@ -258,10 +258,11 @@ repo).
 - [x] (20fde08) M4 review T-6 (low): the `paced drain` hash is what the ISR wrote into the DMA half buffer (consumer side), not a read of the DAC output
 - [x] (3a0643b) M4 review P-1 (medium): `LcdDma::abort` waits (bounded, interrupts on) for CTCIF after clearing EN before the flags are cleared and the channel reprogrammed (RM0433 14.5.5: the ongoing 128-byte buffer completes); lcd-dma-probe's abort-while-running self-test: CTCIF after 8,756 cycles, next frame 0 mismatches (51,699 without the wait)
 - [x] (6cd36fc, 80a0ce7) M4 review P-2 (medium): `AudioDac::watchdog` (paced image's Idle hook, after WFI) restarts the DAC path after a stall (no refill for 50 ms: DMAUDR1 or a stream error), counts the missed flags and `restarts=`; run-paced.sh requires restarts=0 (test-run-paced.sh covers it). Forced underrun on the board: udr1=1 restarts=1, run completes, exit 1; without the watchdog it hangs (no report)
-- [ ] M4 review P-3 (low): DAC ISR reads/clears LISR then reads NDTR; entered ~half a buffer late with the next HT/TC in between, it refills the same half twice (256 frames lost, not counted LATE): remember the last half refilled
-- [ ] M4 review P-4 (low): lost wakeup between the `free()` check and WFI (≤ 7.8 ms); for M5 use cpsid i / check / wfi / cpsie i (Armv7-M B1.5.19)
+- [x] (eb2e432) M4 review P-3 (low): DAC ISR reads/clears LISR then reads NDTR; entered ~half a buffer late with the next HT/TC in between, it refills the same half twice (256 frames lost, not counted LATE): remember the last half refilled
+- [x] (eb2e432) M4 review P-4 (low): lost wakeup between the `free()` check and WFI (≤ 7.8 ms); for M5 use cpsid i / check / wfi / cpsie i (Armv7-M B1.5.19)
 - [ ] M4 review P-5 (low): DBGMCU_CR survives system reset (RM0433 DBGMCU: power-on reset only), so DBGSLEEP_D1 stays set into later images; Stage 3 shouldn't rely on DWT in sleep: use a TIM or the refill count
-- [ ] M4 review P-7 (low): RING/TAP statics can't be reset (a second `paced::run` fails NotFresh); the skip policy drops the newer frame even when the previous transfer is only PENDING (27% skips, ~44 fps): replace the pending frame or double-buffer in M5
+- [x] (eb2e432) M4 review P-7 (low): RING/TAP statics can't be reset (a second `paced::run` fails NotFresh); the skip policy drops the newer frame even when the previous transfer is only PENDING (27% skips, ~44 fps): replace the pending frame or double-buffer in M5
+- [ ] M4 review P-7 remainder (low): the skip policy is fixed (eb2e432); the RING/TAP statics still can't be reset, so a second `paced::run` in one boot fails NotFresh (the M5 player must reset or re-create them)
 
 **Acceptance:** a 10-minute run of `cgb_sound` plus `synth:worst-case`
 with the display on: 0 underruns. Emulated speed is within ±0.1% of real

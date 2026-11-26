@@ -1348,6 +1348,49 @@ run starts four refills before the end of the DAC's start ramp.
 - `cgb_sound`'s slowest call is frame 54, early in the ROM (31% of a
   frame), the reason for its lower `min_fill`.
 
+#### After M4 review P-3/P-4/P-7 (2026-11-26, commit eb2e432)
+
+Same two 10-minute runs, `run-paced.sh` exit 0 for both, the `paced`
+lines equal the host's with the same hashes as above (cgb_sound `fbs`
+ffe7f333d13ab726, feed a42b9bdd2e459ea5; worst-case 329470c6bc19a93f,
+4b3d013ebbd78714). Changes: the display shows the newest frame at each TE
+(a pending transfer is taken back and replaced; a frame that comes while
+MDMA reads the buffer is copied aside and shown from the idle hook when
+the transfer is done; ADR 0039 amendment), the idle hook re-checks the
+wait condition with interrupts masked before `WFI` (P-4), and the DAC ISR
+counts a half-late single-flag entry as `late` and skips the second
+refill of the same half (P-3).
+
+| | `cgb_sound` before → after | `synth:worst-case` before → after |
+|---|---|---|
+| display presented / skipped | 25,788 / 10,046 → **33,276 / 2,558 (7.1%)** | 26,231 / 9,605 → **33,117 / 2,719 (7.6%)** |
+| TE edges | 35,920 → 35,916 | 35,915 → 35,923 |
+| of the skips: replaced while pending / superseded while held | – → 2,558 / 0 | – → 2,198 / 521 |
+| shown from the copy (`deferred`), copy cost mean / max | – → 16,410, 42,072 / 44,983 | – → 15,277, 42,802 / 45,085 |
+| display sink mean / max | 139,505 / 195,265 → 124,983 / 196,648 | 148,663 / 204,706 → 132,738 / 206,934 |
+| busy per frame (sum of the means), idle share | 1,100,203, 86.1% → 1,089,837, **86.2%** | 3,694,277, 53.3% → 3,673,387, **53.5%** |
+| `ppm` / `steady_ppm` | +82 / +9 → +82 / +9 | +72 / +18 → +72 / +18 |
+| underruns, DAC late / errors / restarts | 0, 0 / 0 / 0 → same | 0, 0 / 0 / 0 → same |
+
+- The panel now shows about 55.6 new frames a second (presented over
+  600 s) of the core's 59.73, and every frame the core makes in a TE
+  period with no other one reaches the panel: the remaining skips are
+  two frames completing within one TE period (`replaced`), which the
+  loop's DMA-half grid makes common (frames 15.6 or 23.4 ms apart: two
+  in one 16.7 ms TE period, then a TE period with none).
+- The idle share leaves out the conversions of the copied frames, which
+  run in the idle hook: 16,410 × 195,245 cycles over 35,837 frames is
+  about 89k cycles per frame (1.1% of a frame), so about 85.0% and
+  52.4% idle.
+- P-3 forced on the board (a scratch build spinning once in the DAC ISR
+  between the LISR and NDTR reads until the DMA wrapped, 1,800 frames):
+  `late=1` and the pending second interrupt's refill skipped once; the
+  same forcing on the old guard-less code: `late=0` with the half refilled
+  twice (`run-paced.sh` would have passed it). Found on the way: `halt`
+  clearing the stream's EN sets TCIF and enters the ISR once more with
+  NDTR anywhere (seen 512 and 256); that entry (phase STOPPED) is not
+  checked.
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed
