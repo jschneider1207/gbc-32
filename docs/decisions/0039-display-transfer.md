@@ -78,3 +78,36 @@ transfer, how many buffers, which FMC timing, which frame-rate setting.
 - Measured with `lcd-dma-probe` (60 frames of a changing pattern, each
   read back: 0 mismatching pixels in every run; the control with one
   changed word: exactly 2; with the MPU region removed: 474,387).
+
+## Amendment (2026-11-26, M4 review P-7): the newest frame at each TE
+
+The front end's frame policy, not the transfer scheme, is what this adds;
+the one-buffer TE-started transfer above is unchanged.
+
+**Problem.** The `paced` image's sink dropped a completed frame whenever
+the previous transfer had not finished, also when it was only queued
+(waiting for TE, MDMA not yet reading the buffer). Frames come from the
+audio-paced loop at the DMA-half grid (every 15.6 or 23.4 ms), so about
+27% were dropped and the panel showed about 44 frames a second, although
+a new frame existed for nearly every TE.
+
+**Decision.** Show the newest completed frame at each TE:
+- *Pending* (queued, TE not come): `LcdDma::retract` takes it back with a
+  compare-exchange PENDING→IDLE that races only the TE interrupt's
+  PENDING→RUNNING (one wins; no SWRQ was given, so disabling the channel
+  stops nothing in flight), and the new frame is converted into the same
+  buffer and queued. A TE during that conversion (0.41 ms) finds nothing
+  queued and the frame goes out one TE later.
+- *Running* (MDMA reading the buffer): the core's frame is copied aside
+  (46,080 B in AXI SRAM, about 43k cycles), because the core overwrites
+  its own frame from the next frame on; the idle hook converts and queues
+  the copy as soon as the transfer finishes (8.1 ms after TE; the loop
+  wakes at least every DMA half, 7.8 ms, so it is queued before the next
+  TE), unless a newer frame comes first.
+- A second 128 KiB output buffer (convert while the other is read) was
+  not chosen: it needs a 256 KiB MPU region and a channel reprogram at
+  the swap for the same result; the copy costs 0.5% of a frame and only
+  on the frames that wait.
+
+Frames are then dropped only when two complete within one TE period.
+Measured figures: docs/perf.md "Paced loop (M4)", after P-3/P-4/P-7.

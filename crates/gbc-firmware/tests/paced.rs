@@ -152,6 +152,8 @@ struct Consumer<'a, const N: usize> {
     idle_pop: usize,
     sink_pop: fn(u32) -> usize,
     idles: RefCell<Vec<(usize, u64)>>,
+    /// After each idle's pop: (free, fill, the wait condition then).
+    waits: RefCell<Vec<(usize, usize, bool)>>,
 }
 
 impl<const N: usize> Consumer<'_, N> {
@@ -169,11 +171,18 @@ struct IdleSide<'c, 'a, const N: usize>(&'c Consumer<'a, N>);
 struct SinkSide<'c, 'a, const N: usize>(&'c Consumer<'a, N>);
 
 impl<const N: usize> Idle for IdleSide<'_, '_, N> {
-    fn idle(&mut self) {
+    fn idle(&mut self, waiting: &dyn Fn() -> bool) {
         let c = self.0;
+        // M4 review P-4: the condition the board re-checks before WFI is
+        // the loop's own: true now (the loop is waiting), and it must
+        // follow the ring (checked again after the pop below).
+        assert!(waiting(), "idle called with the wait condition false");
         let pushed = c.ring.fill() as u64 + u64::from(c.tap.frames());
         c.idles.borrow_mut().push((c.ring.free(), pushed));
         c.pop(c.idle_pop);
+        c.waits
+            .borrow_mut()
+            .push((c.ring.free(), c.ring.fill(), waiting()));
     }
 }
 
@@ -188,6 +197,7 @@ struct Run {
     out: String,
     report: Report,
     idles: Vec<(usize, u64)>,
+    waits: Vec<(usize, usize, bool)>,
 }
 
 fn run_paced<const N: usize>(
@@ -205,6 +215,7 @@ fn run_paced<const N: usize>(
         idle_pop,
         sink_pop,
         idles: RefCell::new(Vec::new()),
+        waits: RefCell::new(Vec::new()),
     };
     let mut mem = Box::new(Memory::new());
     let mut save = vec![0u8; cart_ram_size(rom).unwrap()];
@@ -239,6 +250,7 @@ fn run_paced<const N: usize>(
         out,
         report,
         idles: consumer.idles.into_inner(),
+        waits: consumer.waits.into_inner(),
     }
 }
 
@@ -305,6 +317,19 @@ fn never_overruns_and_idles_only_when_full() {
             }
         }
         assert_eq!(full, r.report.idle_calls, "{}", p.0);
+        // M4 review P-4: the condition handed to `idle` is the loop's,
+        // evaluated live: after the idle's pop it says whether the loop
+        // still waits (no room while producing; frames left while
+        // draining).
+        assert_eq!(r.waits.len(), r.idles.len());
+        for (&(_, pushed), &(free, fill, waiting)) in r.idles.iter().zip(&r.waits) {
+            let want = if pushed < total {
+                free < MIN_AUDIO_SLOTS
+            } else {
+                fill > 0
+            };
+            assert_eq!(waiting, want, "{}: free={free} fill={fill}", p.0);
+        }
         assert_eq!(
             r.idles.len() as u64,
             r.report.idle_calls + r.report.drain_idle_calls
@@ -386,7 +411,7 @@ fn refuses_a_used_ring() {
 
 struct NeverIdle;
 impl Idle for NeverIdle {
-    fn idle(&mut self) {
+    fn idle(&mut self, _waiting: &dyn Fn() -> bool) {
         panic!("idle");
     }
 }
@@ -479,6 +504,7 @@ fn run_live(
         idle_pop: 256,
         sink_pop: none,
         idles: RefCell::new(Vec::new()),
+        waits: RefCell::new(Vec::new()),
     };
     let mut mem = Box::new(Memory::new());
     let mut save_ram = vec![0u8; cart_ram_size(rom).unwrap()];

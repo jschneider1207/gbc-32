@@ -75,7 +75,8 @@ struct HostConsumer<'a> {
 }
 
 impl Idle for HostConsumer<'_> {
-    fn idle(&mut self) {
+    // The host never sleeps: it pops at once, whatever the condition.
+    fn idle(&mut self, _waiting: &dyn Fn() -> bool) {
         self.tap.pop_into(self.ring, &mut self.half);
     }
 }

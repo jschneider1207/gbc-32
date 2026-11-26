@@ -13,13 +13,22 @@
 //! - [`Idle`] is `WFI`, with DBGMCU_CR DBGSLEEP_D1 set first, so the CPU
 //!   clock and with it the cycle counter keep running in Sleep (the image
 //!   measures that: "Sleep and the cycle counter" below). The speed
-//!   figures are against that counter.
-//! - The display sink ([`display::Display`]): on each completed frame, if
-//!   the previous transfer has finished, `scale_frame` and `present` (the
-//!   transfer starts on TE, ADR 0039); otherwise the frame is skipped and
-//!   counted. It never waits for the panel; a transfer still unfinished
-//!   [`display::STUCK`] cycles after it was queued is abandoned and counted
-//!   as an error. No readback.
+//!   figures are against that counter. The loop's wait condition is
+//!   re-checked with interrupts masked right before `WFI` (`cpsid i`,
+//!   check, `wfi`, `cpsie i`; M4 review P-4), so a refill between the
+//!   loop's check and the `WFI` cannot leave it asleep for another half.
+//! - The display sink ([`display::Display`]) shows the newest completed
+//!   frame at each TE (M4 review P-7; ADR 0039 amendment), never waiting
+//!   for the panel. On each frame: no transfer queued, or the last one
+//!   finished: `scale_frame` and `present` (the transfer starts on TE).
+//!   Still pending (TE has not come): taken back (`retract`), and this
+//!   frame converted and queued instead (`replaced`, counted as skipped).
+//!   Running (MDMA reading the buffer): the frame is copied aside
+//!   (`copy_*`) and shown by the idle hook as soon as the transfer is done
+//!   (`deferred`), unless a newer frame comes first (the older then
+//!   counts as skipped). A transfer still unfinished [`display::STUCK`]
+//!   cycles after it was queued is abandoned and counted as an error. No
+//!   readback.
 //! - The DAC starts before `paced::run`, which begins four refills before
 //!   the end of the DAC's 250 ms start ramp ([`RAMP_LEFT`]; `ramp_wait`
 //!   below is that wait), so the speed figures do not count the ramp as
@@ -34,13 +43,15 @@
 //! the board's own report-only lines:
 //!
 //! ```text
-//! stats display paced presented=<n> skipped=<n> transfers=<n> transfer_errors=<n> stuck=<n> aborts=<n> te_edges=<n> scale_mean=<c> scale_max=<c> present_mean=<c> present_max=<c> [first_error=frame<n>:<e>]
+//! stats display paced presented=<n> skipped=<n> transfers=<n> transfer_errors=<n> stuck=<n> aborts=<n> te_edges=<n> scale_mean=<c> scale_max=<c> present_mean=<c> present_max=<c> replaced=<n> deferred=<n> copy_mean=<c> copy_max=<c> [first_error=frame<n>:<e>]
 //! stats dac refills=<n> late=<n> spurious=<n> te=<n> dme=<n> fe=<n> udr1=<n> udr2=<n> restarts=<n> isr_min=<c> isr_max=<c> stop=<ok|timeout>
 //! stats paced board run_cycles=<c> run_refills=<n> dac_rate_millihz=<r> ramp_wait=<c> stack_used=<b>/<b> dbgmcu_cr_boot=<hex> sleep_gate_te=<c|untested> sleep_keep_te=<c|untested>
 //! ```
 //!
-//! `presented` frames went to the panel, `skipped` found the previous
-//! transfer still pending or running; `transfers` finished without error
+//! `presented` frames went to the panel, `skipped` were superseded by a
+//! newer frame before TE took them (`replaced` of them were queued and
+//! taken back; the rest waited aside while a transfer ran), `deferred`
+//! were shown from the copy; `transfers` finished without error
 //! (counted when the next frame finds them done; the last one is waited
 //! for after the run). `run_refills` and `dac_rate_millihz` are the DAC
 //! interrupts from right before `paced::run` until it returned, and the
@@ -70,7 +81,7 @@
 #![no_std]
 #![no_main]
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -135,6 +146,7 @@ mod buffers {
         pub audio: &'static mut [StereoSample; MIN_AUDIO_SLOTS],
         pub cart_ram: &'static mut [u8; CART_RAM_BYTES],
         pub capture: &'static mut [u8; CAPTURE_BYTES],
+        pub stash: &'static mut Frame,
     }
 
     struct Slot<T>(UnsafeCell<T>);
@@ -148,7 +160,7 @@ mod buffers {
     /// `.data` (`Memory::new()` is not all zeros): in DTCM in this
     /// placement, copied from flash by the startup code.
     static MEM: Slot<Memory> = Slot(UnsafeCell::new(Memory::new()));
-    // SAFETY (the four `link_section`s): `.axisram` is the NOLOAD output
+    // SAFETY (the five `link_section`s): `.axisram` is the NOLOAD output
     // section of AXI SRAM that memory.x (memory_x::firmware_memory_x)
     // defines for such buffers. It is not zeroed at boot, which is sound
     // for these types (integers and structs of integers: every bit pattern
@@ -166,6 +178,9 @@ mod buffers {
     static CART_RAM: Slot<[u8; CART_RAM_BYTES]> = Slot(UnsafeCell::new([0; CART_RAM_BYTES]));
     #[unsafe(link_section = ".axisram.capture")]
     static CAPTURE: Slot<[u8; CAPTURE_BYTES]> = Slot(UnsafeCell::new([0; CAPTURE_BYTES]));
+    // The display's copy of a frame (written whole before it is read).
+    #[unsafe(link_section = ".axisram.stash")]
+    static STASH: Slot<Frame> = Slot(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
 
     static TAKEN: AtomicBool = AtomicBool::new(false);
 
@@ -173,7 +188,7 @@ mod buffers {
     pub fn take() -> Bufs {
         assert!(!TAKEN.swap(true, Ordering::AcqRel), "buffers taken twice");
         // SAFETY: the swap above lets exactly one caller through, ever, so
-        // these are the only references to the five statics.
+        // these are the only references to the six statics.
         unsafe {
             Bufs {
                 mem: &mut *MEM.0.get(),
@@ -181,6 +196,7 @@ mod buffers {
                 audio: &mut *AUDIO.0.get(),
                 cart_ram: &mut *CART_RAM.0.get(),
                 capture: &mut *CAPTURE.0.get(),
+                stash: &mut *STASH.0.get(),
             }
         }
     }
@@ -223,17 +239,31 @@ impl CycleClock for Dwt {
 }
 
 /// `WFI`: the DAC refill interrupt (128 per second) or TE (60 per second)
-/// wakes it. Then the DAC's stall check (M4 review P-2): after an
-/// underrun or a stream error the refills stop, and the loop would wait
-/// for ring space forever; TE still wakes it, and the watchdog restarts
-/// the DAC path (counted: `restarts=` in `stats dac`).
+/// wakes it. The wait condition is checked with interrupts masked right
+/// before it (M4 review P-4): an interrupt that comes after the check is
+/// pending at the `WFI`, which then does not sleep (Armv7-M B1.5.19: WFI
+/// wakes on a pending interrupt even with PRIMASK set), and runs at
+/// `cpsie i`. Then the display's held frame (`Display::service`), and the
+/// DAC's stall check (M4 review P-2): after an underrun or a stream error
+/// the refills stop, and the loop would wait for ring space forever; TE
+/// still wakes it, and the watchdog restarts the DAC path (counted:
+/// `restarts=` in `stats dac`).
 struct Wfi<'d> {
     dac: &'d mut AudioDac,
+    display: &'d RefCell<display::Display>,
 }
 
 impl Idle for Wfi<'_> {
-    fn idle(&mut self) {
-        cortex_m::asm::wfi();
+    fn idle(&mut self, waiting: &dyn Fn() -> bool) {
+        cortex_m::interrupt::disable();
+        if waiting() {
+            cortex_m::asm::wfi();
+        }
+        // SAFETY: this re-enables what `disable` above masked; no critical
+        // section is open around the idle hook (the loop calls it with
+        // interrupts on), so none is broken.
+        unsafe { cortex_m::interrupt::enable() };
+        self.display.borrow_mut().service();
         self.dac.watchdog(audio_dac::STALL_CYCLES);
     }
 }
@@ -392,7 +422,7 @@ fn main() -> ! {
         frame: b.frame,
         audio: &mut b.audio[..],
     };
-    let mut display = display::init();
+    let display = RefCell::new(display::init(b.stash));
     let mut dac = AudioDac::new();
 
     let dbgmcu_cr_boot = dbgmcu().cr.read().bits();
@@ -440,8 +470,11 @@ fn main() -> ! {
         },
         Hooks {
             clock: &clock,
-            sink: &mut display,
-            idle: &mut Wfi { dac: &mut dac },
+            sink: &mut display::SinkRef(&display),
+            idle: &mut Wfi {
+                dac: &mut dac,
+                display: &display,
+            },
         },
         &mut cap,
     );
@@ -449,7 +482,7 @@ fn main() -> ! {
     let run_cycles = clock.total() - c0;
     let stop = dac.stop();
     cap.live = None;
-    let _ = display.report(&mut cap);
+    let _ = display.borrow_mut().report(&mut cap);
     let s = audio_dac::stats();
     let _ = writeln!(
         cap,
@@ -498,12 +531,13 @@ fn main() -> ! {
     }
 }
 
-/// The panel as the paced loop's [`FrameSink`]: shows a completed frame
-/// when the previous transfer has finished, skips it otherwise; never
-/// waits (module docs).
+/// The panel as the paced loop's [`FrameSink`] (through [`SinkRef`]):
+/// the newest completed frame goes to the panel at each TE; never waits
+/// (module docs, "Wiring"; ADR 0039 amendment, M4 review P-7).
 ///
 /// [`FrameSink`]: gbc_firmware::headless::FrameSink
 mod display {
+    use core::cell::RefCell;
     use core::fmt::{self, Write};
 
     use gbc_core::Frame;
@@ -539,21 +573,30 @@ mod display {
 
     pub struct Display {
         dma: LcdDma,
+        /// A copy of the newest frame, taken while a transfer was running
+        /// (MDMA reading the output buffer), to be shown once it is done:
+        /// the core overwrites its own frame from the next frame on.
+        stash: &'static mut Frame,
+        /// The frame in `stash`, while it waits to be shown.
+        held: Option<u32>,
         /// When the transfer now pending or running was queued.
         queued_at: Option<u32>,
         presented: u32,
         skipped: u32,
+        replaced: u32,
+        deferred: u32,
         transfers: u32,
         errors: u32,
         stuck: u32,
         first_error: Option<(u32, lcd_dma::Error)>,
         scale: Range,
         present: Range,
+        copy: Range,
     }
 
     /// Sets the panel up (FMC at `SPEC`, the Game Boy frame rate, all
     /// black) and the transfer (ADR 0039).
-    pub fn init() -> Display {
+    pub fn init(stash: &'static mut Frame) -> Display {
         let mut l = Lcd::init(lcd::SPEC);
         l.set_frame_rate(FrameRate::GAME_BOY);
         l.set_window(0, 0, lcd::WIDTH - 1, lcd::HEIGHT - 1);
@@ -561,15 +604,20 @@ mod display {
         l.fill(0, u32::from(lcd::WIDTH) * u32::from(lcd::HEIGHT));
         Display {
             dma: LcdDma::new(l),
+            stash,
+            held: None,
             queued_at: None,
             presented: 0,
             skipped: 0,
+            replaced: 0,
+            deferred: 0,
             transfers: 0,
             errors: 0,
             stuck: 0,
             first_error: None,
             scale: Range::default(),
             present: Range::default(),
+            copy: Range::default(),
         }
     }
 
@@ -587,22 +635,93 @@ mod display {
             }
         }
 
-        /// After the run: the last transfer waited for (at most
-        /// [`STUCK`]), then the `stats display paced` line.
-        pub fn report(&mut self, out: &mut dyn Write) -> fmt::Result {
-            if self.queued_at.take().is_some() {
-                let r = self.dma.wait(STUCK);
-                if matches!(r, Err(lcd_dma::Error::Timeout { .. })) {
+        /// Whether the output buffer may be written now: no transfer
+        /// queued, or the queued one finished (its outcome noted), or
+        /// stuck (abandoned), or still pending and taken back (the frame
+        /// it held becomes a skipped one: `replaced`). False while MDMA is
+        /// reading the buffer.
+        fn writable(&mut self, n: u32) -> bool {
+            let Some(at) = self.queued_at else {
+                return true;
+            };
+            match self.dma.try_wait() {
+                Some(r) => self.outcome(n, r),
+                None if cycles().wrapping_sub(at) > STUCK => {
+                    // Abandoned (`wait` with no time left aborts the
+                    // channel and reports the timeout).
+                    let r = self.dma.wait(0);
                     self.stuck += 1;
+                    self.outcome(n, r);
                 }
-                self.outcome(u32::MAX, r);
+                None if self.dma.retract() => {
+                    self.presented -= 1;
+                    self.skipped += 1;
+                    self.replaced += 1;
+                }
+                None => return false,
+            }
+            self.queued_at = None;
+            true
+        }
+
+        /// Converts `frame` into the output buffer and queues it for the
+        /// next TE (`writable` must have said so).
+        fn show(dma: &mut LcdDma, scale: &mut Range, present: &mut Range, frame: &Frame) -> u32 {
+            let t0 = cycles();
+            // No transfer is pending or running: `buffer` does not wait.
+            scale_frame(frame, dma.buffer());
+            let t1 = cycles();
+            dma.present();
+            let t2 = cycles();
+            scale.add(t1.wrapping_sub(t0));
+            present.add(t2.wrapping_sub(t1));
+            t2
+        }
+
+        /// From the idle hook: a held frame goes out as soon as the
+        /// transfer that kept it waiting has finished, so it is queued
+        /// before the next TE (a transfer ends 8.1 ms after TE; the loop
+        /// wakes at least every DMA half, 7.8 ms).
+        pub fn service(&mut self) {
+            let Some(n) = self.held else {
+                return;
+            };
+            if !self.writable(n) {
+                return;
+            }
+            self.held = None;
+            let t2 = Self::show(
+                &mut self.dma,
+                &mut self.scale,
+                &mut self.present,
+                self.stash,
+            );
+            self.presented += 1;
+            self.deferred += 1;
+            self.queued_at = Some(t2);
+        }
+
+        /// After the run: a held frame shown, the last transfer waited
+        /// for (at most [`STUCK`] each), then the `stats display paced`
+        /// line.
+        pub fn report(&mut self, out: &mut dyn Write) -> fmt::Result {
+            for _ in 0..2 {
+                if self.queued_at.is_some() {
+                    let r = self.dma.wait(STUCK);
+                    if matches!(r, Err(lcd_dma::Error::Timeout { .. })) {
+                        self.stuck += 1;
+                    }
+                    self.outcome(u32::MAX, r);
+                    self.queued_at = None;
+                }
+                self.service();
             }
             let te = lcd_dma::te_stats();
             write!(
                 out,
                 "stats display paced presented={} skipped={} transfers={} transfer_errors={} \
                  stuck={} aborts={} te_edges={} scale_mean={} scale_max={} present_mean={} \
-                 present_max={}",
+                 present_max={} replaced={} deferred={} copy_mean={} copy_max={}",
                 self.presented,
                 self.skipped,
                 self.transfers,
@@ -614,43 +733,46 @@ mod display {
                 self.scale.max,
                 self.present.mean(),
                 self.present.max,
+                self.replaced,
+                self.deferred,
+                self.copy.mean(),
+                self.copy.max,
             )?;
             if let Some((n, e)) = self.first_error {
                 write!(out, " first_error=frame{n}:{e:?}")?;
             }
             writeln!(out)
         }
-    }
 
-    impl FrameSink for Display {
         fn frame(&mut self, n: u32, frame: &Frame) {
-            if let Some(at) = self.queued_at {
-                match self.dma.try_wait() {
-                    Some(r) => self.outcome(n, r),
-                    None if cycles().wrapping_sub(at) > STUCK => {
-                        // Abandoned (`wait` with no time left aborts the
-                        // channel and reports the timeout).
-                        let r = self.dma.wait(0);
-                        self.stuck += 1;
-                        self.outcome(n, r);
-                    }
-                    None => {
-                        self.skipped += 1;
-                        return;
-                    }
+            if !self.writable(n) {
+                // MDMA is reading the buffer: keep a copy, shown once the
+                // transfer is done (`service`, or the next frame instead).
+                let t0 = cycles();
+                self.stash.copy_from_slice(frame);
+                self.copy.add(cycles().wrapping_sub(t0));
+                if self.held.replace(n).is_some() {
+                    self.skipped += 1;
                 }
-                self.queued_at = None;
+                return;
             }
-            let t0 = cycles();
-            // No transfer is pending or running: `buffer` does not wait.
-            scale_frame(frame, self.dma.buffer());
-            let t1 = cycles();
-            self.dma.present();
-            let t2 = cycles();
-            self.scale.add(t1.wrapping_sub(t0));
-            self.present.add(t2.wrapping_sub(t1));
+            if self.held.take().is_some() {
+                // Superseded before it could be shown.
+                self.skipped += 1;
+            }
+            let t2 = Self::show(&mut self.dma, &mut self.scale, &mut self.present, frame);
             self.presented += 1;
             self.queued_at = Some(t2);
+        }
+    }
+
+    /// The [`Display`] as the loop's sink; the idle hook services the same
+    /// one ([`Display::service`]).
+    pub struct SinkRef<'d>(pub &'d RefCell<Display>);
+
+    impl FrameSink for SinkRef<'_> {
+        fn frame(&mut self, n: u32, frame: &Frame) {
+            self.0.borrow_mut().frame(n, frame);
         }
     }
 }

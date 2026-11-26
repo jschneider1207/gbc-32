@@ -22,6 +22,12 @@
 //! 3. The channel disables itself and sets CTCIF at the end; the main loop
 //!    sees it the next time it asks ([`LcdDma::busy`], [`LcdDma::wait`]).
 //!
+//! A queued transfer that TE has not started yet can be taken back
+//! ([`LcdDma::retract`]) so a newer frame replaces it (M4 review P-7;
+//! ADR 0039 amendment); once running, MDMA reads the buffer and the
+//! caller has to wait (the `paced` image keeps a copy of the newest frame
+//! aside meanwhile).
+//!
 //! For measurements, [`LcdDma::start_now`] starts a queued transfer from
 //! the main loop instead of TE (the panel may then tear), and
 //! [`LcdDma::wait_started`] waits until TE has taken it. [`readback`] is
@@ -413,6 +419,37 @@ impl LcdDma {
         // interrupt can start the transfer.
         cortex_m::asm::dsb();
         STATE.store(PENDING, Ordering::Release);
+    }
+
+    /// Takes back a queued transfer that TE has not started yet (M4
+    /// review P-7: a newer frame replaces it). True if one was pending:
+    /// the state is then IDLE, the channel disabled and its flags clear,
+    /// so the buffer may be rewritten and [`LcdDma::present`]ed again.
+    /// False if none was pending (idle, or running: MDMA may be reading
+    /// the buffer). Not counted as an abort.
+    ///
+    /// The compare-exchange PENDING→IDLE races only [`on_te`]'s
+    /// PENDING→RUNNING (and [`LcdDma::start_now`]'s, with interrupts off):
+    /// exactly one wins. Winning here, no SWRQ was given, so no buffer
+    /// transfer is in progress and clearing EN stops the channel at once
+    /// (EN is still polled, at most [`ABORT_CYCLES`]); the TE interrupt
+    /// then finds the state IDLE and writes nothing.
+    pub fn retract(&mut self) -> bool {
+        if STATE
+            .compare_exchange(PENDING, IDLE, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        let ch = mdma();
+        // SAFETY: EN cleared, the other bits kept; the state is IDLE, so
+        // the TE interrupt does not write CR.
+        ch.cr.modify(|r, w| unsafe { w.bits(r.bits() & !CR_EN) });
+        let t0 = cycles();
+        while ch.cr.read().bits() & CR_EN != 0 && cycles().wrapping_sub(t0) < ABORT_CYCLES {}
+        // SAFETY: the clear-flag register, write-1-to-clear.
+        ch.ifcr.write(|w| unsafe { w.bits(IFCR_ALL) });
+        true
     }
 
     /// Whether a transfer is pending or running; notes its completion.

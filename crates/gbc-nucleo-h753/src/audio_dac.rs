@@ -254,6 +254,10 @@ static LAST_FRAME: AtomicU32 = AtomicU32::new(SILENCE);
 static REFILLS: AtomicU32 = AtomicU32::new(0);
 static LAST_AT: AtomicU32 = AtomicU32::new(0);
 static LATE: AtomicU32 = AtomicU32::new(0);
+/// The half a late refill wrote, whose second interrupt is still to come
+/// ([`NO_HALF`]: none; M4 review P-3).
+static SKIP_HALF: AtomicU8 = AtomicU8::new(NO_HALF);
+const NO_HALF: u8 = 2;
 static SPURIOUS: AtomicU32 = AtomicU32::new(0);
 static TE: AtomicU32 = AtomicU32::new(0);
 static DME: AtomicU32 = AtomicU32::new(0);
@@ -293,7 +297,10 @@ pub struct Stats {
     pub refills: u32,
     /// Cycle counter at the last refill interrupt's entry.
     pub last_at: u32,
-    /// Interrupts that found both HTIF and TCIF set: a refill missed.
+    /// Refills missed: interrupts that found both HTIF and TCIF set, and
+    /// single-flag interrupts entered about a half late, whose flag
+    /// names the other half than the one the DMA has left (M4 review
+    /// P-3).
     pub late: u32,
     /// Interrupts with neither (error only, or spurious).
     pub spurious: u32,
@@ -428,6 +435,16 @@ fn count_errors(flags: u32) {
 ///
 /// The free half is chosen from NDTR, not from which flag is set, so a
 /// late interrupt (both flags) still refills the half the DMA has left.
+///
+/// An interrupt entered about a half late, with the next HT/TC landing
+/// between its LISR read and its NDTR read, sees one flag (HT: half 0 is
+/// free) but NDTR says the DMA has moved on (it reads half 0, half 1 is
+/// free): the half its flag named was missed. It refills the free half
+/// and counts [`Stats::late`]; the second flag's interrupt, already
+/// pending, then finds the same half free and is skipped: refilling it
+/// again would pop [`HALF`] frames over the unplayed first refill
+/// (M4 review P-3; before, neither was counted). On time, the flag and
+/// NDTR always agree (the latency is microseconds, a half 7.8 ms).
 pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
     let t0 = cycles();
     let d = dma();
@@ -448,6 +465,25 @@ pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
     // NDTR in 1..=HALF: the DMA reads half 1, half 0 is free. Above, or 0
     // (the reload instant): it reads half 0.
     let h = if ndtr != 0 && ndtr <= HALF { 0 } else { 1 };
+    let skip = SKIP_HALF.swap(NO_HALF, Ordering::Relaxed);
+    // Not once STOPPED: `halt` clears the stream's EN, which sets TCIF
+    // (a disabled stream ends its transfer, RM0433 15.3.19) and enters
+    // here once more before the interrupt is masked, with NDTR wherever
+    // the DMA stopped (measured: 512 and 256); that refill of zeros is
+    // harmless and no refill was missed.
+    if ht_tc != ISR_HTIF | ISR_TCIF && PHASE.load(Ordering::Relaxed) != STOPPED {
+        let named = if ht_tc == ISR_HTIF { 0 } else { 1 };
+        if skip == h as u8 {
+            // The second interrupt of a late pair: its half is filled.
+            LAST_AT.store(t0, Ordering::Relaxed);
+            cortex_m::asm::dsb();
+            return;
+        }
+        if named != h {
+            bump(&LATE);
+            SKIP_HALF.store(h as u8, Ordering::Relaxed);
+        }
+    }
     // SAFETY: the DMA reads the other half (NDTR above); only this ISR
     // writes the buffer while the stream runs.
     let out = unsafe { half_mut(h) };
@@ -783,6 +819,7 @@ fn halt() {
 /// [`AudioDac::watchdog`].
 fn arm(first: u32) {
     LAST_AT.store(cycles(), Ordering::Relaxed);
+    SKIP_HALF.store(NO_HALF, Ordering::Relaxed);
     let dac = dac();
     // The first trigger moves DHR (`first`, as DOR) out; its request
     // then brings frame 0 (26.4.8: DHR must hold data before the

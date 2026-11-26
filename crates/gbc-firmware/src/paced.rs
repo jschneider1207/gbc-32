@@ -102,10 +102,13 @@
 //! - [`Idle`] is `WFI`. With a DWT [`CycleClock`] the CPU clock must keep
 //!   running in Sleep (H7: DBGMCU_CR DBGSLEEP_D1), or the counter stops
 //!   during `WFI` and the speed figures count only the busy time
-//!   (docs/reference/audio-dac.md). A refill that lands between the room check and
-//!   the `WFI` delays the loop by at most one DMA half (7.8 ms) or until
-//!   any other interrupt, while the ring still holds over 1,498 frames
-//!   (45 ms).
+//!   (docs/reference/audio-dac.md). The loop hands [`Idle::idle`] its
+//!   wait condition so the board can re-check it with interrupts masked
+//!   right before `WFI` (`cpsid i`, check, `wfi`, `cpsie i`: WFI wakes on
+//!   a pending interrupt even with PRIMASK set, Armv7-M B1.5.19); without
+//!   that, a refill landing between the loop's check and the `WFI` would
+//!   delay the loop by up to one DMA half (7.8 ms) or until any other
+//!   interrupt (M4 review P-4).
 //! - [`run`] drains itself: after the `end` line it calls [`Idle`] until
 //!   the tap has popped every frame pushed, then prints `drain` and the
 //!   stats. The DAC must still be playing (stop it after `run` returns);
@@ -135,8 +138,12 @@ use crate::input::{InputSource, Script};
 pub trait Idle {
     /// Called when the ring has no room for another call's samples, and
     /// while draining. Returns when the consumer may have popped (or at
-    /// once: the loop just checks again).
-    fn idle(&mut self);
+    /// once: the loop just checks again). `waiting` is the loop's
+    /// condition (true: still no room, or still draining); a board that
+    /// sleeps checks it with interrupts masked right before sleeping, so
+    /// a pop between the loop's check and the sleep cannot be missed
+    /// (module docs, "Board use"; M4 review P-4).
+    fn idle(&mut self, waiting: &dyn Fn() -> bool);
 }
 
 /// The board's per-frame hook for [`run_with`], called between frames: at
@@ -360,7 +367,7 @@ where
             if steady_from.is_none() {
                 steady_from = Some((clock_base + emu.clock(), time.total));
             }
-            idle.idle();
+            idle.idle(&|| ring.free() < MIN_AUDIO_SLOTS);
             idle_calls += 1;
             time.tick(clock.now());
         }
@@ -426,8 +433,9 @@ where
 
     // Drain: wait until the consumer has popped every pushed frame.
     let mut drain_idle_calls = 0u64;
-    while u64::from(tap.frames()) != feed_frames & u64::from(u32::MAX) {
-        idle.idle();
+    let draining = || u64::from(tap.frames()) != feed_frames & u64::from(u32::MAX);
+    while draining() {
+        idle.idle(&draining);
         drain_idle_calls += 1;
     }
     let s2 = ring.stats();
