@@ -10,10 +10,9 @@ virtual COM port. The figures replace the x86 instruction-count proxy of
 (MB1364, STM32H753ZIT6, single core, LDO supply; silicon revision V), with
 an X-NUCLEO-GFX02Z1 display shield plugged in (unused here). It replaced the
 **NUCLEO-H755ZI-Q** (MB1363, STM32H755ZIT6, dual core, SMPS supply) on which
-the first results were taken. The board is a cargo feature, `h753`
-(default) or `h755`; `build.sh` and `flash.sh` take it from
-`H7_BENCH_BOARD` (default `h753`), and the images go to `out/<board>/`. See
-"Boards" for what differs.
+the first results were taken. Until the switch onto the firmware lib
+(below) the board was a cargo feature, `h753` or `h755`; see "Boards" for
+what differed.
 
 **Status.** NUCLEO-H755ZI-Q, 2026-11-24: all three placements at both
 clocks. NUCLEO-H753ZI, 2026-11-25: all three placements at 64 and 392 MHz
@@ -39,26 +38,45 @@ case in `itcm-dtcm` (3,296,548 / 3,334,278 cycles, 41.7% / 42.2% of a
 so the spread is most likely code layout, not the clock (see "NUCLEO-H753ZI
 at 472 MHz").
 
+**Bring-up from the firmware lib, 2026-11-25 (ADR 0036).** The board
+images link `crates/gbc-nucleo-h753` for everything chip-side: the supply
+(`__pre_init`), the 472 MHz HSI clock (plan D11), the UART, the LEDs, the
+MPU (new to the bench: ES0392 section 2.1.2's no-access background region,
+write-back flash and AXI SRAM), the caches, the TCM copy, the cycle
+counter, the LSE clock check and the panic, HardFault and DefaultHandler
+(still `h7bench v1 FAULT ...`). `src/board.rs`, `src/tcm.rs` and
+`src/stack.rs` are gone, and with them the `h755` feature and the 392 MHz
+(`pll`) and 64 MHz HSI images: the H755 is retired (plan D8) and D11 fixes
+the clock. Every image runs at 472 MHz and keeps its `-pll480` name. The
+report lines are unchanged; the banner is the lib's ("Read the output").
+After the switch `bench-itcm-dtcm-pll480` printed the same `calls`,
+`frames`, `clocks` and `hash` as before on all fifteen workloads, with
+cycles -1.9% to +1.2% off the 472 MHz table ("After the switch onto the
+lib"). The text below keeps the removed images' names and figures as
+history; `m4-stub/` is kept but no longer built.
+
 Not part of the root workspace: `cargo build` at the repo root does not see
 it.
 
 ## Images
 
-`./build.sh` writes these to `out/<board>/` (ELF and `.bin`; not committed):
+`./build.sh` writes these to `out/h753/` (ELF and `.bin`; not committed).
+All run at the lib's 472 MHz HSI clock (VOS0); the `-pll480` suffix is the
+name the figures below were taken under:
 
 | Image | Features | What it does |
 |---|---|---|
-| `selftest` | `selftest` | Supply, LEDs, UART, caches, cycle counter. No emulator. **Flash this first.** |
-| `clockcheck` | `clockcheck` | The selftest's bring-up, then the CPU clock measured against the LSE crystal ("Clock check"). No emulator. Also `clockcheck-pll` and `clockcheck-pll480`. |
-| `bench-flash-axi` | none | Code in flash behind the I-cache; stack, emulator state and buffers in AXI SRAM behind the D-cache. |
-| `bench-flash-dtcm` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
-| `bench-itcm-dtcm` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
-| `*-pll` | `+pll` | Phase B clock (392 MHz), only with `H7_BENCH_PLL=1`. Flash these last. |
-| `*-pll480` | `+pll480` | Phase C clock (VOS0; 472 MHz from the HSI since 2026-11-25, 480 MHz from the HSE before), `h753` only, only with `H7_BENCH_PLL480=1`. Excludes `pll`. |
-| `m4-stub` | (own crate) | `h755` only: optional Cortex-M4 image, see "Dual core". Not needed. |
+| `selftest-pll480` | `selftest` | The lib's bring-up and banner, the cycle counter on a known delay loop, a TCM probe. No emulator. **Flash this first.** |
+| `clockcheck-pll480` | `clockcheck` | The selftest's bring-up, then the CPU clock measured against the LSE crystal ("Clock check"). No emulator. |
+| `bench-flash-axi-pll480` | none | Code in flash behind the I-cache; stack, emulator state and buffers in AXI SRAM behind the D-cache. |
+| `bench-flash-dtcm-pll480` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
+| `bench-itcm-dtcm-pll480` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
+| `qemu`, `qemu-itcm` | `qemu` (+`itcm`) | Only with `H7_BENCH_QEMU=1`: the frame loop on QEMU (see "Build"). |
 
-Every image also has the board feature (`h753` or `h755`); `build.sh`
-passes it with `--no-default-features`.
+The board images have the default feature `board` (the lib); the QEMU
+images are built with `--no-default-features` and link no lib. The
+features `h753`, `h755`, `pll` and `pll480` and the images without the
+suffix, `*-pll` and `m4-stub` existed before ADR 0036.
 
 The ROMs are built in: fourteen synthetic ones from the bench's generator
 (`tools/bench/src/synth.rs`, compiled into `build.rs`) and blargg's
@@ -117,7 +135,11 @@ With the HSI-based 472 MHz clock (no HSE setup) the `.bin`s were
 13,188 B and `clockcheck-pll480` 15,644 B. With the fractional PLL1
 setup and the banner's `pll` line (every image) they are 12,072, 711,208,
 711,512 and 712,584 B; `clockcheck` 13,336 B, `clockcheck-pll480`
-15,816 B.
+15,816 B. On the lib (ADR 0036: the MPU setup, the lib's banner and LSE
+measurement, the fault handler on its own stack) they are 16,524
+(`selftest-pll480`), 715,504, 715,504 and 716,456 B, `clockcheck-pll480`
+19,220 B; `.itcm` is still 64,024 B, and a 2 KiB `.fault_stack` follows
+`.axisram` in AXI SRAM.
 
 `.rodata` is mostly the fifteen ROM images (fourteen of 32 KiB and cpu_instrs at 64 KiB: 512 KiB). The `.bin` is 34% of the H753's 2 MiB flash and 68% of the H755's 1 MiB bank 1, so both still fit. The stack starts at the
 top of DTCM (0x2002_0000), or at 0x2404_0000 in `flash-axi`; the deepest
@@ -144,12 +166,17 @@ Flash the `.bin`, not the ELF: the ITCM ELF has a load segment at address
 ## Build
 
 ```
-./build.sh                      # all images for the H753, the host hash test
-H7_BENCH_BOARD=h755 ./build.sh  # the same for the H755, plus the M4 stub
-H7_BENCH_PLL=1 ./build.sh       # also the 392 MHz variants
-H7_BENCH_PLL480=1 ./build.sh    # also the VOS0 (472 MHz) variants (h753 only; refused for h755)
+./build.sh                      # all five images, the host hash test
 H7_BENCH_QEMU=1 ./build.sh      # also the QEMU smoke run (qemu-system-arm)
 H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
+```
+
+`H7_BENCH_PLL480=1` is still accepted and changes nothing;
+`H7_BENCH_BOARD=h755` and `H7_BENCH_PLL=1` are refused (ADR 0036).
+
+```
+cargo fmt --check && cargo clippy --release -- -D warnings   # also with --features selftest, clockcheck, itcm
+cargo clippy --release --no-default-features --features qemu -- -D warnings
 ```
 
 `flash.sh` and `read-serial.sh` take the board lock (`scripts/lib/board-lock.sh`, `${GBC_BOARD_LOCK:-/tmp/gbc-32-board.lock}`, ADR 0036); it is re-entrant and separate from `H7_BENCH_LOCK`.
@@ -157,8 +184,12 @@ H7_BENCH_LOCK=<file> ./build.sh # every cargo command under flock (agents)
 Needs only the pinned toolchain (`rust-objcopy` ships inside it) and
 binutils' `readelf`. The script prints the section sizes of each ELF, the
 first two vector words of each `.bin`, and checks: the initial SP is in RAM
-and 8-byte aligned; the reset vector is a Thumb address inside the image; the
-image fits the flash (bank 1 on the H755, both banks on the H753); in the ITCM image every glob of
+and 8-byte aligned (the placement's RAM, which also shows the image linked
+its own `memory.x` and not the lib's); the reset vector is a Thumb address
+inside the image; the image fits both flash banks; the lib's `__pre_init`,
+`HardFault` and `DefaultHandler` are linked, not cortex-m-rt's defaults;
+the fault stack (`__fault_stack_top`) is in AXI SRAM, 8-byte aligned, 2 KiB
+above `.axisram`; in the ITCM image every glob of
 `perf/itcm-sections.txt` that is still linked has its function below
 0x0001_0000 (the linker itself fails if ITCM or DTCM overflows); the host
 command's lines equal the committed `expected-hashes.txt`
@@ -170,24 +201,27 @@ must print exactly `expected-hashes.txt`; once plain, and once with the hot
 set copied to a stand-in ITCM out of branch range, which exercises the
 linker rules, the copy loop and the thunks (without the copy the run hangs:
 checked 2026-11-24). QEMU has no cycle counter, caches or STM32
-peripherals, so nothing in `src/board.rs` is covered by it.
+peripherals, and the QEMU image links no lib (`src/qemu.rs` has its own
+TCM copy, stack depth and panic handler), so no board code is covered by
+it.
 
 ## Flash
 
 ```
-./flash.sh out/h753/selftest.bin
-H7_BENCH_BOARD=h755 ./flash.sh out/h755/selftest.bin
+./flash.sh out/h753/selftest-pll480.bin
 ```
 
 It copies the `.bin` to the ST-LINK mass-storage drive (`H7_DRIVE`,
-default `E:`; label `NOD_H753ZI`, or `NOD_H755ZIQ` for the H755) with a
+default `E:`; label `NOD_H753ZI`) with a
 native Windows `copy`; the drive programs it at 0x0800_0000 and resets the
 target. It checks the image's vectors, that the image carries this board's
 name, the drive's label and files first, and reports the `FAIL.TXT` the
 drive writes on an error. All drive accesses go through `cmd.exe`, so no
 WSL mount of the drive is needed (the drvfs mount at `/mnt/e` was stale
-once, and remounting needs sudo). Close the serial port first. The M4 stub
-cannot be flashed this way.
+once, and remounting needs sudo). Close the serial port first.
+
+To flash and read under one hold of the board lock:
+`. ../../scripts/lib/board-lock.sh; with_board_lock bash -c './flash.sh out/h753/selftest-pll480.bin && ./read-serial.sh 25'`.
 
 Finding the drive and the port: `powershell.exe -NoProfile -Command
 "Get-Volume"` lists the label (the H753 board was `E:`), and
@@ -200,8 +234,41 @@ lists "STMicroelectronics STLink Virtual COM Port (COM5)".
 ./read-serial.sh 20      # COM5 (H7_COM; the H755 board was COM3), 115200 8N1, 20 s
 ```
 
-Expected, selftest (one line a second, the banner every 8 lines). On the
-H753 (2026-11-25, verbatim):
+Expected, `selftest-pll480` on the lib (2026-11-25, verbatim; one line a
+second, the banner every 8 lines and the `tcmprobe` line after it):
+
+```
+h7bench v1 banner image=selftest placement=flash-axi board=NUCLEO-H753ZI clock=pll472 cpu_hz=472000000 lse_cpu_hz=473565548 baud=115200 d3cr=0x0000e000 syscfg_pwrcr=0x00000081 oden=1 flash_acr=0x24 icache=1 dcache=1 mpu=1 cyccnt=1
+h7bench v1 power cr3=0x00000042 csr1=0x0000e000 d3cr=0x0000e000 actvosrdy=1 supply=ldo
+h7bench v1 clock rcc_cr=0x0304c025 cfgr=0x0000001b d1cfgr=0x00000048 d2cfgr=0x00000440 d3cfgr=0x00000040 flash_acr=0x24 rsr=0x00fe0000
+h7bench v1 pll pllckselr=0x02020050 pllcfgr=0x01f9000d pll1divr=0x01010248 pll1fracr=0x0000c000
+h7bench v1 vos0 syscfg_pwrcr=0x00000081 oden=1 pwrcr_before=0x00000000 polls_to_drop=2 polls_low=5
+h7bench v1 cpu cpuid=0x411fc271 idcode=0x20036450 optsr=0x1bc6aaf0 mpu_ctrl=0x1 mpu_regions=16
+h7bench v1 tcm itcmcr=0x3b dtcmcr=0x43 at_init=0x3b,0x43 itcm_bytes=0 dtcm_table_bytes=0 msp=0x2403fec0
+h7bench v1 selftest n=40 delay=8000000 cycles=8000019 cyccnt=2878872037 stack_used=528
+h7bench v1 tcmprobe want=0x5a17c0de itcm=0x5a17c0de dtcm=0x5a17c0de
+h7bench v1 selftest n=41 delay=8000000 cycles=8000019 cyccnt=3353616618 stack_used=528
+h7bench v1 selftest n=42 delay=8000000 cycles=8000008 cyccnt=3825616650 stack_used=528
+h7bench v1 selftest n=43 delay=8000000 cycles=8000019 cyccnt=2649404 stack_used=528
+```
+
+- The banner is the lib's (`Board::banner`), with `banner image=<image>
+  placement=<placement>` as its image name, so the first line keeps every
+  key the bench's own banner had (`board`, `image`, `placement`, `clock`,
+  `cpu_hz`, `baud`) and adds `lse_cpu_hz` (the clock measured against the
+  LSE once at boot, about 2 s, before any workload; plan D11), the VOS0
+  and flash fields and `icache`/`dcache`/`mpu`/`cyccnt`. The old `options
+  optsr=` line is the `cpu` line's `optsr=`, and `itcm_bytes` and
+  `dtcm_table_bytes` moved to the `tcm` line.
+- `cycles=` alternates 8,000,019 (odd `n`, and the line after a banner)
+  and 8,000,008: every value repeats exactly, the 11-cycle step noted
+  below for the older images.
+- `tcmprobe` writes the top of ITCM (only while nothing is placed there)
+  and the top of DTCM (only while the stack and statics are not in DTCM;
+  otherwise a `.bss` word, which is then in DTCM).
+
+Before the lib (the bench's own banner), selftest at 64 MHz on the H753
+(2026-11-25, verbatim):
 
 ```
 h7bench v1 banner board=NUCLEO-H753ZI image=selftest placement=flash-axi clock=hsi64 cpu_hz=64000000 baud=115200
@@ -357,12 +424,12 @@ Expected, bench (the workloads run once, several minutes at 64 MHz (the storms d
 whole report repeats every 3 s forever):
 
 ```
-h7bench v1 banner ... image=bench placement=itcm-dtcm ...
+h7bench v1 banner image=bench placement=itcm-dtcm board=NUCLEO-H753ZI clock=pll472 cpu_hz=472000000 lse_cpu_hz=... ...
 h7bench v1 start worst-case calls=120
 h7bench v1 worst-case calls=120 frames=... clocks=... min=... mean=... max=... hash=................
 ...
-h7bench v1 cpu_instrs calls=600 frames=... clocks=... min=... mean=... max=... hash=................
-h7bench v1 stack used=2952 of=77772
+h7bench v1 storm-ppu calls=120 frames=... clocks=... min=... mean=... max=... hash=................
+h7bench v1 stack used=3440 of=77592
 h7bench v1 end pass=1
 ```
 
@@ -422,11 +489,12 @@ with a `h7bench v1 FAULT ...` line on the UART every second.
 
 ## Boards
 
-### NUCLEO-H753ZI (`h753`, the default)
+### NUCLEO-H753ZI
 
 UM2407 Rev 6 (MB1364 board), RM0433 Rev 9 (MCU), DS12117 Rev 10
 (STM32H753xI datasheet); all in `../gbc-32-hardware/datasheets/`. The code
-comments in `src/board.rs` carry the same citations.
+comments in `crates/gbc-nucleo-h753/src/` carry the same citations (in
+`src/board.rs` before ADR 0036).
 
 - **Supply.** The STM32H753 has no SMPS: VCORE comes from the LDO or, in
   bypass, from an external regulator (RM0433 section 6.4, Figure 20,
@@ -501,10 +569,12 @@ comments in `src/board.rs` carry the same citations.
 - **Single core**: no BCM4/BCM7, no M4 stub; the banner's `dualcore` line
   is an `options optsr=` line instead (read only).
 
-### NUCLEO-H755ZI-Q (`h755`)
+### NUCLEO-H755ZI-Q (retired)
 
-UM2408 Rev 6 (board), RM0399 Rev 5 (MCU), DS12919 Rev 3 (STM32H755xI
-datasheet). The code comments in `src/board.rs` carry the same citations.
+History: the `h755` feature was removed with the switch onto the lib (ADR
+0036). UM2408 Rev 6 (board), RM0399 Rev 5 (MCU), DS12919 Rev 3
+(STM32H755xI datasheet); the code comments in `src/board.rs` carried the
+same citations (git history before ADR 0036).
 
 ### Supply (the item that can lock the board)
 
@@ -563,7 +633,7 @@ boot function" (Table 58) only applies when a BCMx option bit is 0.
   clock tree, GPIO and power registers. ST's dual-core templates stop the M4
   in D2 Stop until the M7 signals HSEM, which this firmware never does, but
   an unknown image deserves no trust: erase the chip, as was done.
-- **`m4-stub`** (64-byte vector table plus `wfi` in a loop, no RAM, no
+- **`m4-stub`** (no longer built; 64-byte vector table plus `wfi` in a loop, no RAM, no
   peripheral access) parks the M4 in Sleep instead of lockup. It makes the
   M4's state tidier for a debugger, nothing more; it needs
   STM32CubeProgrammer at 0x0810_0000 and is one more thing that can be
@@ -701,7 +771,47 @@ of the drop unknown; see "Still not verified".
   others; DTCM against AXI SRAM makes under 1%.
 - `stack used=2952` (itcm-dtcm), 2944 (the flash placements).
 
-### NUCLEO-H753ZI at 472 MHz, 2026-11-25 (current figures)
+### After the switch onto the lib, 2026-11-25
+
+`bench-itcm-dtcm-pll480` built on the gbc-nucleo-h753 lib (ADR 0036; core
+unchanged), after `selftest-pll480` (the verbatim lines in "Read the
+output"). All fifteen lines' `calls`, `frames`, `clocks` and `hash` equal
+`expected-hashes.txt`, and every repeat printed the same line for each
+workload. Banner: `lse_cpu_hz=473697508`, `itcm_bytes=64024
+dtcm_table_bytes=2432`, `mpu=1`; `stack used=3440 of=77592`. Only this
+placement was run; the flash placements and `clockcheck-pll480` are built,
+not run.
+
+Cycles per frame, mean / max, against the 472 MHz table below
+(`itcm-dtcm`, built at b4d6c81):
+
+| Workload | On the lib | Before (b4d6c81) | Mean | Max |
+|---|---|---|---|---|
+| worst-case | 3,296,081 / 3,333,519 | 3,296,548 / 3,334,278 | -0.01% | -0.02% |
+| cgb-raster | 2,636,904 / 2,676,479 | 2,605,630 / 2,644,564 | +1.20% | +1.21% |
+| dmg-raster | 1,920,520 / 1,942,643 | 1,924,667 / 1,947,063 | -0.22% | -0.23% |
+| event-storm | 2,026,813 / 2,041,255 | 2,016,303 / 2,031,279 | +0.52% | +0.49% |
+| cpu_instrs | 1,296,462 / 1,769,208 | 1,295,514 / 1,767,935 | +0.07% | +0.07% |
+| dma-storm | 3,084,675 / 3,089,737 | 3,088,109 / 3,092,401 | -0.11% | -0.09% |
+| halt-irq | 659,801 / 661,155 | 658,298 / 660,286 | +0.23% | +0.13% |
+| apu-writes | 898,367 / 920,576 | 897,195 / 919,289 | +0.13% | +0.14% |
+| oam-lines | 1,451,297 / 1,467,214 | 1,447,995 / 1,463,898 | +0.23% | +0.23% |
+| storm-control | 2,248,256 / 2,266,586 | 2,248,086 / 2,266,601 | +0.01% | -0.00% |
+| storm-apu | 23,961,057 / 24,173,855 | 23,961,284 / 24,174,010 | -0.00% | -0.00% |
+| storm-spsw | 14,477,681 / 14,608,726 | 14,572,044 / 14,705,973 | -0.65% | -0.66% |
+| storm-div | 16,036,439 / 16,178,658 | 16,339,897 / 16,483,324 | -1.86% | -1.85% |
+| storm-gdma | 2,883,432 / 2,908,998 | 2,876,062 / 2,901,220 | +0.26% | +0.27% |
+| storm-ppu | 28,427,641 / 28,727,641 | 28,561,042 / 28,862,232 | -0.47% | -0.47% |
+
+- Within the about +-2% build-to-build band seen before (the 472 against
+  483.86 MHz comparison below): the worst case is unchanged (3,296,081 /
+  3,333,519, 41.7% / 42.2% of a 472 MHz frame, 83.4% / 84.4% of the 50%
+  line), `storm-div` moves most (-1.9%), then `cgb-raster` (+1.2%). The
+  bring-up runs before the first measured call, so only code layout and
+  the MPU's attributes (write-back flash, which the default map has as
+  write-through) can move these figures.
+
+### NUCLEO-H753ZI at 472 MHz, 2026-11-25 (all three placements, before the lib)
 
 `pll480` as it is now: PLL1 from the HSI, 12.8 MHz reference, fractional
 x 73.75, **472 MHz** nominal (473.62 MHz measured against the LSE, "Clock
@@ -949,7 +1059,11 @@ counts and to the final chip.
   and so whether the `*-pll` bench images run on the H753 at all.
 - That the Cortex-M4 sitting in lockup has no effect (nothing suggests one:
   the cycle counts repeat exactly).
-- `m4-stub`: built, never flashed.
+- `m4-stub`: built, never flashed; no longer built (ADR 0036).
+- On the lib (ADR 0036): `bench-flash-axi-pll480`, `bench-flash-dtcm-pll480`
+  and `clockcheck-pll480` are built, not run; the `tcmprobe` path for a
+  selftest with its RAM in DTCM (the `.bss` word) is built, not run (the
+  selftest image keeps its RAM in AXI SRAM).
 - Why the ST-LINK's MCO is 8.064 MHz and wanders ("Clock check"): its
   source inside the ST-LINK is not documented here. No longer used.
 - The LSE crystal's own accuracy (not measured with an instrument; the
@@ -961,20 +1075,17 @@ counts and to the final chip.
 
 ## Flashing order on a board that has not run this
 
-1. `selftest.bin`: LD1 on then toggling at 1 Hz, LD2 on, banner with
-   `supply=ldo` (H753) or `supply=direct-smps` (H755) and
-   `actvosrdy=1 icache=1 dcache=1 cyccnt=1`, one
-   `selftest` line a second with a constant `cycles=`, and a `tcmprobe`
-   line whose three values are equal. Then unplug and replug USB and check
-   the same again (the real test of the supply write).
-2. `bench-flash-axi.bin`: the report lines; compare `calls`, `frames`,
-   `clocks`, `hash` with `expected-hashes.txt` (and with `host/`'s
-   `cargo run --release` if the core changed since it was made).
-3. `bench-flash-dtcm.bin`, then `bench-itcm-dtcm.bin`: same hashes, lower
-   cycle counts; `itcm_bytes=` non-zero in the banner.
-4. Only if 1 to 3 are right: `selftest-pll.bin`, then the `*-pll` bench
-   images (`clock=pll392`; the hashes must not change).
-5. H753 only: `selftest-pll480.bin` (`clock=pll472`, `oden=1`,
-   `flash_acr=0x24`), then the `*-pll480` bench images.
-6. Any time: `clockcheck*.bin` to measure the clock against the LSE
+1. `selftest-pll480.bin`: LD1 on then toggling at 1 Hz, LD2 on, banner
+   with `clock=pll472`, `oden=1`, `flash_acr=0x24`, `supply=ldo`,
+   `actvosrdy=1 icache=1 dcache=1 mpu=1 cyccnt=1` and a plausible
+   `lse_cpu_hz=` (about 473.6 MHz), one `selftest` line a second with
+   `cycles=` repeating exactly, and a `tcmprobe` line whose three values
+   are equal. Then unplug and replug USB and check the same again (the
+   real test of the supply write).
+2. `bench-flash-axi-pll480.bin`: the report lines; compare `calls`,
+   `frames`, `clocks`, `hash` with `expected-hashes.txt` (and with
+   `host/`'s `cargo run --release` if the core changed since it was made).
+3. `bench-flash-dtcm-pll480.bin`, then `bench-itcm-dtcm-pll480.bin`: same
+   hashes, lower cycle counts; `itcm_bytes=` non-zero in the banner.
+4. Any time: `clockcheck-pll480.bin` to measure the clock against the LSE
    (`avg_cpu_hz_measured=`; read for a minute).
