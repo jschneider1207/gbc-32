@@ -13,6 +13,7 @@
 //! - [`fnv`]: 64-bit FNV-1a, the hash on every output line.
 //! - [`headless`]: the headless frame loop and its line format.
 //! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
+//! - [`video`]: the RGB555 to RGB565 1.5x scaler (240x216) for the panel (M3).
 //!
 //! Display, audio-out and button traits arrive with their drivers (M3, M4,
 //! M5).
@@ -24,6 +25,7 @@ pub mod fnv;
 pub mod headless;
 pub mod input;
 pub mod rom_image;
+pub mod video;
 
 /// A free-running cycle counter (on the MCU, the DWT's `CYCCNT`).
 ///
