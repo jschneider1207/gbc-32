@@ -137,6 +137,30 @@ entry worst-case "$tmp/b3"
 run "a synth: entry" 0 "synth:worst-case $frames" 'worst-case: PASS equal=yes'
 run "a synth: entry with a group" 2 "synth:worst-case - g" 'takes a frame count and no group'
 
+# run-paced.sh exits other than 0/1 are tool errors even when every line is
+# present and fine (review T-1: 127, 137, 124 gave PASS exit 0).
+entry g "$tmp/body"
+for code in 3 137; do
+  printf '#!/usr/bin/env bash\nbash "%s" "$@"\nexit %s\n' "$here/../crates/gbc-nucleo-h753/run-paced.sh" "$code" > "$tmp/stub$code.sh"
+  RUN_REPLAY_RUN_PACED=$tmp/stub$code.sh
+  export RUN_REPLAY_RUN_PACED
+  run "checker exits $code after good lines" 2 "$CLOCKED" 'g: TOOL ERROR'
+done
+unset RUN_REPLAY_RUN_PACED
+# A per-entry max_ppm= bound (review T-3); the env can only tighten it.
+run "max_ppm=1000 on the entry fails ppm=+1139" 1 "$CLOCKED max_ppm=1000" 'g: FAIL'
+run "max_ppm=1200 on the entry passes" 0 "$CLOCKED max_ppm=1200" 'g: PASS'
+RUN_REPLAY_MAX_PPM=999999
+export RUN_REPLAY_MAX_PPM
+run "env cannot loosen the entry's max_ppm=1000" 1 "$CLOCKED max_ppm=1000" 'g: FAIL'
+RUN_REPLAY_MAX_PPM=1000
+run "env tightens an entry's max_ppm=1200" 1 "$CLOCKED max_ppm=1200" 'g: FAIL'
+unset RUN_REPLAY_MAX_PPM
+run "max_ppm on a plain entry" 0 "$PLAIN max_ppm=1200" 'rtc3test: PASS'
+run "malformed max_ppm=" 2 "$CLOCKED max_ppm=1e3" 'is not a number'
+# An explicit frame count on a group must equal the table's end (T-7).
+run "group with an explicit frame count that differs" 2 "rtc3test/rtc3test.gb $((frames + 1)) g" "differs from the table's end"
+run "group with the explicit frame count equal" 0 "rtc3test/rtc3test.gb $frames g" 'g: PASS'
 if [ "$fails" = 0 ]; then echo "test-run-replay.sh: all passed"; exit 0; fi
 echo "test-run-replay.sh: $fails FAILED"
 exit 1

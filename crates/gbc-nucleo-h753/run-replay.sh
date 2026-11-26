@@ -18,6 +18,11 @@
 #                                                 paced ROMs), no input;
 #                                                 the entry is named <name>
 #
+# Any line may end with `max_ppm=<n>`: that entry's run-paced.sh speed bound
+# (soak-set.txt: max_ppm=1000, the M4 +-0.1%). RUN_REPLAY_MAX_PPM can only
+# tighten it, never loosen it. A group entry's explicit frame count must equal
+# its table's end (else exit 2); `-` takes the table's.
+#
 # For a group, `replay-input table` converts the group's input from
 # acceptance/stage1.toml with romtest's own code into a `clocks v1` table
 # (changes at their exact clocks, handed to the core as romtest does;
@@ -64,9 +69,9 @@
 #                            <dir>/<name>.bin, .host and .serial (as saved
 #                            in RUN_REPLAY_OUT) and run only steps 5-6 on
 #                            them (RUN_PACED_CAPTURE); for tests
-#   RUN_REPLAY_MAX_PPM=<n>   run-paced.sh's speed bound (default: lifted,
-#                            see step 5); 1000 for a 10-minute run (the M4
-#                            +-0.1% criterion: soak-set.txt, the M5 soak)
+#   RUN_REPLAY_MAX_PPM=<n>   a speed bound for every entry (default: lifted, see
+#                            step 5); it only tightens an entry's max_ppm=
+#                            (soak-set.txt sets 1000, the M4 +-0.1%)
 #   RUN_REPLAY_RUN_PACED=<script>  the checker (default: run-paced.sh next
 #                            to this script; for tests)
 #   GBC_TEST_ROMS=<dir>      test ROMs (default: the repo's test-roms/)
@@ -124,7 +129,9 @@ check_entry() {
     [[ "$v" =~ ^[0-9]+$ ]] || { echo "run-replay.sh: $name: '$2=$v' is malformed in: $1" >&2; return 2; }
     printf '%s\n' "$v"
   }
-  [ "$rc" = 2 ] && return 2
+  # run-paced.sh exits 0 (pass) or 1 (check failed); anything else (2, 127,
+  # 137 OOM kill, 124/143 timeout ...) is a tool error even if the lines look fine.
+  [ "$rc" = 0 ] || [ "$rc" = 1 ] || { echo "run-replay.sh: $name: run-paced.sh exited $rc" >&2; return 2; }
   core=$(line 'stats paced core') || return 2
   ring=$(line 'stats paced ring') || return 2
   player=$(line 'stats player') || return 2
@@ -162,16 +169,28 @@ check_entry() {
 # the list, is a tool error, never a pass).
 expected=$(awk -v only="${RUN_REPLAY_ONLY:-}" '
   $1 == "" || substr($1, 1, 1) == "#" { next }
-  { name = $1; sub(/^synth:/, "", name); sub(/.*\//, "", name); sub(/\.[^.]*$/, "", name); if ($3 != "") name = $3
+  { k = 0; for (i = 1; i <= NF; i++) if ($i !~ /^max_ppm=/) p[++k] = $i
+    name = p[1]; sub(/^synth:/, "", name); sub(/.*\//, "", name); sub(/\.[^.]*$/, "", name); if (p[3] != "") name = p[3]
     if (only == "" || index("," only ",", "," name ",")) n++ }
   END { print n + 0 }' "$list")
 run_paced=${RUN_REPLAY_RUN_PACED:-$here/run-paced.sh}
 entries=0 checked=0
 # The list is read on fd 3: flash.sh, gbc-pc.sh and read-serial.sh get
 # /dev/null as stdin, so none of them can eat the rest of the list.
-while read -r rom_rel frames group extra <&3; do
-  case "$rom_rel" in ''|'#'*) continue;; esac
-  [ -z "${extra:-}" ] || die "$list: too many fields: $rom_rel $frames $group $extra"
+while read -r -a fld <&3; do
+  case "${fld[0]:-}" in ''|'#'*) continue;; esac
+  entry_ppm=""; pos=()
+  for x in "${fld[@]}"; do
+    case "$x" in
+      max_ppm=*) entry_ppm=${x#max_ppm=}; case "$entry_ppm" in ''|*[!0-9]*) die "$list: $x is not a number";; esac;;
+      *) pos+=("$x");;
+    esac
+  done
+  rom_rel=${pos[0]:-} frames=${pos[1]:-} group=${pos[2]:-}
+  [ "${#pos[@]}" -le 3 ] || die "$list: too many fields: ${fld[*]}"
+  [ "${#pos[@]}" -ge 2 ] || die "$list: $rom_rel: no frame count"
+  # The entry's speed bound; the env bound can only tighten it.
+  eppm=$max_ppm; [ -n "$entry_ppm" ] && [ "$entry_ppm" -lt "$eppm" ] && eppm=$entry_ppm
   name=$(basename "${rom_rel%.*}"); [ -n "${group:-}" ] && name=$group
   synth=""
   case "$rom_rel" in synth:*) synth=${rom_rel#synth:}; name=$synth
@@ -185,7 +204,9 @@ while read -r rom_rel frames group extra <&3; do
     for f in "$img" "$host" "$serial"; do [ -f "$f" ] || die "$f: no such file"; done
     rom=/nonexistent.gb
     # A group's length comes from its table; here, from the host's header.
-    [ "$frames" = - ] && frames=$(sed -n 's/^paced v1 .* frames=\([0-9]*\)$/\1/p' "$host")
+    hf=$(sed -n 's/^paced v1 .* frames=\([0-9]*\)$/\1/p' "$host")
+    if [ "$frames" = - ]; then frames=$hf
+    elif [ "$clocked" = 1 ] && [[ "$frames" =~ ^[0-9]+$ ]] && [ "$frames" != "$hf" ]; then die "$name: frames $frames differs from the table's end $hf (use - for the group's length)"; fi
   else
     if [ -n "$synth" ]; then
       rom=$out/$synth.gb
@@ -200,7 +221,8 @@ while read -r rom_rel frames group extra <&3; do
       "$replay_input" table --manifest "$root/acceptance/stage1.toml" --group "$group" > "$out/$name.clocks" ||
         die "$name: replay-input table failed"
       want_frames=$(sed -n 's/^end \([0-9]*\)$/\1/p' "$out/$name.clocks")
-      [ "$frames" = - ] && frames=$want_frames
+      if [ "$frames" = - ]; then frames=$want_frames
+      elif [ "$frames" != "$want_frames" ]; then die "$name: frames $frames differs from the table's end $want_frames (use - for the group's length)"; fi
       input_args=(--input "$out/$name.clocks")
     fi
     case "$frames" in ''|*[!0-9]*) die "$name: frames '$frames' is not a number";; esac
@@ -220,10 +242,10 @@ while read -r rom_rel frames group extra <&3; do
   case "$frames" in ''|*[!0-9]*) die "$name: frames '$frames' is not a number";; esac
   secs=$((frames / 59 + 50))
   if [ -n "$caps" ]; then
-    RUN_PACED_CAPTURE=$serial RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$max_ppm \
+    RUN_PACED_CAPTURE=$serial RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$eppm \
       bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   else
-    RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$max_ppm RUN_PACED_READ_SECS=$secs \
+    RUN_PACED_HOST=$host RUN_PACED_FRAMES=$frames RUN_PACED_MAX_PPM=$eppm RUN_PACED_READ_SECS=$secs \
       RUN_PACED_SAVE=$serial bash "$run_paced" "$img" "$rom" > "$out/$name.run-paced.log" 2>&1
   fi
   rc=$?

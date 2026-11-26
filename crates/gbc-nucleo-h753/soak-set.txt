@@ -4,4 +4,4 @@
 # the scripted `player` (no input) for 35,837 frames (10 minutes), its
 # `paced` lines against the host's, ring underruns 0, total_over_budget 0
 # and the M4 +-1000 ppm speed bound.
-synth:worst-case 35837
+synth:worst-case 35837 max_ppm=1000
