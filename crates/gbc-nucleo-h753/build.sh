@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Builds the gbc-nucleo-h753 images into out/ (ELF and .bin), prints their
+# section sizes and checks what can be checked without the board, as
+# tools/h7-bench/build.sh does.
+#
+#   ./build.sh            every bin (M1: boot)
+#   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
+#                         (agents: the shared build lock)
+#
+# Checks per image: the vector table (initial SP in DTCM and 8-byte
+# aligned, reset vector a Thumb address inside the image), the flash fit,
+# the lib's handlers linked instead of cortex-m-rt's defaults, the startup
+# symbols inside DTCM and in order, and the fault stack inside AXI SRAM
+# and clear of the `.axisram` buffers. scripts/check-itcm-elf.sh applies
+# once an image links gbc-core with the ITCM set (the M1 `headless` image).
+#
+# One target directory, images built one after the other (AGENTS.md
+# "Machine resources"); never pass -j.
+set -euo pipefail
+cd "$(dirname "$0")"
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+
+TARGET=thumbv7em-none-eabihf
+OUT=out
+BINS=(boot)
+MAX_BIN=$((2048 * 1024)) # both flash banks (single core)
+DTCM_LO=0x20000000 DTCM_HI=0x20020000 AXI_LO=0x24000000 AXI_HI=0x24080000
+FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
+
+locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
+
+# rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
+host=$(rustc -vV | sed -n 's/^host: //p')
+sysroot=$(rustc --print sysroot)
+[ -x "$sysroot/lib/rustlib/$host/bin/rust-objcopy" ] || { echo "FAIL: no rust-objcopy in $sysroot" >&2; exit 1; }
+# It links against the toolchain's own libLLVM.
+objcopy() { LD_LIBRARY_PATH="$sysroot/lib" "$sysroot/lib/rustlib/$host/bin/rust-objcopy" "$@"; }
+command -v readelf >/dev/null || { echo "FAIL: readelf (binutils) not found" >&2; exit 1; }
+
+mkdir -p "$OUT"
+fail=0
+bad() { echo "FAIL: $*" >&2; fail=1; }
+
+# word <file> <index>: little-endian 32-bit word of a .bin, as 8 hex digits.
+word() { od -An -tx4 -j $(($2 * 4)) -N4 "$1" | tr -d ' \n'; }
+# sym <readelf -sW output> <name>: the symbol's value, 8 hex digits.
+sym() { awk -v n="$2" '$8 == n {print $2; exit}' <<< "$1"; }
+# in_range <hex> <lo> <hi>: lo <= value <= hi
+in_range() { [ -n "$1" ] && [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
+
+locked cargo build --release --bins
+
+for name in "${BINS[@]}"; do
+  echo "== $name"
+  elf=$OUT/$name.elf bin=$OUT/$name.bin
+  cp "target/$TARGET/release/$name" "$elf"
+  objcopy -O binary "$elf" "$bin"
+
+  # Allocated sections: name, address, size in bytes.
+  readelf -SW "$elf" | sed -n 's/^ *\[ *[0-9]*\] *//p' | awk '
+    $1 ~ /^\./ && $7 ~ /A/ { printf "  %-14s %-8s addr 0x%s size %7d\n", $1, $2, $3, strtonum("0x" $5) }'
+  size=$(stat -c %s "$bin")
+  sp=$(word "$bin" 0)
+  reset=$(word "$bin" 1)
+  echo "  bin $size bytes; vector[0] (initial SP) 0x$sp; vector[1] (reset) 0x$reset"
+  [ "$size" -le "$MAX_BIN" ] || bad "$name.bin is $size bytes: over $MAX_BIN B of flash"
+  in_range "$sp" "$DTCM_LO" "$DTCM_HI" || bad "$name: initial SP 0x$sp outside DTCM"
+  [ $((16#$sp % 8)) -eq 0 ] || bad "$name: initial SP 0x$sp not 8-byte aligned"
+  in_range "$reset" 0x08000000 $((0x08000000 + size)) || bad "$name: reset vector 0x$reset outside the image"
+  [ $((16#$reset & 1)) -eq 1 ] || bad "$name: reset vector 0x$reset lacks the Thumb bit"
+
+  syms=$(readelf -sW "$elf")
+  # The supply configuration must be the first code after reset, and the
+  # fault handlers the lib's: cortex-m-rt PROVIDEs its defaults when an
+  # image does not link them.
+  grep -q ' FUNC .* __pre_init$' <<< "$syms" || bad "$name: no __pre_init function"
+  for f in HardFault DefaultHandler; do
+    grep -q " FUNC .* $f\$" <<< "$syms" || bad "$name: no $f function"
+  done
+  for d in DefaultPreInit HardFault_ DefaultHandler_; do
+    ! grep -q " $d\$" <<< "$syms" || bad "$name: cortex-m-rt's default $d is linked"
+  done
+
+  # What the startup code zeroes, copies and paints must be inside DTCM and
+  # in order (a section inserted after .bss in another region broke this
+  # in h7-bench).
+  sbss=$(sym "$syms" __sbss); ebss=$(sym "$syms" __ebss)
+  sdata=$(sym "$syms" __sdata); edata=$(sym "$syms" __edata)
+  send=$(sym "$syms" _stack_end); sstart=$(sym "$syms" _stack_start)
+  echo "  .data $sdata..$edata  .bss $sbss..$ebss  stack $send..$sstart"
+  for v in "$sdata" "$edata" "$sbss" "$ebss" "$send" "$sstart"; do
+    in_range "$v" "$DTCM_LO" "$DTCM_HI" || bad "$name: startup symbol 0x$v outside DTCM"
+  done
+  { [ $((16#$sdata)) -le $((16#$edata)) ] && [ $((16#$edata)) -le $((16#$sbss)) ] &&
+    [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
+    [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
+
+  # The fault stack: in AXI SRAM, 8-byte aligned, its full size above the
+  # end of the `.axisram` buffers.
+  ftop=$(sym "$syms" __fault_stack_top)
+  axi_end=$(readelf -SW "$elf" | sed -n 's/^ *\[ *[0-9]*\] *//p' |
+    awk '$1 == ".axisram" {printf "%08x", strtonum("0x" $3) + strtonum("0x" $5)}')
+  echo "  fault stack top 0x$ftop; .axisram ends 0x${axi_end:-none}"
+  in_range "$ftop" "$AXI_LO" "$AXI_HI" || bad "$name: __fault_stack_top 0x$ftop outside AXI SRAM"
+  [ -n "$ftop" ] && [ $((16#$ftop % 8)) -eq 0 ] || bad "$name: __fault_stack_top 0x$ftop not 8-byte aligned"
+  [ -n "$axi_end" ] && [ -n "$ftop" ] && [ $((16#$ftop - 16#$axi_end)) -ge "$FAULT_STACK_BYTES" ] ||
+    bad "$name: fewer than $FAULT_STACK_BYTES B between .axisram and __fault_stack_top"
+done
+
+[ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
+echo "build.sh: OK; images in $(pwd)/$OUT"

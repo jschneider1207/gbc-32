@@ -1,0 +1,55 @@
+[package]
+name = "gbc-nucleo-h753"
+description = "NUCLEO-H753ZI board support and firmware images: bring-up at 472 MHz, UART, MPU, caches, TCM copy, fault handlers (ADR 0036)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license = "MIT"
+
+# Not a member of the root workspace: it only builds for thumbv7em and has
+# its own profile and rustflags (.cargo/config.toml), as tools/h7-bench.
+# Root `cargo test --workspace` never builds it for the host (ADR 0036).
+[workspace]
+
+# No host test harness: thumbv7em has no `test` crate, so `cargo clippy
+# --all-targets` would fail on the test targets.
+[lib]
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "boot"
+test = false
+bench = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+# Exact versions: the same as tools/h7-bench's Cargo.lock, so the two
+# workspaces cannot resolve the PAC or the runtime differently (ADR 0036,
+# Consequences). h7-bench will depend on this lib, which then forces them.
+[dependencies]
+cortex-m = "=0.7.10"
+# `paint-stack`: the startup code fills the unused stack with 0xCCCCCCCC, so
+# `stack::usage` can say how deep it went.
+cortex-m-rt = { version = "=0.7.7", features = ["paint-stack"] }
+# PAC only, no HAL: the H753 register description for silicon revision V
+# (RM0433). Its default `rt` feature gives cortex-m-rt the interrupt
+# vector table.
+stm32h7 = { version = "=0.15.1", features = ["stm32h753v"] }
+
+# The memory.x generator (ADR 0036), shared with tools/h7-bench.
+[build-dependencies]
+memory-x = { path = "../../tools/memory-x" }
+
+# As the root workspace's release profile (root Cargo.toml): default
+# opt-level 3, one codegen unit, no LTO (perf/itcm-sections.txt and the
+# sizes in docs/perf.md are measured that way).
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
