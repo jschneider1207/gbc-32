@@ -19,6 +19,13 @@
 # Lines before a report (the previous image's, buffered by the VCP) are
 # ignored.
 #
+# The compared report must come from the image given: its report line's
+# `image_bytes=<n> image_cksum=<crc>` (src/image.rs: the image's own
+# flash range, which build.sh checks is the .bin) must equal `cksum` of
+# <image.bin>. Otherwise the board is not running the flashed image (the
+# ST-LINK accepted the copy and did not program it, flash.sh) and the
+# script exits 2, whatever its lines say.
+#
 # Exit: 0 equal, 1 differ (the first differing line is printed), 2 tool
 # error (bad arguments, flash or serial failure, no complete report).
 #
@@ -27,6 +34,9 @@
 #                           it after a 1 s pause)
 #   RUN_HEADLESS_CAPTURE    a saved serial capture to use instead of flashing
 #                           and reading the board (checks this script)
+#   RUN_HEADLESS_NO_FLASH=1 read the board without flashing (debugging; the
+#                           image check still applies, so it passes only if
+#                           the board already runs <image.bin>)
 #   H7_DRIVE, H7_LABEL, H7_COM  as for flash.sh and read-serial.sh
 #
 # Holds the board lock (scripts/lib/board-lock.sh) across the flash and
@@ -47,15 +57,22 @@ PREFIX=gbc-nucleo-h753
 tmp=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT
 
+[ -f "$img" ] || die "$img: no such file"
+read -r img_crc img_bytes < <(cksum < "$img") || die "cksum $img failed"
+want_image="image_bytes=$img_bytes image_cksum=$img_crc"
+
 if [ -n "${RUN_HEADLESS_CAPTURE:-}" ]; then
   [ -f "$RUN_HEADLESS_CAPTURE" ] || die "RUN_HEADLESS_CAPTURE=$RUN_HEADLESS_CAPTURE: no such file"
   tr -d '\r' < "$RUN_HEADLESS_CAPTURE" > "$tmp/serial"
 else
-  [ -f "$img" ] || die "$img: no such file"
   start=$(date +%s)
-  "$here/flash.sh" "$img" || die "flash.sh failed"
+  if [ "${RUN_HEADLESS_NO_FLASH:-}" = 1 ]; then
+    echo "run-headless.sh: RUN_HEADLESS_NO_FLASH=1: not flashing $img"
+  else
+    "$here/flash.sh" "$img" || die "flash.sh failed"
+  fi
   "$here/../../tools/h7-bench/read-serial.sh" "$secs" > "$tmp/serial" || die "read-serial.sh failed"
-  echo "run-headless.sh: flashed and read in $(($(date +%s) - start)) s"
+  echo "run-headless.sh: read in $(($(date +%s) - start)) s (flash included unless RUN_HEADLESS_NO_FLASH)"
 fi
 
 # Split the capture into reports: report.<k> holds the lines between the
@@ -100,6 +117,12 @@ echo "run-headless.sh: $complete complete report(s), $partial incomplete; compar
 cat "$chosen.start"
 grep '^stats ' "$chosen"
 cat "$chosen.end"
+# Exactly the two fields, with the values of the .bin; a report without
+# them is from an image older than the check.
+got_image=$(grep -oE ' image_bytes=[0-9]+ image_cksum=[0-9]+( |$)' "$chosen.start" | sed 's/^ //; s/ $//')
+[ "$got_image" = "$want_image" ] ||
+  die "the board is not running the flashed image: its report has '${got_image:-no image_bytes/image_cksum}', $img has '$want_image'"
+echo "run-headless.sh: image matched: $want_image"
 
 grep '^headless ' "$chosen" > "$tmp/got"
 tr -d '\r' < "$expected" | grep '^headless ' > "$tmp/want"

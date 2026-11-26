@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! <banner>                                        (Board::banner)
-//! gbc-nucleo-h753 headless report n=<k> rom=<name> frames=<N> run_cycles=<c> run_ms=<ms> stack_used=<b>/<b>
+//! gbc-nucleo-h753 headless report n=<k> rom=<name> frames=<N> run_cycles=<c> run_ms=<ms> stack_used=<b>/<b> image_bytes=<n> image_cksum=<crc>
 //! <the captured lines, exactly as gbc_firmware::headless::run wrote them>
 //! gbc-nucleo-h753 headless end n=<k> rom=<name> bytes=<len> cksum=<crc> overflow=<0|1>
 //! ```
@@ -22,7 +22,9 @@
 //! `bytes` and `cksum` are the length and the POSIX `cksum` CRC of the
 //! captured bytes (`\n` line ends; the UART sends `\r\n`), so the host can
 //! tell a report garbled or cut by the serial link (a tool error) from
-//! lines that differ. `run_cycles` is the DWT count of the whole
+//! lines that differ. `image_bytes` and `image_cksum` identify the image
+//! the board runs (`board::image`): run-headless.sh requires them to be
+//! the `.bin` it flashed. `run_cycles` is the DWT count of the whole
 //! `headless::run` call (emulation, hashing and formatting, no UART).
 //!
 //! Memory (ADR 0036: the board declares the statics, gbc-firmware borrows
@@ -42,7 +44,7 @@ use gbc_core::{Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
 use gbc_firmware::CycleClock;
 use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};
-use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led, stack, wait_since};
+use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, image, led, stack, wait_since};
 
 const PREFIX: &str = "gbc-nucleo-h753";
 const IMAGE: &str = "headless";
@@ -194,31 +196,6 @@ impl Capture {
     }
 }
 
-/// POSIX `cksum` (IEEE Std 1003.1, "cksum"): CRC-32 with the generator
-/// 0x04C11DB7, most significant bit first, initial value 0, over the data
-/// and then its length (least significant byte first, only as many bytes
-/// as it needs), complemented. The host checks a report with `cksum`.
-fn cksum(data: &[u8]) -> u32 {
-    fn feed(mut c: u32, b: u8) -> u32 {
-        c ^= u32::from(b) << 24;
-        for _ in 0..8 {
-            c = if c & 0x8000_0000 != 0 {
-                (c << 1) ^ 0x04C1_1DB7
-            } else {
-                c << 1
-            };
-        }
-        c
-    }
-    let mut c = data.iter().fold(0, |c, &b| feed(c, b));
-    let mut n = data.len();
-    while n != 0 {
-        c = feed(c, n as u8);
-        n >>= 8;
-    }
-    !c
-}
-
 /// What the reports say about the run.
 struct Run {
     frames: u32,
@@ -228,13 +205,14 @@ struct Run {
 
 fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
     board.banner(IMAGE);
+    let (image_bytes, image_cksum) = board.image();
     let ms = run.cycles * 1000 / u64::from(CPU_HZ);
     let out = &mut board.uart;
     // The UART writer never fails.
     let _ = writeln!(
         out,
         "{PREFIX} headless report n={n} rom={ROM_NAME} frames={} run_cycles={} run_ms={ms} \
-         stack_used={}/{}\r",
+         stack_used={}/{} image_bytes={image_bytes} image_cksum={image_cksum}\r",
         run.frames, run.cycles, run.stack.0, run.stack.1
     );
     // The captured lines end in `\n` alone; the UART sends `\r\n`, as
@@ -254,7 +232,7 @@ fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
         out,
         "{PREFIX} headless end n={n} rom={ROM_NAME} bytes={} cksum={} overflow={}\r",
         cap.len,
-        cksum(cap.bytes()),
+        image::cksum(cap.bytes()),
         u8::from(cap.overflow)
     );
 }

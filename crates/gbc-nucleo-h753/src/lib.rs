@@ -12,7 +12,8 @@
 //! ([`tcm`]), the 472 MHz clock from the HSI ([`clock`], plan D11), the
 //! UART ([`uart`]), the MPU ([`mpu`]), the I- and D-cache (write-back,
 //! ES0392 section 2.1.1) and the DWT cycle counter. [`clockcheck`]
-//! measures the clock against the LSE crystal.
+//! measures the clock against the LSE crystal. [`image`] identifies the
+//! flashed image (in the banner).
 //!
 //! Only the H753 at the D11 clock: no board or clock features. The image's
 //! `memory.x` comes from `memory_x::firmware_memory_x`, which defines the
@@ -22,6 +23,7 @@
 pub mod clock;
 pub mod clockcheck;
 mod fault;
+pub mod image;
 pub mod led;
 pub mod mpu;
 pub mod power;
@@ -65,6 +67,8 @@ pub struct Board {
     tcm_boot: (u32, u32),
     /// `None` until [`Board::measure_clock`] ran; then its result.
     lse_cpu_hz: Option<Option<u32>>,
+    /// [`image::identity`], computed by `init`.
+    image: (usize, u32),
 }
 
 /// Brings the board up. Call once, first thing in `main` (the supply was
@@ -135,6 +139,9 @@ pub fn init(prefix: &'static str) -> Board {
     }
     assert!(d2_ok, "D2 domain clocks not ready");
     assert!(cyccnt, "DWT cycle counter does not count");
+    // Read from flash with the caches on (the image's identity for the
+    // banner; see `image`).
+    let image = image::identity();
     led::ld2_on();
     Board {
         uart: Uart::new(),
@@ -143,6 +150,7 @@ pub fn init(prefix: &'static str) -> Board {
         placed,
         tcm_boot,
         lse_cpu_hz: None,
+        image,
     }
 }
 
@@ -150,6 +158,12 @@ impl Board {
     /// The prefix `init` was given.
     pub fn prefix(&self) -> &'static str {
         self.prefix
+    }
+
+    /// The flashed image's (length, `cksum`) ([`image::identity`]), as
+    /// `init` read it from flash.
+    pub fn image(&self) -> (usize, u32) {
+        self.image
     }
 
     /// Bytes copied to ITCM and to the DTCM tables by `init`.
@@ -166,7 +180,8 @@ impl Board {
     }
 
     /// The banner: what is running and the registers that prove how. Its
-    /// first line is `<prefix> <image> board=... cpu_hz=... lse_cpu_hz=...`
+    /// first line is `<prefix> <image> board=... cpu_hz=... lse_cpu_hz=...
+    /// ... image_bytes=<n> image_cksum=<crc>` ([`image`])
     /// (`lse_cpu_hz=unmeasured` before [`Board::measure_clock`], `fail` if
     /// it failed); the others are `<prefix> <topic> ...` lines.
     pub fn banner(&mut self, image: &str) {
@@ -212,13 +227,15 @@ impl Board {
         let _ = writeln!(
             out,
             " baud={} d3cr={d3cr:#010x} syscfg_pwrcr={pwrcr:#010x} oden={} flash_acr={acr:#04x} \
-             icache={} dcache={} mpu={} cyccnt={}\r",
+             icache={} dcache={} mpu={} cyccnt={} image_bytes={} image_cksum={}\r",
             uart::BAUD,
             pwrcr & 1,
             u8::from(SCB::icache_enabled()),
             u8::from(SCB::dcache_enabled()),
             u8::from(mpu_ctrl & 1 != 0),
             u8::from(self.cyccnt),
+            self.image.0,
+            self.image.1,
         );
         let _ = writeln!(
             out,

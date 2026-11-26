@@ -123,6 +123,19 @@ check_image() {
     [ $((16#$sbss)) -le $((16#$ebss)) ] && [ $((16#$ebss)) -le $((16#$send)) ] &&
     [ $((16#$send)) -lt $((16#$sstart)) ]; } || bad "$name: startup symbols out of order"
 
+  # The image's identity (src/image.rs): the range the image hashes, the
+  # end of `.rodata` or of the last load image in flash, must be exactly
+  # the .bin, or run-headless.sh's check against `cksum < .bin` fails.
+  img_end=$(( 16#$(sym "$syms" __erodata) ))
+  for t in "__sdata __edata __sidata" "__sitcm __eitcm __siitcm" "__sdtcm_ro __edtcm_ro __sidtcm_ro"; do
+    read -r s e li <<< "$t"
+    e=$(( 16#$(sym "$syms" "$li") + 16#$(sym "$syms" "$e") - 16#$(sym "$syms" "$s") ))
+    if [ "$e" -gt $((0x08000000)) ] && [ "$e" -le $((0x08000000 + MAX_BIN)) ] && [ "$e" -gt "$img_end" ]; then img_end=$e; fi
+  done
+  read -r img_crc _ < <(cksum < "$bin")
+  echo "  image range 0x08000000..$(printf 0x%08x "$img_end"); cksum $img_crc"
+  [ $((img_end - 0x08000000)) -eq "$size" ] || bad "$name: image range $((img_end - 0x08000000)) B is not the .bin's $size B (src/image.rs)"
+
   # The fault stack: in AXI SRAM, 8-byte aligned, its full size above the
   # end of the `.axisram` buffers.
   ftop=$(sym "$syms" __fault_stack_top)
