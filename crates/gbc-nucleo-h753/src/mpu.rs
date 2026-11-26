@@ -24,11 +24,18 @@
 //! 0); memory types Table B3-13 (TEX, C, B). A region's base is aligned to
 //! its size, and a higher region number wins where regions overlap.
 //!
+//! Region [`REGION_QSPI`] is the QUADSPI window at 0x9000_0000 (Normal,
+//! write-back, read-only, execute-never, sized exactly to the 8 MiB NOR;
+//! the rest of the 256 MB bank stays region 0's). It is disabled at
+//! [`init`] and opened by [`crate::qspi::Qspi::memory_mapped`] only once
+//! the QUADSPI is in memory-mapped mode, and closed again before it leaves
+//! it (`qspi_window`; the order is in the [`crate::qspi`] docs).
+//!
+//! The MPU stays on in HardFault and NMI (HFNMIENA, see
+//! `CTRL_ENABLE_HFNMIENA`).
+//!
 //! Not mapped yet, so no-access through region 0 (and no speculative
 //! access can reach them):
-//! - M2: the QUADSPI window at 0x9000_0000 (Normal, write-back, sized
-//!   exactly to the 8 MiB NOR; the rest of the 256 MB window stays
-//!   region 0's) on [`REGION_QSPI`];
 //! - M3: the FMC bank 1 LCD window at 0x6000_0000 (Device or
 //!   strongly-ordered, so the command and data writes are neither cached,
 //!   merged nor reordered) on [`REGION_FMC`];
@@ -38,7 +45,8 @@
 
 use cortex_m::peripheral::MPU;
 
-/// The region numbers M2 and M3 will use (see the module docs).
+/// The regions of the QUADSPI window (M2) and the FMC LCD window (M3; not
+/// used yet), see the module docs.
 pub const REGION_QSPI: u32 = 6;
 /// See [`REGION_QSPI`].
 pub const REGION_FMC: u32 = 7;
@@ -87,15 +95,32 @@ const REGIONS: [(u32, u32); 6] = [
     (0x4000_0000, size(512 << 20) | XN | AP_RW | DEVICE),
 ];
 
-/// MPU_CTRL: ENABLE, with HFNMIENA = 0 (the MPU is off in the HardFault
-/// handler, which then sees the default map, whatever faulted) and
-/// PRIVDEFENA = 0.
-const CTRL_ENABLE: u32 = 1;
+/// MPU_CTRL (Armv7-M B3.5.8): ENABLE, HFNMIENA, and PRIVDEFENA = 0.
+///
+/// HFNMIENA = 1 (M1 review F-4): the MPU stays on in the HardFault and
+/// NMI handlers. With HFNMIENA = 0 they would run under the default memory
+/// map, where the FMC banks (0x6000_0000, the LCD from M3) and the QUADSPI
+/// bank (0x9000_0000) are Normal memory (RM0433 Table 7), so a speculative
+/// read there (ES0392 2.1.2) could strobe the LCD or hit the QUADSPI
+/// outside memory-mapped mode. Under the MPU map they stay no-access. The
+/// fault path only needs what the map already opens: its code and
+/// `.rodata` in flash (region 2) or ITCM (region 1), its stack
+/// (`.fault_stack`, AXI SRAM, region 4), the prefix static in DTCM
+/// (region 3), the exception frame (DTCM or AXI SRAM, read only after a
+/// range check) and RCC, GPIOB, GPIOD and USART3 (region 5). A fault
+/// before [`init`] runs with the MPU off, where HFNMIENA has no effect.
+/// The cost: a fault inside the HardFault handler itself (say the handler
+/// touching an unmapped address) locks the core up instead of running on
+/// the default map; the handler touches nothing outside the list above.
+const CTRL_ENABLE_HFNMIENA: u32 = 0b011;
 
-/// Programs [`REGIONS`] and enables the MPU. Call before the caches are
-/// enabled, so no line is ever filled under the default map's attributes.
+/// Programs [`REGIONS`], disables every other region, and enables the MPU.
+/// Call before the caches are enabled, so no line is ever filled under the
+/// default map's attributes.
 pub(crate) fn init(mpu: &mut MPU) {
     cortex_m::asm::dmb();
+    // MPU_TYPE.DREGION: 16 on the H753's Cortex-M7.
+    let regions = (mpu._type.read() >> 8) & 0xFF;
     // SAFETY: MPU_CTRL, MPU_RBAR and MPU_RASR are written as Armv7-M
     // B3.5 lays them out. With the MPU off while the regions are written
     // (CTRL = 0), no access in between sees a half-built map; the regions
@@ -104,15 +129,89 @@ pub(crate) fn init(mpu: &mut MPU) {
     // faults.
     unsafe {
         mpu.ctrl.write(0);
-        for (n, &(base, rasr)) in REGIONS.iter().enumerate() {
+        for n in 0..regions {
             // VALID (bit 4) selects region `n` through RBAR's REGION field.
-            mpu.rbar.write(base | (1 << 4) | n as u32);
-            mpu.rasr.write(rasr | 1);
+            match REGIONS.get(n as usize) {
+                Some(&(base, rasr)) => {
+                    mpu.rbar.write(base | (1 << 4) | n);
+                    mpu.rasr.write(rasr | 1);
+                }
+                // Not in the table (the QSPI window until `qspi_window`
+                // opens it, the FMC one): disabled, in case a debugger or
+                // an earlier image left it enabled.
+                None => {
+                    mpu.rbar.write((1 << 4) | n);
+                    mpu.rasr.write(0);
+                }
+            }
         }
-        mpu.ctrl.write(CTRL_ENABLE);
+        mpu.ctrl.write(CTRL_ENABLE_HFNMIENA);
     }
     // Armv7-M B3.5.10 (MPU_CTRL): a DSB and an ISB so the new map applies
     // to the next access and the next instruction fetch.
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+}
+
+/// What [`qspi_window`] maps at 0x9000_0000.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Window {
+    /// Region [`REGION_QSPI`] disabled: region 0's no-access applies.
+    Off,
+    /// Normal, write-back cached (the ROM's mapping).
+    Cached,
+    /// Normal, not cacheable (for measuring one bus access).
+    Uncached,
+}
+
+/// The QUADSPI window: 0x9000_0000, exactly the 8 MiB NOR
+/// ([`crate::qspi::NOR_BYTES`]), read-only at both privilege levels,
+/// execute-never (nothing runs from the ROM image; and XN keeps the
+/// I-side from fetching there speculatively). Normal memory, so unaligned
+/// loads work (Armv7-M A3.2.1; Device and strongly-ordered memory fault
+/// on them) and the core can read it as a slice. Write-back, no
+/// write-allocate (TEX 000 C 1 B 1): read-only, so the allocation policy
+/// never matters, and write-back is what ES0392 2.1.1 asks for. Not
+/// shareable (shareable Normal is not cached on the Cortex-M7).
+///
+/// The other 248 MB of the QUADSPI bank (0x9080_0000 to 0x9FFF_FFFF) stay
+/// region 0's (no-access, execute-never, strongly-ordered; a higher region
+/// number wins only where it overlaps), so no access, speculative or
+/// not, reaches the QUADSPI outside the NOR. That is the layout ST gives
+/// for the Cortex-M7 (an ST moderator on community.st.com, quoting AN4861
+/// section 4.6: the unused part of the 256 MB space "must be set to
+/// strongly ordered XN"; **unverified** against AN4861 or AN4760 itself,
+/// neither is local). ST's AN4760 example makes the mapped part strongly
+/// ordered too; that is not an option here, as the core needs unaligned
+/// reads.
+const QSPI_RASR: u32 = size(crate::qspi::NOR_BYTES as u64) | XN | AP_RO;
+const QSPI_BASE: u32 = crate::qspi::WINDOW as u32;
+const _: () = assert!(QSPI_BASE.is_multiple_of(crate::qspi::NOR_BYTES));
+
+/// Opens, re-attributes or closes the QUADSPI window on [`REGION_QSPI`].
+/// Only [`crate::qspi`] calls it: `Cached` or `Uncached` only while the
+/// QUADSPI is in memory-mapped mode, `Off` before it leaves it.
+pub(crate) fn qspi_window(w: Window) {
+    let rasr = match w {
+        Window::Off => 0,
+        Window::Cached => QSPI_RASR | NORMAL_WB | 1,
+        Window::Uncached => QSPI_RASR | NORMAL_NC | 1,
+    };
+    // Every access before the change completes under the old map.
+    cortex_m::asm::dsb();
+    // SAFETY: RBAR (with VALID and the region number) and RASR of one
+    // region, written as Armv7-M B3.5 lays them out; the MPU may be
+    // updated while enabled (B3.5.4). The region only adds access to the
+    // window, or removes it, and the caller ensures the QUADSPI answers
+    // there whenever it is open. One thread, no interrupt: the two writes
+    // are not interleaved with another update.
+    unsafe {
+        let mpu = &*MPU::PTR;
+        mpu.rbar.write(QSPI_BASE | (1 << 4) | REGION_QSPI);
+        mpu.rasr.write(rasr);
+    }
+    // B3.5.10: the new attributes apply from the next access and the next
+    // instruction fetch.
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
 }

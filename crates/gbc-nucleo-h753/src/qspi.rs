@@ -1,7 +1,26 @@
-//! QUADSPI in indirect mode: the X-NUCLEO-GFX02Z1 shield's 64-Mbit NOR
-//! flash (plan Stage 2 M2). Read commands only, so far: nothing here
-//! writes the NOR (no write enable, no register write, no program or
-//! erase). The part, its commands and limits: `docs/reference/qspi-nor.md`.
+//! QUADSPI in indirect and memory-mapped mode: the X-NUCLEO-GFX02Z1
+//! shield's 64-Mbit NOR flash (plan Stage 2 M2). Read commands only, so
+//! far: nothing here writes the NOR (no write enable, no register write,
+//! no program or erase). The part, its commands and limits:
+//! `docs/reference/qspi-nor.md`.
+//!
+//! Memory-mapped mode ([`Qspi::memory_mapped`], [`Mapped`]): the NOR
+//! appears read-only at [`WINDOW`], [`NOR_BYTES`] long, through MPU region
+//! [`crate::mpu::REGION_QSPI`] (Normal, write-back cached, execute-never).
+//! The order, both ways, keeps every CPU access (speculative ones too) away
+//! from the window while the QUADSPI is not in memory-mapped mode, which
+//! RM0433 23.3.7 forbids ("It is forbidden to access the quad-SPI flash
+//! bank area before having properly configured and enabled the QUADSPI")
+//! and answers with a bus error (23.3.14):
+//! - enter: QUADSPI idle, CCR with FMODE = 11 (the controller is now in
+//!   memory-mapped mode, nothing is sent until the first access), then the
+//!   MPU region on (DSB, ISB);
+//! - exit: the MPU region off (DSB, ISB; no access can start any more),
+//!   ABORT and BUSY = 0 (23.3.15; the prefetch keeps BUSY high until
+//!   then), the ES0392 2.7.4 sequence (required "upon switching from
+//!   memory-mapped to any other mode"), CR restored, then a D-cache clean
+//!   and invalidate, so no line of the old NOR contents survives a program
+//!   or erase in between.
 //!
 //! Sources: RM0433 Rev 9 chapter 23 (QUADSPI) and section 8.7 (RCC);
 //! DS12117 Rev 10 Table 9 (alternate functions); ES0392 Rev 16 section 2.7
@@ -32,18 +51,61 @@
 //! no odd division factor does; so only even factors are accepted
 //! ([`Qspi::init`]).
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::clock::{HCLK_HZ, wait_for};
 use crate::pac;
 
 /// The NOR's size: 64 Mbit (UM2905 section 5.3.1).
 pub const NOR_BYTES: u32 = 8 << 20;
-/// DCR FSIZE: 2^(FSIZE + 1) bytes (RM0433 section 23.3.9).
-const FSIZE: u32 = NOR_BYTES.trailing_zeros() - 1;
+/// DCR FSIZE: 2^(FSIZE + 1) bytes (RM0433 section 23.3.9), set to twice
+/// the NOR: ES0392 2.7.5, "Memory-mapped read of last memory byte fails"
+/// (the last byte of the FSIZE region reads 0x00 and a second read stalls
+/// the AXI bus); its first workaround is "taking margin in FSIZE". So the
+/// last byte of the FSIZE region is 0x90FF_FFFF, outside the MPU window
+/// (8 MiB, [`crate::mpu`]), and the NOR's own last byte reads normally.
+/// The upper 8 MiB would alias the NOR (it ignores A23), but nothing
+/// reaches it: the MPU makes it no-access, and [`Qspi::read`] refuses
+/// addresses past [`NOR_BYTES`] itself, which FSIZE no longer does.
+const FSIZE: u32 = (2 * NOR_BYTES).trailing_zeros() - 1;
+
+/// Where the NOR appears in memory-mapped mode (RM0433 Table 7, the
+/// QUADSPI bank, 0x9000_0000 to 0x9FFF_FFFF).
+pub const WINDOW: usize = 0x9000_0000;
 
 /// The prescaler of the first-contact clock: 236 / 6 = 39.3 MHz, an even
 /// factor, under the 50 MHz every common serial NOR allows for its slowest
 /// read command (0x03).
 pub const PRESCALER_SAFE: u8 = 5;
+
+/// The memory-mapped clock for now: 236 / 4 = 59 MHz, an even factor,
+/// well under 0xEB's 104 MHz at CR.DC = 0 (MX25L6433F Table 7), but over
+/// 0x03's 50 MHz: 0x03 reads go at [`PRESCALER_SAFE`].
+/// A faster clock is M6 tuning.
+pub const PRESCALER_MMAP: u8 = 3;
+
+/// The 0xEB mode byte ("performance enhance" bits P7..P0, MX25L6433F
+/// sections 10-12 and 10-13): the part enters enhance mode (the next
+/// command has no instruction byte) only when P7..P4 toggle against
+/// P3..P0 (e.g. 0xA5, 0x5A). 0xFF does not toggle, so every command keeps
+/// its instruction byte; the alternate-byte phase drives the IOs during
+/// the two mode cycles instead of leaving them floating (a quad dummy phase
+/// is high-Z, RM0433 23.3.4). `docs/reference/qspi-nor.md` "0xEB mode
+/// bits".
+pub const MODE_BYTE: u8 = 0xFF;
+
+/// 4READ (0xEB, 1-4-4): instruction on 1 line, 24-bit address on 4, the
+/// mode byte on 4 (2 cycles), 4 dummy cycles (6 in all at CR.DC = 0,
+/// MX25L6433F Table 7; SFDP BFPT dword 3: 4 wait states + 2 mode clocks),
+/// data on 4. Use [`Read::at`] for the address.
+pub const QUAD_IO_READ: Read = Read {
+    instruction: 0xEB,
+    instruction_lines: Lines::Single,
+    address: Some((0, Lines::Quad)),
+    alternate: Some((MODE_BYTE, Lines::Quad)),
+    dummy_cycles: 4,
+    data_lines: Lines::Quad,
+};
 
 /// Bounded waits: polls of a status bit. One poll is a few AHB reads, so a
 /// million is milliseconds, far more than any read command here takes at
@@ -53,6 +115,7 @@ const POLLS: u32 = 4_000_000;
 // QUADSPI_CR (RM0433 section 23.5.1).
 const CR_EN: u32 = 1 << 0;
 const CR_ABORT: u32 = 1 << 1;
+const CR_TCEN: u32 = 1 << 3;
 const CR_SSHIFT: u32 = 1 << 4;
 const CR_PRESCALER_SHIFT: u32 = 24;
 // QUADSPI_DCR (23.5.2).
@@ -70,8 +133,12 @@ const FCR_CTCF: u32 = 1 << 1;
 // QUADSPI_CCR (23.5.6).
 const CCR_FRCM: u32 = 1 << 29;
 const CCR_FMODE_INDIRECT_READ: u32 = 0b01 << 26;
+const CCR_FMODE_MEMORY_MAPPED: u32 = 0b11 << 26;
 const CCR_DMODE_SHIFT: u32 = 24;
 const CCR_DCYC_SHIFT: u32 = 18;
+/// ABSIZE 00: one alternate byte.
+const CCR_ABSIZE_8: u32 = 0b00 << 16;
+const CCR_ABMODE_SHIFT: u32 = 14;
 const CCR_ADSIZE_24: u32 = 0b10 << 12;
 const CCR_ADMODE_SHIFT: u32 = 10;
 const CCR_IMODE_SHIFT: u32 = 8;
@@ -93,6 +160,9 @@ pub struct Read {
     pub instruction_lines: Lines,
     /// The 24-bit address and its lines; `None`: no address phase.
     pub address: Option<(u32, Lines)>,
+    /// One alternate byte (QUADSPI_ABR, RM0433 23.3.3) and its lines, sent
+    /// after the address; `None`: no alternate-byte phase.
+    pub alternate: Option<(u8, Lines)>,
     /// Dummy cycles, 0 to 31.
     pub dummy_cycles: u8,
     pub data_lines: Lines,
@@ -106,15 +176,21 @@ impl Read {
             instruction,
             instruction_lines: Lines::Single,
             address: None,
+            alternate: None,
             dummy_cycles: 0,
             data_lines: Lines::Single,
         }
     }
 
-    /// The same command with a 24-bit address on one line.
+    /// The same command with a 24-bit address: on the lines of its address
+    /// phase if it has one ([`QUAD_IO_READ`]), else on one line.
     pub const fn at(self, address: u32) -> Self {
+        let lines = match self.address {
+            Some((_, l)) => l,
+            None => Lines::Single,
+        };
         Read {
-            address: Some((address, Lines::Single)),
+            address: Some((address, lines)),
             ..self
         }
     }
@@ -127,22 +203,40 @@ impl Read {
         }
     }
 
-    /// QUADSPI_CCR for this command in indirect-read mode. Never 0: IMODE
-    /// is never 00 (ES0392 2.7.3, CCR = 0 hangs the peripheral), and an
-    /// instruction phase also keeps clear of ES0392 2.7.2 (a data-only
-    /// indirect read hangs).
-    fn ccr(&self) -> u32 {
+    /// QUADSPI_CCR for this command in functional mode `fmode`
+    /// (`CCR_FMODE_*`). Never 0: IMODE is never 00 (ES0392 2.7.3, CCR = 0
+    /// hangs the peripheral), and an instruction phase also keeps clear of
+    /// ES0392 2.7.2 (a data-only indirect read hangs). SIOO, DDRM, DHHC and
+    /// FRCM stay 0: the instruction is sent with every command, SDR.
+    fn ccr(&self, fmode: u32) -> u32 {
         let (admode, adsize) = match self.address {
             Some((_, l)) => (l as u32, CCR_ADSIZE_24),
             None => (0, 0),
         };
-        CCR_FMODE_INDIRECT_READ
+        let abmode = match self.alternate {
+            Some((_, l)) => l as u32,
+            None => 0,
+        };
+        fmode
             | (self.data_lines as u32) << CCR_DMODE_SHIFT
             | u32::from(self.dummy_cycles & 0x1F) << CCR_DCYC_SHIFT
+            | CCR_ABSIZE_8
+            | abmode << CCR_ABMODE_SHIFT
             | adsize
             | admode << CCR_ADMODE_SHIFT
             | (self.instruction_lines as u32) << CCR_IMODE_SHIFT
             | u32::from(self.instruction)
+    }
+
+    /// Writes ABR if the command has an alternate byte. RM0433 23.5.8: ABR
+    /// only while BUSY = 0, before the CCR/AR write that starts the
+    /// command.
+    fn write_abr(&self) {
+        if let Some((b, _)) = self.alternate {
+            // SAFETY: ALTERNATE is any 32-bit value; with ABSIZE 00 only
+            // its low byte is sent.
+            regs().abr.write(|w| unsafe { w.bits(u32::from(b)) });
+        }
     }
 }
 
@@ -153,12 +247,13 @@ impl Read {
 pub enum Error {
     /// The peripheral stayed busy before the command started.
     Busy,
-    /// TEF: the address and length exceed FSIZE (RM0433 section 23.3.14).
+    /// TEF: the address and length exceed FSIZE (RM0433 section 23.3.14;
+    /// [`Qspi::read`] checks against the smaller [`NOR_BYTES`] first).
     Transfer,
     /// No data within the bounded wait.
     Timeout,
-    /// The dummy-cycle count does not fit DCYC or the address is not
-    /// 24-bit, or the buffer is empty.
+    /// The dummy-cycle count does not fit DCYC, the address and length
+    /// run past the NOR ([`NOR_BYTES`]), or the buffer is empty.
     Argument,
 }
 
@@ -236,6 +331,27 @@ fn not_busy() -> bool {
     wait_for(POLLS, || sr() & SR_BUSY == 0)
 }
 
+/// CR as this driver runs it, for a given prescaler: SSHIFT, EN, TCEN 0,
+/// FTHRES 0, no interrupts ([`Qspi::init`] says why).
+fn cr_value(prescaler: u8) -> u32 {
+    u32::from(prescaler) << CR_PRESCALER_SHIFT | CR_SSHIFT | CR_EN
+}
+
+/// DCR (RM0433 23.3.9, 23.3.11, 23.5.2): [`FSIZE`] (16 MiB, the ES0392
+/// 2.7.5 margin); CSHT for at least 50 ns of NCS high between commands at
+/// the clock `prescaler` gives (the MX25L6433F's tSHSL after a write-type
+/// command, longer than the 15 ns after a read); CKMODE 0 (mode 0; serial
+/// NORs take mode 0 and 3). Only while BUSY = 0.
+fn write_dcr(prescaler: u8) {
+    let clk = HCLK_HZ / (u32::from(prescaler) + 1);
+    let csht = clk.div_ceil(20_000_000).clamp(1, 8) - 1;
+    // SAFETY: FSIZE 23 and CSHT 0..7 are valid field values; the reserved
+    // bits stay 0.
+    regs()
+        .dcr
+        .write(|w| unsafe { w.bits(FSIZE << DCR_FSIZE_SHIFT | csht << DCR_CSHT_SHIFT) });
+}
+
 impl Qspi {
     /// Turns the QUADSPI on and sets it up for the shield's NOR, at
     /// [`HCLK_HZ`] / (`prescaler` + 1). Call once, after [`crate::init`].
@@ -297,23 +413,13 @@ impl Qspi {
         pin_af(gpiod, 13, 9, false); // PD13 QUADSPI_BK1_IO3, AF9
 
         errata_2_7_4();
-
-        // DCR (RM0433 23.3.9, 23.3.11): FSIZE for 8 MiB; CSHT for at least
-        // 50 ns of NCS high between commands (the common serial NOR
-        // minimum after a write-type command, longer than the read-type
-        // one); CKMODE 0 (mode 0; serial NORs take mode 0 and 3).
-        let clk = HCLK_HZ / (u32::from(prescaler) + 1);
-        let csht = clk.div_ceil(20_000_000).clamp(1, 8) - 1;
-        // SAFETY: FSIZE 22 and CSHT 0..7 are valid field values; the
-        // reserved bits stay 0.
-        regs()
-            .dcr
-            .write(|w| unsafe { w.bits(FSIZE << DCR_FSIZE_SHIFT | csht << DCR_CSHT_SHIFT) });
+        write_dcr(prescaler);
         // CR (23.3.11): the prescaler; SSHIFT, sampling half a CLK cycle
         // later than the default, for the delay of the path through the
         // shield's connectors (23.3.10; SDR only, DDR needs it clear);
-        // FTHRES 0 (FTF with one byte in the FIFO); no interrupts; EN.
-        write_cr(u32::from(prescaler) << CR_PRESCALER_SHIFT | CR_SSHIFT | CR_EN);
+        // FTHRES 0 (FTF with one byte in the FIFO); TCEN 0 (see
+        // [`Qspi::memory_mapped`]); no interrupts; EN.
+        write_cr(cr_value(prescaler));
         Qspi { prescaler }
     }
 
@@ -328,7 +434,9 @@ impl Qspi {
     }
 
     /// Changes the clock divider (RM0433 23.5.1: PRESCALER only while
-    /// BUSY = 0). Same rule as [`Qspi::init`]: an even division factor.
+    /// BUSY = 0), and CSHT with it (23.5.2, also only while BUSY = 0), so
+    /// NCS stays high long enough at the new clock. Same rule as
+    /// [`Qspi::init`]: an even division factor.
     pub fn set_prescaler(&mut self, prescaler: u8) -> Result<(), Error> {
         assert!(
             prescaler % 2 == 1,
@@ -337,6 +445,7 @@ impl Qspi {
         if !not_busy() {
             return Err(Error::Busy);
         }
+        write_dcr(prescaler);
         let cr = regs().cr.read().bits() & !(0xFF << CR_PRESCALER_SHIFT);
         write_cr(cr | u32::from(prescaler) << CR_PRESCALER_SHIFT);
         self.prescaler = prescaler;
@@ -344,13 +453,17 @@ impl Qspi {
     }
 
     /// Runs `cmd` in indirect-read mode and fills `buf` with the data
-    /// phase's bytes. RM0433 section 23.3.12 "Indirect mode": DLR, CCR,
-    /// then AR, which starts the command when there is an address
+    /// phase's bytes. RM0433 section 23.3.12 "Indirect mode": DLR, ABR,
+    /// CCR, then AR, which starts the command when there is an address
     /// (otherwise the CCR write does, 23.3.5), then the FIFO through DR.
+    /// An address phase must stay inside the NOR ([`NOR_BYTES`]; FSIZE has
+    /// a margin, see [`FSIZE`]).
     pub fn read(&mut self, cmd: &Read, buf: &mut [u8]) -> Result<(), Error> {
         if buf.is_empty()
             || cmd.dummy_cycles > 31
-            || cmd.address.is_some_and(|(a, _)| a > 0xFF_FFFF)
+            || cmd
+                .address
+                .is_some_and(|(a, _)| a as usize + buf.len() > NOR_BYTES as usize)
         {
             return Err(Error::Argument);
         }
@@ -362,7 +475,8 @@ impl Qspi {
         q.fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
         // SAFETY: DL is any 32-bit value (number of bytes - 1).
         q.dlr.write(|w| unsafe { w.bits(buf.len() as u32 - 1) });
-        write_ccr(cmd.ccr());
+        cmd.write_abr();
+        write_ccr(cmd.ccr(CCR_FMODE_INDIRECT_READ));
         if let Some((addr, _)) = cmd.address {
             // SAFETY: ADDRESS is any 32-bit value; 24 bits are sent.
             q.ar.write(|w| unsafe { w.bits(addr) });
@@ -447,5 +561,159 @@ fn errata_2_7_4() {
     // soon as EN is set. So CCR is parked on a command that needs an
     // address and so cannot start before AR is written (RM0433 23.3.5):
     // a 1-line read (0x03) of one byte.
-    write_ccr(Read::single(0x03).at(0).ccr());
+    write_ccr(Read::single(0x03).at(0).ccr(CCR_FMODE_INDIRECT_READ));
+}
+
+impl Qspi {
+    /// Switches to memory-mapped mode with `cmd` (normally
+    /// [`QUAD_IO_READ`]; its address is ignored, the bus access gives it)
+    /// at the current clock, then opens the MPU window (module docs for
+    /// the order). The caller picks a clock the command allows
+    /// ([`PRESCALER_MMAP`] for 0xEB).
+    ///
+    /// TCEN stays 0 (RM0433 23.3.7, 23.5.1): after an access the QUADSPI
+    /// keeps prefetching into its FIFO and holds NCS low with the clock
+    /// stopped once the FIFO is full, so the next sequential access is
+    /// served without a new command. TCEN = 1 would raise NCS after
+    /// LPTR.TIMEOUT idle cycles, saving the NOR's selected-but-idle
+    /// current at the cost of a new instruction, address, mode and dummy
+    /// phase (8 + 6 + 6 = 20 QUADSPI clocks, 0.34 us at 59 MHz) on the next
+    /// access, even a sequential one. The core reads the ROM mostly
+    /// sequentially and the NUCLEO is USB-powered, so the latency wins;
+    /// a battery-powered Stage 3 board can revisit this.
+    ///
+    /// # Errors
+    /// [`Error::Busy`] if the QUADSPI stays busy; [`Error::Argument`] if
+    /// `cmd` has no address phase or too many dummy cycles. The QUADSPI is
+    /// handed back unchanged then.
+    pub fn memory_mapped(self, cmd: &Read) -> Result<Mapped, (Qspi, Error)> {
+        if cmd.address.is_none() || cmd.dummy_cycles > 31 {
+            return Err((self, Error::Argument));
+        }
+        if !not_busy() {
+            return Err((self, Error::Busy));
+        }
+        let q = regs();
+        // TCEN only while BUSY = 0 (23.5.1); cleared explicitly (see above).
+        write_cr(q.cr.read().bits() & !CR_TCEN);
+        // SAFETY: write-1-to-clear flags.
+        q.fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
+        cmd.write_abr();
+        // FMODE = 11 (23.3.12 "Memory-mapped mode"): the frame is sent
+        // when a master reads the window; DLR and AR are not used.
+        write_ccr(cmd.ccr(CCR_FMODE_MEMORY_MAPPED));
+        // The CCR write reaches the peripheral before the MPU opens the
+        // window (the region change itself ends with a DSB and an ISB).
+        cortex_m::asm::dsb();
+        crate::mpu::qspi_window(crate::mpu::Window::Cached);
+        Ok(Mapped { q: self })
+    }
+}
+
+/// The QUADSPI in memory-mapped mode, from [`Qspi::memory_mapped`]: the
+/// NOR is readable at [`WINDOW`] ([`Mapped::bytes`]). Indirect commands
+/// need [`Mapped::exit`], which hands the [`Qspi`] back.
+pub struct Mapped {
+    q: Qspi,
+}
+
+impl Mapped {
+    /// The whole NOR, [`NOR_BYTES`] long, read through the window: the
+    /// slice the core will take as its ROM. Reads of any width and
+    /// alignment work (Normal memory, Armv7-M A3.2.1).
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: [`WINDOW`]..+[`NOR_BYTES`] is readable for as long as
+        // `self` exists: the QUADSPI is in memory-mapped mode and the MPU
+        // maps exactly that range as readable Normal memory (opened by
+        // `memory_mapped`, closed only by `exit`, which consumes `self`).
+        // The contents do not change meanwhile: the only way to send a
+        // program or erase command is the [`Qspi`] this owns, and nothing
+        // else in the lib drives the QUADSPI. The range ends before the
+        // FSIZE region's last byte (ES0392 2.7.5, [`FSIZE`]).
+        unsafe { core::slice::from_raw_parts(WINDOW as *const u8, NOR_BYTES as usize) }
+    }
+
+    /// The QUADSPI clock, as [`Qspi::clock_hz`].
+    pub fn clock_hz(&self) -> u32 {
+        self.q.clock_hz()
+    }
+
+    /// Makes the window cacheable (the default) or not, through its MPU
+    /// region's attributes, for measurements: the uncached figure is the
+    /// cost of one bus access. The D-cache keeps any lines it already holds
+    /// for the window; invalidate them to measure misses.
+    pub fn set_cacheable(&mut self, cacheable: bool) {
+        crate::mpu::qspi_window(if cacheable {
+            crate::mpu::Window::Cached
+        } else {
+            crate::mpu::Window::Uncached
+        });
+    }
+
+    /// Leaves memory-mapped mode (module docs for the order): closes the
+    /// MPU window, stops the prefetch, runs the ES0392 2.7.4 sequence,
+    /// restores CR and DCR, and cleans and invalidates the D-cache.
+    ///
+    /// Stopping the prefetch: CR.ABORT first (RM0433 23.3.15). Measured on
+    /// this board (2026-11-25): when the abort lands while a prefetch is
+    /// still filling the FIFO (SR = 0x620: BUSY, FLEVEL 6), the abort
+    /// completes (ABORT clears, TCF sets) and the QUADSPI, still in FMODE
+    /// 11, starts prefetching again: BUSY stays high with FLEVEL climbing to
+    /// 30 (SR = 0x1E22), and no CPU access can have asked for it (the MPU
+    /// window was closed and a DSB had completed every access). RM0433
+    /// 23.3.7 names the other way BUSY falls: "the peripheral is disabled".
+    /// So if BUSY is still high after the abort, EN is cleared, which the
+    /// ES0392 2.7.4 sequence does next anyway (its first step is CR = 0
+    /// and a wait for BUSY). Only reads are ever interrupted so (the mode
+    /// is read-only), which the NOR tolerates; RM0433's caution is about
+    /// aborting a status-register write. [`exit_fallbacks`] counts how
+    /// often the abort alone did not do it.
+    ///
+    /// # Panics
+    /// If the QUADSPI stays busy even disabled (the message has SR, CR and
+    /// CCR as found).
+    pub fn exit(self) -> Qspi {
+        crate::mpu::qspi_window(crate::mpu::Window::Off);
+        let sr0 = sr();
+        abort();
+        if !wait_for(ABORT_POLLS, || sr() & SR_BUSY == 0) {
+            EXIT_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            let (sr1, cr1) = (sr(), regs().cr.read().bits());
+            write_cr(cr1 & !CR_EN);
+            if !not_busy() {
+                panic!(
+                    "QUADSPI busy after the memory-mapped abort and EN = 0: \
+                     sr_before={sr0:#x} sr_after_abort={sr1:#x} sr={:#x} cr={cr1:#x} ccr={:#x}",
+                    sr(),
+                    regs().ccr.read().bits()
+                );
+            }
+        }
+        errata_2_7_4();
+        write_dcr(self.q.prescaler);
+        write_cr(cr_value(self.q.prescaler));
+        // No line of the window may outlive the mapping: a later program
+        // or erase would leave it stale. Clean as well as invalidate, since
+        // the other cacheable regions (AXI SRAM) hold dirty lines.
+        // SAFETY: SCB and CPUID are core registers; this firmware has one
+        // thread and no interrupt, so nothing else uses them meanwhile, and
+        // a clean-and-invalidate by set/way loses no data.
+        let mut cp = unsafe { cortex_m::Peripherals::steal() };
+        cp.SCB.clean_invalidate_dcache(&mut cp.CPUID);
+        self.q
+    }
+}
+
+/// How long [`Mapped::exit`] waits for BUSY to fall after the abort
+/// before it disables the QUADSPI: polls of SR, far longer than an abort
+/// takes (a few QUADSPI clocks), far shorter than [`POLLS`].
+const ABORT_POLLS: u32 = 10_000;
+
+/// See [`exit_fallbacks`].
+static EXIT_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+
+/// How many [`Mapped::exit`] calls so far needed EN = 0 because BUSY
+/// stayed high after the abort (a diagnostic for the test images).
+pub fn exit_fallbacks() -> u32 {
+    EXIT_FALLBACKS.load(Ordering::Relaxed)
 }
