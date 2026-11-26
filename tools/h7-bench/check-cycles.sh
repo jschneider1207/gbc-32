@@ -11,7 +11,18 @@
 #
 # First, check-report.sh must pass on the capture (with --qspi when the
 # capture or the baseline has QSPI lines), so cycles are never judged on a
-# garbled report or on another image; its exit code is passed on. Then:
+# garbled report or on another image; its exit code is passed on. It
+# zeroes the cycle fields before comparing, and the VCP drops bytes, so a
+# dropped digit in `max=` would pass it. So, in both modes (exit 1):
+#   - the capture has at least two complete reports (banner .. `end
+#     pass=N`; the board repeats its report), and of the last two, the last
+#     is the one check-report.sh checked;
+#   - the two have the same workload lines (both passes), each with
+#     identical fields other than min/mean/max, and min, mean and max each
+#     within 1% of the other report's (|a - b| * 100 <= the smaller; the
+#     board reprints the same numbers, so they are equal in practice);
+#   - every workload line of both has min <= mean <= max.
+# Cycles are judged on the last complete report. Then (check mode):
 #   - the banner's `placement=` and `cpu_hz=` equal the baseline header's;
 #   - every baseline line has its workload line in the report (`flash <w>`
 #     is `h7bench v1 <w> calls=...`, `qspi <w>` is `h7bench v1 qspi <w>
@@ -116,6 +127,49 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 report=$cap.report
+
+# --- the two last complete reports agree (check-report.sh's extraction) ---
+prev=$(mktemp) last=$(mktemp)
+trap 'rm -f "$prev" "$last"' EXIT
+nrep=$(tr -d '\000\r' < "$cap" | awk -v pf="$prev" -v lf="$last" '
+  /^h7bench v1 banner image=bench / { inb = 1; buf = "" }
+  inb { buf = buf $0 "\n" }
+  inb && /^h7bench v1 end pass=[0-9]+$/ { p = l; l = buf; inb = 0; n++ }
+  END { printf "%s", p > pf; printf "%s", l > lf; print n + 0 }')
+if [ "$nrep" -lt 2 ]; then
+  echo "check-cycles.sh: FAIL: $nrep complete report(s) in $cap; two are needed to check the cycle fields (capture for longer)" >&2
+  exit 1
+fi
+cmp -s "$last" "$report" || die "the last complete report is not the one check-report.sh checked ($report)"
+agree=$(awk '
+  function field(k,   i, a) { for (i = 1; i <= NF; i++) { split($i, a, "="); if (a[1] == k) return a[2] } return "" }
+  function num(v) { return v ~ /^[0-9]+$/ }
+  function close1(a, b,   d, m) { d = a - b; if (d < 0) d = -d; m = (a < b) ? a : b; return d * 100 <= m }
+  {
+    if ($1 == "h7bench" && $3 == "qspi" && $5 ~ /^calls=/) k = "qspi " $4
+    else if ($1 == "h7bench" && $4 ~ /^calls=/) k = "flash " $3
+    else next
+    r = (FILENAME == ARGV[1]) ? "previous" : "last"
+    lo = field("min"); me = field("mean"); hi = field("max")
+    if (!num(lo) || !num(me) || !num(hi)) { print "FAIL " k ": " r " report: no numeric min= / mean= / max="; next }
+    if (!(lo + 0 <= me + 0 && me + 0 <= hi + 0)) print "FAIL " k ": " r " report: not min " lo " <= mean " me " <= max " hi
+    rest = $0; gsub(/ (min|mean|max)=[0-9]+/, "", rest)
+    if (r == "previous") { if (k in pr) print "FAIL " k ": twice in the previous report"; pr[k] = rest; pl[k] = lo; pm[k] = me; px[k] = hi; next }
+    if (k in seen) print "FAIL " k ": twice in the last report"
+    seen[k] = 1
+    if (!(k in pr)) { print "FAIL " k ": in the last report, not in the previous one"; next }
+    if (rest != pr[k]) print "FAIL " k ": fields other than min/mean/max differ between the last two reports"
+    if (!close1(lo + 0, pl[k] + 0)) print "FAIL " k ": min " lo " vs " pl[k] " in the previous report (> 1% apart)"
+    if (!close1(me + 0, pm[k] + 0)) print "FAIL " k ": mean " me " vs " pm[k] " in the previous report (> 1% apart)"
+    if (!close1(hi + 0, px[k] + 0)) print "FAIL " k ": max " hi " vs " px[k] " in the previous report (> 1% apart)"
+  }
+  END { for (k in pr) if (!(k in seen)) print "FAIL " k ": in the previous report, not in the last one" }' "$prev" "$last")
+if [ -n "$agree" ]; then
+  sed 's/^FAIL /check-cycles.sh: FAIL: /' <<< "$agree" >&2
+  echo "check-cycles.sh: the last two reports disagree or are inconsistent (a byte the VCP dropped?); cycles not checked" >&2
+  exit 1
+fi
+echo "check-cycles.sh: the last two of $nrep complete reports agree (min <= mean <= max, within 1%)"
 
 banner=$(grep -m1 '^h7bench v1 banner image=bench ' "$report")
 bfield() { sed -nE "s/.* $1=([^ ]+)( .*|$)/\1/p" <<< "$banner"; }

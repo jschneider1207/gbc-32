@@ -23,11 +23,17 @@ end="h7bench v1 end pass=1"
 # Every workload at mean 1,000,000 / max 2,000,000; `qspi ` prefixed for the QSPI pass.
 lines() { sed -E "s/ min=0 mean=0 max=0 / min=1 mean=1000000 max=2000000 /; s/^h7bench v1 /h7bench v1 $1/" "$exp"; }
 
-# cap <file> [qspi] [sed expr on the report lines]: a complete report, CRLF + NULs as the VCP gives it.
+# report [qspi]: one report's banner and workload lines (no end line).
+report() { banner; lines ""; [ "${1:-}" = qspi ] && { echo "$pack"; lines "qspi "; }; }
+# cap <file> [qspi] [sed expr on both reports] [on the previous only] [on the last only]:
+# two complete reports, as the board repeats them, CRLF + NULs as the VCP gives it.
 cap() {
-  { printf 'noise\000\n'; banner; lines ""; [ "${2:-}" = qspi ] && { echo "$pack"; lines "qspi "; }; echo "$end"; } |
+  { printf 'noise\000\n'; report "${2:-}" | sed -E "${4:-}"; echo "h7bench v1 end pass=1"
+    report "${2:-}" | sed -E "${5:-}"; echo "h7bench v1 end pass=2"; } |
     sed -E "${3:-}" | sed 's/$/\r/' > "$1"
 }
+# cap1 <file>: one complete report only.
+cap1() { { printf 'noise\000\n'; report; echo "$end"; } | sed 's/$/\r/' > "$1"; }
 # base <file> [qspi] [sed expr]: a baseline with every workload at the capture's values.
 base() {
   { echo "# test baseline"; echo
@@ -91,6 +97,37 @@ run "garbled hash in the capture: check-report.sh fails" 1 "$C" "$I" "$B"
 cap "$C"; printf 'other image\n' > "$tmp/img2.bin"; base "$B"; run "capture of another image fails" 1 "$C" "$tmp/img2.bin" "$B"
 cap "$C" "" '/^h7bench v1 end /d'; base "$B"; run "truncated capture (no end line): rc 2" 2 "$C" "$I" "$B"
 
+# --- the last two reports: agreement and min <= mean <= max (M6 review) ---
+# A digit the VCP dropped from the last report's max (check-report.sh zeroes it).
+cap "$C" "" "" "" 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=200000 /'; base "$B"
+run "a digit dropped from the last report's max fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=200000 /'; base "$B"
+run "a digit dropped from the previous report's max fails" 1 "$C" "$I" "$B"
+cap1 "$C"; base "$B"; run "one complete report only fails" 1 "$C" "$I" "$B"
+[[ $last == *"1 complete report(s)"* ]] && ok "one-report failure named" || bad "one-report failure not named"
+cap "$C" "" "" "" 's/^(h7bench v1 storm-div .*) max=2000000 /\1 max=2020000 /'; base "$B"
+run "last max 1.00% above the previous passes" 0 "$C" "$I" "$B"
+cap "$C" "" "" "" 's/^(h7bench v1 storm-div .*) max=2000000 /\1 max=2020001 /'; base "$B"
+run "last max 1.00005% above the previous fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" "" 's/^(h7bench v1 storm-div .*) mean=1000000 /\1 mean=989000 /'; base "$B"
+run "last mean 1.1% below the previous fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" "" 's/^(h7bench v1 storm-div .*) min=1 /\1 min=2 /'; base "$B"
+run "last min differing from the previous by > 1% fails" 1 "$C" "$I" "$B"
+cap "$C" qspi "" "" 's/^(h7bench v1 qspi storm-div .*) max=2000000 /\1 max=2030000 /'; base "$B" qspi
+run "qspi line: last max 1.5% above the previous fails" 1 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) min=1 /\1 min=1000001 /'; base "$B"
+run "min > mean in both reports fails" 1 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) mean=1000000 max=2000000 /\1 mean=1000000 max=999999 /'; base "$B"
+run "mean > max in both reports fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" 's/^(h7bench v1 cgb-raster .*hash=)[0-9a-f]/\1z/'; base "$B"
+run "a garbled hash in the previous report only fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" 's/^(h7bench v1 cgb-raster calls=)[0-9]/\19/'; base "$B"
+run "a calls= field differing in the previous report fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" '/^h7bench v1 storm-ppu /d'; base "$B"
+run "a workload line missing from the previous report fails" 1 "$C" "$I" "$B"
+cap "$C" "" "" 's/^(h7bench v1 storm-ppu .*) max=[0-9]+ /\1 /'; base "$B"
+run "no max= in a previous-report line fails" 1 "$C" "$I" "$B"
+
 # --- malformed baseline / usage: rc 2 ---
 cap "$C"
 base "$B" "" '$a flash ghost mean=1x max=1'; run "non-numeric mean in the baseline: rc 2" 2 "$C" "$I" "$B"
@@ -109,11 +146,11 @@ cap "$C" qspi; H7_COMMIT=feedc0de run "--update writes a baseline" 0 --update "$
 grep -q "^h7cycles v1 image=img.bin placement=itcm-dtcm cpu_hz=$HZ commit=feedc0de image_bytes=$bytes image_cksum=$crc\$" "$O" && ok "--update header" || bad "--update header: $(grep h7cycles "$O")"
 [ "$(grep -c '^flash ' "$O")" = "$(wc -l < "$exp")" ] && [ "$(grep -c '^qspi ' "$O")" = "$(wc -l < "$exp")" ] && ok "--update has every flash and qspi line" || bad "--update line count"
 run "the written baseline passes against its capture" 0 "$C" "$I" "$O"
-cp "$O" "$tmp/out.keep"; cap "$C" qspi 's/ mean=1000000 / mean=9000000 /'
+cp "$O" "$tmp/out.keep"; cap "$C" qspi 's/ mean=1000000 / mean=900000 /'
 run "--update refuses an existing file" 1 --update "$C" "$I" "$O"
 cmp -s "$O" "$tmp/out.keep" && ok "existing file unchanged" || bad "--update changed an existing file"
 run "--update --force overwrites" 0 --update --force "$C" "$I" "$O"
-grep -q ' mean=9000000 ' "$O" && ok "--force wrote the new values" || bad "--force did not write"
+grep -q ' mean=900000 ' "$O" && ok "--force wrote the new values" || bad "--force did not write"
 rm -f "$O"; cap "$C" "" 's/^(h7bench v1 cgb-raster .*hash=)[0-9a-f]/\1z/'
 run "--update on a garbled capture refuses" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written from a garbled capture" || bad "file written from a garbled capture"
@@ -124,9 +161,12 @@ run "--update on a capture with a garbled qspi line refuses" 1 --update "$C" "$I
 yes '' | head -c 400000 >> "$C"
 run "--update on a large capture with a garbled qspi line refuses" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written from a large garbled-qspi capture" || bad "file written from a large garbled-qspi capture"
-{ banner 480000000; lines ""; echo "$end"; } > "$C"
+cap "$C" "" 's/cpu_hz=472000000/cpu_hz=480000000/'
 run "--update refuses a non-472 MHz banner" 1 --update "$C" "$I" "$O"
-[ ! -e "$O" ] && ok "no file written at 480 MHz" || bad "file written at 480 MHz"
+[[ $last == *"banner cpu_hz=480000000"* ]] && [ ! -e "$O" ] && ok "no file written at 480 MHz" || bad "file written at 480 MHz, or not refused for the clock"
+cap "$C" "" "" "" 's/^(h7bench v1 worst-case .*) max=2000000 /\1 max=200000 /'
+run "--update refuses a capture whose last two reports disagree" 1 --update "$C" "$I" "$O"
+[ ! -e "$O" ] && ok "no file written from disagreeing reports" || bad "file written from disagreeing reports"
 
 [ $fails -eq 0 ] && echo "all check-cycles tests passed" || echo "$fails failed"
 [ $fails -eq 0 ]

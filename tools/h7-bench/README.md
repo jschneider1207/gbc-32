@@ -552,7 +552,13 @@ before: the second results array).
 The regression ratchet of gate step B2. It runs `check-report.sh` first
 (with `--qspi` when the capture or the baseline has QSPI lines) and passes
 on its exit code if that fails, so cycles are never judged on a garbled
-report or another image. Then, against `expected-cycles.txt` (one
+report or another image. check-report.sh zeroes the cycle fields, and the
+VCP drops bytes, so a dropped digit in `max=` would pass it: the capture
+must hold at least two complete reports, and the last two (the last is
+the one check-report.sh checked) must have the same workload lines, equal
+in every field but min/mean/max and those within 1% (`|a - b| * 100 <=
+the smaller`; the board reprints the same numbers), with min <= mean <=
+max on every line (exit 1 otherwise, also in `--update`). Then, against `expected-cycles.txt` (one
 `h7cycles v1 image= placement= cpu_hz= commit= image_bytes= image_cksum=`
 header, then `flash <workload> mean=<n> max=<n>` and `qspi <workload> ...`
 lines in report order; `#` comments): the banner's `placement` and
