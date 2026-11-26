@@ -53,7 +53,8 @@ name = "loader"
 test = false
 bench = false
 
-# First contact with the shield's ILI9341V panel over the FMC: IDs,
+# First contact with the shield's panel (ST7789V on this board, ILI9341V on the
+# other variant) over the FMC: IDs,
 # timed fills and a full GRAM readback per FMC timing (plan Stage 2 M3);
 # built as `boot`.
 [[bin]]

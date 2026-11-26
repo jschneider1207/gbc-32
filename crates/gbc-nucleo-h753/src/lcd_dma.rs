@@ -92,7 +92,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use gbc_firmware::video::{OUT_BYTES, OUT_H, OUT_W, OutFrame};
 
 use crate::lcd::{self, Lcd};
-use crate::{cycles, mpu, pac};
+use crate::{CPU_HZ, cycles, mpu, pac};
 
 /// The window's first row: (320 - 216) / 2.
 pub const Y0: u16 = (lcd::HEIGHT - OUT_H as u16) / 2;
@@ -170,6 +170,12 @@ static TE_COUNT: AtomicU32 = AtomicU32::new(0);
 static TE_FIRST: AtomicU32 = AtomicU32::new(0);
 static TE_MIN: AtomicU32 = AtomicU32::new(u32::MAX);
 static TE_MAX: AtomicU32 = AtomicU32::new(0);
+/// Transfers abandoned by [`LcdDma::abort`] (a timeout), since boot.
+static ABORTS: AtomicU32 = AtomicU32::new(0);
+/// How long the accessors that wait ([`LcdDma::lcd`], [`LcdDma::buffer`],
+/// [`LcdDma::parts`], [`LcdDma::present`]) give a transfer before they
+/// abandon it: 250 ms, 15 TE periods and 30 transfers.
+const SETTLE_CYCLES: u32 = CPU_HZ / 4;
 
 fn mdma() -> &'static pac::mdma::CH {
     // SAFETY: a shared reference to the memory-mapped register block
@@ -272,11 +278,22 @@ impl LcdDma {
         let ch = mdma();
         // A channel left enabled by an earlier image (a reset clears it,
         // but a debugger reset may not reset MDMA): disable and wait.
+        let was_enabled = ch.cr.read().bits() & CR_EN != 0;
         // SAFETY: CR's EN cleared, the other bits kept.
         ch.cr.modify(|r, w| unsafe { w.bits(r.bits() & !CR_EN) });
         let mut n = 0u32;
         while ch.cr.read().bits() & CR_EN != 0 && n < 1_000_000 {
             n += 1;
+        }
+        // RM0433 14.5.5: clearing EN on a live channel stops it after the
+        // current beat and CTCIF reports that it has; wait for that (bounded)
+        // before the flags are cleared and the registers reused (M3 review
+        // P-1).
+        if was_enabled {
+            let mut n = 0u32;
+            while ch.isr.read().bits() & (ISR_CTCIF | ISR_TEIF) == 0 && n < 1_000_000 {
+                n += 1;
+            }
         }
         // SAFETY: the clear-flag register, write-1-to-clear.
         ch.ifcr.write(|w| unsafe { w.bits(IFCR_ALL) });
@@ -319,21 +336,21 @@ impl LcdDma {
     /// The panel, once no transfer is pending or running (waits for that;
     /// an error is dropped here, [`LcdDma::wait`] reports it).
     pub fn lcd(&mut self) -> &mut Lcd {
-        while self.busy() {}
+        self.settle();
         &mut self.lcd
     }
 
     /// The buffer, once no transfer is pending or running (waits for
     /// that, as [`LcdDma::lcd`]).
     pub fn buffer(&mut self) -> &mut OutFrame {
-        while self.busy() {}
+        self.settle();
         &mut self.buf.0
     }
 
     /// The panel and the buffer together (for a readback check), once no
     /// transfer is pending or running.
     pub fn parts(&mut self) -> (&mut Lcd, &mut OutFrame) {
-        while self.busy() {}
+        self.settle();
         (&mut self.lcd, &mut self.buf.0)
     }
 
@@ -351,7 +368,7 @@ impl LcdDma {
     /// programmed and enabled, waiting for its software request. Waits
     /// for a previous transfer first.
     pub fn present(&mut self) {
-        while self.busy() {}
+        self.settle();
         self.lcd.set_window(0, Y0, lcd::WIDTH - 1, Y1);
         let ch = mdma();
         let src = self.buf as *const DmaBuffer as u32;
@@ -379,6 +396,10 @@ impl LcdDma {
     }
 
     /// Whether a transfer is pending or running; notes its completion.
+    /// A finished transfer's outcome is consumed here: a transfer error
+    /// (TEIF) found by `busy` (or by [`LcdDma::try_buffer`], and the
+    /// accessors that wait) is cleared and dropped, so only [`LcdDma::wait`]
+    /// and [`LcdDma::try_wait`] report it (M3 review P-1).
     pub fn busy(&mut self) -> bool {
         match self.poll() {
             Poll::Busy => true,
@@ -400,12 +421,15 @@ impl LcdDma {
             if cycles().wrapping_sub(t0) > timeout {
                 let ch = mdma();
                 let pending = STATE.load(Ordering::Acquire) == PENDING;
-                return Err(Error::Timeout {
+                let e = Error::Timeout {
                     pending,
                     isr: ch.isr.read().bits(),
                     cr: ch.cr.read().bits(),
                     bndtr: ch.bndtr.read().bits(),
-                });
+                };
+                // Leave the channel and the state usable (M3 review P-1).
+                self.abort();
+                return Err(e);
             }
         }
     }
@@ -463,6 +487,49 @@ impl LcdDma {
         ]
     }
 
+    /// Waits for no transfer to be pending or running, at most
+    /// [`SETTLE_CYCLES`]; past that the transfer is abandoned
+    /// ([`LcdDma::abort`]), so the accessors cannot spin forever.
+    fn settle(&mut self) {
+        let t0 = cycles();
+        while self.busy() {
+            if cycles().wrapping_sub(t0) > SETTLE_CYCLES {
+                self.abort();
+                return;
+            }
+        }
+    }
+
+    /// Abandons a pending or running transfer (M3 review P-1): the state
+    /// goes to IDLE first, with interrupts off, so a TE interrupt cannot
+    /// then start it (its compare-exchange from PENDING fails; one that
+    /// already did has set SWRQ, and the disable below stops that run);
+    /// then EN is cleared and waited for (bounded), and the flags cleared.
+    /// The panel may be left inside a RAMWR; the next window command ends
+    /// it. Counted in [`LcdDma::aborts`].
+    fn abort(&mut self) {
+        cortex_m::interrupt::free(|_| {
+            STATE.store(IDLE, Ordering::SeqCst);
+            let ch = mdma();
+            // SAFETY: EN cleared, the other bits kept; the interrupt is off
+            // and the state IDLE, so nothing else writes CR.
+            ch.cr.modify(|r, w| unsafe { w.bits(r.bits() & !CR_EN) });
+            let mut n = 0u32;
+            while ch.cr.read().bits() & CR_EN != 0 && n < 100_000 {
+                n += 1;
+            }
+            // SAFETY: the clear-flag register, write-1-to-clear.
+            ch.ifcr.write(|w| unsafe { w.bits(IFCR_ALL) });
+        });
+        ABORTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Transfers abandoned after a timeout since boot ([`LcdDma::wait`]
+    /// giving up, or an accessor that waited more than 250 ms).
+    pub fn aborts(&self) -> u32 {
+        ABORTS.load(Ordering::Relaxed)
+    }
+
     fn poll(&mut self) -> Poll {
         match STATE.load(Ordering::Acquire) {
             IDLE => return Poll::Idle,
@@ -517,9 +584,14 @@ enum Poll {
 #[inline]
 pub fn on_te() {
     let now = cycles();
-    // SAFETY: write-1-to-clear of line 13's pending bit; the DSB makes the
-    // clear reach EXTI before the interrupt returns (no second entry).
+    // SAFETY: write-1-to-clear of line 13's pending bit; the
+    // read-back below makes the clear reach EXTI before the interrupt returns
+    // (no second entry).
     exti().cpupr1.write(|w| unsafe { w.bits(1 << EXTI_LINE) });
+    // Read it back: the write goes through the bufferable Device region and
+    // can reach EXTI after the interrupt returned, re-entering it (M3 review
+    // P-2; the standard H7 practice).
+    let _ = exti().cpupr1.read();
     start_pending(now);
     let n = TE_COUNT.load(Ordering::Relaxed);
     if n == 0 {
@@ -581,7 +653,7 @@ pub struct Readback {
 /// Reads the window ([`Y0`]..=[`Y1`], all columns) back from the panel's
 /// GRAM (RAMRD, 3 bytes per pixel) and compares it with `buf` (plan M3
 /// "Readback self-test"). Takes the panel and buffer from
-/// [`LcdDma::parts`] (no transfer may run). About 70 ms at [`lcd::SPEC`].
+/// [`LcdDma::parts`] (no transfer may run). About 90 ms at [`lcd::SPEC`] (90.3 ms measured).
 pub fn readback(l: &mut Lcd, buf: &OutFrame) -> Readback {
     l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
     l.begin_readback();

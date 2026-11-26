@@ -293,6 +293,9 @@ pub fn enabled() -> bool {
 /// or a speculative read allocated) and again after it (a line a
 /// speculative read could have allocated in between: clean, since nothing
 /// writes the buffer before this returns).
+///
+/// The buffer is then zeroed with 64-bit stores (M3 review P-7: first writes
+/// to uninitialised 64-bit-ECC SRAM must be whole words).
 pub(crate) fn dma_buffer_window(region: u32, base: usize, bytes: usize) {
     assert!(region == REGION_DMA_BUF || region == REGION_AUDIO_BUF);
     assert!(bytes.is_power_of_two() && bytes >= 32 && base.is_multiple_of(bytes));
@@ -322,6 +325,28 @@ pub(crate) fn dma_buffer_window(region: u32, base: usize, bytes: usize) {
     cortex_m::asm::dsb();
     cortex_m::asm::isb();
     scb.clean_invalidate_dcache_by_address(base, bytes);
+    // M3 review P-7: AXI SRAM is 64-bit ECC (RM0433 3.2) and not zeroed at
+    // boot (NOLOAD), so the first sub-64-bit store to an uninitialised word
+    // is a read-modify-write of a word with a bad ECC. Write every word once
+    // with 64-bit stores before any 32-bit access (the buffer is not cached
+    // now: the stores go straight to the SRAM; `strd` on Armv7-M).
+    // An explicit `strd` (a compiler is free to split a `u64` store).
+    let mut p = base;
+    for _ in 0..bytes / 8 {
+        // SAFETY: `p` stays inside the region just made non-cacheable (AXI
+        // SRAM, 8-byte aligned: `base` is aligned to `bytes`); nothing else
+        // references the buffer yet (the callers are the singletons'
+        // `new`). The asm stores two zero registers and advances `p`.
+        unsafe {
+            core::arch::asm!(
+                "strd {z}, {z}, [{p}], #8",
+                z = in(reg) 0u32,
+                p = inout(reg) p,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+    cortex_m::asm::dsb();
 }
 
 /// Region `n`'s (MPU_RBAR, MPU_RASR) as they read now (for a report).

@@ -507,7 +507,7 @@ fn main() -> ! {
 /// Per completed frame `n`, outside the core's cycle count:
 /// 1. wait for frame `n - 1`'s transfer to finish, then read the window
 ///    back and compare it with the buffer, which still holds `n - 1`
-///    ([`lcd_dma::readback`], ~70 ms);
+///    ([`lcd_dma::readback`], ~90 ms);
 /// 2. `scale_frame` frame `n` into the buffer (timed);
 /// 3. the sentinel (M3 review T-2): the bitwise inverse of frame `n`
 ///    written into the window by the CPU ([`lcd_dma::write_inverse`],

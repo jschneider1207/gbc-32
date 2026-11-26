@@ -10,9 +10,9 @@
 //! # Colour
 //!
 //! The core's pixel is `r | g << 5 | b << 10` (`gbc_core::rgb555`). The
-//! ILI9341V 16-bit format (datasheet 8.3, "65K color: 16-bit/pixel") is
+//! panel's 16-bit format (ST7789V datasheet V1.3 8.8.3, "65K-Colors", COLMOD 05h) is
 //! `D15..D11 = R4..R0, D10..D5 = G5..G0, D4..D0 = B4..B0` with the high
-//! byte sent first. With MADCTL BGR = 1 (datasheet 8.2.30, "RGB-BGR order")
+//! byte sent first. With MADCTL BGR = 1 (ST7789V 9.1.28, MADCTL D3 "RGB/BGR order")
 //! the panel swaps the red and blue sub-pixels, so the field the datasheet
 //! calls R (top 5 bits) lights blue and the field it calls B (bottom 5
 //! bits) lights red. The word is therefore

@@ -90,6 +90,8 @@ const STEADY: u32 = 120;
 const TARGET_NS: u32 = 16_742_706;
 /// A wait longer than any frame: 50 ms.
 const TIMEOUT: u32 = CPU_HZ / 20;
+/// Two TE periods at 60 Hz (1/30 s), in CPU cycles (a margin, not a measurement).
+const TE_PERIOD_CYCLES: u32 = CPU_HZ / 30;
 
 #[interrupt]
 fn EXTI15_10() {
@@ -261,6 +263,7 @@ struct Summary {
     mismatches: u32,
     errors: u32,
     control: u32,
+    aborts: u32,
     scale: Range,
     xfer: Range,
     delay: Range,
@@ -269,11 +272,12 @@ struct Summary {
 fn summary(out: &mut Out, s: &Summary) {
     let _ = write!(
         out,
-        "{PREFIX} lcd dma summary frames={} mismatches={} transfer_errors={} control_mismatches={} \
+        "{PREFIX} lcd dma summary frames={} mismatches={} transfer_errors={} aborts={} control_mismatches={} \
          te_default_ns={} te_tuned_ns={} target_ns={TARGET_NS} rtna={:#04x} fpa={:#04x} bpa={:#04x}",
         s.frames,
         s.mismatches,
         s.errors,
+        s.aborts,
         s.control,
         ns(s.te_default.mean),
         ns(s.te_tuned.mean),
@@ -391,11 +395,42 @@ fn main() -> ! {
         frames: 0,
         mismatches: 0,
         errors: 0,
+        aborts: 0,
         control: 0,
         scale: Range::new(),
         xfer: Range::new(),
         delay: Range::new(),
     };
+
+    // Timeout recovery self-test (M3 review P-1): queue the buffer and give
+    // `wait` one cycle, so it times out with the transfer pending (TE is up
+    // to a frame away). It must abandon the transfer: the channel disabled,
+    // the state idle (the accessors do not spin), counted. The frames below
+    // then show the next transfers work (mismatches stay 0).
+    {
+        dma.present();
+        let r = dma.wait(1);
+        let timed_out = matches!(r, Err(lcd_dma::Error::Timeout { .. }));
+        let idle = dma.try_buffer().is_some();
+        // Two TE periods: a stale pending state would start a transfer.
+        let t0 = cycles();
+        while cycles().wrapping_sub(t0) < TE_PERIOD_CYCLES {}
+        let en = dma.registers()[4] & 1;
+        let _ = writeln!(
+            out,
+            "{PREFIX} lcd dma timeout-selftest timed_out={} aborts={} idle={} en_after={en} ok={}\r",
+            u8::from(timed_out),
+            dma.aborts(),
+            u8::from(idle),
+            u8::from(
+                timed_out
+                    && dma.aborts() == 1
+                    && idle
+                    && en == 0
+                    && dma.try_wait() == Some(Ok(None))
+            )
+        );
+    }
 
     // Frames with readback.
     for n in 0..FRAMES {
@@ -511,6 +546,7 @@ fn main() -> ! {
     let (bad, _) = readback(l, buf);
     let _ = writeln!(out, "{PREFIX} lcd dma image bars mismatches={bad}\r");
     s.mismatches += bad;
+    s.aborts = dma.aborts();
     summary(out, &s);
     let _ = writeln!(out, "{PREFIX} lcd dma end\r");
     loop {

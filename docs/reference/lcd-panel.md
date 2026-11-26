@@ -318,6 +318,21 @@ buffer write-back cached, no maintenance) the readback gave 474,387
 mismatching pixels over 60 frames and the control 7,887 instead of 2;
 with it, 0. MDMA does not go through the MPU.
 
+The buffer is zeroed once, at the end of that setup (`mpu::dma_buffer_window`,
+an explicit `strd` loop; the audio buffer too): AXI SRAM is 64-bit ECC
+(RM0433 3.2) and NOLOAD, so a first 32-bit store to a never-written word would
+be a read-modify-write of a word with a bad ECC (M3 review P-7).
+
+Timeouts: `LcdDma::wait` giving up, or an accessor that waited 250 ms
+(`SETTLE_CYCLES`), calls `abort`: with interrupts off the state goes to IDLE
+(so the TE interrupt's compare-exchange from PENDING fails), EN is cleared and
+waited for, the flags are cleared, and `LcdDma::aborts` counts it (M3 review
+P-1). `lcd-dma-probe` runs a self-test of this before its frames
+(`timeout-selftest`: `wait(1)` with a transfer pending; checked on the board:
+`timed_out=1 aborts=1 idle=1 en_after=0 ok=1`, then 60 frames with 0
+mismatches). With the state reset removed from `abort` the same self-test
+printed `idle=0 ok=0`.
+
 ### TE: EXTI13 on PE13
 
 PE13 input, no pull. SYSCFG_EXTICR4 EXTI13 = 0100 (port E, RM0433

@@ -20,7 +20,8 @@
 //!
 //! Sources: RM0433 Rev 9 chapter 22 (FMC) and section 8.7 (RCC); DS12117
 //! Rev 10 Table 9 (alternate functions) and Tables 55/57 (FMC asynchronous
-//! timings); ES0392 Rev 16 section 2.6 (FMC errata); UM2905 Rev 2 Table 2
+//! timings; the rev V part's are Tables 152/154 in the same datasheet, same
+//! values); ES0392 Rev 16 section 2.6 (FMC errata); UM2905 Rev 2 Table 2
 //! (the shield's LCD wiring); ILI9341V datasheet V1.00 (section 7.6.3
 //! 8-bit data formats, 8 commands, 15.4 reset, 18.3.1 8080-I timing);
 //! ST7789V datasheet V1.3 (Sitronix, 2014; not in the hardware repo's
@@ -198,8 +199,8 @@ mod ili {
     pub const TROD: u32 = 80;
 }
 
-/// DS12117 Table 55: data setup before NOE high the FMC needs (11 ns);
-/// Table 57: data valid at most Tker + 2.5 ns after NE low.
+/// DS12117 Table 55 (rev V: 152): data setup before NOE high the FMC needs
+/// (11 ns); Table 57 (rev V: 154): data valid at most Tker + 2.5 ns after NE low.
 const FMC_TSU_DATA_NOE: u32 = 11;
 const FMC_TV_DATA_NE_PS: u32 = 2_500;
 
@@ -339,7 +340,7 @@ impl Timing {
 /// 239.6 MHz except the hold times after WR rising, which the FMC cannot
 /// stretch (mode A ends one kernel cycle after NWE rises, RM0433 Figure
 /// 102): data hold tdht 10 ns against the FMC's guaranteed Tker + 0.5 =
-/// 4.7 ns (DS12117 Table 57 th(Data_NWE)), D/CX hold (ST7789V TAHT 10 ns)
+/// 4.7 ns (DS12117 Table 57, rev V Table 154, th(Data_NWE)), D/CX hold (ST7789V TAHT 10 ns)
 /// against Tker - 0.5 = 3.7 ns (th(A_NWE)), CS hold and wait (TCSH, tcsf
 /// 10 ns) against Tker = 4.2 ns (th(NE_NWE)). Out of spec, though no
 /// error was seen (`docs/reference/lcd-panel.md`); the fastest.
@@ -347,7 +348,10 @@ pub const FAST: Timing = Timing::new("hclk3", Kernel::Hclk3, 0);
 /// Every panel minimum met, the holds included: per_ck (the HSI, 64 MHz),
 /// whose 15.4 ns cycle (at 64.96 MHz) covers tdht, TAHT, TCSH and tcsf.
 pub const SPEC: Timing = Timing::new("perck", Kernel::PerHsi, 0);
-/// The conservative fallback: as [`SPEC`] with every minimum doubled.
+/// The conservative fallback: as [`SPEC`] with every minimum doubled. A bus
+/// fallback only, not a display timing: at 7.1 MB/s it is below the 10.1 MB/s
+/// the write-ahead of the scan needs (`docs/reference/lcd-panel.md`), so the
+/// panel tears.
 pub const SAFE: Timing = Timing::new("perck-x2", Kernel::PerHsi, 100);
 
 /// The register block. FMC is at 0x5200_4000 (RM0433 Table 8), inside the
@@ -646,14 +650,14 @@ impl Lcd {
     }
 }
 
-/// What RAMRD returns for a pixel written as `rgb565` (§8.2.24 and §7.6.3
-/// 18-bit format; ST7789V 9.1.23): three bytes, R, G, B, each a 6-bit value in
+/// What RAMRD returns for a pixel written as `rgb565` (ST7789V datasheet V1.3
+/// 9.1.23 RAMRD, 9.1.32 COLMOD, 8.8.3 and 8.8.4 the 16- and 18-bit formats): three bytes, R, G, B, each a 6-bit value in
 /// D7..D2 (D1, D0 undefined: compare under [`READBACK_MASK`]). The 5-bit
 /// red and blue fields come back with green's LSB as their new LSB
-/// (measured on this board, `docs/reference/lcd-panel.md`: neither
-/// datasheet states the 16 -> 18 bit rule in text, and the ILI9341V's
-/// RGBSET LUT has no effect here). Frame memory holds what was written; MADCTL.BGR
-/// only changes the panel output (§8.2.29).
+/// (measured on this board, `docs/reference/lcd-panel.md`: the
+/// datasheet does not state the 16 -> 18 bit rule in text, and no colour LUT
+/// (RGBSET) is loaded or has an effect here). Frame memory holds what was
+/// written; MADCTL.BGR only changes the panel output (ST7789V 9.1.28).
 pub const fn expected_readback(rgb565: u16) -> [u8; 3] {
     let r = (rgb565 >> 11) as u8 & 0x1F;
     let g = (rgb565 >> 5) as u8 & 0x3F;
