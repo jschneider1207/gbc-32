@@ -247,8 +247,8 @@ repo).
 
 ## M4: Audio out
 
-- [ ] Output path per decision D4 (recommended: DAC1 stereo on PA4/PA5, 12-bit, buffer on, line level): TIM6/TIM7 trigger at 32,768 Hz from the 240 MHz timer clock (÷7324 = 32,768.9 Hz, +27 ppm; agent check of the timer clock tree), DMA1 circular double buffer in AXI SRAM (DMA1 cannot reach DTCM), half/full-transfer ISR
-- [ ] `gbc-firmware`: DC blocker (integer one-pole high-pass, ADR 0035 leaves it to the platform), i16 → 12-bit, sample ring with underrun/overrun counters; host unit tests (step response, no overflow at ±full scale)
+- [x] (`audio_dac.rs`, `dac-probe`, 477c997; docs/reference/audio-dac.md: the TIM6 clock is hclk1 236 MHz, ÷7202 = 32,768.675 Hz (+20.6 ppm), not the 240 MHz ÷7324 below; DMA1 stream 0 via DMAMUX request 67, 2 x 256 frames, MPU region 9) Output path per decision D4 (recommended: DAC1 stereo on PA4/PA5, 12-bit, buffer on, line level): TIM6/TIM7 trigger at 32,768 Hz from the 240 MHz timer clock (÷7324 = 32,768.9 Hz, +27 ppm; agent check of the timer clock tree), DMA1 circular double buffer in AXI SRAM (DMA1 cannot reach DTCM), half/full-transfer ISR
+- [x] (`gbc_firmware::audio`, 54bdc05: k = 9, ~10 Hz; ring 2048 frames; `dac_feed_hash`) `gbc-firmware`: DC blocker (integer one-pole high-pass, ADR 0035 leaves it to the platform), i16 → 12-bit, sample ring with underrun/overrun counters; host unit tests (step response, no overflow at ±full scale)
 - [ ] Audio-driven pacing (as desktop ADR 0024): the main loop runs the core while the ring has room for a frame's samples (≤ 550), else `WFI`. Statistics: underruns, ring-fill min/max, emulated clocks vs elapsed DWT cycles
 - [ ] The sample stream the DAC is fed (after DC blocking) hashes equal to the host's for the same ROM and inputs
 

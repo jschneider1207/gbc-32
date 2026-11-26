@@ -139,6 +139,19 @@ Working rules that matter here:
 ## Needs human
 
 Open (session 24, 2026-11-25):
+- **Audio-paced emulation runs ~0.33% fast in real time** (no answer
+  needed unless you object). The DAC trigger is the HSI-derived 236 MHz ÷
+  7202; against the LSE the sample rate measured 32,871.7-32,881.5 Hz
+  (+0.32-0.35%, the HSI's own error, within D11's accepted tolerance).
+  M4's ±0.1% speed check is against DWT (same HSI), so it can't see
+  this; ~6 cents sharp. Agent plan: keep ÷7202 and meet M4 as written.
+  Option if you want true real time: pick ARR at boot from an LSE
+  measurement (±70 ppm), and measure the M4 check against the LSE instead
+  of DWT (that changes the check's reference, so it's your call).
+- **Audio wiring** for sign-off item 2: left PA4 = CN11 pin 32, right PA5
+  = CN12 pin 11, AGND CN12 pin 32; line level (≥ 5 kΩ load: powered
+  speakers or an amp), ~1.65 V DC bias, so AC-couple (e.g. 10 µF series,
+  100 kΩ to ground). `docs/reference/audio-dac.md`.
 - **The shield's panel is an ST7789V, not the ILI9341V** (RDDID 85 85 52,
   TE 60 Hz; UM2905 §6.2: variant XNGFX02Z1$AZ2 has the ST7789V, $AZ1 the
   ILI9341V). Please read the shield sticker to confirm `$AZ2`. Plan and
