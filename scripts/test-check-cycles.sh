@@ -119,6 +119,11 @@ run "--update on a garbled capture refuses" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written from a garbled capture" || bad "file written from a garbled capture"
 cap "$C" qspi 's/^(h7bench v1 qspi cgb-raster .*hash=)[0-9a-f]/\1z/'
 run "--update on a capture with a garbled qspi line refuses" 1 --update "$C" "$I" "$O"
+# A capture as big as a real one (~230 KB): the QSPI-line probe must not lose
+# the match to SIGPIPE under pipefail (grep -q exits early, tr gets 141).
+yes '' | head -c 400000 >> "$C"
+run "--update on a large capture with a garbled qspi line refuses" 1 --update "$C" "$I" "$O"
+[ ! -e "$O" ] && ok "no file written from a large garbled-qspi capture" || bad "file written from a large garbled-qspi capture"
 { banner 480000000; lines ""; echo "$end"; } > "$C"
 run "--update refuses a non-472 MHz banner" 1 --update "$C" "$I" "$O"
 [ ! -e "$O" ] && ok "no file written at 480 MHz" || bad "file written at 480 MHz"

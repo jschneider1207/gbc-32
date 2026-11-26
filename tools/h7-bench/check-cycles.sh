@@ -74,7 +74,9 @@ fi
 
 # Does the capture have QSPI workload lines? (NULs and CRs as the VCP gives them.)
 cap_qspi=0
-tr -d '\000\r' < "$cap" | grep -qE '^h7bench v1 qspi [^ ]+ calls=' && cap_qspi=1
+# Not `tr | grep -q`: under pipefail grep's early exit gives tr SIGPIPE (141)
+# on a large capture and the match is lost.
+grep -qE '^h7bench v1 qspi [^ ]+ calls=' <(tr -d '\000\r' < "$cap") && cap_qspi=1
 
 # --- the baseline (check mode): parsed before anything is judged ---------
 if [ "$update" = 0 ]; then
