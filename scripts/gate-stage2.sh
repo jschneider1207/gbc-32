@@ -506,7 +506,7 @@ run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
 # The board run scripts' pass/fail logic, on synthetic and committed
 # captures (never the board, never the board lock; human, 2026-11-26).
-for t in test-run-headless test-check-report test-run-paced test-run-replay; do
+for t in test-run-headless test-check-report test-check-cycles test-run-paced test-run-replay; do
   sub "scripts/${t}.sh (every failure mode of the script it tests, plus a pass case)"
   run_status "scripts/${t}.sh"
   [ "${rc}" -eq 0 ] || fail "scripts/${t}.sh exited ${rc}"

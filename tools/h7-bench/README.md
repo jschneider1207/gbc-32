@@ -542,6 +542,36 @@ The image takes about 65 s from reset to its first report (two passes of
 about 30 s, the storms most of it); the stack peak is now 4,488 B (3,440
 before: the second results array).
 
+### Cycle baseline (`check-cycles.sh`, plan M6)
+
+```
+./check-cycles.sh <capture> out/h753/bench-itcm-dtcm-pll480.bin [expected-cycles.txt]
+./check-cycles.sh --update [--force] <capture> <image.bin> <out-file>
+```
+
+The regression ratchet of gate step B2. It runs `check-report.sh` first
+(with `--qspi` when the capture or the baseline has QSPI lines) and passes
+on its exit code if that fails, so cycles are never judged on a garbled
+report or another image. Then, against `expected-cycles.txt` (one
+`h7cycles v1 image= placement= cpu_hz= commit= image_bytes= image_cksum=`
+header, then `flash <workload> mean=<n> max=<n>` and `qspi <workload> ...`
+lines in report order; `#` comments): the banner's `placement` and
+`cpu_hz` equal the header's; every baseline line has its workload line
+and both mean and max are at most the baseline + 3% (`value * 100 <= base
+* 103`; faster is reported, never a failure); every report workload has
+a baseline line; `worst-case` max is < 7,902,557 (one real-time frame) in
+every pass. `worst-case` max against 3,951,279 is printed as a `REPORT:`
+line, not a check. Exit 0 pass, 1 a check failed (also a missing baseline
+file), 2 a parse or usage error. `scripts/test-check-cycles.sh` (gate H7)
+covers every rule.
+
+`--update` writes a baseline from a 472 MHz capture that passes
+`check-report.sh` and refuses an existing file without `--force`.
+Absorbing a regression (a +3% failure) into the committed file needs the
+human, as for `check-bench.sh`. Measure it on an image built in the main
+checkout path after ADR 0042's core-first layout: crate hashes in symbol
+names depend on the build path and move code (ADR 0042).
+
 ## Measurement
 
 - DWT `CYCCNT`, read right before and right after each call. No interrupt is
