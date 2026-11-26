@@ -1176,6 +1176,81 @@ nowhere near a full frame, so the M6 ROM-placement task stays optional.
   `itcm-dtcm` run (h7-bench README "After the switch onto the lib";
   +0.12% on the worst case), the usual rebuild band.
 
+### Display in the loop (M3, `headless-display`, 472 MHz)
+
+Plan Stage 2 M3 "Measure": the `headless` loop on `cgb-acid2`, 600
+frames, with the panel running (`headless-display-cgb-acid2`,
+`--features display`, src/bin/headless.rs `display`). Per completed
+frame, outside the core's cycle count (the `FrameSink` hook,
+`gbc_firmware::headless`): wait for the previous transfer, read the
+window back and compare (RAMRD), `scale_frame` the new frame into the
+AXI buffer, queue it (`present`). `GBC_DISPLAY_START` picks the start:
+`te-wait` (TE, and the sink waits until TE has started it, so the 8.1 ms
+transfer of frame n always runs while the core emulates frame n + 1),
+`te` (TE, the sink returns at once: the overlap depends on where TE
+falls), `now` (started by the sink, no TE), `off` (no display; the same
+code: the images differ only in about 300 bytes of `main` around the
+mode constant, every other function and the 64,080-B ITCM image are
+byte-identical). One build (6d696e9), one boot each, 2026-11-25; every
+run's 602 `headless` lines equal `tools/headless/expected/cgb-acid2.txt`
+(run-headless.sh). The `run_frame` figures are DWT counts around each
+`run_frame` call (the run's `stats run_frame` line).
+
+| Image / mode | core cycles per frame, mean / max | vs `off` |
+|---|---|---|
+| display build, `off` | 681,007 / 753,470 | |
+| display build, `te-wait` | 681,453 / 753,464 | +0.07% / -0.00% |
+| display build, `te` | 681,315 / 753,422 | +0.05% / -0.01% |
+| display build, `now` | 681,324 / 753,464 | +0.05% / -0.00% |
+| plain `headless-cgb-acid2`, same tree | 683,879 / 756,185 | +0.42% / +0.36% (a different build) |
+| M2 (0765d62), internal flash | 683,081 / 755,648 | |
+| M1 close | 684,112 / 756,317 | |
+
+**The display costs the core nothing measurable:** +0.07% at most with
+the transfer overlapping every frame, at the level of boot-to-boot noise
+(M2 above: 0.054%); against M2's figure the display run is -0.24% /
+-0.29% (a different build: the usual layout band). The worst frame with
+the display is 9.53% of a 472 MHz frame. The core runs from ITCM and
+DTCM with the ROM and frame buffer cached; the MDMA moves 12.8 MB/s from
+AXI SRAM to the FMC, a small share of the AXI bus, and the core does not
+touch the FMC.
+
+The CPU's display work per frame (587 frames with `FRAME_READY` out of
+600 calls; plan M3 acceptance: conversion plus DMA setup at most 5% of a
+frame, 395,127 cycles at 472 MHz; the plan's "about 402k" is 5% at 480
+MHz):
+
+| | cycles (min / mean / max; min and max over the three display modes) |
+|---|---|
+| `scale_frame` (flash; frame in cached AXI SRAM, output in the non-cacheable buffer) | 195,927 / 196,671-196,682 / 197,247 (415-418 µs) |
+| `present` (window commands, 8 MDMA registers), `te`/`te-wait` | 298 / 335 / 386 |
+| `present` + `start_now`, `now` | 399 / 430 / 512 |
+| **sum of the maxima** | **197,759 = 2.50% of a frame** (50% of the budget) |
+
+`scale_frame` is about 10% slower here than in `lcd-dma-probe`
+(178-183k), whose frame is in DTCM; the headless image keeps the frame
+in AXI SRAM (`.axisram.frame`, cached).
+
+The transfer: 3,822,714 to 3,822,792 cycles from SWRQ to CTCIF (8,099
+µs) in every mode, the same as the idle probe's: the core running beside
+it does not slow the MDMA either (in all three modes the sink was
+already waiting when it finished, `late=0`, so the figure is exact). TE
+to SWRQ 59 to 88 cycles. 0 transfer errors.
+
+`dmg-acid2` (`headless-display-dmg-acid2`, `te-wait`, the same build):
+its 602 lines equal the host tool's (`tools/headless`, 600 frames; no
+committed expected file, so a scratch file), 592 frames, 0 mismatching
+pixels, control 2; core 683,114 / 752,341; `scale_frame` 196,253 to
+197,112, `present` 297 to 386, the transfer 3,822,714 to 3,822,740.
+
+Not part of a real frame loop, measured for scale: the readback of the
+window (51,840 pixels, 155,520 bytes) is 42.63 M cycles, 90.3 ms (274
+cycles per byte); the whole self-test loop takes 100 ms a frame (six TE
+periods), so 600 frames take about 59 s. In `te` mode the loop locks to
+that phase: TE came on average 0.77 M cycles after `present`, after the
+core's frame (0.68 M) had mostly finished, so `te` overlaps little; that
+is why `te-wait` is the measured mode.
+
 ### NUCLEO-H753ZI at 480 MHz (2026-11-25)
 
 STM32H753ZIT6 rev V on the LDO supply, so VOS0 and 480 MHz are allowed

@@ -395,6 +395,32 @@ the arithmetic puts them.
   16.0 ms (it has nothing else to do in the probe) and was at most 22.3
   ms (presenting just after an edge waits a frame plus the transfer).
 
+### In the headless loop (M3, `headless-display`)
+
+The headless loop on `cgb-acid2` with the panel (src/bin/headless.rs
+`display`; figures and method: docs/perf.md "Display in the loop (M3)"),
+600 calls, 587 frames, every one read back after its transfer:
+
+- **0 mismatching pixels** in 587 readbacks, in each of the `te-wait`,
+  `te` and `now` start modes; the control at the end (one buffer word
+  inverted) gave exactly 2.
+- The transfer takes **3,822,714 to 3,822,792 cycles (8,099 µs)** with
+  the core emulating beside it, the same as the idle probe: no slowdown
+  from the core's bus traffic. TE to SWRQ 59 to 88 cycles; `present` 298
+  to 386 cycles.
+- `scale_frame` 195,927 to 197,247 cycles with the frame in cached AXI
+  SRAM (the headless image's `.axisram.frame`), about 10% more than the
+  probe's DTCM frame.
+- The window readback (155,520 bytes) takes 42.63 M cycles, 90.3 ms (274
+  cycles per byte, as the full-GRAM figure above).
+- `dmg-acid2` the same way (`te-wait`): 592 frames, 0 mismatches,
+  control 2, the same transfer and `scale_frame` figures.
+- TE over the about 3,500 periods of each of those four runs: single
+  periods 16,706 to 16,764 µs (7,885,240 to 7,912,445 cycles; these
+  include the interrupt's entry
+  latency, which an FMC read in progress can delay by about a byte read,
+  0.6 µs), wider than the ±10 µs seen over 120 periods.
+
 ### Test image
 
 After the readback phase the probe leaves a frame up (sent by MDMA like
