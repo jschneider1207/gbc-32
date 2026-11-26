@@ -45,6 +45,8 @@ OUT=out/$BOARD
 echo "== board $BOARD; images in $OUT"
 
 locked() { if [ -n "${H7_BENCH_LOCK:-}" ]; then flock -x "$H7_BENCH_LOCK" "$@"; else "$@"; fi; }
+# build_bin: the ELF path as cargo reports it (not an assumed target/ path).
+. ../../scripts/lib/cargo-bin.sh
 
 # rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -71,8 +73,9 @@ in_range() { [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 image() {
   local name=$1 features=$2 ram_lo=$3 ram_hi=$4
   echo "== $name (features: ${features:-none})"
-  locked cargo build --release --features "board${features:+,$features}" "${REMAP[@]}"
-  cp "target/$TARGET/release/h7-bench" "$OUT/$name.elf"
+  # last_built: also the rlib directory for itcm_check.
+  last_built=$(build_bin h7-bench locked cargo build --release --features "board${features:+,$features}" "${REMAP[@]}")
+  cp "$last_built" "$OUT/$name.elf"
   objcopy -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
   # Allocated sections: name, address, size in bytes.
@@ -128,11 +131,12 @@ image() {
 
 # itcm_check <name>: the post-link ITCM check (scripts/check-itcm-elf.sh,
 # docs/perf.md "ITCM placement plan"), told the tiers build.rs left in flash
-# (same variable, same default) and the rlib the image was linked from.
+# (same variable, same default) and the rlib the image was linked from
+# (the target directory cargo reported for the last image built).
 itcm_check() {
   local drop=${H7_BENCH_ITCM_DROP-plain tile path}
   echo "  post-link ITCM check (--drop '${drop}')"
-  ../../scripts/check-itcm-elf.sh --drop "$drop" --rlib "target/$TARGET/release" "$OUT/$1.elf" | sed 's/^/  /' ||
+  ../../scripts/check-itcm-elf.sh --drop "$drop" --rlib "$(dirname "$last_built")" "$OUT/$1.elf" | sed 's/^/  /' ||
     bad "$1: post-link ITCM check (scripts/check-itcm-elf.sh)"
 }
 
@@ -154,8 +158,8 @@ echo "== host: expected lines (calls, frames, clocks, hash) against expected-has
 # compare its report with expected-hashes.txt.
 qemu() {
   echo "== QEMU mps2-an500: $1 (features: $2)"
-  locked cargo build --release --no-default-features --features "$2" "${REMAP[@]}"
-  cp "target/$TARGET/release/h7-bench" "$OUT/$1.elf"
+  last_built=$(build_bin h7-bench locked cargo build --release --no-default-features --features "$2" "${REMAP[@]}")
+  cp "$last_built" "$OUT/$1.elf"
   locked timeout 900 qemu-system-arm -M mps2-an500 -cpu cortex-m7 -display none -monitor none \
     -serial none -semihosting-config enable=on,target=native -kernel "$OUT/$1.elf" \
     | tr -d '\r' > "$OUT/$1.txt" || bad "$1: QEMU exited with an error"

@@ -49,6 +49,8 @@ command -v readelf >/dev/null || die "readelf (binutils) not found"
 REMAP=(--config "target.$TARGET.rustflags=['--remap-path-prefix=$ROOT=/gbc-32','--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/registry/src=/cargo-registry','--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup']")
 
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
+# build_bin: the ELF path as cargo reports it (not an assumed target/ path).
+. "$ROOT/scripts/lib/cargo-bin.sh"
 
 rom_path() {
   case "$1" in
@@ -68,10 +70,10 @@ for rom in "$@"; do
   want=$EXPECTED/$rom.txt
   [ -f "$want" ] || die "$rom: no expected file $want"
   echo "== $rom"
-  GBC_HEADLESS_ROM=$(realpath "$path") locked cargo build --release --quiet "${REMAP[@]}" ||
+  built=$(GBC_HEADLESS_ROM=$(realpath "$path") build_bin headless-qemu locked cargo build --release --quiet "${REMAP[@]}") ||
     die "$rom: build failed"
   elf=$OUT/headless-qemu-$rom.elf
-  cp "target/$TARGET/release/headless-qemu" "$elf"
+  cp "$built" "$elf" || die "$rom: cannot copy $built"
   thunks=$(readelf -sW "$elf" | grep -c 'Thumbv7ABSLongThunk' || true)
   [ "$thunks" -gt 0 ] || die "$rom: no long-branch thunks, so the ITCM placement was not exercised"
 

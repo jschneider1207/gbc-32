@@ -71,14 +71,23 @@ want() { case " ${steps} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ---- the whole run under the build lock, if one is given -------------------
 
-if [ -n "${GBC_BUILD_LOCK:-}" ] && [ -z "${GATE_STAGE2_LOCKED:-}" ]; then
+# Only the gate's own re-exec skips taking the lock: it sets
+# GATE_STAGE2_LOCKED to the pid of the flock it runs under (the gate's pid,
+# kept by exec), so the re-run sees it equal to its parent's pid, and that
+# parent is flock. An inherited value from anything else is ignored.
+reexec=0
+if [ -n "${GATE_STAGE2_LOCKED:-}" ] && [ "${GATE_STAGE2_LOCKED}" = "${PPID}" ] &&
+  [ "$(cat "/proc/${PPID}/comm" 2>/dev/null)" = flock ]; then
+  reexec=1
+fi
+unset GATE_STAGE2_LOCKED
+if [ -n "${GBC_BUILD_LOCK:-}" ] && [ "${reexec}" = 0 ]; then
   echo "gate-stage2.sh: taking the build lock ${GBC_BUILD_LOCK}"
   args=()
   [ "${host_only}" = 1 ] && args+=(--host-only)
   [ "${partial}" = 1 ] && args+=(--step "$(tr ' ' , <<< "${steps}")")
-  exec env GATE_STAGE2_LOCKED=1 flock -x "${GBC_BUILD_LOCK}" "${ROOT}/scripts/gate-stage2.sh" "${args[@]}"
+  exec env GATE_STAGE2_LOCKED=$$ flock -x "${GBC_BUILD_LOCK}" "${ROOT}/scripts/gate-stage2.sh" "${args[@]}"
 fi
-unset GATE_STAGE2_LOCKED
 
 # ---- reporting and exit ------------------------------------------------------
 
@@ -133,10 +142,10 @@ step H1 "Preconditions (Stage 1's, plus the firmware build overrides)"
 # Set but empty counts as set. Also refused here, because they change what
 # the firmware steps build or where they look for it: the build scripts
 # (crates/gbc-nucleo-h753/build.sh, tools/h7-bench/build.sh,
-# tools/headless-qemu/run.sh) copy their ELFs from the crate's own target/,
-# so a CARGO_TARGET_DIR (or build.target-dir) would leave them checking a
-# stale image; CARGO_BUILD_* / CARGO_PROFILE_* replace the build target,
-# the jobs cap and the release profile (codegen-units = 1, ADR on sizes);
+# tools/headless-qemu/run.sh) take their ELFs from cargo's own report
+# (scripts/lib/cargo-bin.sh), but a CARGO_TARGET_DIR still moves the
+# firmware builds away from the crate's target/ (H8 reads it);
+# CARGO_BUILD_* / CARGO_PROFILE_* replace the build target, the jobs cap and the release profile (codegen-units = 1, ADR on sizes);
 # RUSTC* and RUSTUP_TOOLCHAIN replace the pinned compiler.
 for v in $(compgen -e); do
   case $v in
@@ -157,6 +166,27 @@ for d in "${CARGO_HOME:-$HOME/.cargo}" $(p=$(dirname "${ROOT}"); while :; do ech
     fi
   done
 done
+# Inside the repository cargo also merges the config of every directory
+# from the crate's own up to ROOT (the firmware crates build from their own
+# directories, the rest from ROOT). Each such file must be the committed
+# one: tracked by git and unchanged from HEAD, so an untracked or edited
+# config (say a tools/.cargo/config.toml with build.target-dir) cannot
+# change or redirect the builds the gate checks.
+for d in . "${FIRMWARE_DIRS[@]}" tools/h7-bench/host; do
+  p=$d
+  while :; do
+    for f in "$p/.cargo/config" "$p/.cargo/config.toml"; do
+      f=${f#./}
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      git ls-files --error-unmatch -- "$f" > /dev/null 2>&1 ||
+        fail "$f is not tracked by git; cargo merges it into the builds from $d. Remove it and rerun"
+      git diff --quiet HEAD -- "$f" ||
+        fail "$f differs from HEAD; cargo merges it into the builds from $d. Commit or revert it and rerun"
+    done
+    [ "$p" = . ] && break
+    p=$(dirname "$p")
+  done
+done
 
 # Unset, as gate-stage1.sh unsets its overrides: every experiment override
 # of the firmware and Stage 1 scripts, so the gate judges the committed
@@ -164,9 +194,11 @@ done
 # which only say where the board is or which lock to take:
 #   H7_DRIVE, H7_LABEL, H7_COM   board drive and serial port (flash.sh,
 #                                read-serial.sh; board steps)
-#   GBC_BOARD_LOCK, GBC_BOARD_LOCK_WAIT, GBC_BOARD_LOCK_HELD
+#   GBC_BOARD_LOCK, GBC_BOARD_LOCK_WAIT
 #                                scripts/lib/board-lock.sh
 #   GBC_BUILD_LOCK               consumed above (the whole run's lock)
+# GBC_BOARD_LOCK_HELD is unset too: an inherited `1` would make every board
+# step skip the board lock (board-lock.sh's nested-call shortcut).
 # Unset among others: GBC_TEST_ROMS, GBC_ITCM_DROP, GBC_HEADLESS_ROM,
 # GBC_HEADLESS_INPUT, GBC_HEADLESS_FRAMES, H7_BENCH_ITCM_DROP,
 # H7_BENCH_CPU_INSTRS (set again below), H7_BENCH_BOARD, H7_BENCH_PLL,
@@ -181,7 +213,7 @@ done
 unset_list=()
 for v in $(compgen -e); do
   case $v in
-    H7_DRIVE | H7_LABEL | H7_COM | GBC_BOARD_LOCK | GBC_BOARD_LOCK_WAIT | GBC_BOARD_LOCK_HELD) ;;
+    H7_DRIVE | H7_LABEL | H7_COM | GBC_BOARD_LOCK | GBC_BOARD_LOCK_WAIT) ;;
     H7_* | GBC_* | TEST_ROMS | CODE_SIZE_BUDGETS_FILE | ITCM_SET_FILE | HEADLESS_* | QEMU | RUN_HEADLESS_*)
       unset_list+=("$v") ;;
   esac
@@ -469,6 +501,9 @@ step H7 "Host unit tests of the firmware logic, named"
 # by `cargo test -p <crate>`. The plan's list (converter, DC blocker,
 # debounce, serial framing, image header; gbc-link, tools/gbc-pc) is added
 # as those crates arrive (M2-M5).
+sub "scripts/test-board-lock.sh (scripts/lib/board-lock.sh: serializes, re-enters, times out)"
+run_status scripts/test-board-lock.sh
+[ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
 NAMED_TESTS="
 gbc-firmware fnv::tests::known_vectors
 gbc-firmware fnv::tests::frame_is_little_endian_pixel_bytes

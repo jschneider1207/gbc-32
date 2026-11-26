@@ -53,6 +53,8 @@ DTCM_LO=0x20000000 DTCM_HI=0x20020000 AXI_LO=0x24000000 AXI_HI=0x24080000
 FAULT_STACK_BYTES=2048 # memory_x::FAULT_STACK_BYTES
 
 locked() { if [ -n "${GBC_BUILD_LOCK:-}" ]; then flock -x "$GBC_BUILD_LOCK" "$@"; else "$@"; fi; }
+# build_bin: the ELF path as cargo reports it (not an assumed target/ path).
+. ../../scripts/lib/cargo-bin.sh
 
 # rust-objcopy ships inside the pinned toolchain; no llvm-tools install.
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -73,13 +75,13 @@ sym() { awk -v n="$2" '$8 == n {print $2; exit}' <<< "$1"; }
 # in_range <hex> <lo> <hi>: lo <= value <= hi
 in_range() { [ -n "$1" ] && [ $((16#$1)) -ge $(($2)) ] && [ $((16#$1)) -le $(($3)) ]; }
 
-# check_image <name> <cargo bin>: copies the bin just built to out/<name>
-# and runs the checks above.
+# check_image <name> <elf>: copies the ELF cargo just built (build_bin) to
+# out/<name> and runs the checks above.
 check_image() {
   local name=$1
   echo "== $name"
   local elf=$OUT/$name.elf bin=$OUT/$name.bin
-  cp "target/$TARGET/release/$2" "$elf"
+  cp "$2" "$elf"
   objcopy -O binary "$elf" "$bin"
 
   # Allocated sections: name, address, size in bytes.
@@ -134,19 +136,19 @@ check_image() {
   echo "  DTCM: $((16#$send - DTCM_LO)) B of statics and tables, $((16#$sstart - 16#$send)) B of stack region"
 }
 
-locked cargo build --release --bin boot "${REMAP[@]}"
-check_image boot boot
+built=$(build_bin boot locked cargo build --release --bin boot "${REMAP[@]}")
+check_image boot "$built"
 
 for entry in "${HEADLESS_ROMS[@]}"; do
   rom=${entry%%=*} path=$ROMS/${entry#*=}
   [ -f "$path" ] || { bad "headless-$rom: no ROM at $path (scripts/fetch-test-roms.sh, or set GBC_TEST_ROMS)"; continue; }
-  GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP locked cargo build --release --bin headless --features headless "${REMAP[@]}"
-  check_image "headless-$rom" headless
+  built=$(GBC_HEADLESS_ROM=$(realpath "$path") GBC_ITCM_DROP=$ITCM_DROP build_bin headless locked cargo build --release --bin headless --features headless "${REMAP[@]}")
+  check_image "headless-$rom" "$built"
   # The post-link ITCM check (docs/perf.md "ITCM placement plan"), told
   # the tiers build.rs left in flash and the rlib the image was linked
   # from.
   echo "  post-link ITCM check (--drop '$ITCM_DROP')"
-  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "target/$TARGET/release" "$OUT/headless-$rom.elf" | sed 's/^/  /' ||
+  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/headless-$rom.elf" | sed 's/^/  /' ||
     bad "headless-$rom: post-link ITCM check (scripts/check-itcm-elf.sh)"
 done
 
