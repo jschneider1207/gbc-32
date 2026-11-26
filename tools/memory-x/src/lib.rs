@@ -211,13 +211,36 @@ impl ItcmSet {
     }
 }
 
+/// Where gbc-core's flash code (`.text_core`) starts, as an offset from the
+/// start of flash (ADR 0042). Fixed, so that edits to the image's own code
+/// or the lib do not move the core's flash code: the code layout moves the
+/// cycle counts by up to ~4 % through branch-predictor aliasing. Behind the
+/// vector table and the `.itcm` load image, which can never be over the
+/// ITCM's 0xFF00 B: 0x298 B of H7 vectors + 0xFF00 = 0x1_0198, so 0x1_0400
+/// leaves 616 B even for a full ITCM (the linker ASSERTs it).
+pub const CORE_TEXT_OFFSET: u32 = 0x1_0400;
+// The worst case fits: the H7 vector table and a full ITCM load image.
+const _: () = assert!(0x298 + 0xFF00 <= CORE_TEXT_OFFSET);
+
+/// The least `.text_core` may hold: less means its file pattern no longer
+/// matches gbc-core (renamed archive, LTO merging the crates).
+pub const CORE_TEXT_MIN_BYTES: u32 = 0x4000;
+
 /// The `.itcm` section: the hot set runs from ITCM and is loaded from
 /// flash; the image copies it before the first call into gbc-core. No KEEP:
 /// unused functions are still garbage-collected. The rules must come before
 /// cortex-m-rt's `*(.text .text.*)` (the first matching rule gets an input
-/// section), hence INSERT BEFORE .text; cortex-m-rt puts `.text` at
+/// section), hence INSERT BEFORE .text.
+///
+/// Then `.text_core`: the rest of gbc-core's code, at the fixed
+/// [`CORE_TEXT_OFFSET`] in flash (ADR 0042), keyed to gbc-core's archive
+/// member as `.dtcm_rodata` is. In the same SECTIONS block as `.itcm`, so
+/// that `.itcm`'s rules take the hot set first. cortex-m-rt puts `.text` at
 /// `_stext`, by default right after the vector table, which is where the
-/// load image of `.itcm` now is, so `_stext` moves behind it.
+/// load image of `.itcm` now is, so `_stext` moves behind `.text_core`:
+/// the image's and the lib's code come after the core's, and their edits
+/// move nothing of gbc-core. gbc-core's generics instantiated in other
+/// crates are those crates' code and land in `.text`.
 fn write_itcm(s: &mut String, set: &ItcmSet) {
     write!(
         s,
@@ -234,10 +257,19 @@ SECTIONS {{
     __eitcm = .;
   }} > ITCM AT > FLASH
   __siitcm = LOADADDR(.itcm);
+  .text_core ORIGIN(FLASH) + {CORE_TEXT_OFFSET:#x} : {{
+    __stext_core = .;
+    *libgbc_core-*.rlib:*(.text .text.*)
+    . = ALIGN(8);
+    __etext_core = .;
+  }} > FLASH
 }} INSERT BEFORE .text;
-_stext = ALIGN(LOADADDR(.itcm) + SIZEOF(.itcm), 8);
+_stext = __etext_core;
 ASSERT(__eitcm <= ORIGIN(ITCM) + LENGTH(ITCM), \"the ITCM set does not fit\");
 ASSERT(__eitcm - __sitcm > 0x8000, \"the ITCM set is nearly empty: the globs no longer match\");
+ASSERT(__siitcm + SIZEOF(.itcm) <= __stext_core, \"the .itcm load image overlaps .text_core: raise memory_x::CORE_TEXT_OFFSET\");
+ASSERT(__stext_core == ORIGIN(FLASH) + {CORE_TEXT_OFFSET:#x}, \".text_core is not at its fixed address\");
+ASSERT(__etext_core - __stext_core > {CORE_TEXT_MIN_BYTES:#x}, \".text_core is nearly empty: its pattern no longer matches gbc-core\");
 ",
         set.rules()
     )
@@ -515,6 +547,26 @@ mod tests {
         assert!(s.contains("\"the ITCM set is nearly empty: the globs no longer match\""));
         // `.itcm` comes before `.dtcm_rodata`.
         assert!(s.find(".itcm :").unwrap() < s.find(".dtcm_rodata :").unwrap());
+    }
+
+    #[test]
+    fn core_text_follows_the_itcm_rules_at_its_fixed_address() {
+        let set = ItcmSet::parse(&set_text(40), &[]);
+        let s = memory_x(Chip::H753, Data::Dtcm, Some(&set));
+        let itcm = s.find(".itcm : ALIGN(8) {").unwrap();
+        let core = s.find(".text_core ORIGIN(FLASH) + 0x10400 : {").unwrap();
+        let insert = s.find("} INSERT BEFORE .text;").unwrap();
+        // One block, `.itcm` first: its rules take the hot set.
+        assert!(itcm < core && core < insert);
+        assert!(!s[itcm..core].contains("INSERT"));
+        assert!(s[core..insert].contains("\n    *libgbc_core-*.rlib:*(.text .text.*)\n"));
+        // The image's code follows the core's.
+        assert!(s.contains("\n_stext = __etext_core;\n"));
+        assert!(s.contains("overlaps .text_core"));
+        assert!(s.contains("is not at its fixed address"));
+        assert!(s.contains("> 0x4000, \".text_core is nearly empty"));
+        // Without a set, no `.text_core`.
+        assert!(!memory_x(Chip::H753, Data::Dtcm, None).contains(".text_core"));
     }
 
     /// Every symbol the lib reads, in each placement.

@@ -34,7 +34,10 @@
 #     so the dropped-tier report would be false);
 #   - a glob that matches no function section of the rlib (stale: renamed,
 #     or inlined by rustc; check-itcm-set.sh fails the same list);
-#   - no `.itcm` section, or one over 64 KiB, or no kept function in it.
+#   - no `.itcm` section, or one over 64 KiB, or no kept function in it;
+#   - no `.text_core` section, or a gbc-core function of the rlib that the
+#     link kept in flash outside it (ADR 0042; a name with several copies
+#     passes when one is in ITCM or `.text_core`).
 # Reported, exit 0: functions the rlib has and the ELF lacks (garbage-
 # collected as unused, or inlined into their callers under LTO) as long as
 # their tier has another function in the link, and the
@@ -74,7 +77,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # ELF function symbols: "<addr hex> <size> <name>"; thunks apart.
-readelf -sW "$elf" | awk '$4 == "FUNC" {print $2, $3, $8}' > "$work/elfsyms"
+readelf -sW "$elf" | awk '$4 == "FUNC" {print $2, $3, $8, $5}' > "$work/elfsyms"
 [ -s "$work/elfsyms" ] || die "no function symbols in $elf (stripped?)"
 hash=$(grep -o 'Cs[0-9A-Za-z]*_8gbc_core' "$work/elfsyms" | sort | uniq -c | sort -rn | awk 'NR == 1 {print $2}')
 [ -n "$hash" ] || die "no gbc-core symbols in $elf"
@@ -198,6 +201,56 @@ else
   echo ".itcm: $isize B at 0x$iaddr of 65536 B ITCM (ends 0x$(printf '%x' "$iend"), $((65536 - iend)) B free)"
   if [ "$isize" -gt 65536 ] || [ "$iend" -gt 65536 ]; then
     echo "FAIL: .itcm is over the 64 KiB ITCM" >&2; fail=1
+  fi
+fi
+
+# gbc-core's flash code (ADR 0042, memory_x::CORE_TEXT_OFFSET): the rlib's
+# functions that the link kept outside ITCM must be inside `.text_core`,
+# the fixed-address section in front of the image's and the lib's code, or
+# their edits move the core's code again. A name alone does not tell the
+# rlib's copy from a downstream crate's: rustc also compiles small and
+# generic gbc-core functions into the crates that call them, as LOCAL
+# copies of the same name, which are those crates' code and belong in
+# `.text`. So a copy in `.text_core` (which takes only gbc-core's archive
+# member) is the rlib's, and the check fails on
+#   - a GLOBAL copy of a gbc-core function outside ITCM and `.text_core`
+#     (the linker kept the rlib's exported definition elsewhere);
+#   - a function that a gbc-core function inside ITCM or `.text_core`
+#     references (a relocation in the rlib), with no copy in either: the
+#     reference binds to the rlib's copy, so that copy is in the link,
+#     and it is not where it belongs.
+# Other names with copies only in `.text` are reported as downstream copies.
+core=$(readelf -SW "$elf" | sed -n 's/^ *\[ *[0-9]*\] *\.text_core  *[A-Z]*  *\([0-9a-f]*\) [0-9a-f]* \([0-9a-f]*\) .*/\1 \2/p')
+if [ -z "$core" ]; then
+  echo "FAIL: no .text_core section in $elf (gbc-core's flash code is not at its fixed address)" >&2; fail=1
+else
+  read -r caddr csize <<< "$core"
+  clo=$((16#$caddr)); chi=$((16#$caddr + 16#$csize))
+  sed 's/^\.text\.//; s/^unlikely\.//' "$work/secs" > "$work/coresyms"
+  # References between the rlib's function sections: "<from> <to>".
+  for o in "$work"/o/*.o; do readelf -rW "$o"; done | awk '
+    /^Relocation section/ { s = $3; gsub(/\047/, "", s); ok = sub(/^\.rela?\.text\./, "", s); sub(/^unlikely\./, "", s); next }
+    ok && NF >= 5 && $1 ~ /^[0-9a-f]+$/ { t = $5; sub(/^\.text\./, "", t); sub(/^unlikely\./, "", t); print s, t }' > "$work/corerefs"
+  awk -v lo="$clo" -v hi="$chi" -v itcm="$ITCM_END" '
+    FILENAME == ARGV[1] { want[$1] = 1; next }
+    FILENAME == ARGV[2] {
+      if (!($3 in want)) next
+      a = and(strtonum("0x" $1), 0xfffffffe); inside = (a < itcm || (a >= lo && a < hi))
+      kept[$3] = 1; if (inside) ok[$3] = 1
+      else { at[$3] = $1; if ($4 == "GLOBAL" && !($3 in seen)) { seen[$3] = 1; print "global", $1, $3 } }
+      next
+    }
+    ($1 in ok) && ($2 in kept) && !($2 in ok) && !(($2) in seen) { seen[$2] = 1; print "ref", at[$2], $2 }
+    END {
+      for (n in kept) { nk++; if (!(n in ok) && !(n in seen)) nd++ }
+      printf "%d %d\n", nk, nd > "/dev/stderr"
+    }' "$work/coresyms" "$work/elfsyms" "$work/corerefs" > "$work/misplaced" 2> "$work/ncore"
+  read -r nkept_core ncopies < "$work/ncore"
+  echo ".text_core: $((16#$csize)) B at 0x$caddr; $nkept_core gbc-core function names in the link; $ncopies other names with copies only in .text (downstream LOCAL copies)"
+  if [ -s "$work/misplaced" ]; then
+    echo "FAIL: gbc-core functions in flash outside .text_core ($(sort -u -k3 "$work/misplaced" | wc -l)):" >&2
+    sort -u -k3 "$work/misplaced" | while read -r why a n; do printf '  %s 0x%s %s\n' "$why" "$a" "$(demangle <<< "$n")"; done | head -20 >&2
+    fail=1
   fi
 fi
 
