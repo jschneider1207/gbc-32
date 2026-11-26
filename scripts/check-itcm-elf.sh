@@ -76,7 +76,8 @@ readelf -hW "$elf" 2>/dev/null | grep -c 'Machine: *ARM' >/dev/null || die "$elf
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# ELF function symbols: "<addr hex> <size> <name>"; thunks apart.
+# ELF function symbols: "<addr hex> <size> <name> <bind>" (every reader takes
+# the name as field 3 and nothing after it); thunks apart.
 readelf -sW "$elf" | awk '$4 == "FUNC" {print $2, $3, $8, $5}' > "$work/elfsyms"
 [ -s "$work/elfsyms" ] || die "no function symbols in $elf (stripped?)"
 hash=$(grep -o 'Cs[0-9A-Za-z]*_8gbc_core' "$work/elfsyms" | sort | uniq -c | sort -rn | awk 'NR == 1 {print $2}')
@@ -140,7 +141,7 @@ while IFS='|' read -r tier glob name; do
     fail=1
     continue
   fi
-  while read -r _ _ sym; do
+  while read -r _ _ sym _; do
     # shellcheck disable=SC2053
     [[ $sym == $pat ]] && ! grep -qxF -- ".text.$sym" "$work/secs" && ! grep -qxF -- ".text.unlikely.$sym" "$work/secs" && echo "$sym" >> "$work/want"
   done < "$work/elfsyms"
