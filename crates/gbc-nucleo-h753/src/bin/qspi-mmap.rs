@@ -8,7 +8,7 @@
 //!
 //! - `compare`: [`SEGMENTS`] (start and end of the device, page and 64 KiB
 //!   boundaries, fixed-seed LCG offsets; about 88 KiB) read with 0x03 at
-//!   33 MHz as the reference, then with 0xEB in indirect mode at 100 MHz,
+//!   33 MHz as the reference, then with 0xEB in indirect mode at 99.2 MHz,
 //!   then through the window (slice compares, as the core reads its ROM).
 //!   Each round of up to 8 KiB leaves memory-mapped mode and enters it
 //!   again, so the switch both ways (`Mapped::exit`) runs many times.

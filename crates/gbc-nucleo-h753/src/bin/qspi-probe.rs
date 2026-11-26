@@ -3,7 +3,7 @@
 //! UART, a report of what the NOR answers in 1-line SPI mode:
 //!
 //! - `jedec`: the JEDEC ID (0x9F, 3 bytes) at a slow clock (9.8 MHz) and
-//!   at the first-contact clock (33.3 MHz, [`qspi::PRESCALER_SAFE`]), and
+//!   at the first-contact clock (33.1 MHz, [`qspi::PRESCALER_SAFE`]), and
 //!   whether the two agree;
 //! - `rems`: manufacturer and device ID (0x90, address 0, 2 bytes);
 //! - `sfdp`: the SFDP header and parameter headers (0x5A, 3-byte address,
@@ -27,7 +27,7 @@ use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led, wait_since};
 
 const PREFIX: &str = "gbc-nucleo-h753";
 const IMAGE: &str = "qspi-probe";
-/// 200 / 24 = 8.33 MHz: the slow clock the ID is cross-checked at.
+/// 198.4 / 24 = 8.27 MHz: the slow clock the ID is cross-checked at.
 const PRESCALER_SLOW: u8 = 23;
 /// JESD216: the SFDP read, 3-byte address, 8 dummy cycles.
 const SFDP: Read = Read::single(0x5A).dummy(8);

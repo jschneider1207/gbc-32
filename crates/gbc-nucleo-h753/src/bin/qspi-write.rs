@@ -19,7 +19,7 @@
 //!    boundaries) with `program`; the data is a fixed-seed LCG stream
 //!    ([`Pattern`]);
 //! 4. `verify`: the block read back with indirect 0x03 (39 MHz), indirect
-//!    0xEB (100 MHz) and through the memory-mapped window, against the
+//!    0xEB (99.2 MHz) and through the memory-mapped window, against the
 //!    pattern; then unaligned window reads (byte, u16 and u32
 //!    `from_le_bytes`, `read_unaligned`, 16-byte copies, cold and warm)
 //!    around page and line boundaries against an 0x03 reference;

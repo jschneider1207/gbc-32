@@ -115,8 +115,8 @@ NOR.
 | Command | **M6:** `QUAD_IO_READ_XIP`: 0xEB 1-4-4, instruction on 1 line (first command only, SIOO), 24-bit address on 4, one alternate byte 0xA5 on 4 (2 cycles, enhance mode), DCYC 4, data on 4. (M2 to M5: `QUAD_IO_READ`, mode byte 0xFF, no SIOO) | 6 dummy cycles in all at CR.DC = 0 (Table 7). "Tuning (M6)" below |
 | CCR | `0x1F10EDEB` (SIOO, FMODE 11, DMODE 11, DCYC 4, ABSIZE 00, ABMODE 11, ADSIZE 10, ADMODE 11, IMODE 01, 0xEB); DDRM, DHHC, FRCM 0. (M2: `0x0F10EDEB`) | RM0433 23.5.6, 23.3.13 |
 | ABR | `0xA5` (M2: `0xFF`) | |
-| Clock | **M6:** pll2_r_ck 200 MHz / 2 = 100 MHz (QSPISEL 10, PRESCALER 1; CR = `0x01000011`: SSHIFT, EN). (M2: HCLK3 236 MHz / 4 = 59 MHz) | an even divider (RM0433 23.5.1, DS12117 Table 170). "Tuning (M6)" |
-| DCR | `0x00170400` at 100 MHz: FSIZE 23 (**16 MiB**), CSHT 4 (5 cycles, 50 ns). (59 MHz: `0x00170200`, CSHT 2) | ES0392 2.7.5: a memory-mapped read of the last byte of the FSIZE region reads 0x00, and the next read of it stalls the AXI bus. The margin puts that byte at 0x90FF_FFFF, outside the MPU window. Seen on the board: with FSIZE 22 (exactly 8 MiB), the image hung in its first compare round |
+| Clock | **M6:** pll2_r_ck 198.4 MHz / 2 = 99.2 MHz (200 / 2 = 100 MHz before the M6 review: DIVM2 4 put the PLL2 input on its 16 MHz maximum) (QSPISEL 10, PRESCALER 1; CR = `0x01000011`: SSHIFT, EN). (M2: HCLK3 236 MHz / 4 = 59 MHz) | an even divider (RM0433 23.5.1, DS12117 Table 170). "Tuning (M6)" |
+| DCR | `0x00170500` at 99.2 MHz: FSIZE 23 (**16 MiB**), CSHT 5 (6 cycles, 60.5 ns; 59.6 ns at the fastest HSI, sized by `KER_MAX_HZ`; 100 MHz had CSHT 4, 50 ns nominal). (59 MHz: `0x00170200`, CSHT 2) | ES0392 2.7.5: a memory-mapped read of the last byte of the FSIZE region reads 0x00, and the next read of it stalls the AXI bus. The margin puts that byte at 0x90FF_FFFF, outside the MPU window. Seen on the board: with FSIZE 22 (exactly 8 MiB), the image hung in its first compare round |
 | TCEN | **0** (no timeout, LPTR unused) | after an access the QUADSPI fills its FIFO and then holds NCS low with the clock stopped, so the next sequential read skips the 20-clock command (instruction 8 + address 6 + mode 2 + dummy 4 = 0.34 us at 59 MHz). TCEN = 1 would save the NOR's selected-idle current and pay that cost again after every idle period. The NUCLEO is USB-powered, so latency wins. Stage 3 can revisit |
 | Prefetch | always on in memory-mapped mode (RM0433 23.3.7; there is no switch) | |
 | MPU | region 6: base 0x9000_0000, 8 MiB, Normal write-back no write-allocate (TEX 000 C 1 B 1), not shareable, read-only at both privilege levels (AP 110), XN. RASR = `0x1603002D` | Normal memory is needed for unaligned loads. The other 248 MB of the bank stay region 0's (no-access, XN, strongly-ordered) |
@@ -224,14 +224,21 @@ in "Facts" above; DS12117 Rev 10; RM0433 Rev 9; ES0392):
 | TCEN / LPTR | kept off (see the table above: an idle timeout costs a new command after every pause) | RM0433 23.3.7 |
 | Prefetch | always on in memory-mapped mode, no switch | RM0433 23.3.7 |
 
-Adopted: **pll2_r_ck = 200 MHz** (HSI 64 MHz / DIVM2 4 x DIVN2 50 = 800
-MHz VCO, wide range 192 to 836 MHz, DS12117 Table 39; / DIVR2 4), **/2 =
-100 MHz**, and **SIOO with mode byte 0xA5** for memory-mapped mode
-(`qspi::QUAD_IO_READ_XIP`). The HSI is within +-0.5% at 30 C plus +-1%
-over -20 to 105 C (DS12117 Table 36), so the clock stays under 104 MHz
-with margin. PLL2 is otherwise unused; `Qspi::init` starts it. Indirect
-commands (ID, status, program, erase, the loader's reads) keep their
-prescalers: PRESCALER_SAFE 5 is now 33.3 MHz (was 39.3).
+Adopted: **pll2_r_ck = 198.4 MHz** (HSI 64 MHz / DIVM2 5 = 12.8 MHz, x
+DIVN2 62 = 793.6 MHz VCO, wide range 192 to 836 MHz, DS12117 Rev 10
+Table 39; / DIVR2 4), **/2 = 99.2 MHz**, and **SIOO with mode byte 0xA5**
+for memory-mapped mode (`qspi::QUAD_IO_READ_XIP`). Over the whole HSI
+tolerance (62.35 to 64.96 MHz: DS12117 Table 36, 63.7 to 64.3 MHz at
+30 C, -2% to +1% over temperature, -0.12% to +0.03% over VDD; the figures
+`clock.rs` uses for PLL1) the PLL2 input stays at 12.47 to 12.99 MHz
+(PLL2RGE 8 to 16 MHz), the VCO at 773 to 806 MHz and the memory-mapped
+clock at 96.6 to 100.7 MHz, under 104 MHz; `const` assertions in
+`qspi.rs` check each bound. The first M6 set, DIVM2 4 x DIVN2 50 (16 MHz
+input, 800 MHz VCO, 200 MHz), put the input exactly on its 16 MHz
+maximum, and over it on this board (HSI measured 64.228 MHz: 16.06 MHz;
+M6 review T6). PLL2 is otherwise unused; `Qspi::init` starts it.
+Indirect commands (ID, status, program, erase, the loader's reads) keep
+their prescalers: PRESCALER_SAFE 5 is now 33.1 MHz (was 39.3 at HCLK3).
 
 **Enhance mode and resets.** In enhance mode the NOR takes the next
 command's first byte as an address. It has no reset pin and the MCU reset

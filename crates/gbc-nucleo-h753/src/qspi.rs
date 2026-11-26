@@ -46,16 +46,16 @@
 //! before quad mode is used.
 //!
 //! Clock (M6 tuning, `docs/reference/qspi-nor.md` "Clock"): the kernel
-//! clock is pll2_r_ck (RCC_D1CCIPR QSPISEL = 10), [`KER_HZ`] = 200 MHz,
+//! clock is pll2_r_ck (RCC_D1CCIPR QSPISEL = 10), [`KER_HZ`] = 198.4 MHz,
 //! divided by PRESCALER + 1. rcc_hclk3 (236 MHz) gives only 118 MHz (over
 //! 0xEB's 104 MHz at CR.DC = 0) or 59 MHz with an even factor; PLL2 gives
-//! 100 MHz. RM0433 23.5.1 (and DS12117 Table 170) say an odd division
+//! 99.2 MHz. RM0433 23.5.1 (and DS12117 Table 170) say an odd division
 //! factor does not give a 50% duty cycle, which the NOR needs (tCH, tCL
 //! >= 45%); so only even factors are accepted ([`Qspi::init`]).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::clock::wait_for;
+use crate::clock::{HSI_HZ, wait_for};
 use crate::gpio::pin_af;
 use crate::pac;
 
@@ -77,23 +77,58 @@ const FSIZE: u32 = (2 * NOR_BYTES).trailing_zeros() - 1;
 pub const WINDOW: usize = 0x9000_0000;
 
 /// The QUADSPI kernel clock: pll2_r_ck, started by [`Qspi::init`]: HSI
-/// 64 MHz / DIVM2 4 = 16 MHz (PLL input range 8 to 16 MHz), x DIVN2 50 =
-/// 800 MHz VCO (wide range, 192 to 836 MHz, DS12117 Table 39), / DIVR2 4.
-/// The HSI is within +-0.5% at 30 C plus +-1% over -20 to 105 C (DS12117
-/// Table 36), so the 100 MHz memory-mapped clock stays under 104 MHz.
-pub const KER_HZ: u32 = 200_000_000;
+/// 64 MHz / DIVM2 5 = 12.8 MHz (the reference PLL1 uses, [`crate::clock`];
+/// PLL2RGE 8 to 16 MHz, RM0433 8.7.12), x DIVN2 62 = 793.6 MHz VCO (wide
+/// range, 192 to 836 MHz, DS12117 Rev 10 Table 39), / DIVR2 4. Every limit
+/// holds with margin over the whole HSI tolerance, [`HSI_MIN_HZ`] to
+/// [`HSI_MAX_HZ`] (the `const` assertions below): input 12.47 to
+/// 12.99 MHz, VCO 773 to 806 MHz, the memory-mapped clock 96.6 to
+/// 100.7 MHz. DIVM2 4 (16 MHz nominal) sat exactly on the 16 MHz input
+/// maximum, and over it on this board (HSI measured 64.228 MHz, 16.06 MHz).
+pub const KER_HZ: u32 = ker_hz(HSI_HZ);
 /// PLL2 dividers for [`KER_HZ`] (RM0433 8.7.10 PLLCKSELR DIVM2, 8.7.14
 /// PLL2DIVR: fields are N - 1 and R - 1).
-const PLL2_DIVM: u8 = 4;
-const PLL2_DIVN: u16 = 50;
+const PLL2_DIVM: u8 = 5;
+const PLL2_DIVN: u16 = 62;
 const PLL2_DIVR: u8 = 4;
 
-/// The prescaler of the first-contact clock: 200 / 6 = 33.3 MHz, an even
+/// The HSI over its whole tolerance (DS12117 Rev 10 Table 36: 63.7 to
+/// 64.3 MHz at 3.3 V and TJ 30 C, -2% to +1% over TJ -40 to 105 C, -0.12%
+/// to +0.03% over VDD), as [`crate::clock`]'s PLL1 reference uses it.
+const HSI_MIN_HZ: u32 = 62_350_000;
+const HSI_MAX_HZ: u32 = 64_960_000;
+
+/// pll2_r_ck for an HSI at `hsi` Hz.
+const fn ker_hz(hsi: u32) -> u32 {
+    (hsi / PLL2_DIVM as u32) * PLL2_DIVN as u32 / PLL2_DIVR as u32
+}
+
+/// The highest QUADSPI kernel clock the HSI tolerance allows: what
+/// [`write_dcr`]'s CSHT is sized for.
+const KER_MAX_HZ: u32 = ker_hz(HSI_MAX_HZ);
+
+// The PLL2 limits at both ends of the HSI tolerance (DS12117 Rev 10
+// Table 39, wide VCO: fPLL_IN 2 to 16 MHz, RM0433 PLL2RGE range8 8 to
+// 16 MHz; VCO 192 to 836 MHz; R output <= 400 MHz at VOS1), and the
+// NOR's limits at the fastest HSI (MX25L6433F Table 7: 0xEB 104 MHz at
+// CR.DC = 0, 0x03 50 MHz).
+const _: () = {
+    let (lo, hi) = (HSI_MIN_HZ / PLL2_DIVM as u32, HSI_MAX_HZ / PLL2_DIVM as u32);
+    assert!(lo >= 8_000_000 && hi <= 16_000_000);
+    let n = PLL2_DIVN as u32;
+    assert!(lo * n >= 192_000_000 && hi * n <= 836_000_000);
+    assert!(KER_MAX_HZ <= 400_000_000);
+    assert!(KER_MAX_HZ / (PRESCALER_MMAP as u32 + 1) <= 104_000_000);
+    assert!(KER_MAX_HZ / (PRESCALER_SAFE as u32 + 1) <= 50_000_000);
+    assert!(KER_HZ == 198_400_000);
+};
+
+/// The prescaler of the first-contact clock: 198.4 / 6 = 33.1 MHz, an even
 /// factor, under the 50 MHz every common serial NOR allows for its slowest
 /// read command (0x03).
 pub const PRESCALER_SAFE: u8 = 5;
 
-/// The memory-mapped clock: 200 / 2 = 100 MHz, an even factor, under
+/// The memory-mapped clock: 198.4 / 2 = 99.2 MHz, an even factor, under
 /// 0xEB's 104 MHz at CR.DC = 0 and VCC >= 3 V (MX25L6433F Table 7; the
 /// shield's VCC is 3.3 V) and DS12117 Table 170's 133 MHz, but over 0x03's
 /// 50 MHz: 0x03 reads go at [`PRESCALER_SAFE`]. Measured: M6, docs/perf.md
@@ -343,11 +378,13 @@ fn cr_value(prescaler: u8) -> u32 {
 
 /// DCR (RM0433 23.3.9, 23.3.11, 23.5.2): [`FSIZE`] (16 MiB, the ES0392
 /// 2.7.5 margin); CSHT for at least 50 ns of NCS high between commands at
-/// the clock `prescaler` gives (the MX25L6433F's tSHSL after a write-type
-/// command, longer than the 15 ns after a read); CKMODE 0 (mode 0; serial
-/// NORs take mode 0 and 3). Only while BUSY = 0.
+/// the fastest clock `prescaler` can give ([`KER_MAX_HZ`]; the
+/// MX25L6433F's tSHSL after a write-type command, longer than the 15 ns
+/// after a read): at /2, 6 cycles (60.5 ns nominal, 59.6 at the fastest
+/// HSI); at /6, 2 (60.5 and 59.6 ns). CKMODE 0 (mode 0; serial NORs take
+/// mode 0 and 3). Only while BUSY = 0.
 fn write_dcr(prescaler: u8) {
-    let clk = KER_HZ / (u32::from(prescaler) + 1);
+    let clk = KER_MAX_HZ / (u32::from(prescaler) + 1);
     let csht = clk.div_ceil(20_000_000).clamp(1, 8) - 1;
     // SAFETY: FSIZE 23 and CSHT 0..7 are valid field values; the reserved
     // bits stay 0.
@@ -625,7 +662,7 @@ fn pll2_on(rcc: &pac::rcc::RegisterBlock) {
             .divr2en()
             .enabled()
     });
-    // SAFETY: DIVN2 field 49 (x50, valid 4..512), DIVR2 field 3 (/4);
+    // SAFETY: DIVN2 field 61 (x62, valid 4..512), DIVR2 field 3 (/4);
     // DIVP2 and DIVQ2 0 for disabled outputs (RM0433 8.5.5, as clock.rs
     // does for PLL1).
     rcc.pll2divr.write(|w| unsafe {
@@ -648,7 +685,7 @@ fn pll2_on(rcc: &pac::rcc::RegisterBlock) {
 /// ES0392 section 2.7.4, "QUADSPI internal timing criticality": a
 /// sequence to run after reset (and when leaving memory-mapped mode).
 /// The CR = 0 that follows the first CCR write must complete within 127
-/// kernel clocks (300 CPU cycles at 472 MHz and [`KER_HZ`]): the three writes are back to
+/// kernel clocks (302 CPU cycles at 472 MHz and [`KER_HZ`]): the three writes are back to
 /// back, with nothing between them but the store instructions.
 fn errata_2_7_4() {
     write_cr(0);
@@ -682,7 +719,7 @@ impl Qspi {
     /// served without a new command. TCEN = 1 would raise NCS after
     /// LPTR.TIMEOUT idle cycles, saving the NOR's selected-but-idle
     /// current at the cost of a new instruction, address, mode and dummy
-    /// phase (8 + 6 + 6 = 20 QUADSPI clocks, 0.2 us at 100 MHz) on the next
+    /// phase (8 + 6 + 6 = 20 QUADSPI clocks, 0.2 us at 99.2 MHz) on the next
     /// access, even a sequential one. The core reads the ROM mostly
     /// sequentially and the NUCLEO is USB-powered, so the latency wins;
     /// a battery-powered Stage 3 board can revisit this.

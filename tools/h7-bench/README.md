@@ -479,7 +479,7 @@ with a `h7bench v1 FAULT ...` line on the UART every second.
 
 Plan Stage 2 M2, placement `itcm-dtcm-qspi`: the bench workloads with
 their ROMs read from the shield's QSPI NOR (MX25L6433F, memory-mapped,
-0xEB quad I/O, cached, at 100 MHz with SIOO since M6 (59 MHz in M2); `docs/reference/qspi-nor.md`) instead of
+0xEB quad I/O, cached, at 99.2 MHz with SIOO since M6 (59 MHz in M2); `docs/reference/qspi-nor.md`) instead of
 internal flash, as the conservative proxy for the Stage 3 HyperRAM.
 
 **One binary, one boot, two ROM sources.** Every board bench image, after
