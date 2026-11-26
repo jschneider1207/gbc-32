@@ -1101,9 +1101,10 @@ flags did not help. The ITCM images now put gbc-core's flash code first,
 at the fixed address 0x0801_0400 (`.text_core`, `tools/memory-x`), with
 the image's and the lib's code after it, so a bench-code change moved
 the counts by 0.38% at most instead of 3.29%. A core change still moves
-the layout (about +-1.7% via ITCM, up to about +-4% on the storms), and a
-baseline must be built in the main checkout (the bytes, not the
-addresses, depend on the path).
+the layout (about +-1.7% via ITCM, up to about +-4.2% on the storms; the
+canonical statement, with the margin left for the +3% ratchet, is ADR 0042
+"Amendments"), and a baseline must be built in the main checkout (the
+bytes, not the addresses, depend on the path).
 
 ### LTO and opt-level (M6)
 
@@ -1113,8 +1114,10 @@ internal flash), each variant built from main at 82458a9 with only
 `codegen-units = 1` and the CodeGenPrepare flag of "Build flags"). Every
 report passed `check-report.sh`: all 15 hash lines equal
 `expected-hashes.txt`. Mean cycles per frame against the baseline (the
-noise floor for a changed core-code layout is about +-1.5% on the bound
-workloads and up to about +-4% on the storms; "Layout noise" above):
+noise floor for a changed core-code layout is about +-1.7% on the bound
+workloads and up to about +-4.2% on the storms; ADR 0042 "Amendments" has
+the canonical statement; each variant is one build, so a delta inside
+about +-1.7% on a bound workload is not evidence of a cause):
 
 | Variant | `.itcm` B | `.text_core` B | `.bin` B | ITCM check | worst-case | cgb-raster | dmg-raster | event-storm | cpu_instrs | max \|delta\| of 15 |
 |---|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
@@ -1141,12 +1144,13 @@ no function that is in ITCM in the baseline ended up in flash in either
 LTO image (only two panic thunks moved), so the placement itself held.
 
 **Result: nothing adopted; the firmware profiles stay as they are.** Fat
-LTO is 2.3% slower on worst-case (the gated figure) and no bound
-workload gains beyond noise; thin LTO is within noise on the bound set
+LTO is 2.25% slower on worst-case (the gated figure), marginal against
+the layout band (one build; the band is about +-1.7%, so a layout effect
+is not excluded), and no bound workload gains beyond noise; thin LTO is within noise on the bound set
 but 7.2-7.3% slower on storm-spsw and storm-ppu. gbc-core at
 `opt-level = 2` frees 10 KB of ITCM, enough to keep the plain tile path
-there too, but is slower either way (cgb-raster +2.1 to +4.4%,
-event-storm +2.6 to +2.8%); `"s"` costs 10 to 29%. Making LTO usable
+there too, but is slower either way on the bound set (cgb-raster +2.1 to +4.4%,
+event-storm +2.6 to +2.8%; the smaller of these are near the layout band); `"s"` costs 10 to 29%. Making LTO usable
 would also need `.text_core`, `.dtcm_rodata` and `check-itcm-elf.sh` to
 match by symbol rather than by file, for no measured gain. No change is
 recommended for the root workspace's release profile either: these are
@@ -1283,10 +1287,10 @@ nothing about the QSPI.
   with Pokemon Red (reloaded, hash 0x0bfa5d71919acbbc) for 60 s: 0 over
   budget, 0 display errors, core max 1,348,228 cycles.
 
-### M6 worst-case report (shipped placement)
+### M6 worst-case report (h7-bench ratchet measurement; shipped-image figure below)
 
-Plan Stage 2 M6 "Report". `bench-itcm-dtcm-pll480` (the shipped
-placement: ADR 0042 core-first layout, the ITCM tier default with the
+Plan Stage 2 M6 "Report". `bench-itcm-dtcm-pll480` (the core placement
+of the shipped image: ADR 0042 core-first layout, the ITCM tier default with the
 plain tile path dropped, QSPI 100 MHz + SIOO, no LTO, opt-level
 unchanged) built in the main checkout at main a6a2995, NUCLEO-H753ZI at
 472 MHz, bench pack in the NOR, two independent boots of one `.bin`
@@ -1308,6 +1312,19 @@ flash the same boot gives 3,304,254 / 3,342,450 (83.6% / 84.6% of the
 50% line): the QSPI costs +1.24% / +1.19%. The 50% figure is not met
 on the H753 at 472 MHz (85.6% of it) and is reported, not gated (plan
 M6). Real time is met with 57% of the frame to spare.
+
+**What this is, and the shipped-image figure (M6 review P5).** The bench
+image keeps `FRAME` in cached AXI SRAM and has no front end; the shipped
+`player` keeps `FRAME` in DTCM (ADR 0026 2026-11-26 amendment). So the
+figures in this section are the ratchet's controlled measurement, not
+literally the shipped placement. The plan's M6 acceptance wording
+("measured on the board with ROMs in QSPI and the shipped placement") is
+met by the scripted `player-script` run of `synth:worst-case` with the ROM
+in the NOR, 10 minutes, 0 frames over budget
+(`docs/reference/m6-evidence.md`): core max 3,390,856 (42.9% of 7,902,557;
+85.8% of 3,951,279), mean 3,350,505, busy max 3,846,037. The live `player`
+(`gbc-pc play`, same ROM, 10 minutes) read core max 3,385,726, busy max
+3,902,609.
 
 **H735 at 550 MHz: a projection, not a measurement.** 50% line at
 550 MHz = 550e6 / 59.7275 / 2 = 4,604,244 cycles (a frame 9,208,489).
@@ -1342,8 +1359,11 @@ cycles a cold line here); and no front-end cost is in these figures.
 
 Boot to boot (all 60 mean and max figures): largest |delta| 0.047%
 (`qspi apu-writes` max, 430 cycles); worst-case QSPI max +0.04% (1,412
-cycles), every mean within 0.03%. The ratchet's +3% is about 60 times
-that spread. The storms (`storm-*`) are outside the bound by human
+cycles), every mean within 0.03%. That is the reflash spread only, not the
+margin of the +3% ratchet: a core layout change moves the bound
+workloads by up to about +-1.7% and `storm-spsw` moved 0.67% between two
+boots of one binary (ADR 0042 "Amendments", the canonical statement; no
+gate step runs `check-cycles.sh` yet, gate B2 is M7). The storms (`storm-*`) are outside the bound by human
 decision; `storm-gdma` is the one QSPI-bound workload (+15% max), still
 under half a frame.
 
@@ -1800,6 +1820,13 @@ has the decision and its reasons.
 | 128 KiB (01) | 122,880 B | 97,136 B, 79%, margin 25,744 B | 262,144 B | 30,720 B |
 | 192 KiB (10) | 188,416 B | 97,136 B, 52%, margin 91,280 B | 196,608 B | -34,816 B: does not fit |
 
+*Note 2026-11-26 (M6 review P8):* the "AXI left" column is for the Stage 2
+plan's 231,424 B of buffers and does not hold for the real front end. The
+shipped `player` uses 394,240 B of AXI SRAM (ADR 0026 2026-11-26 amendment,
+open item), above the 262,144 B of AXI at 128 KiB of ITCM. The Stage 3
+front end needs its own AXI budget, and the 128 KiB ITCM recommendation
+below must be re-checked against it. The analysis here is kept as written.
+
 **Recommendation: 128 KiB** (`TCM_AXI_SHARED` = 01). It already holds the
 whole core with 21% to spare, and leaves 30 KiB of AXI SRAM (plus 48 KiB
 of SRAM1/2/4) for the launcher, eMMC/FAT and USB buffers. At 192 KiB the
@@ -1939,8 +1966,9 @@ measurement only and then reverted.
 Measured on `bench-itcm-dtcm-pll480` (472 MHz, internal-flash ROMs), built
 in one worktree path. Each capture passed `check-report.sh` (15 lines equal
 to `expected-hashes.txt`). Two runs of the default image agreed within
-0.01%, so any difference below comes from layout, not from run-to-run
-noise. Deltas against the default, mean / max:
+0.01%, so run-to-run noise is small, but a core layout change moves bound
+workloads by up to about +-1.7% (ADR 0042 "Amendments"), and each variant
+is one build. Deltas against the default, mean / max:
 
 | Workload | drop per-event | drop APU |
 |---|---|---|
@@ -1951,9 +1979,10 @@ noise. Deltas against the default, mean / max:
 | `blargg/cpu_instrs` | +0.64% / +0.50% | +0.40% / +0.32% |
 | max \|delta\| over 15 | 4.97% (storm-div, faster) | 2.46% (worst-case max) |
 
-Neither swap is faster on the bound set. Both are slower on `worst-case`
-and `event-storm`, and the per-event swap is slower on `dmg-raster` as
-well. The workload that should gain most from the plain tile path,
+Neither swap is faster on the bound set. Both read slower on `worst-case`
+and `event-storm`, and the per-event swap on `dmg-raster` as well, but only
+the APU swap's +2.35% worst-case clearly exceeds the +-1.7% layout band; the
+per-event swap's +1.42% is inside it and may be layout, not the swap. The workload that should gain most from the plain tile path,
 `cgb-raster`, the closest to cgb-acid2-like content, gains at most 0.2%,
 which is noise. The plain tile path runs once per line per run of plain
 tiles and stays warm in the 16 KiB I-cache, while the per-event PPU

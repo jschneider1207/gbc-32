@@ -571,6 +571,15 @@ line, not a check. Exit 0 pass, 1 a check failed (also a missing baseline
 file), 2 a parse or usage error. `scripts/test-check-cycles.sh` (gate H7)
 covers every rule.
 
+Noise and margin (canonical statement: ADR 0042 "Amendments"): a reflash or
+reboot of one binary moves counts by at most about 0.05% (but `storm-spsw`
+moved 0.67% once), so the counts do not repeat exactly. A core layout change
+moves bound workloads by up to about 1.2% (the core-first switch) and +-1.7%
+(ITCM shifts), and the storms by up to about 4.2%, so the margin of the +3%
+for a core change on the bound set is about 1.3-1.8 points, and a storm can
+exceed +3% from layout alone. No gate step runs this script yet (gate B2 is
+M7); only its host test runs in H7.
+
 `--update` writes a baseline from a 472 MHz capture that passes
 `check-report.sh` and refuses an existing file without `--force`. With
 `--force` it refuses (exit 1, listing them) when any line of the existing

@@ -126,3 +126,29 @@ the large moves.
   1.70% for a 16 B shift, so a baseline on that board must also be built
   from an unchanged layout, and front-end code placed in ITCM should come
   after the core's.
+
+## Amendments
+
+### 2026-11-26: canonical noise statement (M6 review P1, T9)
+
+This is the one statement of how much the on-board cycle counts move; other
+docs quote it or point here. It corrects the Consequences text above ("far
+outside the <= 0.61%", "cycle counts repeat exactly") and does not change
+the Decision.
+- **Same binary, reflashed or rebooted:** at most 0.03-0.05% (largest
+  boot-to-boot |delta| 0.047%), except `storm-spsw`, which moved 0.67%
+  between two boots of one binary (14.89M vs 14.99M; docs/perf.md "QSPI
+  tuning (M6)"). Counts do not repeat exactly.
+- **Front-end-only changes after this ADR:** bound workloads at most about
+  0.2%, largest 0.38% (halt-irq).
+- **A core layout change:** bound workloads moved up to 1.18% (cgb-raster,
+  the core-first switch itself) and about +-1.7% via ITCM shifts; the storms
+  moved up to about 4.2% (storm-div) from layout alone.
+- **Consequence for the +3% ratchet:** for a core change on the bound set
+  the margin over layout noise is about 1.3-1.8 points, not "60 times the
+  spread" (that figure compared +3% with the reflash spread only). The
+  storms can exceed +3% from layout alone, so a storm-only trip needs a look
+  and the ratchet's treatment of the storms is an open question for the
+  human (review finding P3).
+- **Not yet enforced:** no gate step runs `check-cycles.sh` today. Gate
+  step B2 is M7 work; only the script's host test runs in the H7 checks.
