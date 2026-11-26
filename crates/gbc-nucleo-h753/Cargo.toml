@@ -88,7 +88,18 @@ required-features = ["link"]
 test = false
 bench = false
 
+# The dev-board game player (plan Stage 2 M5): the ROM from the QSPI NOR,
+# the paced loop with display, DAC, joystick and the link session; built
+# only with `--features player` (build.sh: out/player.bin) or
+# `--features player-script` (out/player-script.bin, the scripted replay).
+[[bin]]
+name = "player"
+required-features = ["player"]
+test = false
+bench = false
+
 # Built only with `--features headless` (build.sh), which also selects the
+
 # ITCM set in build.rs; see the feature.
 [[bin]]
 name = "headless"
@@ -130,6 +141,10 @@ display = ["headless"]
 paced = ["headless"]
 # `link` (implies `headless`): the `link-probe` bin (src/bin/link-probe.rs).
 link = ["headless"]
+# `player` (implies `rom-qspi`: no ROM embedded): the `player` bin
+# (src/bin/player.rs); `player-script` the same bin in scripted mode.
+player = ["rom-qspi"]
+player-script = ["player"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

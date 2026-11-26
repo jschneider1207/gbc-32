@@ -13,6 +13,9 @@
 #                         DAC, M4) for cgb_sound and the synthetic worst-case ROM
 #                         and link-probe (the serial link with a running emulator
 #                         and the joystick, M5; ROM: GBC_LINK_ROM, else generated)
+#                         and player / player-script (the M5 game player on the
+#                         ROM in the QSPI NOR; player-script replays
+#                         GBC_HEADLESS_INPUT for GBC_HEADLESS_FRAMES frames)
 #   ./build.sh <image>... only the named images (e.g. `./build.sh lcd-probe`; a
 #                         name that is no image is an error)
 #   GBC_BUILD_LOCK=<file> run every cargo command under `flock -x <file>`
@@ -116,7 +119,7 @@ for entry in "${HEADLESS_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-${entry%
 ALL_IMAGES="$ALL_IMAGES headless-qspi"
 for entry in "${DISPLAY_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES headless-display-${entry%%=*}"; done
 for entry in "${PACED_ROMS[@]}"; do ALL_IMAGES="$ALL_IMAGES paced-${entry%%=*}"; done
-ALL_IMAGES="$ALL_IMAGES link-probe"
+ALL_IMAGES="$ALL_IMAGES link-probe player player-script"
 for a in "$@"; do
   case " $ALL_IMAGES " in *" $a "*) ;; *) echo "build.sh: no image named $a (images: $ALL_IMAGES)" >&2; exit 2;; esac
 done
@@ -308,5 +311,19 @@ if want link-probe; then
   fi
 fi
 
+# The game player (plan Stage 2 M5; src/bin/player.rs): no ROM embedded
+# (the QSPI NOR's image); `player-script` is the same bin in scripted mode
+# (GBC_HEADLESS_INPUT, GBC_HEADLESS_FRAMES). The same checks as the
+# headless-<rom> images.
+for img in player player-script; do
+  want "$img" || continue
+  built=$(GBC_ITCM_DROP=$ITCM_DROP build_bin player locked env -u GBC_HEADLESS_ROM cargo build --release --bin player --features "$img" "${REMAP[@]}")
+  check_image "$img" "$built"
+  echo "  post-link ITCM check (--drop '$ITCM_DROP')"
+  ../../scripts/check-itcm-elf.sh --drop "$ITCM_DROP" --rlib "$(dirname "$built")" "$OUT/$img.elf" | sed 's/^/  /' ||
+    bad "$img: post-link ITCM check (scripts/check-itcm-elf.sh)"
+done
+
 [ "$fail" -eq 0 ] || { echo "build.sh: FAILED" >&2; exit 1; }
+
 echo "build.sh: OK; images in $(pwd)/$OUT"
