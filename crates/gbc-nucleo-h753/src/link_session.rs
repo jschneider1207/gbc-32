@@ -50,6 +50,12 @@
 //!   stored as the last request, so it is never answered from the store.
 //!   [`Session::board_dump`] starts the same stream unrequested (the
 //!   joystick chord), with seq 0.
+//! - `AudioStart` / `AudioStop` (ADR 0041): `Ack`, and the audio stream
+//!   is on / off ([`Session::audio_on`]); `Nak UnexpectedType` unless the
+//!   caller enabled audio ([`Session::set_audio_capable`]). The stream
+//!   also stops on `Hello` and after [`PC_TIMEOUT_FRAMES`] frames without
+//!   any decoded frame from the PC (it never outlives the PC). The caller
+//!   writes the `Audio` messages through [`Session::fill_tx_with`].
 //!
 //! **One save buffer** serves the load and the dump (a 128 KiB-RAM save
 //! twice would not fit AXI SRAM beside the cartridge RAM): a
@@ -57,8 +63,9 @@
 //! `Nak UnexpectedType`), and a `SaveBegin` stops a dump being streamed
 //! (the PC sees a gap and retries). The PC never does both at once.
 //!
-//! Transmit order ([`Session::fill_tx`]): queued replies first, then as
-//! many whole dump frames as fit. A reply is never split, so text the
+//! Transmit order ([`Session::fill_tx_with`]): queued replies first, then
+//! the caller's frames (the player's `Stats` and audio), then as many
+//! whole dump frames as fit. A reply is never split, so text the
 //! caller sends between `fill_tx` calls (when [`Session::busy`] is false)
 //! never lands inside a frame.
 
@@ -121,6 +128,11 @@ pub struct Counters {
     /// Replies dropped because the reply queue was full (never expected:
     /// the PC waits for each answer).
     pub replies_dropped: u32,
+    /// `AudioStart`s and `AudioStop`s handled (not counting replays).
+    pub audio_starts: u32,
+    pub audio_stops: u32,
+    /// Times the audio stream stopped for want of any frame from the PC.
+    pub audio_timeouts: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +175,10 @@ struct State<'b> {
     queue: [u8; QUEUE_MAX],
     queue_len: usize,
     frames_since_input: u32,
+    /// Frames since any frame decoded (saturating).
+    frames_since_rx: u32,
+    audio_capable: bool,
+    audio: bool,
 }
 
 pub struct Session<'b> {
@@ -221,6 +237,9 @@ impl<'b> Session<'b> {
                 queue: [0; QUEUE_MAX],
                 queue_len: 0,
                 frames_since_input: 0,
+                frames_since_rx: 0,
+                audio_capable: false,
+                audio: false,
             },
         }
     }
@@ -241,6 +260,19 @@ impl<'b> Session<'b> {
             },
             (None, None) => Progress::Idle,
         }
+    }
+
+    /// Whether `AudioStart` is accepted (off by default: link-probe and
+    /// the player's no-ROM loop have no audio). Turning it off stops a
+    /// stream.
+    pub fn set_audio_capable(&mut self, on: bool) {
+        self.st.audio_capable = on;
+        self.st.audio &= on;
+    }
+
+    /// The PC asked for audio and is still there.
+    pub fn audio_on(&self) -> bool {
+        self.st.audio
     }
 
     /// Replies or dump frames are waiting for [`Session::fill_tx`]: the
@@ -276,6 +308,7 @@ impl<'b> Session<'b> {
             }
         };
         st.counters.frames += 1;
+        st.frames_since_rx = 0;
         let raw = self.raw.get(..raw_len).unwrap_or(&[]);
         match msg {
             Message::Input { buttons } => {
@@ -325,6 +358,11 @@ impl<'b> Session<'b> {
             shared.set_pc(0);
             st.counters.pc_timeouts += 1;
         }
+        st.frames_since_rx = st.frames_since_rx.saturating_add(1);
+        if st.frames_since_rx >= PC_TIMEOUT_FRAMES && st.audio {
+            st.audio = false;
+            st.counters.audio_timeouts += 1;
+        }
     }
 
     /// Writes what is waiting to be sent into `out` (the caller's idle
@@ -332,6 +370,17 @@ impl<'b> Session<'b> {
     /// frames as fit. Returns the bytes written; 0 when nothing waits.
     /// Give it at least [`MAX_FRAME`] + 256 bytes, or a dump never moves.
     pub fn fill_tx(&mut self, out: &mut [u8]) -> usize {
+        self.fill_tx_with(out, |_| 0)
+    }
+
+    /// [`Session::fill_tx`] with the caller's frames between the replies
+    /// and the dump: `extra` gets the room left after the replies and
+    /// returns how many bytes it wrote there (whole frames only).
+    pub fn fill_tx_with(
+        &mut self,
+        out: &mut [u8],
+        extra: impl FnOnce(&mut [u8]) -> usize,
+    ) -> usize {
         let st = &mut self.st;
         let mut n = 0;
         if let (Some(dst), Some(src)) = (out.get_mut(..st.queue_len), st.queue.get(..st.queue_len))
@@ -339,6 +388,9 @@ impl<'b> Session<'b> {
             dst.copy_from_slice(src);
             n = st.queue_len;
             st.queue_len = 0;
+        }
+        if let Some(room) = out.get_mut(n..) {
+            n += extra(room).min(room.len());
         }
         while let Some(mut d) = st.dump {
             let Some(room) = out.get_mut(n..) else { break };
@@ -425,6 +477,7 @@ impl State<'_> {
             Message::Hello { .. } => {
                 self.counters.hellos += 1;
                 self.load = None;
+                self.audio = false;
                 Message::HelloReply {
                     protocol: PROTOCOL_VERSION,
                     max_chunk: MAX_CHUNK,
@@ -436,6 +489,16 @@ impl State<'_> {
             }
             Message::SaveBegin { len, hash } => self.save_begin(len, hash, game),
             Message::SaveChunk { offset, data } => self.save_chunk(offset, data, game),
+            Message::AudioStart | Message::AudioStop if self.audio_capable => {
+                let on = msg == Message::AudioStart;
+                self.audio = on;
+                if on {
+                    self.counters.audio_starts += 1;
+                } else {
+                    self.counters.audio_stops += 1;
+                }
+                Message::Ack
+            }
             _ => nak(NakCode::UnexpectedType),
         }
     }

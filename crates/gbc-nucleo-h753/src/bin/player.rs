@@ -17,6 +17,11 @@
 //!   ROM (the image header's length and hash), else `Nak UnexpectedType`
 //!   (load it with the `loader`); save loads go through `save::reload`;
 //!   dumps on request (`gbc-pc dump`, F5 in `gbc-pc play`) and on the chord.
+//! - Audio to the PC (ADR 0041): after `AudioStart` the DAC ISR copies
+//!   each refilled half's real frames into [`TEE`] and the service hook
+//!   sends them as `Audio` messages (after the replies and the `Stats`,
+//!   before dump frames), as many as the idle transmit buffer holds; a
+//!   full [`TEE`] drops halves (`audio_dropped`), never DAC samples.
 //! - DMG-mode games get [`COMPAT_PALETTE`] (romtest's common palette),
 //!   set before the first frame and on every save reload.
 //! - Statistics every [`STATS_FRAMES`] frames (5.0 s): a `Stats` frame
@@ -54,7 +59,7 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use gbc_core::{Config, Emulator, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
-use gbc_firmware::audio::{FeedRing, FeedTap};
+use gbc_firmware::audio::{AudioTee, DMA_HALF_FRAMES, FeedRing, FeedTap};
 use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Shared};
 use gbc_firmware::headless::{Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, InputSource, Press, Script};
@@ -119,11 +124,31 @@ const LIVE_RAMP_LEFT: u32 = 24;
 
 static RING: FeedRing = FeedRing::new();
 static TAP: FeedTap = FeedTap::new();
+/// The copy of the DAC feed for the PC (live mode; ADR 0041), 4 KiB of
+/// AXI SRAM (DTCM has no room: it would come out of the stack region, and
+/// AXI SRAM had 6 KiB left).
+// SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x defines for
+// such buffers; not zeroed at boot, which is sound for the tee's integer
+// atomics, and `main` calls `TEE.reset()` before the DAC starts. Only the
+// CPU touches it (no DMA), so caching needs no maintenance.
+#[unsafe(link_section = ".axisram.audio_tee")]
+static TEE: AudioTee = AudioTee::new();
+
+/// The largest `Audio` frame: one DMA half of real frames.
+const AUDIO_WIRE_MAX: usize =
+    gbc_link::cobs::max_encoded_len(2 + 6 + DMA_HALF_FRAMES * gbc_link::audio::FRAME_BYTES + 4) + 1;
+
+/// The most bytes one transmit carries while audio streams: 15.4 ms at
+/// 2 Mbit/s, so the transfer ends within a video frame and every
+/// service call finds the transmitter idle (the tee holds 2 frames).
+const TX_AUDIO_CAP: usize = 3072;
 
 #[interrupt]
 fn DMA1_STR0() {
     audio_dac::on_dma(|_, out| {
-        TAP.pop_into(&RING, out);
+        let _n = TAP.pop_into(&RING, out);
+        #[cfg(not(feature = "player-script"))]
+        TEE.offer(out, _n);
     });
 }
 
@@ -303,12 +328,14 @@ impl<const N: usize> Write for Text<N> {
 }
 
 /// Feeds what the DMA received to the session and hands its output to the
-/// transmit DMA (when idle). True if anything was received.
+/// transmit DMA (when idle), `extra`'s frames after the replies
+/// ([`Session::fill_tx_with`]). True if anything was received.
 fn serve(
     link: &mut LinkUart,
     session: &mut Session<'_>,
     game: &mut impl Game,
     shared: &Shared,
+    extra: impl FnOnce(&mut [u8]) -> usize,
 ) -> bool {
     let mut got = false;
     link.read(|b| {
@@ -316,7 +343,8 @@ fn serve(
         session.feed(b, game, shared);
     });
     if let Some(buf) = link.tx_buf() {
-        let n = session.fill_tx(&mut buf[..]);
+        let cap = if session.audio_on() { TX_AUDIO_CAP } else { buf.len() };
+        let n = session.fill_tx_with(&mut buf[..cap], extra);
         link.start_tx(n);
     }
     got
@@ -358,6 +386,62 @@ struct Player<'a> {
     text: Text,
     wire: [u8; MAX_FRAME],
     pending: Pending,
+    audio: AudioOut,
+}
+
+/// The audio stream's main-loop side (ADR 0041). Its buffer is a local of
+/// [`AudioOut::fill`], so the scripted mode's stack (which never sends)
+/// does not grow.
+struct AudioOut {
+    /// `Audio` messages written and their real frames.
+    sent: u32,
+    frames: u32,
+    /// Cycles spent packing and encoding them.
+    cycles: u64,
+}
+
+impl AudioOut {
+    const fn new() -> Self {
+        AudioOut {
+            sent: 0,
+            frames: 0,
+            cycles: 0,
+        }
+    }
+
+    /// Writes queued halves into `room` as whole `Audio` frames while one
+    /// more surely fits; the bytes written.
+    fn fill(&mut self, room: &mut [u8]) -> usize {
+        let mut n = 0;
+        let mut packed = [0u8; DMA_HALF_FRAMES * gbc_link::audio::FRAME_BYTES];
+        while room.len() - n >= AUDIO_WIRE_MAX {
+            let t0 = cycles();
+            let mut dst = packed
+                .as_chunks_mut::<{ gbc_link::audio::FRAME_BYTES }>()
+                .0
+                .iter_mut();
+            let Some(h) = TEE.pop_with(|w| {
+                if let Some(d) = dst.next() {
+                    d.copy_from_slice(&gbc_link::audio::pack(w));
+                }
+            }) else {
+                break;
+            };
+            let real = usize::from(h.real).min(DMA_HALF_FRAMES);
+            let msg = Message::Audio {
+                first: h.first,
+                held: h.held,
+                data: &packed[..real * gbc_link::audio::FRAME_BYTES],
+            };
+            if let Ok(k) = gbc_link::encode(&msg, 0, &mut room[n..]) {
+                n += k;
+                self.sent = self.sent.wrapping_add(1);
+                self.frames = self.frames.wrapping_add(real as u32);
+            }
+            self.cycles += u64::from(cycles().wrapping_sub(t0));
+        }
+        n
+    }
 }
 
 impl Player<'_> {
@@ -409,6 +493,23 @@ impl Player<'_> {
             self.stats_sent,
             self.stats_dropped,
         )?;
+        if self.live {
+            let t = TEE.stats();
+            let a = &self.audio;
+            write!(
+                out,
+                " audio_on={} audio_sent={} audio_frames={} audio_dropped={} audio_dropped_halves={} \
+                 audio_timeouts={} audio_cyc_per_frame={} audio_isr_max={}",
+                u8::from(TEE.is_on()),
+                a.sent,
+                a.frames,
+                t.dropped_frames,
+                t.dropped_halves,
+                c.audio_timeouts,
+                a.cycles / u64::from(a.frames.max(1)),
+                audio_dac::stats().isr_max,
+            )?;
+        }
         // The deepest stack use since boot, the paint high-water mark (M5
         // review P-1: live mode's save and dump paths go deeper than the
         // scripted run).
@@ -459,6 +560,10 @@ impl Player<'_> {
         };
         self.window.reset();
         self.since_stats = 0;
+        if self.live {
+            // `audio_isr_max` per window, so on and off can be compared.
+            audio_dac::reset_isr_cost();
+        }
     }
 
     fn link_service(&mut self, emu: &mut Emulator<'_>) -> Serviced {
@@ -474,8 +579,34 @@ impl Player<'_> {
         if self.shared.take_dump_request() {
             self.session.board_dump(&mut game);
         }
-        let got = serve(link, &mut self.session, &mut game, self.shared);
+        let (pending, wire, stats_sent, audio) = (
+            &mut self.pending,
+            &self.wire,
+            &mut self.stats_sent,
+            &mut self.audio,
+        );
+        let got = serve(link, &mut self.session, &mut game, self.shared, |room| {
+            // The pending `Stats` frame first (else a stream that keeps
+            // the transmitter busy would starve it), then audio.
+            let mut n = 0;
+            if let Pending::Frame(k) = *pending
+                && room.len() >= k
+            {
+                room[..k].copy_from_slice(&wire[..k]);
+                n = k;
+                *pending = Pending::None;
+                *stats_sent += 1;
+            }
+            n + audio.fill(&mut room[n..])
+        });
         self.session.end_frame(self.shared);
+        let on = self.session.audio_on();
+        if on != TEE.is_on() {
+            TEE.set_on(on);
+        }
+        if !on {
+            TEE.clear();
+        }
         let reloaded = game.reloaded;
         if got {
             if self.quiet >= ACTIVE_FRAMES {
@@ -614,7 +745,7 @@ fn no_rom(
     let mut t_text = cycles().wrapping_sub(2 * CPU_HZ);
     let mut t_quiet = cycles();
     loop {
-        if serve(&mut link, &mut session, &mut NoGame, &shared) {
+        if serve(&mut link, &mut session, &mut NoGame, &shared, |_| 0) {
             t_quiet = cycles();
         }
         let now = cycles();
@@ -634,6 +765,7 @@ fn no_rom(
 fn main() -> ! {
     let mut board = board::init(PREFIX);
     board.banner(IMAGE);
+    TEE.reset();
     let b = buffers::take();
 
     let mapped = match map_rom() {
@@ -710,7 +842,9 @@ fn main() -> ! {
         text: Text::new(),
         wire: [0; MAX_FRAME],
         pending: Pending::None,
+        audio: AudioOut::new(),
     };
+    player.session.set_audio_capable(live);
     let clock = Dwt::new();
     let feed = Feed {
         ring: &RING,

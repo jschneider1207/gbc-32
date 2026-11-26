@@ -311,3 +311,103 @@ fn a_board_dump_streams_unrequested_with_seq_0() {
     }
     assert_eq!(got, sav());
 }
+
+/// Every frame in `bytes`, as debug strings (seq, message).
+fn frames(bytes: &[u8]) -> Vec<String> {
+    let mut d = FrameDecoder::new();
+    bytes
+        .iter()
+        .filter_map(|&b| {
+            d.feed(b)
+                .map(|r| format!("{:?}", r.map(|(s, m)| (s, format!("{m:?}")))))
+        })
+        .collect()
+}
+
+fn ack(seq: u8) -> String {
+    format!("{:?}", Ok::<_, ()>((seq, "Ack".to_string())))
+}
+
+#[test]
+fn audio_start_is_refused_unless_the_board_streams_audio() {
+    let mut b = Board::new();
+    b.write_all(&encode(&Message::AudioStart, 3)).unwrap();
+    let out: Vec<u8> = b.out.drain(..).collect();
+    let nak = Message::Nak {
+        code: NakCode::UnexpectedType,
+    };
+    assert_eq!(
+        frames(&out),
+        [format!("{:?}", Ok::<_, ()>((3u8, format!("{nak:?}"))))]
+    );
+    assert!(!b.session.audio_on());
+}
+
+#[test]
+fn audio_start_stop_hello_and_timeout() {
+    let mut b = Board::new();
+    b.session.set_audio_capable(true);
+    b.write_all(&encode(&Message::AudioStart, 1)).unwrap();
+    assert_eq!(frames(&b.out.drain(..).collect::<Vec<_>>()), [ack(1)]);
+    assert!(b.session.audio_on());
+    b.write_all(&encode(&Message::AudioStop, 2)).unwrap();
+    assert_eq!(frames(&b.out.drain(..).collect::<Vec<_>>()), [ack(2)]);
+    assert!(!b.session.audio_on());
+    // Hello ends it.
+    b.write_all(&encode(&Message::AudioStart, 3)).unwrap();
+    b.write_all(&encode(&Message::Hello { protocol: 1 }, 4))
+        .unwrap();
+    assert!(!b.session.audio_on());
+    // Any frame from the PC keeps it alive; PC_TIMEOUT_FRAMES of silence end it.
+    b.write_all(&encode(&Message::AudioStart, 5)).unwrap();
+    for _ in 0..PC_TIMEOUT_FRAMES - 1 {
+        b.session.end_frame(b.shared);
+    }
+    b.write_all(&encode(&Message::Input { buttons: 0 }, 6))
+        .unwrap();
+    for _ in 0..PC_TIMEOUT_FRAMES - 1 {
+        b.session.end_frame(b.shared);
+    }
+    assert!(b.session.audio_on());
+    b.session.end_frame(b.shared);
+    assert!(!b.session.audio_on());
+    let c = b.session.counters();
+    assert_eq!((c.audio_starts, c.audio_stops, c.audio_timeouts), (3, 1, 1));
+    // Turning the capability off stops a stream.
+    b.write_all(&encode(&Message::AudioStart, 7)).unwrap();
+    b.session.set_audio_capable(false);
+    assert!(!b.session.audio_on());
+}
+
+#[test]
+fn caller_frames_go_after_replies_and_before_the_dump() {
+    let mut b = Board::new();
+    b.session.set_audio_capable(true);
+    for &x in &encode(&Message::AudioStart, 9) {
+        b.session.feed(x, &mut b.game, b.shared);
+    }
+    for &x in &encode(&Message::SaveDumpRequest, 10) {
+        b.session.feed(x, &mut b.game, b.shared);
+    }
+    let marker = encode(
+        &Message::Audio {
+            first: 77,
+            held: 0,
+            data: &[1, 2, 3],
+        },
+        0,
+    );
+    let mut tx = [0u8; 4096];
+    let mut room_seen = 0;
+    let n = b.session.fill_tx_with(&mut tx, |room| {
+        room_seen = room.len();
+        room[..marker.len()].copy_from_slice(&marker);
+        marker.len()
+    });
+    let f = frames(&tx[..n]);
+    assert_eq!(f[0], ack(9));
+    assert!(f[1].contains("Audio { first: 77"), "{}", f[1]);
+    assert!(f[2].contains("SaveBegin"), "{}", f[2]);
+    assert!(f[3..].iter().all(|s| s.contains("SaveChunk")));
+    assert_eq!(room_seen, 4096 - encode(&Message::Ack, 9).len());
+}
