@@ -1,6 +1,6 @@
 //! Live playback of the board's audio (`gbc-pc play --audio`, ADR 0041
 //! "Amendment: live playback"): everything but the Win32 device, which is
-//! [`crate::waveout`]. Host-tested in `tests/live.rs`.
+//! `crate::waveout`. Host-tested in `tests/live.rs`.
 //!
 //! The play loop (one thread, a board frame every <= 10 ms) hands each
 //! `Audio` message to [`Live::on_audio`]; the playback thread calls

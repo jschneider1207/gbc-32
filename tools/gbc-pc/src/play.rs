@@ -4,7 +4,8 @@
 //! then wait up to [`PlayOptions::poll`] (10 ms, so about 100 Hz) for a
 //! board frame and handle it: `Stats` are reported, dump frames go to the
 //! dump in progress. Everything here is host-tested against
-//! [`crate::sim`]; the Win32 keyboard is [`crate::keyboard`].
+//! `crate::sim` (the `sim` feature); the Win32 keyboard is
+//! `crate::keyboard`.
 //!
 //! `Input` frames are not answered, so a `Nak` here usually answers one
 //! the board could not decode: only a `Nak` with the dump request's

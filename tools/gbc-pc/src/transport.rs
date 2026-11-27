@@ -1,5 +1,6 @@
 //! The byte link the client runs over: a COM port on Windows
-//! ([`crate::serial`]), a simulated board in tests ([`crate::sim`]).
+//! (`crate::serial`), a simulated board in tests (`crate::sim`, behind
+//! the `sim` feature).
 
 use std::io;
 use std::time::Duration;

@@ -5,8 +5,8 @@
 //!
 //! The portable part (the protocol client, the ROM and save flows, the
 //! key mapping and the `play` loop, and a simulated board for tests)
-//! builds and tests on any host. Only the COM port, [`serial`], the
-//! keyboard, [`keyboard`], and the audio device, [`waveout`], are
+//! builds and tests on any host. Only the COM port, `serial`, the
+//! keyboard, `keyboard`, and the audio device, `waveout`, are
 //! Windows-specific: the tool ships as a
 //! native Windows `.exe` because WSL has poor COM-port access.
 
