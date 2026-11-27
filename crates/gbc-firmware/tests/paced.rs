@@ -471,13 +471,14 @@ impl RawInputs for LogPins<'_> {
 
 /// The player-loop hook under test: feeds the script's buttons as PC
 /// input frames, logs its calls, and reloads a zero save at `reload_at`.
-struct Svc<'a> {
+struct Svc<'a, const H: bool = true> {
     shared: &'a Shared,
     log: &'a RefCell<Vec<(char, u32)>>,
     reload_at: Option<u32>,
     zero: Vec<u8>,
 }
-impl Service for Svc<'_> {
+impl<const H: bool> Service for Svc<'_, H> {
+    const HASHES: bool = H;
     fn service(&mut self, n: u32, emu: &mut Emulator<'_>) -> Serviced {
         self.log.borrow_mut().push(('s', n));
         self.shared.set_pc(Script::new(&PRESSES).held(n).bits());
@@ -507,6 +508,15 @@ fn run_live(
     frames: u32,
     reload_at: Option<u32>,
 ) -> (Vec<String>, Report, Vec<(char, u32)>) {
+    run_live_h::<true>(rom, frames, reload_at)
+}
+
+/// [`run_live`] with [`Service::HASHES`] = `H`.
+fn run_live_h<const H: bool>(
+    rom: &[u8],
+    frames: u32,
+    reload_at: Option<u32>,
+) -> (Vec<String>, Report, Vec<(char, u32)>) {
     let ring = Box::new(AudioRing::<{ gbc_firmware::audio::RING_FRAMES }>::new());
     let tap = FeedTap::new();
     let consumer = Consumer {
@@ -530,7 +540,7 @@ fn run_live(
     let log = RefCell::new(Vec::new());
     let shared = Shared::new();
     let mut input = LiveInput::<_, FRAME_SAMPLES>::new(LogPins(&log), &shared);
-    let mut svc = Svc {
+    let mut svc = Svc::<H> {
         shared: &shared,
         log: &log,
         reload_at,
@@ -575,6 +585,45 @@ fn run_with_live_input_and_service_matches_the_script() {
         .collect();
     assert_eq!(log, expect);
     assert_eq!(report.emulated, report.clock);
+}
+
+/// A service with `HASHES` off: the frame and feed hashes stay the hash of
+/// nothing, and everything else the run reports is the hashed run's (whose
+/// lines `run_with_live_input_and_service_matches_the_script` checks).
+#[test]
+fn run_with_hashes_off_leaves_the_hashes_and_nothing_else() {
+    let rom = battery_rom();
+    let frames = 90;
+    let (on_lines, on, on_log) = run_live_h::<true>(&rom, frames, Some(50));
+    let (off_lines, off, off_log) = run_live_h::<false>(&rom, frames, Some(50));
+    let nothing = FeedTap::new().hash();
+    assert_eq!((off.fbs, off.feed), (fnv::Fnv1a::new().get(), nothing));
+    assert_ne!(on.fbs, off.fbs);
+    assert_ne!(on.feed, off.feed);
+    assert!(on.ready > 0 && on.feed_frames > 0);
+    let same = |r: &Report| {
+        (
+            r.frames,
+            r.clock,
+            r.emulated,
+            r.ready,
+            r.feed_frames,
+            r.drained_frames,
+        )
+    };
+    assert_eq!(same(&off), same(&on));
+    assert_eq!(off_log, on_log);
+    // The lines differ only in the hash fields.
+    assert_eq!(off_lines.len(), on_lines.len());
+    let strip = |l: &str| {
+        l.split(' ')
+            .filter(|f| !f.starts_with("fbs=") && !f.starts_with("feed="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (a, b) in off_lines.iter().zip(&on_lines) {
+        assert_eq!(strip(a), strip(b));
+    }
 }
 
 /// A reload from the hook in the middle of a held button (B, frames

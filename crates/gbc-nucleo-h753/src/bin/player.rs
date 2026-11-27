@@ -86,6 +86,10 @@ const PREFIX: &str = "gbc-nucleo-h753";
 const IMAGE: &str = "player";
 #[cfg(feature = "player-script")]
 const IMAGE: &str = "player-script";
+/// Only the scripted image's `paced` lines are compared, so only it hashes
+/// its frames and its DAC feed ([`Service::HASHES`]; 2.3% of a frame).
+const HASHES: bool = cfg!(feature = "player-script");
+
 const ROM_NAME: &str = "qspi";
 
 const LINK_BAUD: u32 = parse_baud(option_env!("GBC_LINK_BAUD"), 2_000_000);
@@ -146,7 +150,11 @@ const TX_AUDIO_CAP: usize = 3072;
 #[interrupt]
 fn DMA1_STR0() {
     audio_dac::on_dma(|_, out| {
-        let _n = TAP.pop_into(&RING, out);
+        let _n = if HASHES {
+            TAP.pop_into(&RING, out)
+        } else {
+            TAP.pop_unhashed(&RING, out)
+        };
         #[cfg(not(feature = "player-script"))]
         TEE.offer(out, _n);
     });
@@ -680,6 +688,8 @@ impl Service for Player<'_> {
     fn frame_done(&mut self, _: u32, c: FrameCycles) {
         self.core = c.core;
     }
+
+    const HASHES: bool = HASHES;
 }
 
 /// Discards the run's lines (live mode: the run never ends).

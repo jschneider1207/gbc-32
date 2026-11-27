@@ -167,6 +167,17 @@ pub trait Service {
     /// nothing in the run (the default does nothing).
     #[inline]
     fn frame_done(&mut self, _frame: u32, _cycles: FrameCycles) {}
+
+    /// Whether the run hashes what it produced: the frame hash (`fbs`,
+    /// every completed frame) and the DAC feed hash (`feed`, every push).
+    /// On (the default) for every run whose `paced` lines are compared;
+    /// the live player, which discards its lines, turns it off (the frame
+    /// hash alone is 2.3% of a frame on the board, docs/perf.md "Paced
+    /// loop (M4)"). Off, [`Report::fbs`] and [`Report::feed`] stay the hash
+    /// of nothing and [`FrameCycles::hash`] measures an empty interval;
+    /// every other effect of the run is the same. A constant, so the
+    /// branches compile out.
+    const HASHES: bool = true;
 }
 
 /// One iteration's [`CycleClock`] counts (as the `stats paced core` and
@@ -416,7 +427,9 @@ where
             // Never short under the pacing rule; if it were, only what
             // went in is hashed (and the overrun is counted).
             let k = ring.push_frames(words);
-            feed_h.fold(&words[..k]);
+            if V::HASHES {
+                feed_h.fold(&words[..k]);
+            }
             feed_frames += k as u64;
         }
         let t2 = clock.now();
@@ -428,9 +441,11 @@ where
             ..FrameCycles::default()
         };
         if r.events.contains(Events::FRAME_READY) {
-            let mut fb = Fnv1a::new();
-            fb.frame(frame);
-            fbs.u64(fb.get());
+            if V::HASHES {
+                let mut fb = Fnv1a::new();
+                fb.frame(frame);
+                fbs.u64(fb.get());
+            }
             ready += 1;
             let t3 = clock.now();
             sink.frame(n, frame);

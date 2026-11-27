@@ -250,6 +250,20 @@ impl FeedTap {
         n
     }
 
+    /// Consumer: [`AudioRing::pop_into`] and the frame count of
+    /// [`pop_into`](Self::pop_into), without the fold: for a feed nobody
+    /// compares (the live player; [`crate::paced::Service::HASHES`]). The
+    /// hash stays where it was. One consumer uses one of the two.
+    pub fn pop_unhashed<const N: usize>(&self, ring: &AudioRing<N>, out: &mut [u32]) -> usize {
+        let n = ring.pop_into(out);
+        if n != 0 {
+            let f = self.frames.load(Ordering::Relaxed);
+            self.frames
+                .store(f.wrapping_add(n as u32), Ordering::Release);
+        }
+        n
+    }
+
     /// Real frames popped so far.
     pub fn frames(&self) -> u32 {
         self.frames.load(Ordering::Acquire)
@@ -997,6 +1011,29 @@ mod tests {
         assert_eq!(tap.pop_into(&r, &mut out), 0, "drained");
         assert_eq!(tap.frames(), 2000);
         assert_eq!(tap.hash(), dac_feed_hash(&s));
+    }
+
+    /// `pop_unhashed` pops and counts as `pop_into` does (same frames out,
+    /// same count) and leaves the hash at the hash of nothing.
+    #[test]
+    fn feed_tap_unhashed_counts_but_leaves_the_hash() {
+        let s: Vec<StereoSample> = (0..2000)
+            .map(|i| ss(((i * 77) % 50_000 - 25_000) as i16, (i * 29) as i16))
+            .collect();
+        let (r, q) = (FeedRing::new(), FeedRing::new());
+        let (hashed, unhashed) = (FeedTap::new(), FeedTap::new());
+        let (mut c, mut d) = (Conditioner::new(), Conditioner::new());
+        let (mut a, mut b) = ([0u32; DMA_HALF_FRAMES], [0u32; DMA_HALF_FRAMES]);
+        for chunk in s.chunks(100) {
+            r.push_slice(&mut c, chunk);
+            q.push_slice(&mut d, chunk);
+            let n = hashed.pop_into(&r, &mut a[..150]);
+            assert_eq!(unhashed.pop_unhashed(&q, &mut b[..150]), n);
+            assert_eq!(a, b);
+        }
+        assert_eq!((hashed.frames(), unhashed.frames()), (2000, 2000));
+        assert_eq!(hashed.hash(), dac_feed_hash(&s));
+        assert_eq!(unhashed.hash(), FeedHash::new().get());
     }
 
     #[test]
