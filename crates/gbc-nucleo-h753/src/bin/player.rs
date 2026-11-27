@@ -54,9 +54,8 @@
 #![no_std]
 #![no_main]
 
-use core::cell::{Cell, RefCell, UnsafeCell};
+use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use gbc_core::{Config, Emulator, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
 use gbc_firmware::audio::{AudioTee, FeedRing, FeedTap};
@@ -65,12 +64,12 @@ use gbc_link::audio::{U12, U12_BYTES, encode_u12};
 /// One DMA refill (the tee's half).
 const DMA_HALF_FRAMES: usize = audio_dac::HALF;
 use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Shared};
+use gbc_firmware::fmt_buf::FmtBuf;
 use gbc_firmware::headless::{Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, InputSource, Press, Script};
 use gbc_firmware::paced::{self, Feed, FrameCycles, Hooks, Idle, Service, Serviced};
 use gbc_firmware::player::{COMPAT_PALETTE, Window, frame_budget};
 use gbc_firmware::replay::{self, Change, ClockScript};
-use gbc_firmware::rom_image::{self, ImageHeader};
 use gbc_firmware::save::{self, Image, Layout};
 use gbc_link::{MAX_FRAME, Message};
 use gbc_nucleo_h753::audio_dac::{self, AudioDac};
@@ -82,7 +81,7 @@ use gbc_nucleo_h753::pac::interrupt;
 use gbc_nucleo_h753::paced_board::{
     Capture, Dwt, RAMP_LEFT, dac_line, report, set_sleep_clock, start_dac,
 };
-use gbc_nucleo_h753::qspi::{self, NOR_BYTES, Qspi};
+use gbc_nucleo_h753::qspi::{self, NOR_BYTES};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led, stack, wait_since};
 
 const PREFIX: &str = "gbc-nucleo-h753";
@@ -185,48 +184,45 @@ mod buffers {
         pub stash: &'static mut Frame,
     }
 
-    struct Slot<T>(UnsafeCell<T>);
-    // SAFETY: only reachable through `take`, which hands out one
-    // reference to each for the life of the program (guarded by `TAKEN`).
-    unsafe impl<T: Send> Sync for Slot<T> {}
-
-    /// `.data` (`Memory::new()` is not all zeros): DTCM in this placement.
-    static MEM: Slot<Memory> = Slot(UnsafeCell::new(Memory::new()));
-    /// `.bss`, DTCM (the M6-target placement for the frame, ADR 0026;
-    /// here because AXI SRAM is full): only the CPU touches it (the
-    /// scaler reads it into the panel buffer).
-    static FRAME: Slot<Frame> = Slot(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
-    // SAFETY (the `link_section`s): `.axisram` is the NOLOAD AXI SRAM
-    // section memory.x defines for such buffers; not zeroed at boot, which
-    // is sound for these integer types. `headless::start` fills the
-    // cartridge RAM before it is read; the audio buffer, the
-    // stash and the save buffer (in scripted mode partly the capture) are
-    // written before they are read.
-    #[unsafe(link_section = ".axisram.audio")]
-    static AUDIO: Slot<[StereoSample; MIN_AUDIO_SLOTS]> = Slot(UnsafeCell::new(
-        [StereoSample { left: 0, right: 0 }; MIN_AUDIO_SLOTS],
-    ));
-    #[unsafe(link_section = ".axisram.cart_ram")]
-    static CART_RAM: Slot<[u8; CART_RAM_BYTES]> = Slot(UnsafeCell::new([0; CART_RAM_BYTES]));
-    #[unsafe(link_section = ".axisram.save")]
-    static SAVE: Slot<[u8; SAVE_BYTES]> = Slot(UnsafeCell::new([0; SAVE_BYTES]));
-    #[unsafe(link_section = ".axisram.stash")]
-    static STASH: Slot<Frame> = Slot(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
-
-    static TAKEN: AtomicBool = AtomicBool::new(false);
-
+    /// The buffers. Panics on a second call.
     pub fn take() -> Bufs {
-        assert!(!TAKEN.swap(true, Ordering::AcqRel), "buffers taken twice");
-        // SAFETY: the swap lets exactly one caller through, ever.
-        unsafe {
-            Bufs {
-                mem: &mut *MEM.0.get(),
-                frame: &mut *FRAME.0.get(),
-                audio: &mut *AUDIO.0.get(),
-                cart_ram: &mut *CART_RAM.0.get(),
-                save: &mut *SAVE.0.get(),
-                stash: &mut *STASH.0.get(),
-            }
+        const TWICE: &str = "buffers taken twice";
+        Bufs {
+            // `.data` (`Memory::new()` is not all zeros): DTCM in this
+            // placement.
+            mem: gbc_nucleo_h753::take_once!(Memory = Memory::new()).expect(TWICE),
+            // `.bss`, DTCM (the M6-target placement for the frame, ADR
+            // 0026; here because AXI SRAM is full): only the CPU touches
+            // it (the scaler reads it into the panel buffer).
+            frame: gbc_nucleo_h753::take_once!(Frame = [0; SCREEN_WIDTH * SCREEN_HEIGHT])
+                .expect(TWICE),
+            // SAFETY (the four `link_section`s): `.axisram` is the NOLOAD
+            // AXI SRAM section memory.x defines for such buffers; not
+            // zeroed at boot, which is sound for these integer types.
+            // `headless::start` fills the cartridge RAM before it is read;
+            // the audio buffer, the stash and the save buffer (in scripted
+            // mode partly the capture) are written before they are read.
+            audio: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.audio")]
+                [StereoSample; MIN_AUDIO_SLOTS] =
+                    [StereoSample { left: 0, right: 0 }; MIN_AUDIO_SLOTS]
+            )
+            .expect(TWICE),
+            cart_ram: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.cart_ram")]
+                [u8; CART_RAM_BYTES] = [0; CART_RAM_BYTES]
+            )
+            .expect(TWICE),
+            save: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.save")]
+                [u8; SAVE_BYTES] = [0; SAVE_BYTES]
+            )
+            .expect(TWICE),
+            stash: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.stash")]
+                Frame = [0; SCREEN_WIDTH * SCREEN_HEIGHT]
+            )
+            .expect(TWICE),
         }
     }
 }
@@ -317,37 +313,12 @@ impl Game for NoGame {
     }
 }
 
-/// A text line or a `Stats` extra built in memory.
-struct Text<const N: usize = 1024> {
-    buf: [u8; N],
-    len: usize,
-}
+/// A text line or a `Stats` extra built in memory, at most 1,023 bytes:
+/// the last byte is kept for a text line's 0x00 ([`FmtBuf::reserving_nul`]).
+type Text = FmtBuf<1024>;
 
-/// An error's `Debug` text, short.
-type Why = Text<96>;
-
-impl<const N: usize> Text<N> {
-    const fn new() -> Self {
-        Text {
-            buf: [0; N],
-            len: 0,
-        }
-    }
-    fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.len]
-    }
-}
-
-impl<const N: usize> Write for Text<N> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        // One byte stays free for the text line's 0x00.
-        let room = self.buf.len() - 1 - self.len;
-        let n = s.len().min(room);
-        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
-        Ok(())
-    }
-}
+/// An error's `Debug` text, short (truncated at 95 bytes).
+type Why = FmtBuf<95>;
 
 /// Feeds what the DMA received to the session and hands its output to the
 /// transmit DMA (when idle), `extra`'s frames after the replies
@@ -558,7 +529,7 @@ impl Player<'_> {
         if self.pending != Pending::None {
             self.stats_dropped += 1;
         }
-        let mut t = Text::new();
+        let mut t = Text::reserving_nul();
         let active = self.quiet < ACTIVE_FRAMES;
         if !active {
             let _ = write!(t, "{PREFIX} {IMAGE} stats ");
@@ -577,9 +548,7 @@ impl Player<'_> {
             }
         } else {
             let _ = t.write_str("\r\n");
-            let n = t.len;
-            t.buf[n] = 0;
-            t.len = n + 1;
+            let _ = t.push_nul();
             self.text = t;
             Pending::Text
         };
@@ -714,33 +683,6 @@ impl Write for Discard {
     }
 }
 
-/// Maps the NOR and validates the image in it; the error says where it
-/// failed. The [`qspi::Mapped`] must outlive the ROM slice, which `main`
-/// guarantees by never returning.
-fn map_rom() -> Result<qspi::Mapped, (&'static str, Why)> {
-    let err = |stage, e: &dyn fmt::Debug| {
-        let mut t = Why::new();
-        let _ = write!(t, "{e:?}");
-        (stage, t)
-    };
-    let mut q = Qspi::init(qspi::PRESCALER_SAFE);
-    q.set_prescaler(qspi::PRESCALER_MMAP)
-        .map_err(|e| err("map", &e))?;
-    q.memory_mapped(&qspi::QUAD_IO_READ_XIP)
-        .map_err(|(_, e)| err("map", &e))
-}
-
-fn validate(window: &[u8]) -> Result<(&[u8], ImageHeader), (&'static str, Why)> {
-    let err = |stage, e: &dyn fmt::Debug| {
-        let mut t = Why::new();
-        let _ = write!(t, "{e:?}");
-        (stage, t)
-    };
-    let header = rom_image::read_header(window).map_err(|e| err("header", &e))?;
-    let rom = rom_image::validate(window).map_err(|e| err("validate", &e))?;
-    Ok((rom, header))
-}
-
 /// No valid ROM image: a dark red panel, the reason on the UART every
 /// 2 s, and the link session with no game (module docs). Never returns.
 fn no_rom(
@@ -751,7 +693,7 @@ fn no_rom(
 ) -> ! {
     display::status_screen(0x8000);
     let why = core::str::from_utf8(why.as_bytes()).unwrap_or("?");
-    let mut line: Text = Text::new();
+    let mut line: Text = Text::reserving_nul();
     let _ = write!(
         line,
         "{PREFIX} {IMAGE} no-rom stage={stage} error={why}: no valid ROM image in the QSPI NOR; \
@@ -760,9 +702,7 @@ fn no_rom(
     let _ = board
         .uart
         .write_str(core::str::from_utf8(line.as_bytes()).unwrap_or(""));
-    let n = line.len;
-    line.buf[n] = 0;
-    line.len = n + 1;
+    let _ = line.push_nul();
     let mut link = match LinkUart::new(&mut board.uart, LINK_BAUD) {
         Ok(l) => l,
         Err(e) => panic!("link baud {LINK_BAUD} refused: {e:?}"),
@@ -795,14 +735,16 @@ fn main() -> ! {
     TEE.reset();
     let b = buffers::take();
 
-    let mapped = match map_rom() {
-        Ok(m) => m,
-        Err((stage, why)) => no_rom(&mut board, b.save, stage, &why),
+    // Mapped for good: `main` never returns, so the ROM slice stays valid.
+    let image = match qspi::map_rom_image() {
+        Ok(i) => i,
+        Err(e) => {
+            let mut why = Why::new();
+            let _ = write!(why, "{:?}", e.error());
+            no_rom(&mut board, b.save, e.stage(), &why)
+        }
     };
-    let (rom, header) = match validate(mapped.bytes()) {
-        Ok(r) => r,
-        Err((stage, why)) => no_rom(&mut board, b.save, stage, &why),
-    };
+    let (rom, header) = (image.rom(), image.header);
     let title = &header.title[..header.title.iter().position(|&c| c == 0).unwrap_or(16)];
     let _ = writeln!(
         board.uart,
@@ -811,7 +753,7 @@ fn main() -> ! {
         header.len,
         header.hash,
         core::str::from_utf8(title).unwrap_or("?"),
-        mapped.clock_hz(),
+        image.mapped.clock_hz(),
         frame_budget(CPU_HZ),
     );
 
@@ -866,7 +808,7 @@ fn main() -> ! {
         stats_dropped: 0,
         sessions: 0,
         reloads: 0,
-        text: Text::new(),
+        text: Text::reserving_nul(),
         wire: [0; MAX_FRAME],
         pending: Pending::None,
         audio: AudioOut::new(),
