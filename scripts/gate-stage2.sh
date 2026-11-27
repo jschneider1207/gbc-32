@@ -36,8 +36,10 @@
 #       acceptance/stage2.toml); the display readback self-test
 #       (run-headless.sh, headless-display-cgb-acid2: 0 mismatches); the
 #       replay set in the player-script image (run-replay.sh replay-set.txt:
-#       paced lines equal the host's, 0 underruns, 0 frames over budget),
-#       every entry PASS. Loads each replay ROM into the QSPI NOR.
+#       paced lines equal the host's, 0 underruns, 0 frames over budget,
+#       the image's own panel readback samples: >= 1 readback, 0
+#       mismatches, control 2), every entry PASS. Loads each replay ROM
+#       into the QSPI NOR.
 #   B4  the 10-minute synth:worst-case soak (run-replay.sh soak-set.txt):
 #       as B3, plus |ppm| <= 1000 of the board's cycle counter
 #   B5  the save round trip on the player image (run-player-save.sh, the
@@ -957,7 +959,8 @@ sets_check() {
   [ -n "${SAVE_FIXTURE}" ] || tool_error "scripts/check-stage2-sets.sh printed no save_fixture="
 }
 # replay_run <dir> <list> <label>: run-replay.sh over a list; every entry
-# of the list must be in its summary as PASS with equal=yes.
+# of the list must be in its summary as PASS with equal=yes and at least
+# one panel readback with 0 mismatches.
 replay_run() {
   local out=$1 list=$2 n_want n_pass
   set +e
@@ -967,7 +970,7 @@ replay_run() {
   grep -E '^run-replay.sh: (===|summary|PASS|FAILED|TOOL ERROR)|^  [^ ]+: (PASS|FAIL|TOOL ERROR)|^  run-paced.sh: (speed|CHECK FAILED)|CHECK FAILED' "${out}.log" || true
   board_rc "run-replay.sh $3" "${rc}"
   n_want=$(sed 's/#.*//' "${list}" | awk 'NF' | wc -l)
-  n_pass=$(grep -cE '^  [^ ]+: PASS equal=yes underruns=0 over_budget=0 ' "${out}.log" || true)
+  n_pass=$(grep -cE '^  [^ ]+: PASS equal=yes underruns=0 over_budget=0 core_max=[0-9]+ readbacks=[1-9][0-9]* mismatches=0( |$)' "${out}.log" || true)
   [ "${n_pass}" = "${n_want}" ] || tool_error "run-replay.sh $3 exited 0 with ${n_pass} PASS lines for ${n_want} entries"
   stack_lines+=("$(grep -ho 'stack_used=[0-9]*/[0-9]*' "${out}"/*.run-paced.log 2> /dev/null |
     sort -t= -k2 -n | tail -n 1 | sed "s|^|$3 player-script, deepest of the entries: |" || true)")

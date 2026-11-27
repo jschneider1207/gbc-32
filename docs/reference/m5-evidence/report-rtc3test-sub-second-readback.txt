@@ -1,0 +1,16 @@
+gbc-nucleo-h753 paced report n=59 rom=qspi frames=1793 image_bytes=278056 image_cksum=4129663762
+paced v1 rom_bytes=32768 rom_fnv=d4fd59c3bf5b59f4 input_fnv=9779df36a504ca47 frames=1793
+paced end frames=1793 clock=125774624 ready=1787 fbs=49fdfa7575eed354 feed_frames=982614 feed=9f5855f8e1d9f365
+paced drain feed_frames=982614 feed=9f5855f8e1d9f365
+stats paced core min=110572 mean=888957 max=1445226 max_frame=923 hz=472000000
+stats paced frontend push_mean=35041 push_max=36357 hash_mean=170674 hash_max=171031 sink_mean=88117 sink_max=185432
+stats paced idle calls=5330 drain_calls=10
+stats paced ring min_fill=1243 max_fill=2047 underrun_events=0 underrun_frames=0 overrun_events=0 overrun_frames=0
+stats paced drain underrun_events=1 underrun_frames=170
+stats paced speed elapsed=14138083210 ppm=+1116 steady_ppm=-386
+stats input clock_changes=6 handed=6 late=0
+stats display paced presented=1355 skipped=432 transfers=1355 transfer_errors=0 stuck=0 aborts=0 te_edges=1826 scale_mean=190652 scale_max=198710 present_mean=280 present_max=294 replaced=71 deferred=728 copy_mean=26100 copy_max=26234
+stats display readback samples=6 readbacks=6 mismatches=0 control_mismatches=2 first=120 every=300 readback_rows=4 sentinel_rows=27 steps=372 step_mean=751581 step_max=791217
+stats dac refills=3911 late=0 spurious=0 te=0 dme=0 fe=0 udr1=0 udr2=0 restarts=0 isr_min=602 isr_max=8266 stop=ok
+stats player image=player-script frames=1792 core_min=110572 core_mean=889232 core_p99=1445226 core_max=1445226 fe_mean=547539 fe_max=1244511 busy_mean=1436772 busy_max=2676382 slack_min=5226175 over_budget=0 budget=7902557 underruns=7 underrun_frames=1706 overruns=0 presented=1355 skipped=432 display_errors=0 stuck=0 dac_restarts=0 total_frames=1792 total_over_budget=0 total_core_max=1445226 total_busy_max=2676382 reloads=0 rom_len=32768 rom_hash=d4fd59c3bf5b59f4 link_frames=0 bad_frames=0 hellos=0 inputs=0 saves_applied=0 saves_refused=0 dumps=0 dumps_done=0 naks=0 replies_dropped=0 sessions=0 stats_sent=0 stats_dropped=0 stack_used=19976/22912
+gbc-nucleo-h753 paced report-end n=59 rom=qspi bytes=1951 cksum=1213093718 overflow=0

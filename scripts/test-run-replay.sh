@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests crates/gbc-nucleo-h753/run-replay.sh (the Stage 2 M5 replay
-# checker) on captures built from the real M5 board report committed in
-# docs/reference/m5-evidence/ (rtc3test-sub-second, a clock-table entry).
+# checker) on captures built from a real board report committed in
+# docs/reference/m5-evidence/ (rtc3test-sub-second, a clock-table entry,
+# from the player-script image with the panel readback samples).
 # RUN_REPLAY_CAPTURES is always set, so nothing builds, flashes, reads the
 # port, runs a host tool or takes the board lock. The image is a small
 # synthetic file; the report's image fields are rewritten to match it (as
@@ -13,7 +14,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 script=${RUN_REPLAY:-$here/../crates/gbc-nucleo-h753/run-replay.sh}
-real=$here/../docs/reference/m5-evidence/report-rtc3test-sub-second.txt
+real=$here/../docs/reference/m5-evidence/report-rtc3test-sub-second-readback.txt
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GBC_BOARD_LOCK=$tmp/lock
@@ -67,13 +68,18 @@ mut() {
 }
 
 entry g "$tmp/body"
-run "real report passes" 0 "$CLOCKED" 'g: PASS equal=yes underruns=0 over_budget=0 core_max=[0-9]+ input=6/6 late=0'
+run "real report passes" 0 "$CLOCKED" 'g: PASS equal=yes underruns=0 over_budget=0 core_max=[0-9]+ readbacks=[1-9][0-9]* mismatches=0 input=6/6 late=0'
 
 # Exit 1: a failed check.
 mut "doctored frame chain (run-paced.sh exit 1)" 1 's/^(paced end .* fbs=)[0-9a-f]/\1x/' 'g: FAIL equal=no'
 mut "a late change" 1 's/^(stats input .*) late=0/\1 late=1/' 'CHECK FAILED: g: stats input late=1'
 mut "not every change handed" 1 's/^(stats input .*) handed=6/\1 handed=5/' 'handed=5 of clock_changes=6'
 mut "a frame over budget" 1 's/ total_over_budget=0 / total_over_budget=1 /' 'total_over_budget=1'
+# The panel readback (plan B3: 0 mismatches).
+mut "readback mismatches" 1 's/^(stats display readback .*) mismatches=0 /\1 mismatches=3 /' 'CHECK FAILED: g: stats display readback mismatches=3 \(want 0\)'
+mut "no readback done" 1 's/^(stats display readback .*) readbacks=[0-9]+ /\1 readbacks=0 /' 'CHECK FAILED: g: stats display readback readbacks=0'
+mut "control readback 0" 1 's/ control_mismatches=2 / control_mismatches=0 /' 'control_mismatches=0 \(want 2\)'
+mut "no control readback" 1 's/ control_mismatches=2 / control_mismatches=none /' 'control_mismatches=none \(want 2\)'
 
 # Exit 2: a missing, repeated or malformed line.
 mut "no stats input line" 2 '/^stats input /d' "want exactly one 'stats input' line"
@@ -83,6 +89,13 @@ mut "malformed late" 2 's/^(stats input .*) late=0/\1 late=x/' "'late=x' is malf
 mut "late twice" 2 's/^(stats input .*) late=0/\1 late=0 late=0/' "'late=' appears 2 times"
 mut "no total_over_budget" 2 's/ total_over_budget=0 / /' "'total_over_budget=' appears 0 times"
 mut "no core max" 2 's/^(stats paced core .*) max=[0-9]+/\1/' "'max=' appears 0 times"
+mut "no readback line" 2 '/^stats display readback /d' "want exactly one 'stats display readback' line"
+mut "two readback lines" 2 's/^(stats display readback .*)$/\1\n\1/' "want exactly one 'stats display readback' line"
+mut "no readbacks field" 2 's/^(stats display readback .*) readbacks=[0-9]+ /\1 /' "'readbacks=' appears 0 times"
+mut "no mismatches field" 2 's/^(stats display readback .*) mismatches=0 /\1 /' "'mismatches=' appears 0 times"
+mut "malformed mismatches" 2 's/^(stats display readback .*) mismatches=0 /\1 mismatches=-1 /' "'mismatches=-1' is malformed"
+mut "no control field" 2 's/ control_mismatches=2 / /' "'control_mismatches=' appears 0 times"
+mut "malformed control" 2 's/ control_mismatches=2 / control_mismatches=2x /' "'control_mismatches=2x' is malformed"
 mut "run-paced.sh exit 2 with every line present" 2 's/^(stats dac .*) late=0/\1 late=x/' 'g: TOOL ERROR'
 sed -E '/^stats input /d' "$tmp/body" > "$tmp/b3"
 entry rtc3test "$tmp/body"
@@ -122,13 +135,13 @@ unset RUN_REPLAY_RUN_PACED
 run "bad frames" 2 "rtc3test/rtc3test.gb 6x0 g" "is not a number"
 
 # The speed bound (the M5 soak runs with RUN_REPLAY_MAX_PPM=1000): the
-# committed 30 s report has ppm=+1139, inside the default (lifted) bound.
+# committed 30 s report has ppm=+1116, inside the default (lifted) bound.
 entry g "$tmp/body"
 RUN_REPLAY_MAX_PPM=1000
 export RUN_REPLAY_MAX_PPM
-run "RUN_REPLAY_MAX_PPM=1000 fails ppm=+1139" 1 "$CLOCKED" 'g: FAIL'
+run "RUN_REPLAY_MAX_PPM=1000 fails ppm=+1116" 1 "$CLOCKED" 'g: FAIL'
 RUN_REPLAY_MAX_PPM=1200
-run "RUN_REPLAY_MAX_PPM=1200 passes ppm=+1139" 0 "$CLOCKED" 'g: PASS'
+run "RUN_REPLAY_MAX_PPM=1200 passes ppm=+1116" 0 "$CLOCKED" 'g: PASS'
 RUN_REPLAY_MAX_PPM=1e3
 run "a malformed RUN_REPLAY_MAX_PPM" 2 "$CLOCKED" 'is not a number'
 unset RUN_REPLAY_MAX_PPM
@@ -148,7 +161,7 @@ for code in 3 137; do
 done
 unset RUN_REPLAY_RUN_PACED
 # A per-entry max_ppm= bound (review T-3); the env can only tighten it.
-run "max_ppm=1000 on the entry fails ppm=+1139" 1 "$CLOCKED max_ppm=1000" 'g: FAIL'
+run "max_ppm=1000 on the entry fails ppm=+1116" 1 "$CLOCKED max_ppm=1000" 'g: FAIL'
 run "max_ppm=1200 on the entry passes" 0 "$CLOCKED max_ppm=1200" 'g: PASS'
 RUN_REPLAY_MAX_PPM=999999
 export RUN_REPLAY_MAX_PPM

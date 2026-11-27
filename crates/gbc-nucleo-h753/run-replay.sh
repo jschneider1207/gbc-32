@@ -52,8 +52,12 @@
 #      report: `stats player` total_over_budget=0 (exit 1 otherwise), and
 #      for a table `stats input` handed=clock_changes and late=0 (a late
 #      change is not romtest's emulation); core max (`stats paced core`)
-#      is printed. Each line exactly once, each field exactly once and
-#      numeric, else exit 2.
+#      is printed. The panel readback (plan B3 "the display readback has
+#      0 mismatches"; src/display.rs "Readback samples"): `stats display
+#      readback` readbacks >= 1, mismatches=0 and control_mismatches=2
+#      (one buffer word inverted after the run reads back as exactly 2
+#      bad pixels; `none`, no control, fails), exit 1 otherwise. Each line
+#      exactly once, each field exactly once and numeric, else exit 2.
 #
 # Exit: 0 every entry passes; 1 a check failed (run-paced.sh exit 1, or a
 # step 6 check); 2 a tool error in any entry (usage, build, flash, load,
@@ -116,7 +120,7 @@ summary=()
 # check_entry <name> <log> <rc> <clocked 0|1>: step 6 on run-paced.sh's
 # output; prints one summary line; returns 0/1/2.
 check_entry() {
-  local name=$1 log=$2 rc=$3 clocked=$4 n v rc6=0 core ring player input
+  local name=$1 log=$2 rc=$3 clocked=$4 n v rc6=0 core ring player input rbl
   line() { # line <prefix>: exactly one line of the log starting with it
     n=$(grep -c "^$1 " "$log")
     [ "$n" = 1 ] || { echo "run-replay.sh: $name: want exactly one '$1' line, run-paced.sh printed $n" >&2; return 2; }
@@ -141,6 +145,18 @@ check_entry() {
   # The run's underruns (run-paced.sh checks them); `stats player`'s count
   # also includes the drain and the stop.
   under=$(val "$ring" underrun_events) || return 2
+  # The panel readback, every value read before any check.
+  rbl=$(line 'stats display readback') || return 2
+  local rbn mism ctl
+  rbn=$(val "$rbl" readbacks) || return 2
+  mism=$(val "$rbl" mismatches) || return 2
+  n=$(tr ' ' '\n' <<< "$rbl" | grep -c "^control_mismatches=")
+  [ "$n" = 1 ] || { echo "run-replay.sh: $name: 'control_mismatches=' appears $n times in: $rbl" >&2; return 2; }
+  ctl=$(tr ' ' '\n' <<< "$rbl" | sed -n "s/^control_mismatches=//p")
+  [[ "$ctl" =~ ^([0-9]+|none)$ ]] || { echo "run-replay.sh: $name: 'control_mismatches=$ctl' is malformed in: $rbl" >&2; return 2; }
+  [ "$rbn" -ge 1 ] || { echo "run-replay.sh: CHECK FAILED: $name: stats display readback readbacks=0 (want >= 1)"; rc6=1; }
+  [ "$mism" = 0 ] || { echo "run-replay.sh: CHECK FAILED: $name: stats display readback mismatches=$mism (want 0)"; rc6=1; }
+  [ "$ctl" = 2 ] || { echo "run-replay.sh: CHECK FAILED: $name: stats display readback control_mismatches=$ctl (want 2)"; rc6=1; }
   local inp=""
   if [ "$clocked" = 1 ]; then
     input=$(line 'stats input') || return 2
@@ -159,7 +175,7 @@ check_entry() {
   grep -q '^run-paced.sh: EQUAL' "$log" && equal=yes
   local verdict=FAIL
   [ "$rc" = 0 ] && [ "$rc6" = 0 ] && verdict=PASS
-  summary+=("$name: $verdict equal=$equal underruns=$under over_budget=$ob core_max=$cmax$inp")
+  summary+=("$name: $verdict equal=$equal underruns=$under over_budget=$ob core_max=$cmax readbacks=$rbn mismatches=$mism$inp")
   [ "$rc" = 1 ] && return 1
   return $rc6
 }
