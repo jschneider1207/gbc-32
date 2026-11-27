@@ -160,7 +160,17 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- None. (Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link`: agents may not force-delete.)
+- Session 28 (2026-11-26), M7 in progress. Done and merged: gate board
+  steps B1-B5 (each run once on the board, all PASS; first version awaits
+  the human's approval, see Needs human), the three M7 reviews
+  (`docs/reviews/stage2-m7.md`, 30 findings, no high), fixes C1, C2, P1,
+  T1, T3, T4, T7, T10, and the Stage 3 carry-over list (architecture
+  "Targets", plan end). Open: T2 (panel readback inside `player-script`,
+  branch `m7-readback`, agent running), P2 (display stash MPU attribute,
+  measure first), then the full `gate-stage2.sh` run alone, then the
+  human checklist. Raw review notes were in the session scratchpad only;
+  the record is the reviews file.
+- Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
 
