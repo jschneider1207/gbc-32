@@ -31,7 +31,8 @@
 #   4. gbc-pc dump right away (d0); `gbc-pc play --seconds RUN_SAVE_WAIT`
 #      (default 12, ~700 frames; no keys; Stats come every 300 frames, so
 #      12 s hold at least two) whose last `Stats` must show
-#      saves_applied=1 and total_frames grown by >= 300 (one Stats window)
+#      saves_applied=1, rx_overflow=0 (the link receive ring never
+#      lapped, M7 C5) and total_frames grown by >= 300 (one Stats window)
 #      over the first one (the emulator ran); gbc-pc dump again
 #      (d1). Both must be byte-identical to RUN_SAVE_EXPECT (`cmp`). The
 #      default fixture's clock is halted (DH bit 6), latched = live, so
@@ -126,6 +127,8 @@ echo "$last"
 f0=$(field "$first" total_frames) f1=$(field "$last" total_frames) applied=$(field "$last" saves_applied)
 for v in "$f0" "$f1" "$applied"; do [[ "$v" =~ ^[0-9]+$ ]] || die "4 play: malformed Stats: $last"; done
 [ "$applied" = 1 ] || fail "4 play: saves_applied=$applied (want 1)"
+ovf=$(field "$last" rx_overflow)
+[ "$ovf" = 0 ] || fail "4 play: rx_overflow=$ovf (want 0: the link receive ring was lapped, M7 C5)"
 [ $((f1 - f0)) -ge 300 ] || fail "4 play: total_frames $f0 -> $f1 in $wait_s s (the emulator did not run)"
 dump d1 4
 same d0 4; same d1 4
