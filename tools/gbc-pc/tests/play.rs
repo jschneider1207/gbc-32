@@ -218,3 +218,44 @@ fn f5_dump_restamps_the_clock_footer_unless_raw() {
         assert_eq!(got[8192 + 40..], stamp.to_le_bytes());
     }
 }
+
+/// K4: a board-started dump (joystick chord, seq 0) whose `SaveBegin` is
+/// corrupted. Its chunks arrive with no job; play asks for the dump once.
+#[test]
+fn board_dump_with_corrupt_begin_is_requested_again() {
+    let save: Vec<u8> = (0..2500u32).map(|i| (i % 251) as u8).collect();
+    let mut board = SimBoard::new(1 << 20);
+    board.save = Some(save.clone());
+    board.dump_faults = vec![(0, DumpFault::CorruptBegin)];
+    board.board_dump();
+    let out = sav_out("chord-begin");
+    let opts = PlayOptions {
+        sav_out: Some(out.clone()),
+        ..PlayOptions::default()
+    };
+    let (c, r, _) = run(board, vec![keys(&[]); 60], opts);
+    assert_eq!(std::fs::read(&out).unwrap(), save);
+    assert_eq!(r.saves, 1);
+    // The chord's dump plus exactly one requested again, not one per chunk.
+    assert_eq!(c.transport().work.dumps, 2);
+}
+
+/// The chunks that follow a dump's last failure are not a new board-started
+/// dump: no endless re-request.
+#[test]
+fn leftover_chunks_of_a_failed_dump_do_not_restart_it() {
+    let mut board = SimBoard::new(1 << 20);
+    board.save = Some(vec![7; 5000]);
+    board.dump_faults = vec![(EVERY_DUMP, DumpFault::CorruptChunk(0))];
+    let out = sav_out("leftover");
+    let mut script = vec![keys(&[Key::F5])];
+    script.extend(vec![keys(&[]); 100]);
+    let opts = PlayOptions {
+        sav_out: Some(out.clone()),
+        ..PlayOptions::default()
+    };
+    let (c, r, _) = run(board, script, opts);
+    assert!(!out.exists());
+    assert_eq!(r.dumps_failed, 1);
+    assert_eq!(c.transport().work.dumps, 3, "first try + 2 retries");
+}

@@ -140,6 +140,9 @@ pub fn play<T: Transport>(
     let mut sched = InputSchedule::new(opts.refresh);
     let mut prev = KeySet::default();
     let mut job: Option<Job> = None;
+    // Seq of the dump that just ended: its leftover chunks are not a new
+    // board-started dump.
+    let mut quiet_seq: Option<u8> = None;
     let mut report = PlayReport {
         exit: Exit::Time,
         inputs: 0,
@@ -224,6 +227,23 @@ pub fn play<T: Transport>(
                     _ => report.ignored_naks += 1,
                 },
                 _ => {
+                    // A chunk with no job: its `SaveBegin` was lost (a
+                    // board-started dump, the joystick chord). Ask for
+                    // the dump again, once: the job now exists, so the
+                    // rest of the stray chunks (other seq) are ignored.
+                    // Not for chunks of a dump that just ended.
+                    if job.is_none()
+                        && matches!(msg, Incoming::SaveChunk { .. })
+                        && quiet_seq != Some(*seq)
+                    {
+                        let seq = client.send(&Message::SaveDumpRequest)?;
+                        job = Some(Job {
+                            rx: DumpRx::new(Some(seq)),
+                            attempts: 1,
+                            deadline: t + cfg.timeout,
+                        });
+                        event(PlayEvent::DumpStarted);
+                    }
                     if job.is_none() && matches!(msg, Incoming::SaveBegin { .. }) {
                         job = Some(Job {
                             rx: DumpRx::new(None),
@@ -256,6 +276,7 @@ pub fn play<T: Transport>(
         match step {
             DumpStep::Pending => {}
             DumpStep::Done(data) => {
+                quiet_seq = job.as_ref().and_then(|j| j.rx.seq());
                 job = None;
                 let (data, _) = crate::rtc::from_dump(data, opts.clock.map(|f| f()));
                 match &opts.sav_out {
@@ -275,6 +296,7 @@ pub fn play<T: Transport>(
             DumpStep::Failed(f) => {
                 let attempts = job.as_ref().map_or(0, |j| j.attempts);
                 if attempts > cfg.retries {
+                    quiet_seq = job.as_ref().and_then(|j| j.rx.seq());
                     job = None;
                     report.dumps_failed += 1;
                     event(PlayEvent::DumpFailed(f));

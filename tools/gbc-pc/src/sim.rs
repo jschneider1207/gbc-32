@@ -40,6 +40,8 @@ pub enum DumpFault {
     Truncate(usize),
     /// One byte of chunk frame `i` is changed (fails its CRC).
     CorruptChunk(usize),
+    /// The `SaveBegin` frame fails its CRC (the chunks are fine).
+    CorruptBegin,
     /// `SaveBegin.hash` is off by one.
     BadHash,
     /// A `Stats` frame goes out before every chunk (not a fault: the PC
@@ -356,6 +358,12 @@ impl SimBoard {
         }
     }
 
+    /// A dump nobody asked for (the joystick chord), with seq 0, as
+    /// `Session::board_dump` starts one.
+    pub fn board_dump(&mut self) {
+        self.dump(0);
+    }
+
     /// Answers `SaveDumpRequest` `seq`: `SaveBegin` then the chunks, all
     /// with `seq`; `Nak UnexpectedType` when there is no save.
     fn dump(&mut self, seq: u8) {
@@ -382,7 +390,11 @@ impl SimBoard {
             len: save.len() as u32,
             hash,
         };
-        self.out.extend(encode(&begin, seq));
+        let mut begin = encode(&begin, seq);
+        if faults.contains(&DumpFault::CorruptBegin) {
+            flip(&mut begin);
+        }
+        self.out.extend(begin);
         for (i, data) in save.chunks(self.dump_chunk).enumerate() {
             if faults.contains(&DumpFault::Truncate(i)) {
                 break;
