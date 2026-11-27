@@ -73,7 +73,7 @@ name the figures below were taken under:
 
 | Image | Features | What it does |
 |---|---|---|
-| `selftest-pll480` | `selftest` | The lib's bring-up and banner, the cycle counter on a known delay loop, a TCM probe. No emulator. **Flash this first.** |
+| `selftest-pll480` | `selftest` | The lib's bring-up and banner, the cycle counter on a known delay loop (run from ITCM), a TCM probe. No emulator. **Flash this first.** |
 | `clockcheck-pll480` | `clockcheck` | The selftest's bring-up, then the CPU clock measured against the LSE crystal ("Clock check"). No emulator. |
 | `bench-flash-axi-pll480` | none | Code in flash behind the I-cache; stack, emulator state and buffers in AXI SRAM behind the D-cache. |
 | `bench-flash-dtcm-pll480` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
@@ -276,6 +276,17 @@ h7bench v1 selftest n=43 delay=8000000 cycles=8000019 cyccnt=2649404 stack_used=
 - `cycles=` alternates 8,000,019 (odd `n`, and the line after a banner)
   and 8,000,008: every value repeats exactly, the 11-cycle step noted
   below for the older images.
+- **Since 2026-11-26** the timed loop runs from ITCM behind a `dsb`/`isb`
+  (`ItcmDelay` in `src/main.rs`) and `cycles=` is 8,000,019 on every
+  line. From flash the count depended on the code layout and on what ran
+  just before it: after d8c8588 the timed I-cache line shared its set
+  (two ways) with `<u32 as Display>::fmt` and `Board::banner`, and the
+  lines after each banner read 8,000,020-22 (gate B1 failed). The
+  11-cycle step above is most likely the LD1 toggle's GPIO write still in
+  flight at the first counter read: from ITCM without the barrier the
+  same 8,000,008 lines came back, and they went with the toggle removed.
+  The loop sits at the bottom of ITCM, clear of the `tcmprobe` word at
+  its top.
 - `tcmprobe` writes the top of ITCM (only while nothing is placed there)
   and the top of DTCM (only while the stack and statics are not in DTCM;
   otherwise a `.bss` word, which is then in DTCM).

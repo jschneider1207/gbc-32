@@ -409,15 +409,12 @@ fn main() -> ! {
 
     let mut board = board::init(PREFIX);
     board.measure_clock();
+    let delay = ItcmDelay::place();
     let mut n = 0u32;
     loop {
         if n.is_multiple_of(8) {
             banner!(board, "selftest");
         }
-        // A known loop, timed by the cycle counter. The count must be the
-        // same on every line (no interrupt is enabled) and of the order of
-        // DELAY: `asm::delay` runs DELAY/2 iterations of a two-instruction
-        // loop, which the M7 executes in 1 to 3 cycles each.
         // The TCM probe after every banner, so a port opened late sees it.
         if n % 8 == 1 {
             let (i, d) = tcm_probe(&board);
@@ -426,9 +423,13 @@ fn main() -> ! {
                 "h7bench v1 tcmprobe want={PROBE:#x} itcm={i:#x} dtcm={d:#x}\r"
             );
         }
+        // A known loop, timed by the cycle counter. The count must be the
+        // same on every line (no interrupt is enabled) and of the order of
+        // DELAY: `asm::delay`'s loop of DELAY + 1 iterations of `subs` and
+        // `bne`, which the M7 runs in one cycle each. From ITCM, so the
+        // count cannot depend on the I-cache (see [`ItcmDelay`]).
         let t0 = board::cycles();
-        cortex_m::asm::delay(DELAY);
-        let dt = board::cycles().wrapping_sub(t0);
+        let dt = delay.run(DELAY);
         let _ = writeln!(
             board.uart,
             "h7bench v1 selftest n={n} delay={DELAY} cycles={dt} cyccnt={} stack_used={}\r",
@@ -440,6 +441,122 @@ fn main() -> ! {
         board::wait_since(t0, board::CPU_HZ);
         board::led::toggle();
         n += 1;
+    }
+}
+
+/// The top word of ITCM, which [`tcm_probe`] writes.
+#[cfg(all(feature = "selftest", not(feature = "clockcheck")))]
+const ITCM_TOP: *mut u32 = 0x0000_FFF0 as *mut u32;
+
+/// The DWT cycle counter, DWT_CYCCNT (Armv7-M ARM C1.8.7; the lib's
+/// `cycles` reads it).
+#[cfg(all(feature = "selftest", not(feature = "clockcheck")))]
+const CYCCNT: *const u32 = 0xE000_1004 as *const u32;
+
+// The `selftest` line's timed loop (see [`ItcmDelay`]):
+// `h7bench_itcm_delay(iterations: r0, cyccnt: r1) -> cycles: r0` waits for
+// every earlier memory access to complete and refetches (`dsb`, `isb`),
+// reads the cycle counter, runs `cortex_m::asm::delay`'s loop (`subs` and
+// `bne` on an 8-byte boundary, `iterations` times), reads the counter
+// again and returns the difference. Position independent (no literal pool, no
+// absolute address), so a copy runs anywhere; the labels are plain
+// (not `.thumb_func`), so their addresses are the code's bytes, without
+// the Thumb bit.
+#[cfg(all(feature = "selftest", not(feature = "clockcheck")))]
+core::arch::global_asm!(
+    ".section .text.h7bench_itcm_delay,\"ax\",%progbits",
+    ".p2align 3",
+    ".global h7bench_itcm_delay_start",
+    ".global h7bench_itcm_delay_end",
+    "h7bench_itcm_delay_start:",
+    "    dsb",
+    "    isb",
+    "    ldr r2, [r1]",
+    "    .p2align 3",
+    "2:",
+    "    subs r0, #1",
+    "    bne 2b",
+    "    ldr r3, [r1]",
+    "    subs r0, r3, r2",
+    "    bx lr",
+    "h7bench_itcm_delay_end:",
+);
+
+/// The timed loop of the `selftest` line, copied from flash to ITCM.
+///
+/// From flash, the count depended on the I-cache (gate B1, 2026-11-26):
+/// the loop, both counter reads and the instructions between them were one
+/// 32-byte line, 0x0800_0420 in both builds, and the I-cache (16 KiB, two
+/// ways of 256 sets of 32 B, CCSIDR 0xf01fe009 read on the board: index
+/// bits 12:5, a way every 8 KiB) gives that line one set with 0x0800_2420
+/// and 0x0800_4420. The fault handler grown in d8c8588 moved
+/// `<u32 as Display>::fmt`, run for every line, onto 0x0800_4420, beside
+/// `Board::banner` on 0x0800_2420: three lines for two ways, so after each
+/// banner the timed line was refetched from flash for one to three lines,
+/// and those counts were 1 to 3 cycles high (8,000,020-22 for 8,000,019).
+/// With the I-cache invalidated before every count they were 8,000,010 and
+/// 8,000,024: a line fill's timing varies too. ITCM is not cached and has
+/// no wait states (DUI 0646 "Cache"), so the count no longer depends on
+/// what else ran or where the linker put it.
+///
+/// From ITCM without the `dsb`/`isb`, every even `n` but the banner's
+/// (`n % 8 == 0`) read 8,000,008 instead of 8,000,019: the LD1 toggle's
+/// GPIOB_BSRR write, just before the count, was still in flight when the
+/// first counter read ran (without the toggle: 8,000,019 on every line).
+/// The barrier completes it before the first read, so the window holds
+/// the loop alone.
+#[cfg(all(feature = "selftest", not(feature = "clockcheck")))]
+struct ItcmDelay(unsafe extern "C" fn(u32, *const u32) -> u32);
+
+#[cfg(all(feature = "selftest", not(feature = "clockcheck")))]
+impl ItcmDelay {
+    /// Copies the loop to the first free 8-byte boundary of ITCM, behind
+    /// whatever the lib placed there (nothing, in this image).
+    fn place() -> ItcmDelay {
+        unsafe extern "C" {
+            static h7bench_itcm_delay_start: u16;
+            static h7bench_itcm_delay_end: u16;
+            /// The lib's ITCM copy ends here (memory.x; ORIGIN(ITCM) when
+            /// nothing is placed).
+            static __eitcm: u16;
+        }
+        let src = &raw const h7bench_itcm_delay_start;
+        let len = (&raw const h7bench_itcm_delay_end) as usize - src as usize;
+        let dst = ((&raw const __eitcm) as usize).next_multiple_of(8) as *mut u16;
+        // The loop is a few halfwords; it must stay clear of the word
+        // `tcm_probe` writes.
+        assert!(len > 0 && len <= 64 && len.is_multiple_of(2));
+        assert!(dst as usize >= 0x100 && dst as usize + len <= ITCM_TOP as usize);
+        for i in 0..len / 2 {
+            // SAFETY: `src` .. `src + len` is the assembled loop in flash
+            // (its two labels); `dst` .. `dst + len` is inside the ITCM
+            // (checked above), behind the lib's ITCM code and below the
+            // probe word, so it holds nothing else, and the MPU maps ITCM
+            // read/write and executable (the lib's region 1).
+            unsafe { dst.add(i).write_volatile(src.add(i).read_volatile()) };
+        }
+        // Complete the stores before the instruction side fetches them
+        // (Armv7-M ARM A3.7.3), as the lib's `tcm::place` does.
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+        // SAFETY: `dst` now holds the routine above, a Thumb function with
+        // the AAPCS signature `(u32, *const u32) -> u32`; bit 0 selects
+        // Thumb state for the branch to it.
+        ItcmDelay(unsafe {
+            core::mem::transmute::<usize, unsafe extern "C" fn(u32, *const u32) -> u32>(
+                dst as usize | 1,
+            )
+        })
+    }
+
+    /// The cycles of `cortex_m::asm::delay(delay)`'s loop: `delay + 1`
+    /// iterations, as `asm::delay` runs (cortex-m 0.7.10), timed from
+    /// inside ITCM.
+    fn run(&self, delay: u32) -> u32 {
+        // SAFETY: the routine only reads the word its second argument
+        // points to, here the cycle counter, and clobbers only r0-r3 and
+        // the flags, which the AAPCS lets a callee clobber.
+        unsafe { (self.0)(delay.saturating_add(1), CYCCNT) }
     }
 }
 
@@ -463,7 +580,6 @@ const PROBE: u32 = 0x5A17_C0DE;
 fn tcm_probe(board: &board::Board) -> (u32, u32) {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    const ITCM_TOP: *mut u32 = 0x0000_FFF0 as *mut u32;
     const DTCM_TOP: *mut u32 = 0x2001_FFF0 as *mut u32;
     /// DTCM: RM0433 Table 7.
     const DTCM: core::ops::Range<usize> = 0x2000_0000..0x2002_0000;
@@ -477,8 +593,9 @@ fn tcm_probe(board: &board::Board) -> (u32, u32) {
 
     let itcm = if board.placed().0 == 0 {
         // SAFETY: the address is inside the 64 KB ITCM; with nothing
-        // placed in ITCM no code or data lives there, so the write
-        // disturbs nothing.
+        // placed in ITCM no code or data lives there but `ItcmDelay`'s
+        // loop at its bottom, which ends below this word (`place`
+        // asserts it), so the write disturbs nothing.
         unsafe {
             ITCM_TOP.write_volatile(PROBE);
             ITCM_TOP.read_volatile()
