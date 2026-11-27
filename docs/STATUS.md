@@ -202,9 +202,8 @@ Open (session 30, 2026-11-27):
   agent: please confirm keys still work in `play` under both conhost and
   Windows Terminal, and are ignored when another window has focus.
 - FYI (Q13, approved by you 2026-11-27): gbc-core now uses `tools/hard-rules` as a dev-dependency (its own 440-line copy and the drift test are gone; `cargo tree -p gbc-core -e normal,build` is still empty). `acceptance/README.md` item 8 still says "no dependencies of any kind"; please reword it to "no normal or build dependencies (only the hard-rules dev-dependency)" (contract text, yours).
-- **Sign-off item 2 (audio):** you heard the player's audio after ADR 0044
-  and said it sounded good. Count that as item 2, or still to do with
-  speakers on the DAC pins?
+- FYI: sign-off item 2 (audio) done (human, 2026-11-27, plan checklist
+  0f27541): the player's audio after ADR 0044 sounded good.
 - FYI, approved by you (2026-11-27, "go ahead with all of them"): ADR 0043
   (new crate `gbc-link-board`, amends ADR 0036's layout) and ADR 0044
   (neutral audio frame, link audio format byte, protocol 2; amends ADR

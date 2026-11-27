@@ -623,7 +623,7 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature
 - [ ] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire
 - [ ] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043)
-- [ ] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human
+- [x] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human (d2cfb51; human-approved 2026-11-27)
 
 Still open from M1-M6 (copied, also kept in their milestones):
 
