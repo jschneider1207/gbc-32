@@ -40,10 +40,13 @@
 //!
 //! # Speed
 //!
-//! No tables. Four source pixels become six output pixels, three words
-//! (`aa`, `bc`, `cd`). Each source row is converted once into a 480-byte
-//! stack row (in DTCM) which is then stored to the output twice for the
-//! doubled rows (source row 2k -> output rows 3k and 3k+1), and the single
+//! No tables. Two source pixels are read as one `u32` and converted
+//! together (`panel_pair`: three masks, two shifts, two ORs for both),
+//! then byte-swapped per half (`rev16`, one `REV16`) into wire order.
+//! Four source pixels become six output pixels, three words (`aa`, `bc`,
+//! `ce`), built from the two converted pairs with a shift or two. The
+//! doubled source row (2k -> output rows 3k and 3k+1) stores each word to
+//! both rows as it is made, with no stack row in between, and the single
 //! row (2k+1 -> 3k+2) is converted straight into the output. Nothing is
 //! ever read back from the output buffer. The hot loops use fixed-size
 //! array chunks, so there are no bounds checks or panics.
@@ -68,21 +71,40 @@ pub type OutFrame = [OutRow; OUT_H];
 /// One band: the three output rows made from two source rows.
 pub type OutBand = [OutRow; 3];
 
-/// One RGB555 pixel as the panel's 16-bit word, in the value (not byte)
-/// sense: `B5 G6 R5` from the top. See the module doc.
+/// Two RGB555 pixels (the first in the low half) as two panel words in the
+/// same halves, in the value (not byte) sense: `B5 G6 R5` from the top of
+/// each half. See the module doc. Per half: red (bits 0-4) stays; green
+/// and blue (bits 5-14) move up one (bits 6-15); green's top bit (bit 9)
+/// is copied to bit 5, g6 = (g << 1) | (g >> 4). Bit 15 of a source pixel
+/// is ignored (the core never sets it, ADR 0013): in the low half the
+/// shift moves it to bit 16, which the mask clears, and in the high half
+/// it falls off the top. No bit of one half reaches the other.
 #[inline(always)]
-const fn panel_word(p: u16) -> u16 {
-    // Bit 4 of g is p bit 9; it becomes g6's bit 0 (panel bit 5).
-    (p & 0x1F) | ((p & 0x7FE0) << 1) | ((p >> 9) & 1) << 5
+const fn panel_pair(w: u32) -> u32 {
+    (w & 0x001F_001F) | ((w << 1) & 0xFFC0_FFC0) | ((w >> 4) & 0x0020_0020)
 }
 
-/// Two panel words as one `u32` whose memory bytes are in wire order
-/// (high byte first within each pixel).
+/// Swaps the two bytes of each 16-bit half (one `REV16` on the Cortex-M7),
+/// so that the little-endian memory bytes of two panel words are the wire
+/// order: high byte first within each pixel.
+///
+/// Written as a byte swap plus a rotate rather than as the shift-and-mask
+/// form `(w >> 8) & 0x00FF_00FF | (w << 8) & 0xFF00_FF00`: LLVM folds
+/// that form into [`panel_pair`]'s masks and emits 8 instructions per
+/// pixel pair (`lsr`, `uxtb16`, `orr`, ...) instead of 5 and a `REV16`
+/// (thumbv7em, rustc 1.100.0, checked in the player image's disassembly).
 #[inline(always)]
-const fn wire_pair(first: u16, second: u16) -> u32 {
-    // Little-endian bytes of the result: hi(first) lo(first) hi(second)
-    // lo(second); each `swap_bytes` is one REV16 half.
-    (first.swap_bytes() as u32) | ((second.swap_bytes() as u32) << 16)
+const fn rev16(w: u32) -> u32 {
+    w.swap_bytes().rotate_left(16)
+}
+
+/// Four source pixels `a b c e` to the three output words for the pixels
+/// `a a b c c e` (source 0 0 1 2 2 3), in wire order.
+#[inline(always)]
+fn convert4(s: &[u16; 4]) -> [u32; 3] {
+    let ab = rev16(panel_pair(s[0] as u32 | (s[1] as u32) << 16));
+    let ce = rev16(panel_pair(s[2] as u32 | (s[3] as u32) << 16));
+    [ab << 16 | (ab & 0xFFFF), ab >> 16 | ce << 16, ce]
 }
 
 /// Converts one source row (160 pixels) to one output row (120 words).
@@ -91,16 +113,21 @@ fn convert_row(src: &[u16; SCREEN_WIDTH], dst: &mut OutRow) {
     let (src, _) = src.as_chunks::<4>();
     let (dst, _) = dst.as_chunks_mut::<3>();
     for (s, d) in src.iter().zip(dst.iter_mut()) {
-        let [a, b, c, e] = [
-            panel_word(s[0]),
-            panel_word(s[1]),
-            panel_word(s[2]),
-            panel_word(s[3]),
-        ];
-        // Output pixels: a a b c c e (source 0 0 1 2 2 3).
-        d[0] = wire_pair(a, a);
-        d[1] = wire_pair(b, c);
-        d[2] = wire_pair(c, e);
+        *d = convert4(s);
+    }
+}
+
+/// Converts one source row to two identical output rows, storing each word
+/// to both as it is made (no stack row, no reads of the output).
+#[inline(always)]
+fn convert_row_twice(src: &[u16; SCREEN_WIDTH], dst0: &mut OutRow, dst1: &mut OutRow) {
+    let (src, _) = src.as_chunks::<4>();
+    let (dst0, _) = dst0.as_chunks_mut::<3>();
+    let (dst1, _) = dst1.as_chunks_mut::<3>();
+    for ((s, d0), d1) in src.iter().zip(dst0.iter_mut()).zip(dst1.iter_mut()) {
+        let words = convert4(s);
+        *d0 = words;
+        *d1 = words;
     }
 }
 
@@ -145,15 +172,12 @@ pub fn to_wire_bytes(out: &OutFrame, bytes: &mut [u8; OUT_BYTES]) {
 }
 
 /// Source row `r0` (doubled) then `r1` (single) to the band's three rows.
-/// Row `r0` is converted once into a stack row, then stored twice, so the
-/// output buffer is only ever written.
+/// Row `r0` is converted once and each word stored to both of its rows, so
+/// the output buffer is only ever written.
 #[inline(always)]
 fn convert_band(r0: &[u16; SCREEN_WIDTH], r1: &[u16; SCREEN_WIDTH], out: &mut OutBand) {
     let [o0, o1, o2] = out;
-    let mut tmp: OutRow = [0; OUT_ROW_WORDS];
-    convert_row(r0, &mut tmp);
-    *o0 = tmp;
-    *o1 = tmp;
+    convert_row_twice(r0, o0, o1);
     convert_row(r1, o2);
 }
 
@@ -174,6 +198,62 @@ mod tests {
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^ (z >> 31)
+        }
+    }
+
+    /// The per-pixel conversion the scaler used before [`panel_pair`]
+    /// (one RGB555 pixel to one panel word, value sense), kept as the
+    /// reference for the two-pixel form.
+    const fn panel_word(p: u16) -> u16 {
+        // Bit 4 of g is p bit 9; it becomes g6's bit 0 (panel bit 5).
+        (p & 0x1F) | ((p & 0x7FE0) << 1) | ((p >> 9) & 1) << 5
+    }
+
+    /// Every u16 in each half of [`panel_pair`] against [`panel_word`],
+    /// with a varying neighbour in the other half (so a bit leaking across
+    /// halves shows), and [`rev16`] against `u16::swap_bytes` per half.
+    #[test]
+    fn panel_pair_matches_panel_word_exhaustively() {
+        for v in 0..=u16::MAX {
+            for other in [0, 0xFFFF, v.rotate_left(7) ^ 0xA5C3, !v] {
+                let lo = panel_pair(v as u32 | (other as u32) << 16);
+                let hi = panel_pair(other as u32 | (v as u32) << 16);
+                assert_eq!(lo as u16, panel_word(v), "low half {v:#06x}");
+                assert_eq!((hi >> 16) as u16, panel_word(v), "high half {v:#06x}");
+                let w = v as u32 | (other as u32) << 16;
+                assert_eq!(rev16(w) as u16, v.swap_bytes(), "rev16 low {v:#06x}");
+                assert_eq!((rev16(w) >> 16) as u16, other.swap_bytes());
+            }
+        }
+    }
+
+    /// Frames of one value per bit (alone and as its complement), bit 15
+    /// alone and with everything, and column/row stripes, against the
+    /// reference.
+    #[test]
+    fn matches_reference_on_edge_frames() {
+        let mut values: Vec<u16> = (0..16).map(|b| 1u16 << b).collect();
+        values.extend((0..16).map(|b| !(1u16 << b)));
+        values.extend([0x0000, 0xFFFF, 0x8000, 0x7FFF, 0x5555, 0xAAAA]);
+        for &p in &values {
+            let f = filled(p);
+            assert!(scaled(&f) == reference(&f), "pixel {p:#06x}");
+        }
+        // Stripes: alternating columns, then alternating rows, of a and b.
+        for (a, b) in [(0x0000, 0xFFFF), (0x7C1F, 0x03E0), (0x8000, 0x0201)] {
+            let mut f = filled(0);
+            for (i, p) in f.iter_mut().enumerate() {
+                *p = if i.is_multiple_of(2) { a } else { b };
+            }
+            assert!(scaled(&f) == reference(&f), "columns {a:#06x}/{b:#06x}");
+            for (i, p) in f.iter_mut().enumerate() {
+                *p = if (i / SCREEN_WIDTH).is_multiple_of(2) {
+                    a
+                } else {
+                    b
+                };
+            }
+            assert!(scaled(&f) == reference(&f), "rows {a:#06x}/{b:#06x}");
         }
     }
 
