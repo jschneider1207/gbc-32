@@ -17,9 +17,11 @@
 //! (not part of `init`: only the images that use it call it), [`lcd`] the
 //! shield's ST7789V panel on the FMC (likewise), [`lcd_dma`] its MDMA
 //! frame transfer synced to TE, [`audio_dac`] the DAC1 audio output
-//! (TIM6-triggered, DMA1 from a circular buffer; likewise). [`loader`] is
-//! the board side of the ROM loader protocol (`gbc-link`), behind a NOR
-//! trait.
+//! (TIM6-triggered, DMA1 from a circular buffer; likewise). [`loader`]
+//! (the ROM loader server, behind a NOR trait) and [`link_session`] (the
+//! player's link session, behind a game trait) are board-independent and
+//! live in `gbc-link-board` (ADR 0043); they are re-exported here so the
+//! images name them as before.
 //!
 //! Only the H753 at the D11 clock: no board or clock features. The image's
 //! `memory.x` comes from `memory_x::firmware_memory_x`, which defines the
@@ -39,9 +41,7 @@ pub mod joystick;
 pub mod lcd;
 pub mod lcd_dma;
 pub mod led;
-pub mod link_session;
 pub mod link_uart;
-pub mod loader;
 pub mod mpu;
 pub mod paced_board;
 pub mod power;
@@ -56,6 +56,7 @@ use cortex_m::peripheral::{DWT, SCB};
 pub use stm32h7::stm32h753v as pac;
 
 pub use clock::CPU_HZ;
+pub use gbc_link_board::{link_session, loader};
 pub use uart::Uart;
 
 /// The board's name, in every banner (and so in every image: the flash

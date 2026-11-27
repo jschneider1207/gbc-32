@@ -2,7 +2,9 @@
 //! the protocol (the loader over a fake flash, plus the M5 save load,
 //! save dump and `Input`, `docs/reference/link-protocol.md`), and
 //! [`Faulty`] sits in front of it and
-//! injects link faults. Both are [`Transport`]s whose reads never block:
+//! injects link faults. Frame capture, resend detection and the stored
+//! reply are the board's own code (`gbc_link_board::responder`, ADR
+//! 0043); the message handling is this file's. Both are [`Transport`]s whose reads never block:
 //! a read with nothing queued returns 0 at once, which the client treats
 //! as the timeout passing.
 
@@ -10,7 +12,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
-use gbc_link::{FrameDecoder, MAX_FRAME, Message, NakCode, PROTOCOL_VERSION};
+use gbc_link::{MAX_FRAME, Message, NakCode, PROTOCOL_VERSION};
+use gbc_link_board::responder::{Received, Responder};
 
 use crate::client::IMAGE_HEADER_LEN;
 use crate::fnv;
@@ -97,9 +100,8 @@ pub struct SimBoard {
     /// The save load in progress: length, hash, bytes so far.
     save_load: Option<(u32, u64, Vec<u8>)>,
     state: State,
-    raw: Vec<u8>,
-    /// The last request frame answered and its reply, both as on the wire.
-    last: Option<(Vec<u8>, Vec<u8>)>,
+    /// The board's frame capture, resend detection and stored reply.
+    link: Responder,
     out: VecDeque<u8>,
 }
 
@@ -124,8 +126,7 @@ impl SimBoard {
             audio_script: Vec::new(),
             save_load: None,
             state: State::Idle,
-            raw: Vec::new(),
-            last: None,
+            link: Responder::new(),
             out: VecDeque::new(),
         }
     }
@@ -171,37 +172,28 @@ impl SimBoard {
 
     /// Feeds received bytes; answers each complete frame.
     pub fn receive(&mut self, data: &[u8]) {
+        // Out of `self` while it borrows a frame, so `handle` gets `&mut self`.
+        let mut link = std::mem::take(&mut self.link);
         for &b in data {
-            if b != 0 {
-                self.raw.push(b);
-            } else if !self.raw.is_empty() {
-                let mut frame = std::mem::take(&mut self.raw);
-                frame.push(0);
-                self.handle(&frame);
+            if let Some(rx) = link.feed(b) {
+                self.handle(rx);
             }
         }
+        self.link = link;
     }
 
-    fn handle(&mut self, frame: &[u8]) {
-        let mut dec = FrameDecoder::new();
-        let mut decoded = None;
-        for &b in frame {
-            if let Some(d) = dec.feed(b) {
-                decoded = Some(d.map(|(s, m)| (s, owned(&m))));
-            }
-        }
-        let (seq, msg) = match decoded {
-            Some(Ok(x)) => x,
-            Some(Err(e)) => {
+    fn handle(&mut self, rx: Received<'_>) {
+        let req = match rx {
+            Received::BadFrame { nak } => {
                 self.work.bad_frames += 1;
-                let reply = encode(&Message::Nak { code: e.nak_code() }, e.seq().unwrap_or(0));
-                self.out.extend(reply);
+                self.out.extend(nak.expect("a Nak fits REPLY_MAX"));
                 return;
             }
-            None => return,
+            Received::Request(req) => req,
         };
+        let (seq, msg) = (req.seq, owned(&req.msg));
         // `Input` is not answered (and not a request to repeat); a dump
-        // is a stream, every request a fresh snapshot.
+        // is a stream, every request a fresh snapshot. Neither is stored.
         match msg {
             Req::Input { buttons } => {
                 self.inputs.push(buttons);
@@ -214,22 +206,22 @@ impl SimBoard {
             _ => {}
         }
         // A repeat of the last answered frame is a resend: answer again,
-        // don't redo the work. `Hello` opens a session, so it is always
-        // handled afresh and forgets the last frame (a new session's
-        // seqs restart and may equal the old session's last one).
-        if matches!(msg, Req::Hello) {
-            self.last = None;
-        } else if let Some((req, reply)) = &self.last
-            && req == frame
-        {
-            self.work.duplicates += 1;
-            self.out.extend(reply.iter().copied());
-            return;
-        }
+        // don't redo the work. `Hello` opens a session, so it is never a
+        // resend (a new session's seqs restart and may equal the old
+        // session's last one).
+        let req = match req.resend() {
+            Ok(reply) => {
+                self.work.duplicates += 1;
+                self.out.extend(reply.iter().copied());
+                return;
+            }
+            Err(req) => req,
+        };
         let reply = self.answer(msg);
-        let wire = encode(&reply.as_message(), seq);
+        let wire = req
+            .answer(&reply.as_message())
+            .expect("every sim reply fits REPLY_MAX");
         self.out.extend(wire.iter().copied());
-        self.last = Some((frame.to_vec(), wire));
         if self.audio_on {
             for (first, held, frames) in std::mem::take(&mut self.audio_script) {
                 self.push_audio(first, held, &frames);

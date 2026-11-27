@@ -1,12 +1,9 @@
 //! The PC client against the board's real link session
-//! (`crates/gbc-nucleo-h753/src/link_session.rs`, compiled here on the
-//! host) over a fake game: `load --sav` (ROM `AlreadyLoaded`, then the
-//! save), dumps, refusals that apply nothing, live input and its timeout.
+//! (`gbc_link_board::link_session`, the code the `player` and
+//! `link-probe` images run) over a fake game: `load --sav` (ROM
+//! `AlreadyLoaded`, then the save), dumps, refusals that apply nothing,
+//! live input and its timeout.
 //! `tests/save.rs` runs the same client against the simulated board.
-
-#[path = "../../../crates/gbc-nucleo-h753/src/link_session.rs"]
-#[allow(dead_code)]
-mod link_session;
 
 use std::collections::VecDeque;
 use std::io;
@@ -15,11 +12,11 @@ use std::time::{Duration, Instant};
 use gbc_firmware::buttons::Shared;
 use gbc_firmware::save::{ClockKind, Image, Layout};
 use gbc_link::{FrameDecoder, Message, NakCode, buttons};
+use gbc_link_board::link_session::{self, Game, PC_TIMEOUT_FRAMES, Session};
 use gbc_pc::input::{Key, KeySet};
 use gbc_pc::play::{Keyboard, PlayOptions, play};
 use gbc_pc::sim::encode;
 use gbc_pc::{Client, Config, Error, Failure, LoadOutcome, Transport, fnv};
-use link_session::{Game, PC_TIMEOUT_FRAMES, Session};
 
 const RAM: usize = 32 * 1024;
 const SAVE_LEN: usize = RAM + 48;

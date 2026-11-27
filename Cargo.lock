@@ -655,12 +655,21 @@ name = "gbc-link"
 version = "0.1.0"
 
 [[package]]
+name = "gbc-link-board"
+version = "0.1.0"
+dependencies = [
+ "gbc-firmware",
+ "gbc-link",
+]
+
+[[package]]
 name = "gbc-pc"
 version = "0.1.0"
 dependencies = [
  "gbc-core",
  "gbc-firmware",
  "gbc-link",
+ "gbc-link-board",
  "gbc-pc",
  "windows-sys 0.61.2",
 ]

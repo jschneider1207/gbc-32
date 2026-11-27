@@ -856,10 +856,10 @@ pub fn exit_fallbacks() -> u32 {
 
 /// The NOR's page: a program never crosses one (MX25L6433F 10-19).
 pub const PAGE_BYTES: u32 = 256;
-/// The 4 KiB sector of [`Qspi::erase_4k`] (SE, 0x20).
-pub const SECTOR_BYTES: u32 = 4096;
-/// The 64 KiB block of [`Qspi::erase_64k`] (BE, 0xD8).
-pub const BLOCK_BYTES: u32 = 65536;
+/// The 4 KiB sector of [`Qspi::erase_4k`] (SE, 0x20) and the 64 KiB block
+/// of [`Qspi::erase_64k`] (BE, 0xD8): defined once, with the loader that
+/// erases in these units (`gbc_link_board::loader`, Q11).
+pub use gbc_link_board::loader::{BLOCK_BYTES, SECTOR_BYTES};
 
 const CMD_PP: u8 = 0x02;
 const CMD_RDSR: u8 = 0x05;

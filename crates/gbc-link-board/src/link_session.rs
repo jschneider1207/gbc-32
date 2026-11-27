@@ -6,12 +6,12 @@
 //! [`Game`] trait and the UART is the caller's. The caller feeds every
 //! received byte to [`Session::feed`] and, whenever its transmitter is
 //! idle, lets [`Session::fill_tx`] write the next frames to send into its
-//! transmit buffer. Only `core`, `gbc_link` and `gbc_firmware` paths are
-//! used, so `tools/gbc-pc/tests/link_session.rs` compiles this file on
-//! the host (`#[path]`) and runs the PC client against it.
+//! transmit buffer. `tools/gbc-pc/tests/link_session.rs` runs the PC
+//! client against it on the host.
 //!
 //! Behavior per message:
-//! - Stop-and-wait replies as the loader: a frame byte-identical to the
+//! - Stop-and-wait replies as the loader ([`crate::responder`], the same
+//!   code): a frame byte-identical to the
 //!   last answered request is a resend and gets the stored reply (the
 //!   save verdict included) without being redone. `Hello` is handled
 //!   afresh and forgets the last frame. A frame that fails COBS, CRC or
@@ -75,12 +75,13 @@ use gbc_firmware::fnv;
 use gbc_firmware::save::{
     self, ClockKind, HUC3_FOOTER_LEN, Image, Layout, MBC3_FOOTER_LEN, VBA_FOOTER_LEN,
 };
-use gbc_link::{FrameDecoder, MAX_ENCODED, MAX_FRAME, Message, NakCode, PROTOCOL_VERSION};
+use gbc_link::{MAX_FRAME, Message, NakCode, PROTOCOL_VERSION};
 
 /// The largest chunk this board takes (`HelloReply.max_chunk`), and the
-/// size of the chunks it dumps: the protocol's maximum.
-pub const MAX_CHUNK: u16 = gbc_link::MAX_CHUNK as u16;
-const _: () = assert!(MAX_CHUNK as usize == gbc_link::MAX_CHUNK);
+/// size of the chunks it dumps: the protocol's maximum. The reply buffer
+/// sizes, shared with the loader.
+pub use crate::responder::{MAX_CHUNK, REPLY_BODY_MAX, REPLY_FRAME_MAX, REPLY_MAX};
+use crate::responder::{Received, Responder, encode_reply};
 
 /// Frames without an `Input` after which the PC's buttons are released:
 /// 1.5 s at 60 Hz, three times the PC's 500 ms repeat
@@ -156,32 +157,17 @@ struct Dump {
     next: u32,
 }
 
-/// The largest reply body: `HelloReply` (protocol u16, max_chunk u16,
-/// flash_len u32), 8 bytes; `Nak` has 1, `Ack` and `AlreadyLoaded` none
-/// (`tests/link_session.rs` encodes each).
-pub const REPLY_BODY_MAX: usize = 8;
-
-/// One reply frame's buffer: at least [`REPLY_FRAME_MAX`], with room to spare.
-pub const REPLY_MAX: usize = 32;
-/// The largest reply frame on the wire: type, seq, body and CRC, COBS-encoded,
-/// plus the delimiter.
-pub const REPLY_FRAME_MAX: usize = gbc_link::cobs::max_encoded_len(2 + REPLY_BODY_MAX + 4) + 1;
-const _: () = assert!(REPLY_FRAME_MAX <= REPLY_MAX);
 /// Replies waiting for the transmitter.
 const QUEUE_MAX: usize = 8 * REPLY_MAX;
 
-/// Everything but the decoder and the frame being received, so a decoded
-/// message (which borrows the decoder) can be handled with `&mut` to it.
+/// Everything but the responder, so a decoded message (which borrows the
+/// responder) can be handled with `&mut` to it.
 struct State<'b> {
     buf: &'b mut [u8],
     flash_len: u32,
     counters: Counters,
     load: Option<Load>,
     dump: Option<Dump>,
-    last_req: [u8; MAX_ENCODED],
-    last_req_len: usize,
-    last_reply: [u8; REPLY_MAX],
-    last_reply_len: usize,
     queue: [u8; QUEUE_MAX],
     queue_len: usize,
     frames_since_input: u32,
@@ -192,10 +178,7 @@ struct State<'b> {
 }
 
 pub struct Session<'b> {
-    dec: FrameDecoder,
-    /// The frame being received, as on the wire (no delimiter).
-    raw: [u8; MAX_ENCODED],
-    raw_len: usize,
+    link: Responder,
     st: State<'b>,
 }
 
@@ -231,19 +214,13 @@ impl<'b> Session<'b> {
     /// the games take: 128 KiB + 48); `flash_len` goes into `HelloReply`.
     pub fn new(buf: &'b mut [u8], flash_len: u32) -> Self {
         Self {
-            dec: FrameDecoder::new(),
-            raw: [0; MAX_ENCODED],
-            raw_len: 0,
+            link: Responder::new(),
             st: State {
                 buf,
                 flash_len,
                 counters: Counters::default(),
                 load: None,
                 dump: None,
-                last_req: [0; MAX_ENCODED],
-                last_req_len: 0,
-                last_reply: [0; REPLY_MAX],
-                last_reply_len: 0,
                 queue: [0; QUEUE_MAX],
                 queue_len: 0,
                 frames_since_input: 0,
@@ -293,34 +270,20 @@ impl<'b> Session<'b> {
 
     /// One received byte.
     pub fn feed(&mut self, b: u8, game: &mut impl Game, shared: &Shared) {
-        if b != 0 {
-            // Past MAX_ENCODED the decoder reports Oversize; the raw copy
-            // is then never compared.
-            if let Some(slot) = self.raw.get_mut(self.raw_len) {
-                *slot = b;
-                self.raw_len += 1;
-            }
-        }
-        let decoded = self.dec.feed(b);
-        if b == 0 && decoded.is_none() {
-            // An empty frame (a lone 0x00): ignored.
-            self.raw_len = 0;
-        }
-        let Some(decoded) = decoded else { return };
-        let raw_len = core::mem::take(&mut self.raw_len);
+        let Some(rx) = self.link.feed(b) else { return };
         let st = &mut self.st;
-        let (seq, msg) = match decoded {
-            Ok(x) => x,
-            Err(e) => {
+        let req = match rx {
+            Received::BadFrame { nak } => {
                 st.counters.bad_frames += 1;
-                st.queue_msg(&nak(e.nak_code()), e.seq().unwrap_or(0));
+                st.queue_reply(nak);
                 return;
             }
+            Received::Request(req) => req,
         };
         st.counters.frames += 1;
         st.frames_since_rx = 0;
-        let raw = self.raw.get(..raw_len).unwrap_or(&[]);
-        match msg {
+        // Never answered from the store, and never stored.
+        match req.msg {
             Message::Input { buttons } => {
                 st.counters.inputs += 1;
                 st.frames_since_input = 0;
@@ -328,30 +291,24 @@ impl<'b> Session<'b> {
                 return;
             }
             Message::SaveDumpRequest => {
-                st.start_dump(seq, game);
-                return;
-            }
-            Message::Hello { .. } => st.last_req_len = 0,
-            _ if st.last_req_len != 0 && st.last_req.get(..st.last_req_len) == Some(raw) => {
-                st.counters.duplicates += 1;
-                let n = st.last_reply_len;
-                let reply = st.last_reply;
-                st.queue_wire(reply.get(..n).unwrap_or(&[]));
+                st.start_dump(req.seq, game);
                 return;
             }
             _ => {}
         }
-        let answer = st.handle(msg, game);
+        let req = match req.resend() {
+            Ok(wire) => {
+                st.counters.duplicates += 1;
+                st.queue_wire(wire);
+                return;
+            }
+            Err(req) => req,
+        };
+        let answer = st.handle(req.msg, game);
         if let Message::Nak { .. } = answer {
             st.counters.naks += 1;
         }
-        st.last_reply_len = encode_reply(&answer, seq, &mut st.last_reply, &mut st.counters);
-        let reply = st.last_reply;
-        st.queue_wire(reply.get(..st.last_reply_len).unwrap_or(&[]));
-        if let Some(dst) = st.last_req.get_mut(..raw_len) {
-            dst.copy_from_slice(raw);
-            st.last_req_len = raw_len;
-        }
+        st.queue_reply(req.answer(&answer));
     }
 
     /// Starts a dump nobody asked for (the joystick chord), with seq 0.
@@ -439,15 +396,6 @@ impl<'b> Session<'b> {
     }
 }
 
-/// Encodes a reply into `out`: its length, or 0 (nothing to send, counted
-/// in [`Counters::replies_dropped`]) if it does not fit.
-fn encode_reply(msg: &Message<'_>, seq: u8, out: &mut [u8], counters: &mut Counters) -> usize {
-    gbc_link::encode(msg, seq, out).unwrap_or_else(|_| {
-        counters.replies_dropped += 1;
-        0
-    })
-}
-
 impl State<'_> {
     fn queue_wire(&mut self, wire: &[u8]) {
         match self
@@ -462,12 +410,19 @@ impl State<'_> {
         }
     }
 
+    /// Queues a reply's wire; `None` (it did not fit [`REPLY_MAX`]) is
+    /// counted in [`Counters::replies_dropped`].
+    fn queue_reply(&mut self, wire: Option<&[u8]>) {
+        match wire {
+            Some(w) => self.queue_wire(w),
+            None => self.counters.replies_dropped += 1,
+        }
+    }
+
     fn queue_msg(&mut self, msg: &Message<'_>, seq: u8) {
         let mut wire = [0u8; REPLY_MAX];
-        let n = encode_reply(msg, seq, &mut wire, &mut self.counters);
-        if n != 0 {
-            self.queue_wire(wire.get(..n).unwrap_or(&[]));
-        }
+        let n = encode_reply(msg, seq, &mut wire);
+        self.queue_reply(n.and_then(|n| wire.get(..n)));
     }
 
     fn start_dump(&mut self, seq: u8, game: &mut impl Game) {

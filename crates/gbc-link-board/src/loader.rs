@@ -2,16 +2,15 @@
 //! in `gbc-link`; image format ADR 0037; this design ADR 0038). It is
 //! board-independent: the NOR is behind the small [`Nor`] trait and the
 //! UART is the caller's (it feeds received bytes to [`Loader::feed`] and
-//! sends the [`Reply`] bytes it gets back). Only `core`, `gbc_link` and
-//! `gbc_firmware` paths are used here, so `tools/gbc-pc/tests/board.rs`
-//! compiles this same file on the host (`#[path]`) and runs the PC
-//! client against it over a fake NOR.
+//! sends the [`Reply`] bytes it gets back). `tools/gbc-pc/tests/board.rs`
+//! runs the PC client against it on the host over a fake NOR.
 //!
 //! Behavior (the PC side's reference is `tools/gbc-pc/src/sim.rs`):
-//! - Stop-and-wait. A frame byte-identical to the last answered request
-//!   (same `seq`, same content: a resend) is answered with the stored
-//!   reply and not redone. `Hello` is always handled afresh and forgets
-//!   the last frame (each PC session restarts `seq` at 0).
+//! - Stop-and-wait ([`crate::responder`]). A frame byte-identical to the
+//!   last answered request (same `seq`, same content: a resend) is
+//!   answered with the stored reply and not redone. `Hello` is always
+//!   handled afresh and forgets the last frame (each PC session restarts
+//!   `seq` at 0).
 //! - A frame that fails COBS, CRC or its length check is answered `Nak`
 //!   with [`gbc_link::DecodeError::nak_code`], with its `seq` when the CRC
 //!   vouches for it, else 0. It is not remembered, and its `Nak` never
@@ -49,14 +48,16 @@
 //! - Anything else (save, input, board-to-PC types): `Nak UnexpectedType`.
 
 use gbc_firmware::rom_image::{self, HEADER_LEN, ImageError, ImageHeader};
-use gbc_link::{FrameDecoder, MAX_ENCODED, Message, NakCode, PROTOCOL_VERSION};
+use gbc_link::{Message, NakCode, PROTOCOL_VERSION};
 
 /// The largest chunk this board takes (`HelloReply.max_chunk`): the
-/// protocol's maximum, four NOR pages.
-pub const MAX_CHUNK: u16 = gbc_link::MAX_CHUNK as u16;
-const _: () = assert!(MAX_CHUNK as usize == gbc_link::MAX_CHUNK);
+/// protocol's maximum, four NOR pages. The reply buffer sizes, shared
+/// with the link session.
+pub use crate::responder::{MAX_CHUNK, REPLY_BODY_MAX, REPLY_FRAME_MAX, REPLY_MAX};
+use crate::responder::{Received, Responder};
 
-/// Erase units of the NOR (MX25L6433F SE 0x20 and BE 0xD8).
+/// Erase units of the NOR (MX25L6433F SE 0x20 and BE 0xD8); the board's
+/// QSPI driver re-exports these, so they are defined once (Q11).
 pub const SECTOR_BYTES: u32 = 4096;
 pub const BLOCK_BYTES: u32 = 65536;
 
@@ -123,18 +124,6 @@ enum State {
     },
 }
 
-/// The largest reply body: `HelloReply` (protocol u16, max_chunk u16,
-/// flash_len u32) and `RomDone` (hash u64), 8 bytes; `Nak` has 1, `Ack`
-/// and `AlreadyLoaded` none (`tests/board.rs` encodes each).
-pub const REPLY_BODY_MAX: usize = 8;
-
-/// The reply buffer: at least [`REPLY_FRAME_MAX`], with room to spare.
-pub const REPLY_MAX: usize = 32;
-/// The largest reply frame on the wire: type, seq, body and CRC, COBS-encoded,
-/// plus the delimiter.
-pub const REPLY_FRAME_MAX: usize = gbc_link::cobs::max_encoded_len(2 + REPLY_BODY_MAX + 4) + 1;
-const _: () = assert!(REPLY_FRAME_MAX <= REPLY_MAX);
-
 /// One answered frame, from [`Loader::feed`].
 #[derive(Clone, Copy, Debug)]
 pub struct Reply<'a> {
@@ -159,20 +148,7 @@ pub struct Loader<N: Nor> {
     /// The last NOR error, for the status line.
     pub last_flash_error: Option<N::Error>,
     state: State,
-    dec: FrameDecoder,
-    /// The frame being received, as on the wire (no delimiter), to tell a
-    /// resend from a new request.
-    raw: [u8; MAX_ENCODED],
-    raw_len: usize,
-    /// The last answered request, as on the wire; length 0 = none.
-    last_req: [u8; MAX_ENCODED],
-    last_req_len: usize,
-    /// The reply to `last_req`, replayed for a resend.
-    reply: [u8; REPLY_MAX],
-    reply_len: usize,
-    /// The `Nak` for a frame that did not decode: kept apart from `reply`
-    /// so the stored reply survives it.
-    bad_reply: [u8; REPLY_MAX],
+    link: Responder,
 }
 
 impl<N: Nor> Loader<N> {
@@ -182,14 +158,7 @@ impl<N: Nor> Loader<N> {
             counters: Counters::default(),
             last_flash_error: None,
             state: State::Idle,
-            dec: FrameDecoder::new(),
-            raw: [0; MAX_ENCODED],
-            raw_len: 0,
-            last_req: [0; MAX_ENCODED],
-            last_req_len: 0,
-            reply: [0; REPLY_MAX],
-            reply_len: 0,
-            bad_reply: [0; REPLY_MAX],
+            link: Responder::new(),
         }
     }
 
@@ -216,81 +185,55 @@ impl<N: Nor> Loader<N> {
     /// Feeds one received byte. When it ends a frame, the frame is
     /// answered and the reply returned (send all of `wire`).
     pub fn feed(&mut self, b: u8) -> Option<Reply<'_>> {
-        if b != 0 {
-            // Past MAX_ENCODED the decoder reports Oversize; the raw copy
-            // is then never compared.
-            if let Some(slot) = self.raw.get_mut(self.raw_len) {
-                *slot = b;
-                self.raw_len += 1;
-            }
-        }
-        let decoded = self.dec.feed(b);
-        if b == 0 && decoded.is_none() {
-            // An empty frame (a lone 0x00): ignored.
-            self.raw_len = 0;
-        }
-        let decoded = decoded?;
-        let raw_len = core::mem::take(&mut self.raw_len);
-        let (seq, msg) = match decoded {
-            Ok(x) => x,
-            Err(e) => {
+        let req = match self.link.feed(b)? {
+            Received::BadFrame { nak } => {
                 self.counters.bad_frames += 1;
-                let nak = Message::Nak { code: e.nak_code() };
-                let n = encode_reply(
-                    &nak,
-                    e.seq().unwrap_or(0),
-                    &mut self.bad_reply,
-                    &mut self.counters,
-                );
                 return Some(Reply {
-                    wire: self.bad_reply.get(..n).unwrap_or(&[]),
+                    wire: sent(nak, &mut self.counters),
                     request: None,
                     duplicate: false,
                 });
             }
+            Received::Request(req) => req,
         };
         self.counters.frames += 1;
-        let raw = self.raw.get(..raw_len).unwrap_or(&[]);
-        let ty = msg.type_code();
-        if matches!(msg, Message::Hello { .. }) {
-            self.last_req_len = 0;
-        } else if self.last_req_len != 0 && self.last_req.get(..self.last_req_len) == Some(raw) {
-            self.counters.duplicates += 1;
-            return Some(Reply {
-                wire: self.reply.get(..self.reply_len).unwrap_or(&[]),
-                request: Some(ty),
-                duplicate: true,
-            });
-        }
+        let ty = req.msg.type_code();
+        let req = match req.resend() {
+            Ok(wire) => {
+                self.counters.duplicates += 1;
+                return Some(Reply {
+                    wire,
+                    request: Some(ty),
+                    duplicate: true,
+                });
+            }
+            Err(req) => req,
+        };
         let mut s = Session {
             nor: &mut self.nor,
             state: &mut self.state,
             counters: &mut self.counters,
             last_flash_error: &mut self.last_flash_error,
         };
-        let answer = s.handle(msg);
+        let answer = s.handle(req.msg);
         if let Message::Nak { .. } = answer {
             self.counters.naks += 1;
         }
-        self.reply_len = encode_reply(&answer, seq, &mut self.reply, &mut self.counters);
-        if let Some(dst) = self.last_req.get_mut(..raw_len) {
-            dst.copy_from_slice(raw);
-            self.last_req_len = raw_len;
-        }
+        let wire = req.answer(&answer);
         Some(Reply {
-            wire: self.reply.get(..self.reply_len).unwrap_or(&[]),
+            wire: sent(wire, &mut self.counters),
             request: Some(ty),
             duplicate: false,
         })
     }
 }
 
-/// Encodes a reply into `out`: its length, or 0 (nothing to send, counted
-/// in [`Counters::replies_dropped`]) if it does not fit.
-fn encode_reply(msg: &Message<'_>, seq: u8, out: &mut [u8], counters: &mut Counters) -> usize {
-    gbc_link::encode(msg, seq, out).unwrap_or_else(|_| {
+/// A reply's wire, or nothing (counted in [`Counters::replies_dropped`])
+/// if it did not fit the reply buffer.
+fn sent<'a>(wire: Option<&'a [u8]>, counters: &mut Counters) -> &'a [u8] {
+    wire.unwrap_or_else(|| {
         counters.replies_dropped += 1;
-        0
+        &[]
     })
 }
 

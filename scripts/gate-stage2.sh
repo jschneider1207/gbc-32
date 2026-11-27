@@ -664,8 +664,9 @@ step H7 "Host unit tests of the firmware logic, named"
 # converter (gbc-firmware video), the DC blocker and DAC conversion
 # (gbc-firmware audio), debounce (gbc-firmware buttons), the image header
 # (gbc-firmware rom_image), the save footer (gbc-firmware save), serial
-# framing (gbc-link COBS, CRC and message framing), and tools/gbc-pc's
-# ROM load, input and save/RTC host logic.
+# framing (gbc-link COBS, CRC and message framing), the board servers'
+# shared resend/stored-reply logic and hard rules (gbc-link-board, ADR
+# 0043), and tools/gbc-pc's ROM load, input and save/RTC host logic.
 sub "scripts/test-board-lock.sh (scripts/lib/board-lock.sh: serializes, re-enters, times out)"
 run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
@@ -786,6 +787,23 @@ gbc-link save_dump_stream_decodes_in_order
 gbc-link short_and_non_cobs_frames
 gbc-link unknown_types_are_errors
 gbc-link wrong_body_length_is_bad_length
+gbc-link-board allows_test_modules_comments_strings_and_core_alloc
+gbc-link-board catches_extern_crate_however_written
+gbc-link-board catches_path_and_include
+gbc-link-board catches_std_and_alloc_paths
+gbc-link-board catches_unsafe_anywhere
+gbc-link-board crate_attributes_are_found
+gbc-link-board dependency_tables_are_found
+gbc-link-board escaped_quote_char_literals_lex_as_one_token
+gbc-link-board leading_inner_attributes_only
+gbc-link-board link_board_depends_on_gbc_link_and_gbc_firmware_only
+gbc-link-board link_board_has_no_build_script_or_lib_path
+gbc-link-board link_board_sources_follow_the_rules
+gbc-link-board manifest_escape_hatches_are_found
+gbc-link-board responder::tests::a_bad_frame_is_naked_and_keeps_the_stored_reply
+gbc-link-board responder::tests::a_resend_gets_the_stored_reply
+gbc-link-board responder::tests::an_unanswered_request_stores_nothing
+gbc-link-board responder::tests::hello_is_never_a_resend
 gbc-pc already_loaded_is_skipped
 gbc-pc corrupt_reply_is_resent
 gbc-pc corrupt_request_is_naked_and_resent

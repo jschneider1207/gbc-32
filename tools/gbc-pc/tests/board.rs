@@ -1,14 +1,10 @@
 //! The PC client against the board's real loader session
-//! (`crates/gbc-nucleo-h753/src/loader.rs`, compiled here on the host)
+//! (`gbc_link_board::loader`, the code the `loader` image runs)
 //! over a fake NOR that behaves like one: erase sets 0xFF, program can
 //! only clear bits, and programming a byte that is not erased is counted
 //! as an error. `tests/load.rs` runs the same client against the
 //! simulated board (`gbc_pc::sim`); this checks that the firmware's own
 //! logic agrees with it, and the NOR-side rules (lazy erase, header last).
-
-#[path = "../../../crates/gbc-nucleo-h753/src/loader.rs"]
-#[allow(dead_code)]
-mod loader;
 
 use std::collections::VecDeque;
 use std::io;
@@ -16,9 +12,9 @@ use std::time::Duration;
 
 use gbc_firmware::rom_image::{self, ImageError};
 use gbc_link::{FrameDecoder, Message, NakCode};
+use gbc_link_board::loader::{self, BLOCK_BYTES, Loader, Nor, SECTOR_BYTES};
 use gbc_pc::sim::encode;
 use gbc_pc::{Client, Config, Error, LoadOutcome, Transport, fnv};
-use loader::{BLOCK_BYTES, Loader, Nor, SECTOR_BYTES};
 
 const FLASH: usize = 8 << 20;
 
