@@ -96,7 +96,7 @@ Per window (the frames since the last report):
 |---|---|
 | `frames` | iterations of the loop (one `run_frame` call each) |
 | `core_min/mean/p99/max` | cycles of the `run_frame` call alone. `p99` from a 128-bin histogram of 65,536-cycle bins: the top of the bin holding the 99th percentile, capped at `core_max` |
-| `busy_mean/max` | the whole iteration **awake**: from one service-hook call to the next minus the cycles asleep in `WFI` (link, saves, statistics, input, core, audio push, frame hash, display hand-off, the idle hook's display and DAC checks, interrupt handlers) |
+| `busy_mean/max` | the whole iteration **awake**: from one service-hook call to the next minus the cycles asleep in `WFI` (link, saves, statistics, input, core, audio push, frame hash (scripted image only: the live image does not hash), display hand-off, the idle hook's display and DAC checks, interrupt handlers) |
 | `fe_mean/max` | front end: `busy - core` |
 | `slack_min` | `budget - busy_max` (negative: over) |
 | `over_budget` | frames with `busy > budget` |

@@ -1752,8 +1752,11 @@ screens), branch `m5-player` (commits f3187ad, 82449fb):
 | Wario Land 3, 150 s | 11,071 | 1,790,006 (heaviest window) | 1,859,948 | 1,897,911 (24.0%) | 443,761 / 500,382 | 2,350,158 (29.7%) | 5,592,506 | 0 | 0 | 10,339 / 649 |
 
 Percentages are of the 7,902,557-cycle budget. The front end (about
-0.41-0.50 M cycles, 0.9-1.1 ms per frame) is mostly the 1.5x scaler into
-the panel buffer and the audio push. `skipped` frames are superseded
+0.41-0.50 M cycles, 0.9-1.1 ms per frame) in these runs was mostly the
+frame hash (`fbs`, about 185 k cycles per completed frame, "Paced loop
+(M4)") and the 1.5x scaler into the panel buffer (about 195 k per
+presented frame), then the audio push (about 35 k); the live image no
+longer hashes (below). `skipped` frames are superseded
 before the panel's TE took them (the panel runs at about 60 Hz against
 59.73 Hz). The first Wario Land 3 run had 5 underruns (1,280 frames),
 all at the start: the run hashes the 2 MiB ROM from the NOR for its
@@ -1774,6 +1777,22 @@ busy max 2,903,956 (36.7%), over budget 0. (Its `underruns=6
 underrun_frames=1467` are since boot and include the drain's last pop and
 the DAC stop ramp after the run, which pop an empty ring; the run's own
 figure is `stats paced ring`: 0.)
+
+**No hashing in the live image (M7 review, branch `m7-fe-perf`).** The
+live `player` only discards its `paced` lines, so it no longer computes
+the frame hash and the DAC feed hash (`paced::Service::HASHES` false
+without `player-script`; the ISR pops with `FeedTap::pop_unhashed`). The
+scripted image (`player-script`, gate B3/B4) and every other image hash
+as before. Pokemon Red, no input, 80 s via `play-on-board.sh`, 16 Stats
+windows each, same ROM and NOR, 472 MHz, 2026-11-26:
+
+| Image | fe mean (mean of windows) | fe_mean range | fe max | busy max (last window) | core max | over budget / underruns / dac_restarts |
+|---|---|---|---|---|---|---|
+| main (383ed4f), hashing | 427,482 | 410,983-444,657 | 516,128 | 1,770,366 | 1,341,699 | 0 / 0 / 0 |
+| no hashing in live mode | 244,589 | 217,603-253,741 | 321,577 | 1,605,867 | 1,349,528 | 0 / 0 / 0 |
+
+The front end drops by about 183 k cycles a frame (2.3% of the budget),
+the frame hash's measured cost; what is left is mostly the scaler.
 
 ## ITCM placement plan
 
