@@ -42,6 +42,20 @@ board_absent() {
   return 1
 }
 
+# board_lost_check <what>: the gate's tool_error and unexpected-exit paths
+# call this once the board lock is held and the board was seen there (gate
+# LOCK; board_held=1). If the board has gone since, the error is a missing
+# board: a failure, exit 1 (the gate's contract: a missing board is exit 1,
+# never a pass; M7 review T9), not exit 2. Returns, so the caller reports
+# the error as it is, when the board is still there.
+board_lost_check() {
+  local why
+  if why=$(board_absent); then
+    fail "board lost after the board lock: ${why} (while: $1)"
+  fi
+  return 0
+}
+
 # sets_verdict <log>: check-stage2-sets.sh's save_fixture= line; sets
 # SAVE_FIXTURE.
 sets_verdict() {

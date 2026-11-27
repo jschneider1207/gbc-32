@@ -19,8 +19,11 @@
 # then the whole board phase holds the board lock
 # (scripts/lib/board-lock.sh), and the board must be there (the ST-LINK
 # drive with its label and DETAILS.TXT, and the COM port): a missing board
-# is exit 1, never a pass. Every flash is followed by a serial read whose
-# checker ignores the lines before the flashed image's own output (its
+# is exit 1, never a pass. That holds for a board lost later too: once the
+# board was seen, any tool error (or unexpected exit) is checked against the
+# board again, and with the board gone it is exit 1, not 2 (M7 review T9;
+# scripts/lib/gate-board.sh board_lost_check). Every flash is followed by
+# a serial read whose checker ignores the lines before the flashed image's own output (its
 # banner's image cksum, or its fresh run):
 #   B1  selftest-pll480: tools/h7-bench/check-selftest.sh (clock=pll472,
 #       cpu_hz, VOS0/ODEN, actvosrdy, flash_acr, constant cycles=, tcmprobe)
@@ -48,10 +51,12 @@
 #
 # Exit status:
 #   0  Stage 2 gate passed: every host and board step, in one full run.
-#   1  a check failed (also: the board is not attached)
+#   1  a check failed (also: the board is not attached, or is gone after
+#      the board lock was taken)
 #   2  a tool or runner error (missing tool, unreadable output, a script
 #      reporting its own tool error, serial unreadable, flash refused, a
-#      malformed line); results are not meaningful
+#      malformed line; in the board steps, with the board still there);
+#      results are not meaningful
 #   3  --host-only (or --step): every step that ran passed. The run
 #      always ends with the line `NOT A STAGE 2 GATE PASS`.
 #
@@ -136,6 +141,7 @@ fi
 # failed under `set -e`, with any status, 3 included) is a tool error, so an
 # unexpected exit can never look like a pass or a host-only success.
 _finished=0
+board_held=0
 finish() {
   _finished=1
   [ "${host_only}" = 1 ] || [ "${partial}" = 1 ] && printf '\nNOT A STAGE 2 GATE PASS\n'
@@ -146,6 +152,8 @@ on_exit() {
   local rc=$?
   [ -z "${TMP}" ] || rm -rf "${TMP}"
   [ "${_finished}" = 1 ] && return
+  # In the board phase, with the board gone: exit 1 (board_lost_check).
+  if [ "${board_held:-0}" = 1 ]; then board_lost_check "unexpected exit (status ${rc})"; fi
   printf '\nGATE ERROR: unexpected exit (status %s) during %s; results are not meaningful\n' "${rc}" "${current:-startup}" >&2
   [ "${host_only}" = 1 ] || [ "${partial}" = 1 ] && printf '\nNOT A STAGE 2 GATE PASS\n'
   exit 2
@@ -162,7 +170,14 @@ step() {
 }
 sub() { printf -- '--- %s\n' "$*"; }
 fail() { printf '\nGATE FAILED (%s): %s\n' "${current:-H1}" "$*" >&2; finish 1; }
-tool_error() { printf '\nGATE ERROR (%s): %s; results are not meaningful\n' "${current:-H1}" "$*" >&2; finish 2; }
+tool_error() {
+  # In the board phase (board_held=1, set by LOCK), a tool error with the
+  # board gone is a missing board: exit 1 (scripts/lib/gate-board.sh
+  # board_lost_check; M7 review T9).
+  if [ "${board_held:-0}" = 1 ]; then board_lost_check "$*"; fi
+  printf '\nGATE ERROR (%s): %s; results are not meaningful\n' "${current:-H1}" "$*" >&2
+  finish 2
+}
 # run_status CMD...: runs CMD; prints nothing; sets $rc (never trips set -e).
 run_status() { set +e; "$@"; rc=$?; set -e; }
 
@@ -942,6 +957,8 @@ board_ports() {
   powershell.exe -NoProfile -NonInteractive -Command "[System.IO.Ports.SerialPort]::GetPortNames()" 2> /dev/null | tr -d '\r' || true
 }
 if why=$(board_absent); then fail "no board: ${why}"; fi
+# From here on, an error with the board gone is exit 1 (tool_error, on_exit).
+board_held=1
 echo "  board: ${drive} (${label}), ${port}"
 
 # sets_check: the run lists equal acceptance/stage2.toml; sets SAVE_FIXTURE.

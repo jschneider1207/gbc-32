@@ -588,8 +588,8 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 - [ ] (M7 C9) ES0392 2.2.30: PC13 vs LSE during clockcheck
 - [ ] (M7 platform) set NVIC priorities; decide IWDG policy; test the stack guard vs the largest frame and MLSPERR; fault-inject DMAUDR/MDMA TEIF/USART errors; NCS/CLK float before init; temperature/VDD corners
 - [ ] (M7 T8) boot nonce so a gate can tell a fresh board run from a stale capture
-- [ ] (M7 T9) board loss after the lock: gate exit 2 vs 1 (never a pass; make it consistent)
-- [ ] (M7 T11) tests for the gate's own board-step parsing
+- [x] (M7 T9) board loss after the lock: gate exit 2 vs 1 (never a pass; make it consistent). Done: once LOCK saw the board, a tool error or unexpected exit re-probes it; gone is exit 1 (`board_lost_check`, scripts/lib/gate-board.sh); tested in scripts/test-gate-board.sh
+- [x] (M7 T11) tests for the gate's own board-step parsing. Done: the verdicts moved verbatim to scripts/lib/gate-board.sh; scripts/test-gate-board.sh (gate H7) feeds them canned output; 63 of 63 mutants caught
 - [ ] (M7 P3, medium, accepted) bench with a realistic footprint: >= 1 MiB streaming synth ROM and a cart-RAM variant, QSPI A/B, LSUCNT; the H735 HyperRAM miss path is what matters
 - [ ] (M7 P4, medium, accepted) make the `gbc-firmware` audio sample format generic when SAI lands (ADR 0036: extract when duplicated)
 - [ ] (M7 P5) move the ST7789V pixel format (video.rs:54-60) out of the shared crate

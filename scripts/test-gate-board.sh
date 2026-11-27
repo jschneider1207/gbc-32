@@ -6,7 +6,10 @@
 # run-paced.sh and run-player-save.sh print), run with the gate's own
 # fail / tool_error / finish (taken from scripts/gate-stage2.sh, so
 # "a check failed" is exit 1 and a tool error exit 2 as the gate exits),
-# on canned good and bad output. Also: the gate sources the lib and calls
+# on canned good and bad output. Also (M7 review T9): once the gate holds
+# the board lock and saw the board (board_held=1), a tool error or an
+# unexpected exit with the board gone is exit 1, and with the board there
+# (or before the lock) still exit 2. And: the gate sources the lib, calls
 # each verdict, and its argument errors are exit 2. No board, no build, no
 # lock. Exit 0 = all pass.
 #   GATE_BOARD_LIB  the lib under test     (used to mutation-check this test)
@@ -29,7 +32,7 @@ fn_src() {
     on { print; if ($0 == "}") exit }' "$gate"
 }
 defs=""
-for f in finish fail tool_error; do
+for f in finish fail tool_error on_exit; do
   src=$(fn_src "$f")
   [ -n "$src" ] || { echo "FAIL: no $f() in $gate"; exit 1; }
   defs+="$src"$'\n'
@@ -38,13 +41,14 @@ done
 # run <name> <want rc> <command...>: the command in a subshell as the gate
 # runs (set -euo pipefail, the gate's fail/tool_error, the lib). Want 0: it
 # returns, and the shell goes on; 1: GATE FAILED, exit 1; 2: GATE ERROR,
-# exit 2.
+# exit 2. The board probes answer T_VOL, T_DET and T_PORTS (default: the
+# board is there).
 run() {
   local name=$1 want=$2 rc
   shift 2
   out=$( (
     set -euo pipefail
-    host_only=0 partial=0 current=B0 _finished=0
+    host_only=0 partial=0 current=B0 _finished=0 board_held=0 TMP=""
     drive=E: label=NOD_H753ZI port=COM5
     eval "${defs}"
     # shellcheck source=lib/gate-board.sh
@@ -54,13 +58,24 @@ run() {
   ) 2>&1)
   rc=$?
   local tag
-  case $want in 0) tag=RETURNED ;; 1) tag="GATE FAILED (B0)" ;; *) tag="GATE ERROR (B0)" ;; esac
+  case $want in 0) tag=RETURNED ;; 1) tag="GATE FAILED (B0)" ;; *) tag="GATE ERROR" ;; esac
   if [ "$rc" = "$want" ] && [[ "$out" == *"$tag"* ]]; then
     ok "$name (rc $rc)"
   else
     bad "$name: want rc $want ($tag), got $rc: $(head -c 300 <<< "$out" | tr '\n' ' ')"
   fi
 }
+
+VOL=" Volume in drive E is NOD_H753ZI
+ Volume Serial Number is 1234-ABCD"
+PORTS="COM3
+COM5"
+board_vol() { printf '%s\n' "$T_VOL"; }
+board_details() { printf '%s\n' "$T_DET"; }
+board_ports() { printf '%s\n' "$T_PORTS"; }
+there() { T_VOL=$VOL T_DET=yes T_PORTS=$PORTS; }
+gone() { T_VOL="" T_DET="" T_PORTS=""; }
+there
 
 # --- board_rc: a board script's exit status ---------------------------------
 run "board_rc 0 goes on" 0 board_rc "x.sh" 0
@@ -75,16 +90,9 @@ run "board_rc 127 is a tool error" 2 board_rc "x.sh" 127
 # PRESENT or ABSENT: <why>.
 probe() {
   T_VOL=$1 T_DET=$2 T_PORTS=$3
-  board_vol() { printf '%s\n' "$T_VOL"; }
-  board_details() { printf '%s\n' "$T_DET"; }
-  board_ports() { printf '%s\n' "$T_PORTS"; }
   local why
   if why=$(board_absent); then echo "ABSENT: $why"; else echo "PRESENT[$why]"; fi
 }
-VOL=" Volume in drive E is NOD_H753ZI
- Volume Serial Number is 1234-ABCD"
-PORTS="COM3
-COM5"
 expect() { # expect <name> <want substring> -- run's output
   [[ "$out" == *"$2"* ]] && ok "$1" || bad "$1: want '$2' in: $(tr '\n' ' ' <<< "$out")"
 }
@@ -98,6 +106,38 @@ run "probe: COM50 is not COM5" 0 probe "$VOL" yes "COM50
 XCOM5"
 expect "probe: COM50 / XCOM5 are not COM5" "ABSENT: serial port COM5"
 run "probe: no ports" 0 probe "$VOL" yes ""; expect "probe: no ports is absent" "ABSENT: serial port COM5"
+
+# --- a board lost after the lock (M7 review T9) --------------------------------
+gone
+run "lost: tool error after the lock, board gone" 1 eval 'board_held=1; tool_error "read-serial.sh exited 1 (serial unreadable)"'
+expect "lost: says so, with the error" "board lost after the board lock: volume E: is not labelled NOD_H753ZI (no answer); attach the NUCLEO-H753ZI (while: read-serial.sh exited 1 (serial unreadable))"
+run "lost: board script exit 2 after the lock, board gone" 1 eval 'board_held=1; board_rc "run-replay.sh B3" 2'
+run "lost: unexpected exit after the lock, board gone" 1 eval 'trap on_exit EXIT; board_held=1; false'
+expect "lost: unexpected exit names its status" "(while: unexpected exit (status 1))"
+run "lost: tool error before the lock, board gone" 2 tool_error "could not take the board lock"
+[[ "$out" != *"board lost"* ]] && ok "lost: no board probe before the lock" || bad "lost: probed before the lock: $out"
+run "lost: unexpected exit before the lock, board gone" 2 eval 'trap on_exit EXIT; false'
+expect "lost: before the lock it is the unexpected-exit error" "GATE ERROR: unexpected exit (status 1)"
+run "lost: check failure after the lock, board gone" 1 eval 'board_held=1; fail "B4: emulated speed +2000 ppm"'
+there
+run "lost: tool error after the lock, board there" 2 eval 'board_held=1; tool_error "read-serial.sh exited 1 (serial unreadable)"'
+[[ "$out" != *"board lost"* ]] && ok "lost: board there is the tool error as it is" || bad "lost: board there reported lost: $out"
+run "lost: unexpected exit after the lock, board there" 2 eval 'trap on_exit EXIT; board_held=1; false'
+expect "lost: board there is the unexpected-exit error" "GATE ERROR: unexpected exit (status 1)"
+run "lost: board_lost_check returns with the board there" 0 board_lost_check "x"
+# The gate: board_held starts 0 (before the trap), and is set to 1 once,
+# only after LOCK saw the board and before the first board step.
+n_init=$(grep -n '^board_held=0$' "$gate" | head -n 1 | cut -d: -f1)
+n_trap=$(grep -n '^trap on_exit EXIT$' "$gate" | head -n 1 | cut -d: -f1)
+n_probe=$(grep -nF 'if why=$(board_absent); then fail "no board: ${why}"; fi' "$gate" | head -n 1 | cut -d: -f1)
+n_held=$(grep -n '^board_held=1$' "$gate" | cut -d: -f1)
+n_b1=$(grep -n '^step B1 ' "$gate" | head -n 1 | cut -d: -f1)
+if [ -n "$n_init" ] && [ -n "$n_trap" ] && [ -n "$n_probe" ] && [ -n "$n_b1" ] && [ "$(wc -w <<< "$n_held")" = 1 ] &&
+  [ "$n_init" -lt "$n_trap" ] && [ "$n_probe" -lt "$n_held" ] && [ "$n_held" -lt "$n_b1" ]; then
+  ok "gate: board_held=0 before the trap, =1 once, after the presence check, before B1"
+else
+  bad "gate: board_held wiring (init ${n_init:-none}, trap ${n_trap:-none}, probe ${n_probe:-none}, held ${n_held:-none}, B1 ${n_b1:-none})"
+fi
 
 # --- sets_verdict: check-stage2-sets.sh's save_fixture= -----------------------
 L=$tmp/log
