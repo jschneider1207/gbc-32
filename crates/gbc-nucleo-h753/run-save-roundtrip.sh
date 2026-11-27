@@ -28,7 +28,7 @@
 #      fixture (never half-applied);
 #   7. the probe's status line (read at the link rate): saves_applied=1,
 #      saves_refused=1, and overruns, framing, noise, rx_overflow,
-#      bad_frames and replies_dropped all 0.
+#      rx_dma_errors, bad_frames and replies_dropped all 0.
 # gbc-pc's counters must show no resend, Nak or timeout on the steps that
 # should succeed. The last line is the verdict: `run-save-roundtrip: PASS
 # ...` or `run-save-roundtrip: FAIL <step>: <why>`. Captures and dumps stay
@@ -126,7 +126,7 @@ echo "$st"
 [ -n "$st" ] || fail "7 status: no status line in $scratch/status.txt"
 [ "$(field "$st" saves_applied)" = 1 ] || fail "7 status: saves_applied=$(field "$st" saves_applied)"
 [ "$(field "$st" saves_refused)" = 1 ] || fail "7 status: saves_refused=$(field "$st" saves_refused)"
-for c in overruns framing noise rx_overflow bad_frames replies_dropped; do
+for c in overruns framing noise rx_overflow rx_dma_errors bad_frames replies_dropped; do
   [ "$(field "$st" "$c")" = 0 ] || fail "7 status: $c=$(field "$st" "$c")"
 done
 echo "run-save-roundtrip: PASS fixture $(stat -c %s "$fixture") B round-tripped (d1, d2 after ${wait_s} s), wrong size and bad footer refused with nothing applied; board overruns=0 framing=0 noise=0 rx_overflow=0 bad_frames=0"

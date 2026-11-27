@@ -61,10 +61,13 @@ one copy only.
 - The session's state grows by one 32-byte buffer (the bad-frame `Nak`
   is now encoded into the responder's own buffer, as the loader's was,
   instead of a stack temporary).
-- `gbc_pc::sim::SimBoard` still answers messages with its own code (one
-  board that takes both a ROM and saves, with knobs the real servers
+- `gbc_pc::sim::SimBoard` still answered messages with its own code (one
+  board that took both a ROM and saves, with knobs the real servers
   don't have: a fake protocol version and chunk size, any save length,
-  dump faults, scripted `Stats` and audio). Replacing that with the real
-  `Loader` + `Session` is left as a later task.
+  dump faults, scripted `Stats` and audio). **Done since 54db549** (Q2
+  rest): it runs the real `Loader` (over an in-memory NOR) and `Session`
+  (over an in-memory `Game`), one image at a time as on the board, with
+  the faults on the wire around them and the version and chunk size as
+  labelled `HelloReply` rewrites; it has no message handling of its own.
 - The new crate's hard-rules checker is a fourth copy; keep the copies in
   step (a shared checker crate would be a new dependency of `gbc-core`).

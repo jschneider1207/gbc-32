@@ -301,13 +301,14 @@ fn status(
     )?;
     write!(
         t,
-        " overruns={} framing={} noise={} rx_high={} rx_overflow={} tx_errors={} \
+        " overruns={} framing={} noise={} rx_high={} rx_overflow={} rx_dma_errors={} tx_errors={} \
          core_cycles_last={core_last} core_cycles_max={core_max} unix_time={} baud={}\r\n",
         e.overruns,
         e.framing,
         e.noise,
         link.rx_high(),
         link.rx_overflow(),
+        link.rx_dma_errors(),
         link.tx_errors(),
         game.unix_time,
         link.setting().actual,

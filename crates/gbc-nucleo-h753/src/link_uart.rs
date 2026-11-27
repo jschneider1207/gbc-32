@@ -25,6 +25,18 @@
 //!   bytes are still delivered as before (the newest ones are intact; the
 //!   frame that lost its middle fails CRC). USART ORE does not help here:
 //!   the DMA keeps RDR drained while it overwrites the ring.
+//! - **Stream errors** (comprehensive review K11): a bus error sets the
+//!   receive stream's TEIF and the hardware clears its EN (RM0433
+//!   15.3.20), freezing NDTR. Each read takes EN before its snapshot and
+//!   TEIF, FEIF and DMEIF with HTIF/TCIF (all cleared); after delivering
+//!   the bytes written before the stop, a stopped stream (TEIF, or EN
+//!   found clear) counts in [`LinkUart::rx_dma_errors`] and is re-armed
+//!   from index 0 by the 15.3.19 procedure (EN confirmed 0, flags
+//!   cleared, M0AR/NDTR rewritten, EN set). FEIF and DMEIF alone leave the
+//!   stream running with no data lost (15.3.20), so they are only
+//!   cleared. Bytes arriving while the stream was stopped are lost (USART
+//!   ORE counts them; the frame fails CRC and the PC resends). Polled, no
+//!   ISR, like the rest.
 //! - **Transmit:** DMA1 stream 2 (DMAMUX1 channel 2, request 46
 //!   `usart3_tx_dma`), normal mode, from a [`TX_BYTES`] buffer into
 //!   USART_TDR. [`LinkUart::tx_buf`] lends the buffer while the stream is
@@ -83,6 +95,8 @@ const TX_SCR: u32 = SCR_TRBUFF | SCR_PL_MEDIUM | SCR_MINC | SCR_DIR_M2P;
 // stream at bits 0, 2, 3, 4, 5 of its group; stream 1's group at bit 6,
 // stream 2's at 16.
 const FLAGS: u32 = 0b11_1101;
+const FEIF: u32 = 1 << 0;
+const DMEIF: u32 = 1 << 2;
 const TEIF: u32 = 1 << 3;
 const HTIF: u32 = 1 << 4;
 const TCIF: u32 = 1 << 5;
@@ -205,6 +219,10 @@ impl LinkUart {
     /// Calls `f` with each byte received since the last call, in order.
     pub fn read(&mut self, mut f: impl FnMut(u8)) {
         self.count_errors();
+        // EN before the snapshot: read clear, the stream had stopped
+        // before it, so the snapshot's NDTR is final (module docs, "Stream
+        // errors").
+        let enabled = dma().st[RX_STREAM].cr.read().bits() & SCR_EN != 0;
         let (ndtr, marks) = rx_snapshot();
         let p = self.rx.poll(ndtr, marks & HTIF != 0, marks & TCIF != 0);
         let rx = self.buf as *const u8;
@@ -215,6 +233,35 @@ impl LinkUart {
             // module docs).
             f(unsafe { rx.add(i).read_volatile() });
             i = (i + 1) % RX_BYTES;
+        }
+        if self.rx.check_stream(enabled, marks & TEIF != 0) {
+            self.rearm_rx();
+        }
+    }
+
+    /// Re-arms the receive stream at index 0 after it stopped (module
+    /// docs, "Stream errors"; RM0433 15.3.19).
+    fn rearm_rx(&mut self) {
+        // Step 1: EN must read 0 before any configuration (a stream that
+        // stopped itself already does; bounded wait otherwise).
+        stop_stream(RX_STREAM);
+        let d = dma();
+        let st = &d.st[RX_STREAM];
+        // SAFETY: EN = 0 (just confirmed), the stream's flags cleared
+        // before EN; PAR is USART3's RDR, M0AR the ring, NDTR its length,
+        // CR as `new` sets it; the DMAMUX route is unchanged. Stream 1 and
+        // its flag bits belong to this module and no handler touches them
+        // (crate docs, "Interrupt handlers": `DMA1_STR0` writes only
+        // stream 0's LIFCR bits, write-1-to-clear).
+        unsafe {
+            d.lifcr.write(|w| w.bits(FLAGS << RX_SHIFT));
+            st.par.write(|w| w.bits(&usart().rdr as *const _ as u32));
+            st.m0ar.write(|w| w.bits(self.buf as u32));
+            st.ndtr.write(|w| w.bits(RX_BYTES as u32));
+            st.fcr.write(|w| w.bits(0)); // direct mode
+            st.cr.write(|w| w.bits(RX_SCR));
+            cortex_m::asm::dsb();
+            st.cr.write(|w| w.bits(RX_SCR | SCR_EN));
         }
     }
 
@@ -227,6 +274,12 @@ impl LinkUart {
     /// "Lap detection"): 0 means no received byte was overwritten unread.
     pub fn rx_overflow(&self) -> u32 {
         self.rx.laps()
+    }
+
+    /// Times the receive stream stopped on a DMA error and was re-armed
+    /// (module docs, "Stream errors"): 0 means it never stopped.
+    pub fn rx_dma_errors(&self) -> u32 {
+        self.rx.restarts()
     }
 
     /// Whether the transmit stream is idle (its last transfer is done:
@@ -316,8 +369,9 @@ impl LinkUart {
     }
 }
 
-/// The receive stream's NDTR and its HTIF/TCIF (at bit 4/5), the flags
-/// read then cleared, taken at one instant: NDTR is read before and after
+/// The receive stream's NDTR and its flags (HTIF/TCIF at bit 4/5, the
+/// error flags TEIF/DMEIF/FEIF at 3/2/0), the flags read then cleared,
+/// taken at one instant: NDTR is read before and after
 /// LISR and the pair retried until they agree, so no byte landed between
 /// them and the flags cover exactly the bytes up to that NDTR. Only the
 /// flags read are cleared (LIFCR is write-1-to-clear, RM0433 15.5.3): a
@@ -332,7 +386,7 @@ fn rx_snapshot() -> (usize, u32) {
     let mut tries = 0;
     let (ndtr, marks) = loop {
         let n0 = st.ndtr.read().bits();
-        let marks = (d.lisr.read().bits() >> RX_SHIFT) & (HTIF | TCIF);
+        let marks = (d.lisr.read().bits() >> RX_SHIFT) & (HTIF | TCIF | TEIF | DMEIF | FEIF);
         let n1 = st.ndtr.read().bits();
         tries += 1;
         if n0 == n1 || tries == 4 {
@@ -340,7 +394,7 @@ fn rx_snapshot() -> (usize, u32) {
         }
     };
     if marks != 0 {
-        // SAFETY: write-1-to-clear of this stream's HTIF/TCIF only.
+        // SAFETY: write-1-to-clear of this stream's flags only.
         d.lifcr.write(|w| unsafe { w.bits(marks << RX_SHIFT) });
     }
     (ndtr as usize, marks)

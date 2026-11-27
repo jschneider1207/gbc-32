@@ -30,6 +30,17 @@
 //! lap counter would be exact but needs an ISR, its vector in every image
 //! and an NVIC priority, for a condition that should never happen; the
 //! flags cost two register accesses per poll.
+//!
+//! **Stream errors** (comprehensive review K11). A bus error during a
+//! transfer sets the stream's TEIF and the hardware clears its EN, as does
+//! a FIFO threshold/burst mismatch (RM0433 15.3.20); NDTR then freezes and
+//! no byte arrives again: the link would be dead with nothing counted. A
+//! FIFO overrun (FEIF) or direct mode error (DMEIF) leaves the stream
+//! running and loses no data (same section), so they are cleared, not
+//! counted. After each poll the board passes in whether the stream was
+//! enabled before the poll's snapshot and whether TEIF was set;
+//! [`RxRing::check_stream`] counts a stopped stream and moves the reader to
+//! index 0, where the board re-arms the stream (15.3.19).
 
 /// What one [`RxRing::poll`] found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +62,7 @@ pub struct RxRing {
     pos: usize,
     high: usize,
     laps: u32,
+    restarts: u32,
 }
 
 impl RxRing {
@@ -68,6 +80,7 @@ impl RxRing {
             pos: 0,
             high: 0,
             laps: 0,
+            restarts: 0,
         }
     }
 
@@ -98,6 +111,28 @@ impl RxRing {
     /// Polls that found the ring possibly lapped ([`Poll::lapped`]).
     pub fn laps(&self) -> u32 {
         self.laps
+    }
+
+    /// After a [`RxRing::poll`] (which took the bytes the stream wrote
+    /// before it stopped): whether the stream stopped by itself, `enabled`
+    /// being its EN read before the poll's snapshot and `teif` its
+    /// transfer error flag from that snapshot (module docs, "Stream
+    /// errors"). If so, counts it and moves the reader to index 0, and the
+    /// caller must re-arm the stream with its full length (it then writes
+    /// index 0 first).
+    pub fn check_stream(&mut self, enabled: bool, teif: bool) -> bool {
+        let stopped = teif || !enabled;
+        if stopped {
+            self.pos = 0;
+            self.restarts = self.restarts.saturating_add(1);
+        }
+        stopped
+    }
+
+    /// Times [`RxRing::check_stream`] found the stream stopped (a DMA
+    /// transfer error); 0 means the stream never stopped.
+    pub fn restarts(&self) -> u32 {
+        self.restarts
     }
 }
 
@@ -244,6 +279,46 @@ mod tests {
         assert_eq!(got, s.total);
         assert_eq!(r.laps(), 0);
         assert_eq!(r.high(), N / 2);
+    }
+
+    /// A running stream is never restarted; a stopped one (EN cleared, or
+    /// TEIF) is counted once per check, and the reader then follows a
+    /// stream re-armed at index 0.
+    #[test]
+    fn stopped_stream_restarts_at_zero() {
+        let mut r = RxRing::new(N);
+        let mut s = Stream {
+            total: 0,
+            ht: false,
+            tc: false,
+        };
+        s.write(5);
+        assert_eq!(s.poll(&mut r).avail, 5);
+        assert!(!r.check_stream(true, false));
+        assert_eq!(r.restarts(), 0);
+        // The stream stops after 3 more bytes (frozen NDTR): the poll
+        // still takes them, then the check restarts.
+        s.write(3);
+        let p = s.poll(&mut r);
+        assert_eq!((p.start, p.avail), (5, 3));
+        assert!(r.check_stream(false, true));
+        assert_eq!(r.restarts(), 1);
+        // Re-armed: a fresh stream from index 0.
+        let mut s = Stream {
+            total: 0,
+            ht: false,
+            tc: false,
+        };
+        assert_eq!(s.poll(&mut r).avail, 0);
+        s.write(4);
+        let p = s.poll(&mut r);
+        assert_eq!((p.start, p.avail, p.lapped), (0, 4, false));
+        // TEIF with EN still read set (the error after the EN read) and EN
+        // clear without TEIF each count.
+        assert!(r.check_stream(true, true));
+        assert!(r.check_stream(false, false));
+        assert_eq!(r.restarts(), 3);
+        assert_eq!(r.laps(), 0);
     }
 
     #[test]

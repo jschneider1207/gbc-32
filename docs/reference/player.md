@@ -112,7 +112,9 @@ ring short; 0 = no audible gap), `overruns`, `presented`/`skipped`
 `replies_dropped`, `sessions`, `stats_sent`, `stats_dropped`, `rx_high`,
 `rx_overflow` (reads that found the link receive ring possibly lapped:
 every lap counts, and any read of more than half the 4 KiB ring may; 0 =
-no received byte overwritten unread; `link_uart.rs`, M7 C5), `tx_errors`,
+no received byte overwritten unread; `link_uart.rs`, M7 C5),
+`rx_dma_errors` (times the link receive DMA stream stopped on a transfer
+error and was re-armed; 0 = never; `link_uart.rs`, K11), `tx_errors`,
 `baud`.
 
 Audio to the PC (live mode only, before `stack_used`; ADR 0041):

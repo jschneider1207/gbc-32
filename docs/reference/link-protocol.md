@@ -3,9 +3,12 @@
 What the board must do for the M5 messages, as `tools/gbc-pc` sends and
 expects them. The framing, the message table and the stop-and-wait rule
 are in the `gbc-link` crate docs (`crates/gbc-link/src/lib.rs`); the ROM
-load is ADR 0038 and `loader.md`. The PC side is host-tested against the
-simulated board `tools/gbc-pc/src/sim.rs`, which is the executable form
-of this page (`tests/save.rs`, `tests/play.rs`).
+load is ADR 0038 and `loader.md`. The board side is
+`crates/gbc-link-board` (`loader`, `link_session`; ADR 0043); the PC side
+is host-tested against it directly (`tools/gbc-pc/tests/board.rs`,
+`link_session.rs`) and through the simulated board
+`tools/gbc-pc/src/sim.rs`, which runs those servers with link faults on
+the wire (`tests/load.rs`, `save.rs`, `play.rs`).
 
 Hash: FNV-1a 64 over the whole `.sav`, as for the ROM (ADR 0037;
 `gbc_firmware::fnv::hash`). The `.sav` is the desktop format (ADR 0023):
