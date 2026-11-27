@@ -174,6 +174,20 @@ Working rules that matter here:
 
 ## Needs human
 
+Open (session 28, 2026-11-26):
+- **Approve the first version of the gate's board steps B1-B5** (plan:
+  the human approves it). Diff: `git diff 6757ae7..HEAD -- scripts
+  tools/h7-bench`. Interpretations to confirm: B4 soaks `player-script`
+  (link and joystick off), not the live player (review T5); B1 needs every
+  `cycles=` after n=0 equal; a passing `--step` run exits 3.
+- **Plan wording (T6):** B4's "±0.1% of real time" is checked against the
+  board's cycle counter (as `acceptance/stage2.toml` says); DWT and TIM6
+  both run from the HSI, ~+0.34% vs the LSE, so real-time error is
+  invisible. Change the plan text to the manifest's wording?
+- FYI: H5 now pins the replay set's host output
+  (`tools/headless/expected/replay/`) and H7 names 85 more tests;
+  removing/renaming a named test is a gate loosening (yours).
+
 Open (session 27, 2026-11-26):
 - **Decision for you (M6 review P3):** the +3% on-board cycle ratchet
   covers every workload, but code layout alone moves the storm workloads
