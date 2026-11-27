@@ -82,31 +82,35 @@
 //! ```ignore
 //! #[interrupt]
 //! fn DMA1_STR0() {
-//!     gbc_nucleo_h753::audio_dac::on_dma(|_half, frames| ring.pop_into(frames));
+//!     gbc_nucleo_h753::audio_dac::on_dma(|_half, out| {
+//!         TAP.pop_to(&RING, out, |_popped| {});
+//!     });
 //! }
 //! ```
 //!
 //! # Samples in, DAC words out (ADR 0044)
 //!
-//! [`on_dma`]'s source writes board-independent frames
-//! (`gbc_firmware::audio::PcmFrame::to_bits` words, signed 16-bit PCM,
-//! what the sample ring holds) into a scratch half; `on_dma` then
-//! converts them into the DMA half as `DAC_DHR12RD` words with
+//! The sample ring holds board-independent frames
+//! (`gbc_firmware::audio::PcmFrame::to_bits` words, signed 16-bit PCM).
+//! [`on_dma`] hands its source the DMA half as a
+//! `gbc_firmware::audio::HalfOut<U12Lanes>`, which only a pop can fill:
+//! the pop converts each frame as it reads it from the ring, with
 //! `gbc_firmware::audio::u12_lanes` (12-bit codes `2048 + n/16`, rounded
 //! and clamped; DHR12RD's channels sit in the same 16-bit lanes as the
-//! frame's, so no shuffle). This is the only
-//! place the DAC's register layout and resolution meet the audio path;
-//! the codes are bit-identical to the ones the shared code produced
-//! before ADR 0044. [`on_dma_codes`] takes DAC words directly (the
-//! dac-probe image's test patterns).
+//! frame's, so no shuffle), one store per frame, and the half is never
+//! read back (the feed hash and the tee read the frames from the ring).
+//! This is the only place the DAC's register layout and resolution meet
+//! the audio path; the codes are bit-identical to the ones the shared
+//! code produced before ADR 0044. [`on_dma_codes`] takes DAC words
+//! directly (the dac-probe image's test patterns).
 //!
 //! An image that links this lib without [`AudioDac`] needs no handler:
 //! the interrupt is only unmasked by [`AudioDac::start`].
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 
 use crate::{clock, cycles, mpu, pac};
+use gbc_firmware::audio::{HalfOut, U12Lanes};
 
 /// The TIM6 kernel clock, nominal (module docs).
 pub const TIM_HZ: u32 = clock::HCLK_HZ;
@@ -147,31 +151,32 @@ const BUFFER_BYTES: usize = FRAMES * 4;
 const _: () = assert!(core::mem::size_of::<Buffer>() == BUFFER_BYTES);
 const _: () = assert!(core::mem::align_of::<Buffer>() == BUFFER_BYTES);
 
-struct Slot(UnsafeCell<Buffer>);
-// SAFETY: the buffer is written by `start` (stream disabled, interrupt
-// masked) and otherwise only by `on_dma`, one half at a time, the half the
-// DMA is not reading; `AudioDac::new`'s guard makes `start` single-owner.
-unsafe impl Sync for Slot {}
-// SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x
-// (memory_x::firmware_memory_x) defines for DMA buffers; not zeroed at
-// boot, which is sound for `u32` words. `start` fills both halves before
-// the stream is enabled.
-#[unsafe(link_section = ".axisram.audio_dac")]
-static BUF: Slot = Slot(UnsafeCell::new(Buffer([0; FRAMES])));
+/// The buffer, taken once by [`AudioDac::new`] (`take_once!`) and kept
+/// only as this pointer (null before), so `start` (main thread) and
+/// `on_dma` (the ISR) each make the one reference to the half they own
+/// at that moment. Set before the interrupt is ever unmasked (`start`).
+static BUF: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
 
 fn buffer_addr() -> usize {
-    BUF.0.get() as usize
+    BUF.load(Ordering::Relaxed) as usize
 }
 
 /// Half `h` (0 or 1) of the buffer.
 ///
 /// # Safety
-/// No other reference to that half may exist, and the DMA must not be
-/// reading it (see [`Slot`]).
+/// [`AudioDac::new`] has run (every caller is an `AudioDac` method or the
+/// ISR, which only `start` unmasks). No other reference to that half may
+/// exist, and the DMA must not be reading it: it is written by `start`
+/// and `halt` (stream disabled, interrupt masked) and otherwise only by
+/// `on_dma`, one half at a time, the half the DMA is not reading.
 unsafe fn half_mut(h: usize) -> &'static mut [u32] {
     debug_assert!(h < 2);
-    // SAFETY: in bounds (h < 2); exclusive per the caller's contract.
-    unsafe { core::slice::from_raw_parts_mut((BUF.0.get() as *mut u32).add(h * HALF), HALF) }
+    let p = BUF.load(Ordering::Relaxed);
+    debug_assert!(!p.is_null());
+    // SAFETY: `p` is the take-once buffer's (`new`), FRAMES words, valid
+    // for the program; in bounds (h < 2); exclusive per the caller's
+    // contract.
+    unsafe { core::slice::from_raw_parts_mut(p.add(h * HALF), HALF) }
 }
 
 // RCC enables.
@@ -443,27 +448,21 @@ fn count_errors(flags: u32) {
 }
 
 /// The DMA1 stream 0 interrupt with a source of board-independent frames:
-/// [`on_dma_codes`], with `fill` writing [`HALF`]
-/// `gbc_firmware::audio::PcmFrame::to_bits` words into a scratch half on
-/// the ISR's stack (DTCM, 1 KiB), which are then converted into the DMA
-/// half as [`frame`]s (module docs, "Samples in, DAC words out"). The
-/// source may read what it wrote (the feed hash, the PC tee) before it
-/// returns; the DMA only ever sees DAC words.
+/// [`on_dma_codes`], with `fill(half, out)` given the DMA half as a
+/// [`HalfOut`] in the DAC's format, which it fills with one pop
+/// (`FeedTap::pop_to` / `pop_unhashed_to`, or `AudioRing::pop_to`): each
+/// real frame converted to a [`frame`] as it is read from the ring, then
+/// the last one held (module docs, "Samples in, DAC words out"). The
+/// pop's `inspect` sees the `PcmFrame` words (the feed hash, the PC tee);
+/// the DMA only ever sees DAC words, and the non-cacheable half is
+/// written once per frame and never read back. A source that does not pop
+/// leaves the half's previous words (it must pop).
 ///
-/// The scratch keeps the ISR's cost where it was (ADR 0044): the ring's
-/// pop, the hash and the tee now touch DTCM instead of the non-cacheable
-/// DMA buffer (before, the hash and the tee read the buffer back), and the
-/// buffer still gets exactly one store per frame, now from the
-/// conversion (about 8 instructions a frame).
+/// No scratch half (before: 1 KiB on the ISR's stack, zero-filled each
+/// refill, then converted; this review's P5 follow-up to ADR 0044).
 #[inline(always)]
-pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
-    on_dma_codes(|h, out| {
-        let mut pcm = [0u32; HALF];
-        fill(h, &mut pcm);
-        for (o, &p) in out.iter_mut().zip(&pcm) {
-            *o = gbc_firmware::audio::u12_lanes(p);
-        }
-    });
+pub fn on_dma<F: FnOnce(usize, HalfOut<'_, U12Lanes>)>(fill: F) {
+    on_dma_codes(|h, out| fill(h, HalfOut::new(out)));
 }
 
 /// The DMA1 stream 0 interrupt: counts and clears the flags, then fills
@@ -540,7 +539,9 @@ pub fn on_dma_codes<F: FnOnce(usize, &mut [u32])>(fill: F) {
         }
         PLAY => {
             fill(h, out);
-            LAST_FRAME.store(out[HALF - 1], Ordering::Relaxed);
+            if let Some(&w) = out.last() {
+                LAST_FRAME.store(w, Ordering::Relaxed);
+            }
         }
         RAMP_DOWN => {
             if ramp(out, LAST_FRAME.load(Ordering::Relaxed), 0) {
@@ -599,35 +600,39 @@ impl AudioDac {
     // No `Default`: a singleton that panics on a second call (as `LcdDma`).
     #[allow(clippy::new_without_default)]
     pub fn new() -> AudioDac {
-        static TAKEN: AtomicBool = AtomicBool::new(false);
-        assert!(
-            !TAKEN.swap(true, Ordering::AcqRel),
-            "AudioDac::new called twice"
-        );
+        let buf = crate::take_once!(
+            // SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x
+            // (memory_x::firmware_memory_x) defines for DMA buffers; not
+            // zeroed at boot, which is sound for `u32` words. `start`
+            // fills both halves before the stream is enabled.
+            #[unsafe(link_section = ".axisram.audio_dac")]
+            Buffer = Buffer([0; FRAMES])
+        )
+        .expect("AudioDac::new called twice");
+        BUF.store(buf.0.as_mut_ptr(), Ordering::Relaxed);
         mpu::dma_buffer_window(mpu::REGION_AUDIO_BUF, buffer_addr(), BUFFER_BYTES);
-        // SAFETY: RCC enables by read-modify-write from the main thread,
-        // as the other drivers do; no interrupt touches RCC.
-        let rcc = unsafe { &*pac::RCC::ptr() };
-        // SAFETY: setting enable bits; the other bits kept.
-        unsafe {
-            rcc.ahb1enr
-                .modify(|r, w| w.bits(r.bits() | RCC_AHB1_DMA1EN));
-            rcc.ahb4enr
-                .modify(|r, w| w.bits(r.bits() | RCC_AHB4_GPIOAEN));
-            rcc.apb1lenr
-                .modify(|r, w| w.bits(r.bits() | RCC_APB1L_TIM6EN | RCC_APB1L_DAC12EN));
-        }
-        let _ = rcc.ahb1enr.read();
-        let _ = rcc.ahb4enr.read();
-        let _ = rcc.apb1lenr.read();
+        crate::rcc::modify(|rcc| {
+            // SAFETY: setting enable bits; the other bits kept.
+            unsafe {
+                rcc.ahb1enr
+                    .modify(|r, w| w.bits(r.bits() | RCC_AHB1_DMA1EN));
+                rcc.ahb4enr
+                    .modify(|r, w| w.bits(r.bits() | RCC_AHB4_GPIOAEN));
+                rcc.apb1lenr
+                    .modify(|r, w| w.bits(r.bits() | RCC_APB1L_TIM6EN | RCC_APB1L_DAC12EN));
+            }
+            let _ = rcc.ahb1enr.read();
+            let _ = rcc.ahb4enr.read();
+            let _ = rcc.apb1lenr.read();
+        });
 
         // PA4, PA5: analog (MODER 11, no pull; RM0433 26.4.2 and 11.3.13:
         // the DAC output needs the pin in analog mode). Analog is also the
         // reset state of both; written anyway.
         // SAFETY: GPIOA is shared (joystick.rs read-modify-writes PA0's
-        // MODER/PUPDR fields), but both run only from the main thread during
-        // init and no interrupt handler touches GPIOA (the ISRs here are the
-        // DAC DMA and the LCD TE EXTI), so the read-modify-writes cannot
+        // MODER/PUPDR fields), but both run only from the main thread
+        // during init and no handler that returns touches GPIO (crate
+        // docs, "Interrupt handlers"), so the read-modify-writes cannot
         // interleave; this one changes pins 4 and 5's fields only.
         let gpioa = unsafe { &*pac::GPIOA::ptr() };
         // SAFETY: as above; 0b00 = no pull, 0b11 = analog.

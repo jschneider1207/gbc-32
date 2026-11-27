@@ -39,7 +39,7 @@
 //!
 //! | Handler | Images | Body | Touches |
 //! |---|---|---|---|
-//! | `DMA1_STR0` | `paced`, `player`, `dac-probe` | [`audio_dac::on_dma`], calling the image's fill (`FeedTap::pop_into`/`pop_unhashed` and `AudioTee::offer`; dac-probe's `source`): RAM and atomics only | DMA1 LISR (read), LIFCR (stream 0's flags), stream 0 NDTR (read); the DAC buffer half the DMA is not reading |
+//! | `DMA1_STR0` | `paced`, `player`, `dac-probe` | [`audio_dac::on_dma`], calling the image's fill (`FeedTap::pop_to`/`pop_unhashed_to`, whose `inspect` calls `AudioTee::offer_popped`; dac-probe's `source` through `on_dma_codes`): RAM and atomics only | DMA1 LISR (read), LIFCR (stream 0's flags), stream 0 NDTR (read), DAC1 SR (read, DMAUDRx write-1-to-clear); the DAC buffer half the DMA is not reading (written once per frame; its last word read back for the stop ramp) |
 //! | `EXTI15_10` | `headless` (`display` builds), `lcd-dma-probe`, `paced`, `player` | [`lcd_dma::on_te`] | EXTI CPUPR1 (line 13: write-1-to-clear, read back); with a transfer pending, one RAMWR byte to the FMC command address and MDMA channel 0's CR (SWRQ) |
 //! | `HardFault` (`global_asm!`), `DefaultHandler` (every other exception, NMI included) | all | `fault::die` | masks interrupts for good first, then RCC, GPIOB, USART3, the DMA1/DMA2 streams and the MDMA channels; never returns, so it cannot split a read-modify-write it preempted |
 //!

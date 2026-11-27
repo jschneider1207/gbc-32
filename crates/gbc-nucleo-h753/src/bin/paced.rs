@@ -9,7 +9,7 @@
 //! # Wiring (the `paced` module docs, "Board use")
 //!
 //! - `RING: FeedRing` and `TAP: FeedTap` are statics; the DMA1 stream 0
-//!   ISR is `audio_dac::on_dma(|_, out| TAP.pop_into(&RING, out))`.
+//!   ISR is `audio_dac::on_dma(|_, out| TAP.pop_to(&RING, out, |_| {}))`.
 //! - [`Idle`] is `WFI`, with DBGMCU_CR DBGSLEEP_D1 set first, so the CPU
 //!   clock and with it the cycle counter keep running in Sleep (the image
 //!   measures that: "Sleep and the cycle counter" below). The speed
@@ -130,7 +130,7 @@ static TAP: FeedTap = FeedTap::new();
 #[interrupt]
 fn DMA1_STR0() {
     audio_dac::on_dma(|_, out| {
-        TAP.pop_into(&RING, out);
+        TAP.pop_to(&RING, out, |_| {});
     });
 }
 

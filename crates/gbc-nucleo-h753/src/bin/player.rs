@@ -156,13 +156,15 @@ const TX_AUDIO_CAP: usize = 3072;
 #[interrupt]
 fn DMA1_STR0() {
     audio_dac::on_dma(|_, out| {
-        let _n = if HASHES {
-            TAP.pop_into(&RING, out)
-        } else {
-            TAP.pop_unhashed(&RING, out)
+        let tee = |_p: &gbc_firmware::audio::Popped<'_>| {
+            #[cfg(not(feature = "player-script"))]
+            TEE.offer_popped(_p);
         };
-        #[cfg(not(feature = "player-script"))]
-        TEE.offer(out, _n);
+        if HASHES {
+            TAP.pop_to(&RING, out, tee)
+        } else {
+            TAP.pop_unhashed_to(&RING, out, tee)
+        };
     });
 }
 
