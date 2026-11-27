@@ -581,7 +581,7 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 
 - [x] (M7 C3, d8c8588) `fault::die()`: quiesce IRQs and DMA and clear `CR3.DMAT` before the FAULT line. Done: cpsid i, every clocked DMA1/DMA2 stream and MDMA channel stopped (bounded), CR3.DMAT/DMAR cleared; board smoke (throwaway probe, panic in DMA1_STR0 during a 4 KiB link TX): FAULT line clean, while the old path lost it under the TX payload
 - [ ] (M7 C4) DAC/SAI underrun: re-init per RM0433 26.4.8 (RM0468 for the H735)
-- [ ] (M7 C5) `link_uart` RX overflow (ring lap) detected and counted
+- [x] (M7 C5, 29313cd, 318099a) `link_uart` RX overflow (ring lap) detected and counted. Done: each read takes the RX stream's sticky HTIF/TCIF with NDTR (polled, no ISR); a read that saw both counts as `rx_overflow` (every lap counts, a read of <= half the ring never does; `gbc_firmware::rx_ring`, host tests, 9/9 mutants caught); shown on the player Stats line and the link-probe status line; run-player-save (B5) and run-save-roundtrip require 0. Board: player round trip rx_overflow=0 (rx_high=1039); link-probe 10 KB burst rx_overflow=0 (rx_high=258); a throwaway probe reading once per second: 1.5 KB burst 0, 10 KB burst 1 (rx_high=1808 = 10000 - 2 laps)
 - [ ] (M7 C6) check NDTR reads against posted writes (ordering)
 - [x] (M7 C7) fix the SAFETY comments that assume "no interrupt" (qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window`)
 - [x] (M7 C8) one DS revision for datasheet citations (qspi.rs rev Y vs clock.rs rev V)
