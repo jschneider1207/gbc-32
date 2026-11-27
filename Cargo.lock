@@ -661,6 +661,7 @@ dependencies = [
  "gbc-core",
  "gbc-firmware",
  "gbc-link",
+ "gbc-pc",
  "windows-sys 0.61.2",
 ]
 

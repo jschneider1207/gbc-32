@@ -90,10 +90,13 @@ impl Clock {
     /// `tools/gbc-pc` (ADR 0040).
     #[must_use]
     pub fn sync(self, saved_unix: u64, now: u64) -> Self {
-        if saved_unix == 0 {
-            return self;
-        }
-        let elapsed = now.saturating_sub(saved_unix);
+        // `advance_seconds(0)` rather than returning `self`: it still
+        // normalises (masks) a hostile footer's fields.
+        let elapsed = if saved_unix == 0 {
+            0
+        } else {
+            now.saturating_sub(saved_unix)
+        };
         match self {
             Self::Mbc3(s) => Self::Mbc3(s.advance_seconds(elapsed)),
             Self::Huc3(s) => Self::Huc3(s.advance_seconds(elapsed)),
