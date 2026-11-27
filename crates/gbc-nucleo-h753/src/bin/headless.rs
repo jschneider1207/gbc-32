@@ -80,6 +80,10 @@ use gbc_firmware::rom_image::{self, ImageHeader};
 use gbc_nucleo_h753::qspi::{self, Qspi};
 
 const PREFIX: &str = "gbc-nucleo-h753";
+// `display` and `rom-qspi` each name the image; build.sh never combines them
+// (review Q10), and both together would define IMAGE twice.
+#[cfg(all(feature = "rom-qspi", feature = "display"))]
+compile_error!("features `rom-qspi` and `display` are mutually exclusive (see build.sh)");
 #[cfg(not(any(feature = "rom-qspi", feature = "display")))]
 const IMAGE: &str = "headless";
 #[cfg(feature = "display")]

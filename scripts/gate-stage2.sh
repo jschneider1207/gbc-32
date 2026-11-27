@@ -361,6 +361,16 @@ clippy() { # clippy <dir> <description> [env assignments...] -- <cargo args...>
 # `headless` bin, the ITCM placement; its build.rs needs a ROM).
 clippy crates/gbc-nucleo-h753 "no features" -- --all-targets
 clippy crates/gbc-nucleo-h753 "--features headless" GBC_HEADLESS_ROM="${CPU_INSTRS}" -- --all-targets --features headless
+# Every other feature set build.sh builds (Q3): display, paced and link
+# embed a ROM; rom-qspi and the player images embed none (build.sh unsets
+# GBC_HEADLESS_ROM for them). `rom-qspi` + `display` is not a set build.sh
+# builds (headless.rs compile_error!s on it).
+for f in display paced link; do
+  clippy crates/gbc-nucleo-h753 "--features $f" GBC_HEADLESS_ROM="${CPU_INSTRS}" -- --all-targets --features "$f"
+done
+for f in rom-qspi player player-script; do
+  clippy crates/gbc-nucleo-h753 "--features $f" -u GBC_HEADLESS_ROM -- --all-targets --features "$f"
+done
 # h7-bench: every feature set tools/h7-bench/build.sh builds. Not
 # --all-targets: the bin has a test target, and thumbv7em has no `test`
 # crate.
@@ -369,6 +379,11 @@ for f in board board,selftest board,clockcheck board,dtcm board,itcm qemu qemu,i
 done
 clippy tools/h7-bench/host "host" -- --all-targets
 clippy tools/headless-qemu "headless-qemu" GBC_HEADLESS_ROM="${CPU_INSTRS}" -- --all-targets
+# tools/gbc-pc's cfg(windows) modules (serial, waveout, keyboard: ~20 unsafe
+# blocks) are only compiled for the Windows target the host build of H2
+# never lints (Q3). Needs the x86_64-pc-windows-gnu target (scripts/gbc-pc.sh).
+sub "cargo clippy: gbc-pc (x86_64-pc-windows-gnu)"
+cargo clippy -p gbc-pc --target x86_64-pc-windows-gnu --all-targets -- -D warnings || fail "clippy in gbc-pc for x86_64-pc-windows-gnu"
 fi
 
 # =============================================================================
