@@ -32,7 +32,7 @@ use core::fmt::{self, Write};
 use gbc_firmware::rom_image::{ImageError, ImageHeader};
 use gbc_link::ty;
 use gbc_nucleo_h753::loader::{Loader, Nor, Progress};
-use gbc_nucleo_h753::qspi::{self, NOR_BYTES, NorError, QUAD_IO_READ_XIP, Qspi};
+use gbc_nucleo_h753::qspi::{self, NOR_BYTES, NorError, NorFlash, QUAD_IO_READ_XIP, Qspi};
 use gbc_nucleo_h753::uart::{self, Uart};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led};
 

@@ -66,6 +66,7 @@ pub mod link_uart;
 pub mod mpu;
 pub mod paced_board;
 pub mod power;
+pub mod nor;
 pub mod qspi;
 pub mod rcc;
 pub mod stack;

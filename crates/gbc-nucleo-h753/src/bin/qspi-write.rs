@@ -44,8 +44,8 @@ use core::fmt::{self, Write};
 use core::hint::black_box;
 
 use gbc_nucleo_h753::qspi::{
-    self, BLOCK_BYTES, NOR_BYTES, NorError, Op, PAGE_BYTES, QUAD_IO_READ, QUAD_IO_READ_XIP, Qspi,
-    Read, SECTOR_BYTES,
+    self, BLOCK_BYTES, NOR_BYTES, NorError, NorFlash, Op, PAGE_BYTES, QUAD_IO_READ,
+    QUAD_IO_READ_XIP, Qspi, Read, SECTOR_BYTES,
 };
 use gbc_nucleo_h753::uart::{self, baud_setting};
 use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led};
