@@ -217,8 +217,9 @@ to the DAC code `(s >> 4) + 2048` and must equal feed frame
 player-script` builds `out/player-script.bin`: the same loop on the NOR's
 ROM with the script as input (joystick and PC ignored, link off, UART at
 115200, the core's default DMG palette). It ends with the `paced`
-image's framed report (`paced` lines, `stats display paced`, `stats dac`,
-`stats player`), so with the ROM in the NOR:
+image's framed report (`paced` lines, `stats display paced`, `stats
+display readback`, `stats dac`, `stats player`), so with the ROM in the
+NOR:
 
 ```
 RUN_PACED_FRAMES=<n> RUN_PACED_READ_SECS=<s> crates/gbc-nucleo-h753/run-paced.sh out/player-script.bin <rom>
@@ -226,6 +227,39 @@ RUN_PACED_FRAMES=<n> RUN_PACED_READ_SECS=<s> crates/gbc-nucleo-h753/run-paced.sh
 
 compares its `paced` lines with the host's `headless --paced` (without
 `--input`, so build it without `GBC_HEADLESS_INPUT` for that check).
+
+**Panel readback** (scripted image only; plan B3 "the display readback
+has 0 mismatches"; `src/display.rs` "Readback samples"). A full RAMRD
+readback takes 90 ms (five frames), so it cannot follow every frame in
+real time. Instead the image samples by a fixed rule that does not depend
+on the ROM: the first frame shown at or after loop frame 120, then the
+first one at least 300 frames after the previous sample started. Each
+sample is a sentinel (the frame's inverse written by the CPU, 27 rows a
+step), the normal TE transfer, then a readback against the buffer (4
+rows a step). That is 62 steps of about 0.8 M cycles (1.7 ms), one per
+loop iteration and only while the loop is ahead of the DAC. Newer frames
+wait in the stash meanwhile (more `skipped`). After the run comes a
+control: one buffer word inverted must read back as exactly 2 bad
+pixels. The result is the line `stats display readback samples=
+readbacks= mismatches= control_mismatches= first=120 every=300
+readback_rows=4 sentinel_rows=27 steps= step_mean= step_max=
+[first_bad=...]`. `run-replay.sh` requires readbacks >= 1, mismatches=0
+and control_mismatches=2 for every entry. The live `player` has none of
+this code.
+
+Measured 2026-11-26 (branch `m7-readback`, the same entries without and
+with the readback). The `paced end` lines (fbs, feed, clock) are
+identical, and core max is within run-to-run noise:
+
+| entry | readbacks | fe_max before / after | busy_max before / after | over budget | underruns |
+|---|---|---|---|---|---|
+| cgb-acid2 (600) | 2 | 456,798 / 1,238,060 | 1,144,009 / 1,920,777 | 0 | 0 |
+| synth:worst-case (3600) | 12 | 457,375 / 1,240,179 | 3,839,866 / 4,574,504 (58% of 7,902,557) | 0 | 0 |
+| rtc3test-sub-second (1793) | 6 | - / 1,244,511 | - / 2,676,382 | 0 | 0 |
+
+step_max is 799,616 cycles. A scratch build that inverted one buffer
+word before the first readback gave `mismatches=2
+first_bad=frame120:(0,0)` and run-replay.sh exit 1.
 
 The script may also be a `clocks v1` table (`gbc_firmware::replay`): an
 `acceptance/*.toml` group's `input`, converted with romtest's own code by

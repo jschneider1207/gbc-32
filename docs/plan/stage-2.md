@@ -295,7 +295,7 @@ b, an SAI/I2S driver partly would).
 - [ ] M5 review P-5 (low): player.rs ~443-446 drops a Stats report silently on encode error; count it or assert the worst case vs MAX_STATS_EXTRA 1016
 - [ ] M5 review P-6 (low): link_session.rs ~292 keeps the stored reply after a chord dump drops a load; clear last_req_len in start_dump
 - [ ] M5 review P-7 (low): B1 active-high polarity assumed; open until the human's button check
-- [ ] M5 review gate note (low): proposed B3 wants display readback 0 mismatches; player-script does no readback and run-paced.sh doesn't check it
+- [x] (e278521, 83b82b5: sampled readback in player-script, `stats display readback`; run-replay.sh requires readbacks >= 1, mismatches=0, control 2; docs/reference/player.md "Panel readback") M5 review gate note (low): proposed B3 wants display readback 0 mismatches; player-script does no readback and run-paced.sh does not check it
 - [x] (8b3a2e6) M5 review T-2 (medium): gbc-pc syncs the RTC footer to real time on `load --sav` and restamps dumps (desktop rule shared as `gbc_firmware::save::Clock::sync`, fb94fda); `--raw-save` for the byte-identity round trips (ADR 0040)
 - [x] (7569334) M5 review P-1 (medium): the player's live stack depth was unmeasured and unguarded. `stack_used` is now in the live Stats/text fields; measured on the board 12,968 of 22,912 B after boot, a save load (reload), two dumps and Stats (run-player-save.sh PASS), so 9.9 KB of headroom and no reduction needed; the stack guard (M1 F-2) catches a creeping overflow
 
@@ -424,6 +424,12 @@ reading the serial port and **ignoring the lines before the new banner**):
   Then the `player` image in scripted mode: each ROM's frame-hash list
   and DAC-feed hash equal the host's, the display readback has 0
   mismatches, and the run ends with 0 underruns and 0 frames over budget.
+  (The readback is the image's own: a full readback takes 90 ms, so it
+  samples by a fixed rule, the first frame shown at or after frame 120
+  and then one at least every 300 frames, each read back in 1.7 ms steps
+  between frames after a sentinel; every entry needs >= 1 readback, 0
+  mismatches and a control of exactly 2; src/display.rs "Readback
+  samples".)
 - **B4.** A 10-minute `synth:worst-case` soak in the `player` image: 0
   frames over budget (budget = one real-time frame, 7,902,557 cycles), 0
   underruns, and emulated speed within ±0.1% of real time.
