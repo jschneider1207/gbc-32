@@ -12,7 +12,9 @@
 
 pub mod audio;
 pub mod client;
-pub mod fnv;
+// The ROM / save hash (ADR 0037) is gbc-firmware's, re-exported so
+// `gbc_pc::fnv` / `crate::fnv` keep working.
+pub use gbc_firmware::fnv;
 pub mod input;
 pub mod live;
 pub mod play;
