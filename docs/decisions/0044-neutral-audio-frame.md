@@ -41,6 +41,14 @@ once.
    because the board crate has no host tests and the bit-identity proof
    (below) must run in `cargo test`; it is documented as the 12-bit
    quantiser, not the register.
+   *Implementation note (2026-11-27, review P5; the decision is
+   unchanged):* the scratch half is gone. `on_dma` hands its source the
+   DMA half as a write-only `HalfOut<U12Lanes>`, and the ring's
+   `pop_to` converts each frame with `u12_lanes` as it reads it (one
+   store per frame, the held last frame mapped too); the feed hash and
+   the tee read the `PcmFrame` words from the ring in the pop's
+   `inspect` callback, never the non-cacheable half. The player's ISR
+   stack frame went from 1,088 B back to 80 B.
 3. **Bit-identical DAC codes.** `u12_lanes(sample(y))` equals the old
    `pack(dac_code(y), ..)` for every blocker output: saturating to
    `i16` first cannot change a code, because the old code already
