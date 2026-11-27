@@ -127,7 +127,8 @@ pub struct Counters {
     /// `Nak`s sent for decoded frames (not counting replays).
     pub naks: u32,
     /// Replies dropped because the reply queue was full (never expected:
-    /// the PC waits for each answer).
+    /// the PC waits for each answer) or because a reply did not fit
+    /// [`REPLY_MAX`] (never expected either: the const assertion there).
     pub replies_dropped: u32,
     /// `AudioStart`s and `AudioStop`s handled (not counting replays).
     pub audio_starts: u32,
@@ -155,9 +156,17 @@ struct Dump {
     next: u32,
 }
 
-/// The largest reply frame (`HelloReply`, 2 + 8 + 4 payload bytes, COBS
-/// plus delimiter), with room to spare.
-const REPLY_MAX: usize = 32;
+/// The largest reply body: `HelloReply` (protocol u16, max_chunk u16,
+/// flash_len u32), 8 bytes; `Nak` has 1, `Ack` and `AlreadyLoaded` none
+/// (`tests/link_session.rs` encodes each).
+pub const REPLY_BODY_MAX: usize = 8;
+
+/// One reply frame's buffer: at least [`REPLY_FRAME_MAX`], with room to spare.
+pub const REPLY_MAX: usize = 32;
+/// The largest reply frame on the wire: type, seq, body and CRC, COBS-encoded,
+/// plus the delimiter.
+pub const REPLY_FRAME_MAX: usize = gbc_link::cobs::max_encoded_len(2 + REPLY_BODY_MAX + 4) + 1;
+const _: () = assert!(REPLY_FRAME_MAX <= REPLY_MAX);
 /// Replies waiting for the transmitter.
 const QUEUE_MAX: usize = 8 * REPLY_MAX;
 
@@ -336,7 +345,7 @@ impl<'b> Session<'b> {
         if let Message::Nak { .. } = answer {
             st.counters.naks += 1;
         }
-        st.last_reply_len = gbc_link::encode(&answer, seq, &mut st.last_reply).unwrap_or(0);
+        st.last_reply_len = encode_reply(&answer, seq, &mut st.last_reply, &mut st.counters);
         let reply = st.last_reply;
         st.queue_wire(reply.get(..st.last_reply_len).unwrap_or(&[]));
         if let Some(dst) = st.last_req.get_mut(..raw_len) {
@@ -430,6 +439,15 @@ impl<'b> Session<'b> {
     }
 }
 
+/// Encodes a reply into `out`: its length, or 0 (nothing to send, counted
+/// in [`Counters::replies_dropped`]) if it does not fit.
+fn encode_reply(msg: &Message<'_>, seq: u8, out: &mut [u8], counters: &mut Counters) -> usize {
+    gbc_link::encode(msg, seq, out).unwrap_or_else(|_| {
+        counters.replies_dropped += 1;
+        0
+    })
+}
+
 impl State<'_> {
     fn queue_wire(&mut self, wire: &[u8]) {
         match self
@@ -446,8 +464,10 @@ impl State<'_> {
 
     fn queue_msg(&mut self, msg: &Message<'_>, seq: u8) {
         let mut wire = [0u8; REPLY_MAX];
-        let n = gbc_link::encode(msg, seq, &mut wire).unwrap_or(0);
-        self.queue_wire(wire.get(..n).unwrap_or(&[]));
+        let n = encode_reply(msg, seq, &mut wire, &mut self.counters);
+        if n != 0 {
+            self.queue_wire(wire.get(..n).unwrap_or(&[]));
+        }
     }
 
     fn start_dump(&mut self, seq: u8, game: &mut impl Game) {

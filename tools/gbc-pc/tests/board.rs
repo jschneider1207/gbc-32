@@ -671,3 +671,27 @@ fn header_programmed_wrong_is_naked_and_leaves_no_image() {
     assert_eq!(b.loader.counters.loads_ok, 0);
     assert!(rom_image::validate(&b.nor().flash).is_err());
 }
+
+#[test]
+fn every_reply_fits_the_reply_buffer() {
+    // Every message the loader answers with, at its largest; the const
+    // assertion in loader.rs relies on REPLY_BODY_MAX being right.
+    let bound = loader::REPLY_FRAME_MAX;
+    for m in [
+        Message::Ack,
+        Message::Nak {
+            code: NakCode::FlashError,
+        },
+        Message::HelloReply {
+            protocol: u16::MAX,
+            max_chunk: u16::MAX,
+            flash_len: u32::MAX,
+        },
+        Message::AlreadyLoaded,
+        Message::RomDone { hash: u64::MAX },
+    ] {
+        let mut out = [0u8; loader::REPLY_MAX];
+        let n = gbc_link::encode(&m, 0xFF, &mut out).unwrap();
+        assert!(n <= bound, "{m:?}: {n} > {bound}");
+    }
+}

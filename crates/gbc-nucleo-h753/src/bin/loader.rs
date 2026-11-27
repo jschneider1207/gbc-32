@@ -270,8 +270,8 @@ fn status(
     write!(
         t,
         " frames={} bad_frames={} duplicates={} hellos={} begins={} already_loaded={} \
-         chunks={} ends={} loads_ok={} verify_failures={} naks={} erases_64k={} erases_4k={} \
-         flash_errors={} last_flash_error={:?}",
+         chunks={} ends={} loads_ok={} verify_failures={} naks={} replies_dropped={} \
+         erases_64k={} erases_4k={} flash_errors={} last_flash_error={:?}",
         c.frames,
         c.bad_frames,
         c.duplicates,
@@ -283,6 +283,7 @@ fn status(
         c.loads_ok,
         c.verify_failures,
         c.naks,
+        c.replies_dropped,
         c.erases_64k,
         c.erases_4k,
         c.flash_errors,

@@ -101,6 +101,9 @@ pub struct Counters {
     pub verify_failures: u32,
     /// `Nak`s sent for decoded frames (not counting replays).
     pub naks: u32,
+    /// Replies that did not fit the reply buffer, so nothing was sent
+    /// (never expected: [`REPLY_MAX`] holds every reply).
+    pub replies_dropped: u32,
     pub erases_64k: u32,
     pub erases_4k: u32,
     pub flash_errors: u32,
@@ -120,9 +123,17 @@ enum State {
     },
 }
 
-/// The largest reply frame: `HelloReply`, 2 + 8 + 4 payload bytes,
-/// COBS-encoded plus the delimiter, with room to spare.
-const REPLY_MAX: usize = 32;
+/// The largest reply body: `HelloReply` (protocol u16, max_chunk u16,
+/// flash_len u32) and `RomDone` (hash u64), 8 bytes; `Nak` has 1, `Ack`
+/// and `AlreadyLoaded` none (`tests/board.rs` encodes each).
+pub const REPLY_BODY_MAX: usize = 8;
+
+/// The reply buffer: at least [`REPLY_FRAME_MAX`], with room to spare.
+pub const REPLY_MAX: usize = 32;
+/// The largest reply frame on the wire: type, seq, body and CRC, COBS-encoded,
+/// plus the delimiter.
+pub const REPLY_FRAME_MAX: usize = gbc_link::cobs::max_encoded_len(2 + REPLY_BODY_MAX + 4) + 1;
+const _: () = assert!(REPLY_FRAME_MAX <= REPLY_MAX);
 
 /// One answered frame, from [`Loader::feed`].
 #[derive(Clone, Copy, Debug)]
@@ -225,8 +236,12 @@ impl<N: Nor> Loader<N> {
             Err(e) => {
                 self.counters.bad_frames += 1;
                 let nak = Message::Nak { code: e.nak_code() };
-                let n =
-                    gbc_link::encode(&nak, e.seq().unwrap_or(0), &mut self.bad_reply).unwrap_or(0);
+                let n = encode_reply(
+                    &nak,
+                    e.seq().unwrap_or(0),
+                    &mut self.bad_reply,
+                    &mut self.counters,
+                );
                 return Some(Reply {
                     wire: self.bad_reply.get(..n).unwrap_or(&[]),
                     request: None,
@@ -257,7 +272,7 @@ impl<N: Nor> Loader<N> {
         if let Message::Nak { .. } = answer {
             self.counters.naks += 1;
         }
-        self.reply_len = gbc_link::encode(&answer, seq, &mut self.reply).unwrap_or(0);
+        self.reply_len = encode_reply(&answer, seq, &mut self.reply, &mut self.counters);
         if let Some(dst) = self.last_req.get_mut(..raw_len) {
             dst.copy_from_slice(raw);
             self.last_req_len = raw_len;
@@ -268,6 +283,15 @@ impl<N: Nor> Loader<N> {
             duplicate: false,
         })
     }
+}
+
+/// Encodes a reply into `out`: its length, or 0 (nothing to send, counted
+/// in [`Counters::replies_dropped`]) if it does not fit.
+fn encode_reply(msg: &Message<'_>, seq: u8, out: &mut [u8], counters: &mut Counters) -> usize {
+    gbc_link::encode(msg, seq, out).unwrap_or_else(|_| {
+        counters.replies_dropped += 1;
+        0
+    })
 }
 
 /// `validate` and the header it checked.

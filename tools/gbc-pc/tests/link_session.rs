@@ -543,3 +543,26 @@ fn play_audio_after_a_run_that_ended_without_audio_stop() {
     assert_eq!((c.audio_starts, c.audio_stops), (2, 1));
     assert_eq!(c.duplicates, 0);
 }
+
+#[test]
+fn every_reply_fits_the_reply_buffer() {
+    // Every message the session answers with, at its largest; the const
+    // assertion in link_session.rs relies on REPLY_BODY_MAX being right.
+    let bound = link_session::REPLY_FRAME_MAX;
+    for m in [
+        Message::Ack,
+        Message::Nak {
+            code: NakCode::HashMismatch,
+        },
+        Message::HelloReply {
+            protocol: u16::MAX,
+            max_chunk: u16::MAX,
+            flash_len: u32::MAX,
+        },
+        Message::AlreadyLoaded,
+    ] {
+        let mut out = [0u8; link_session::REPLY_MAX];
+        let n = gbc_link::encode(&m, 0xFF, &mut out).unwrap();
+        assert!(n <= bound, "{m:?}: {n} > {bound}");
+    }
+}
