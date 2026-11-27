@@ -568,3 +568,65 @@ reliably on the H753 after the 2026-11-25 USB drop.
 | 3 | Input | every Game Boy button works on the input-test screen and in a game, with the joystick for the D-pad and PC input for the rest (and for all 8 on their own) | Done (human, 2026-11-26): buttons worked, PC input too. |
 | 4 | Real games at full speed | about 10 minutes each: Shantae, Alone in the Dark, Wario Land 3, LADX, Pokémon Crystal (save load and dump over the serial link, D6) | |
 | 5 | Power cycle | unplug and replug USB, then the banner shows `supply=ldo actvosrdy=1` and VOS0 (the supply write is only really exercised by a power-on reset) | |
+
+## Stage 3 carry-over tasks (from M7 and open M1-M6 lows)
+
+From the M7 review (`docs/reviews/stage2-m7.md`):
+
+- [ ] (M7 C3) `fault::die()`: quiesce IRQs and DMA and clear `CR3.DMAT` before the FAULT line
+- [ ] (M7 C4) DAC/SAI underrun: re-init per RM0433 26.4.8 (RM0468 for the H735)
+- [ ] (M7 C5) `link_uart` RX overflow (ring lap) detected and counted
+- [ ] (M7 C6) check NDTR reads against posted writes (ordering)
+- [ ] (M7 C7) fix the SAFETY comments that assume "no interrupt" (qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window`)
+- [ ] (M7 C8) one DS revision for datasheet citations (qspi.rs rev Y vs clock.rs rev V)
+- [ ] (M7 C9) ES0392 2.2.30: PC13 vs LSE during clockcheck
+- [ ] (M7 platform) set NVIC priorities; decide IWDG policy; test the stack guard vs the largest frame and MLSPERR; fault-inject DMAUDR/MDMA TEIF/USART errors; NCS/CLK float before init; temperature/VDD corners
+- [ ] (M7 T8) boot nonce so a gate can tell a fresh board run from a stale capture
+- [ ] (M7 T9) board loss after the lock: gate exit 2 vs 1 (never a pass; make it consistent)
+- [ ] (M7 T11) tests for the gate's own board-step parsing
+- [ ] (M7 P3, medium, accepted) bench with a realistic footprint: >= 1 MiB streaming synth ROM and a cart-RAM variant, QSPI A/B, LSUCNT; the H735 HyperRAM miss path is what matters
+- [ ] (M7 P4, medium, accepted) make the `gbc-firmware` audio sample format generic when SAI lands (ADR 0036: extract when duplicated)
+- [ ] (M7 P5) move the ST7789V pixel format (video.rs:54-60) out of the shared crate
+- [ ] (M7 P6) scaler is 196k cycles: try an STRD-based store path
+- [ ] (M7 P7) set NVIC priorities (see platform item above; one task)
+- [ ] (M7 P8) player stack: 19,800 of 22,912 B scripted; move the 4 KiB clock table (player.rs:118) off the stack
+- [ ] (M7 P9) fe regression bound (B4 only checks < 100%); ratchet sits on +-1.7% noise; guard `player`, not just the bench
+- [ ] (M7 P10) p99 histogram range below a 550 MHz frame (player.rs:60-63); `Elapsed` wraps after 7.8 s at 550 MHz (paced.rs:517)
+- [ ] (M7 carry-over) H735 items: AXI 394,240 vs 262,144 B, memory-x chip and `CORE_TEXT_OFFSET` assert, ITCM reserve 3,854 B, HyperRAM rebaseline, 550 MHz projection, crystal SAI pacing clock (see architecture.md "Carry-over to Stage 3")
+
+Still open from M1-M6 (copied, also kept in their milestones):
+
+- [ ] (M1 low) T-4: generated expected files (`tools/headless/expected/*`, `expected-hashes.txt`) are checked against the code that made them; record ownership in an ADR note or `acceptance/README.md`
+- [ ] (M1 low) T-8: gate H8 picks the newest gbc-core rlib, not the one matching the ELF's crate hash
+- [ ] (M1 low) F-3: ITCM mem builtins only valid after `tcm::place()`; a fault before it locks up silently
+- [ ] (M1 low) F-5: `.axisram` statics declared `[0; N]`, use `MaybeUninit`
+- [ ] (M1 low) F-6: `.dtcm_rodata` has no ASSERT; no alignment ASSERT on `__siitcm`/`__sidtcm_ro`
+- [ ] (M1 low) F-7: `clockcheck.rs` leaves PWR_CR1.DBP set; stale `asm::delay` comment in boot.rs
+- [ ] (M2 low) H-2: `qspi::FORBIDDEN` blocks only 0x60/0xC7/0x01; allow-list read opcodes
+- [ ] (M2 low) H-3: `Qspi::init` never resets the NOR or leaves 0xEB enhance/QPI mode
+- [ ] (M2 low) H-4: FIFO may hold prefetched bytes after the EN=0 exit fallback; assert FLEVEL == 0 or ABORT again
+- [ ] (M2 low) H-5: `Qspi::init` has no once-guard, `Mapped` no Drop
+- [ ] (M2 low) T-5: loader.md two lock takes; `GBC_BOARD_LOCK_HELD=1` runs gbc-pc's cargo build outside `GBC_BUILD_LOCK`
+- [ ] (M3 low) T-3: LCD readback compares GRAM with the DMA buffer, not the core frame; add a sampled `scale_frame` check
+- [ ] (M3 low) T-4: perf.md says the display "costs the core nothing measurable"; reword (te-wait +0.07% vs 0.054% noise) and note the TE ISR's RAMWR+SWRQ
+- [ ] (M3 low) P-3: `lcd::Timing::new` doesn't model trcsfm 355 ns / tcsf; record the assumed reading
+- [ ] (M3 low) P-5: panel init sends no VCOM/gamma/power registers and no INVON; compare with ST's BSP init
+- [ ] (M3 low) P-6: `Lcd::set_timing` resets FMC while PD4/PD5/PD7 stay AF12; drive them as GPIO high around the reset (lcd-probe only)
+- [ ] (M4 low) P-5: DBGMCU_CR survives system reset, DBGSLEEP_D1 stays set; don't rely on DWT in sleep on Stage 3
+- [ ] (M4 low) P-7 remainder: RING/TAP statics can't be reset; a second `paced::run` in one boot fails NotFresh
+- [ ] (M5 low) T-4: last frame's over-budget never counted (frames=35836 of 35,837)
+- [ ] (M5 low) T-5: run-player-save.sh and run-save-roundtrip.sh don't check the flashed image cksum
+- [ ] (M5 low) T-8: `.gitignore` `!tools/gbc-pc/tests/fixtures/*.sav` exception
+- [ ] (M5 low) P-2: 64 KiB player save limit comes from section order; too-big dump answers Nak UnexpectedType
+- [ ] (M5 low) P-4: link_uart `read()` can't detect a ring lap > 4 KiB or a dead RX stream (RX TEIF never read)
+- [ ] (M5 low) P-5: player.rs ~443-446 drops a Stats report silently on encode error
+- [ ] (M5 low) P-6: link_session.rs ~292 keeps the stored reply after a chord dump drops a load; clear `last_req_len` in `start_dump`
+- [ ] (M5 low) P-7: B1 active-high polarity assumed until the human's button check
+- [ ] (M5 low) gate note: B3 display readback of 0 mismatches is not checked by player-script or run-paced.sh
+- [ ] (M6 low) P6: ratchet guards the h7-bench image, not `player`; wire gate B2
+- [ ] (M6 low) P7: ITCM has 1,192 B free in `player`; 57 thunks (570 B) move with layout; next ITCM drop unmeasured
+- [ ] (M6 low) P9: add `.text.__aeabi_memmove*` to the ITCM builtins rule (tools/memory-x/src/lib.rs:253), with the next baseline refresh
+- [ ] (M6 low) T4: h7-bench banner lacks `H7_BENCH_ITCM_DROP`; capture behind `expected-cycles.txt` not archived
+- [ ] (M6 low) re-review L1: `check-cycles.sh --update` dirty check misses `tools/bench/src/synth.rs` and the `H7_BENCH_*` env vars
+- [ ] (M6 low) re-review L2: dirty check also sees `expected-cycles.txt` and captures, so a second refresh records `+dirty` falsely
+- [ ] (M6 low) re-review L3/L4: regression guard only runs when the out file exists; `--absorb-regression` leaves no mark in the file

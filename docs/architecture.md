@@ -71,6 +71,24 @@ the RAM layout and cache sizes differ. Reading the ROM from QSPI NOR is a
 conservative stand-in for HyperRAM. The custom-board contract is
 `../gbc-32-hardware/docs/firmware-interface.md`.
 
+### Carry-over to Stage 3 (H735), from Stage 2
+
+From the M7 review (`docs/reviews/stage2-m7.md`) and the Stage 2 measurements.
+
+- AXI SRAM is 394,240 B on the H753 vs 262,144 B planned on the H735 (perf.md P8): re-check every `.axisram` budget.
+- `tools/memory-x` has no H735 chip yet; `CORE_TEXT_OFFSET` needs an assert.
+- ITCM reserve is 3,854 B; the H753 set's fit does not transfer.
+- Rebaseline cycles and miss latency for HyperRAM (the QSPI figures are a stand-in); add a >= 1 MiB streaming ROM and a cart-RAM bench (P3).
+- The 73.5% projection assumes the 550 MHz boost (no TCM ECC); it is 77.7% at 520 MHz and excludes the 0.4-0.5M-cycle front end.
+- Board code (clock/power/SMPS, FMC/LCD, DAC audio, QSPI) is rewritten; `link_session` and the loader are portable but live in the board crate.
+- `gbc-firmware` audio is tied to the H753 DAC format and the ST7789V format sits in the shared crate: make both generic when SAI lands (P4, P5; ADR 0036).
+- DBGSLEEP_D1 has a power cost; the pacing clock needs the crystal-derived SAI at 32,768 Hz.
+- No IWDG on the NUCLEO: decide the watchdog policy for the handheld.
+- No NVIC priorities are set: assign them with the ISR set (DAC/SAI, TE/display, USART, TIM).
+- The fault path (`die()`) leaves IRQs and DMA running; quiesce DMA and clear `CR3.DMAT` before reporting.
+- DAC underrun handling is not per RM0433 26.4.8 (re-init); do the SAI equivalent properly.
+- Enable the I/O compensation cell on the new board (C2: CSI + CCCSR.EN, bounded waits) before any fast external bus (HyperRAM, OCTOSPI).
+- Cold power-on is untested on the H753 (sign-off item 5); the SMPS start-up on the H735 needs its own check.
 ## Core ↔ platform boundary
 
 The core is a library the platform drives. It never calls out to the
@@ -212,7 +230,6 @@ LoadErrorKind { RomTooSmall { len }, CartRamTooSmall { needed, len },
   (with the `SERIAL_TX` event), memory peek, the clock, LCD on/off. These are
   plain field reads; nothing is on the hot path (no callbacks or dynamic
   dispatch).
-
 
 Core unit tests live in `#[cfg(test)]` modules, which may use `std`. The
 gate only forbids `alloc` in `gbc-core/src`, and the `thumbv7em` build
