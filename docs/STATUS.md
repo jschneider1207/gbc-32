@@ -71,7 +71,7 @@
   case 85.6% of 3,951,279 (H735 projection 73.5%); shipped player soak 10
   min: 0 over budget, core max 3,390,856 (42.9%). Facts: docs/perf.md M6
   sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
-- **Board state:** `player` flashed (session 28 main, after the gate run), Pokemon Red (scratch copy) in the NOR. To play:
+- **Board state:** `player` flashed (session 28 main, after the gate run), the B5 save fixture ROM (32 KiB) in the NOR, not Pokemon Red. To play (reloads the NOR if needed):
   `scripts/play-on-board.sh <rom>` (see Needs human).
 - **Last updated:** 2026-11-26, session 28 (log
   `logs/2026-11-26-28-stage2-m7.md`; session 27: M6).
