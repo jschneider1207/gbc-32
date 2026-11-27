@@ -382,6 +382,30 @@ fn audio_start_stop_hello_and_timeout() {
 }
 
 #[test]
+fn hello_drops_a_dump_being_sent() {
+    let mut b = Board::new();
+    // Fed straight to the session: nothing is sent between the frames,
+    // so the dump is still queued when Hello arrives.
+    for &x in &encode(&Message::SaveDumpRequest, 4) {
+        b.session.feed(x, &mut b.game, b.shared);
+    }
+    assert!(matches!(
+        b.session.progress(),
+        link_session::Progress::Dumping { .. }
+    ));
+    for &x in &encode(&Message::Hello { protocol: 1 }, 0) {
+        b.session.feed(x, &mut b.game, b.shared);
+    }
+    assert_eq!(b.session.progress(), link_session::Progress::Idle);
+    b.poll_tx();
+    let f = frames(&b.out.drain(..).collect::<Vec<_>>());
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].contains("HelloReply"), "{}", f[0]);
+    let c = b.session.counters();
+    assert_eq!((c.dumps, c.dumps_done), (1, 0));
+}
+
+#[test]
 fn caller_frames_go_after_replies_and_before_the_dump() {
     let mut b = Board::new();
     b.session.set_audio_capable(true);

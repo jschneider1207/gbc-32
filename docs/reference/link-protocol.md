@@ -127,7 +127,8 @@ dump goes out as whole frames, up to 4 KiB per TX transfer.
 
 **Per message**, as the tables above, plus:
 - `Hello`: `HelloReply` (protocol 1, max_chunk 1024, flash_len = the
-  NOR's 8 MiB); drops a save load in progress.
+  NOR's 8 MiB); drops a save load in progress and a dump still being
+  sent, and stops the audio stream.
 - `RomBegin`: `AlreadyLoaded` if it names the running ROM (length and
   FNV-1a 64), else `Nak UnexpectedType`; `RomChunk`/`RomEnd`: `Nak
   UnexpectedType`. So `gbc-pc load <rom> --sav <f>` with the probe's own

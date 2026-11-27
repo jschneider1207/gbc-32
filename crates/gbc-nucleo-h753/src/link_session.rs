@@ -19,7 +19,8 @@
 //!   (its `seq` when the CRC vouches for it, else 0).
 //! - `Hello`: `HelloReply` (this board's protocol version, [`MAX_CHUNK`],
 //!   the `flash_len` given to [`Session::new`]); a save load in progress
-//!   is dropped.
+//!   and a dump still being sent are dropped (a new session never wants
+//!   the old one's), and the audio stream stops.
 //! - `RomBegin { len, hash }`: `AlreadyLoaded` when the running game's ROM
 //!   ([`Game::rom`]) has this length and hash, so `gbc-pc load <rom>
 //!   --sav <f>` goes straight on to the save; otherwise `Nak
@@ -477,6 +478,7 @@ impl State<'_> {
             Message::Hello { .. } => {
                 self.counters.hellos += 1;
                 self.load = None;
+                self.dump = None;
                 self.audio = false;
                 Message::HelloReply {
                     protocol: PROTOCOL_VERSION,
