@@ -1059,6 +1059,56 @@ mod tests {
         assert_eq!(last, PcmFrame::SILENCE);
     }
 
+    /// End to end (conditioner, neutral frame, the ISR's conversion):
+    /// silence, after a burst or a constant DC input, is exactly the DAC's
+    /// mid-scale code on both channels.
+    #[test]
+    fn silence_is_exactly_mid_scale() {
+        const MID: u32 = 2048 | 2048 << 16;
+        let word = |f: PcmFrame| u12_lanes(f.to_bits());
+        let mut c = Conditioner::new();
+        assert_eq!(word(c.frame(ss(0, 0))), MID);
+        for i in 0..1_000 {
+            c.frame(ss(((i * 37) % 20_000) as i16, 25_000));
+        }
+        let mut last = PcmFrame::new(1, 1);
+        for _ in 0..30_000 {
+            last = c.frame(ss(0, 0));
+        }
+        assert_eq!(word(last), MID);
+        let mut c = Conditioner::new();
+        for _ in 0..30_000 {
+            last = c.frame(ss(30_720, -30_720));
+        }
+        assert_eq!(word(last), MID);
+    }
+
+    /// The DAC code of a blocker output `y` through the neutral frame
+    /// (`sample`, then the ISR's `u12_lanes`): endpoints, saturation,
+    /// round-half-up ties and monotonicity, as before ADR 0044.
+    #[test]
+    fn conversion_endpoints_and_rounding() {
+        let code = |y: i32| u12_lanes(PcmFrame::new(sample(y), 0).to_bits()) & 0xfff;
+        assert_eq!(code(-32_768), 0);
+        assert_eq!(code(32_767), 4095);
+        assert_eq!(code(0), 2048);
+        assert_eq!(code(-65_535), 0);
+        assert_eq!(code(65_535), 4095);
+        assert_eq!(code(i32::MAX), 4095);
+        assert_eq!(code(i32::MIN), 0);
+        // Ties round up: 8/16 = 0.5 -> 1, 7/16 -> 0, -8/16 -> 0, -9/16 -> -1.
+        assert_eq!(code(8), 2049);
+        assert_eq!(code(7), 2048);
+        assert_eq!(code(-8), 2048);
+        assert_eq!(code(-9), 2047);
+        let mut prev = 0;
+        for y in -70_000..=70_000 {
+            let c = code(y);
+            assert!(c >= prev, "not monotone at y = {y}");
+            prev = c;
+        }
+    }
+
     #[test]
     fn sample_saturates_to_i16() {
         assert_eq!(sample(0), 0);
