@@ -583,8 +583,8 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 - [ ] (M7 C4) DAC/SAI underrun: re-init per RM0433 26.4.8 (RM0468 for the H735)
 - [ ] (M7 C5) `link_uart` RX overflow (ring lap) detected and counted
 - [ ] (M7 C6) check NDTR reads against posted writes (ordering)
-- [ ] (M7 C7) fix the SAFETY comments that assume "no interrupt" (qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window`)
-- [ ] (M7 C8) one DS revision for datasheet citations (qspi.rs rev Y vs clock.rs rev V)
+- [x] (M7 C7) fix the SAFETY comments that assume "no interrupt" (qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window`)
+- [x] (M7 C8) one DS revision for datasheet citations (qspi.rs rev Y vs clock.rs rev V)
 - [ ] (M7 C9) ES0392 2.2.30: PC13 vs LSE during clockcheck
 - [ ] (M7 platform) set NVIC priorities; decide IWDG policy; test the stack guard vs the largest frame and MLSPERR; fault-inject DMAUDR/MDMA TEIF/USART errors; NCS/CLK float before init; temperature/VDD corners
 - [ ] (M7 T8) boot nonce so a gate can tell a fresh board run from a stale capture

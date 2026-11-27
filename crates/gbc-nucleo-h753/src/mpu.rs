@@ -271,8 +271,11 @@ pub(crate) fn qspi_window(w: Window) {
     // region, written as Armv7-M B3.5 lays them out; the MPU may be
     // updated while enabled (B3.5.4). The region only adds access to the
     // window, or removes it, and the caller ensures the QUADSPI answers
-    // there whenever it is open. One thread, no interrupt: the two writes
-    // are not interleaved with another update.
+    // there whenever it is open. Interrupts run in the images, but no
+    // handler (`audio_dac::on_dma`, `lcd_dma::on_te`, HardFault) writes an
+    // MPU register, and the other MPU writers (`fmc_window`,
+    // `dma_buffer_window`) run in the main thread, so the RBAR and RASR
+    // writes are not interleaved with another update.
     unsafe {
         let mpu = &*MPU::PTR;
         mpu.rbar.write(QSPI_BASE | (1 << 4) | REGION_QSPI);
@@ -309,8 +312,9 @@ pub(crate) fn fmc_window(open: bool) {
     // SAFETY: as in `qspi_window`: one region's RBAR and RASR, written as
     // Armv7-M B3.5 lays them out, while the MPU is enabled (B3.5.4); the
     // region only adds or removes access to the window, and the caller
-    // ensures the FMC answers there whenever it is open. One thread, no
-    // interrupt.
+    // ensures the FMC answers there whenever it is open. No interrupt
+    // handler writes an MPU register (see `qspi_window`), so the two
+    // writes are not interleaved with another update.
     unsafe {
         let mpu = &*MPU::PTR;
         mpu.rbar.write(FMC_BASE | (1 << 4) | REGION_FMC);
@@ -364,7 +368,8 @@ pub(crate) fn dma_buffer_window(region: u32, base: usize, bytes: usize) {
     // Armv7-M B3.5 lays them out, while the MPU is enabled (B3.5.4). The
     // region covers memory region 4 already opens, so it grants no new
     // access. Called before the TE or the DMA interrupt is enabled
-    // (`LcdDma::new`, `AudioDac::new`), from the main thread, so no other
+    // (`LcdDma::new`, `AudioDac::new`), from the main thread; no handler
+    // writes an MPU register in any case (see `qspi_window`), so no other
     // MPU update interleaves with the two writes.
     unsafe {
         let mpu = &*MPU::PTR;

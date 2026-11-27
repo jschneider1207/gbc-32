@@ -6,7 +6,7 @@
 //!   PF8, UP PF9, RIGHT PF7, each "active low", the common contact to
 //!   GND. UM2905 names no pull-up resistor for these lines (its text and
 //!   tables; the schematic was not checked), so the pins get the internal
-//!   pull-ups (RM0433 11.4.4; ~40 kOhm, DS12117 Table 59);
+//!   pull-ups (RM0433 11.4.4; ~40 kOhm, DS12117 Rev 10 Table 146, rev V: RPU 30 to 50 kOhm);
 //!   they would be harmless next to external ones.
 //! - B1 USER (UM2407 section 7.6.2 and Table 10, "B1 USER"): PC13 by
 //!   default (SB51 on, SB58 off). UM2407's text names only the pin, not

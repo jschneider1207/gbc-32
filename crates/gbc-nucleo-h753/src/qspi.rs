@@ -49,7 +49,7 @@
 //! clock is pll2_r_ck (RCC_D1CCIPR QSPISEL = 10), [`KER_HZ`] = 198.4 MHz,
 //! divided by PRESCALER + 1. rcc_hclk3 (236 MHz) gives only 118 MHz (over
 //! 0xEB's 104 MHz at CR.DC = 0) or 59 MHz with an even factor; PLL2 gives
-//! 99.2 MHz. RM0433 23.5.1 (and DS12117 Table 170) say an odd division
+//! 99.2 MHz. RM0433 23.5.1 (and DS12117 Rev 10 Table 170) say an odd division
 //! factor does not give a 50% duty cycle, which the NOR needs (tCH, tCL
 //! >= 45%); so only even factors are accepted ([`Qspi::init`]).
 
@@ -79,7 +79,8 @@ pub const WINDOW: usize = 0x9000_0000;
 /// The QUADSPI kernel clock: pll2_r_ck, started by [`Qspi::init`]: HSI
 /// 64 MHz / DIVM2 5 = 12.8 MHz (the reference PLL1 uses, [`crate::clock`];
 /// PLL2RGE 8 to 16 MHz, RM0433 8.7.12), x DIVN2 62 = 793.6 MHz VCO (wide
-/// range, 192 to 836 MHz, DS12117 Rev 10 Table 39), / DIVR2 4. Every limit
+/// range, 192 to 960 MHz, DS12117 Rev 10 Table 136, rev V; the assertions
+/// below keep to 836 MHz, the rev Y limit in Table 39), / DIVR2 4. Every limit
 /// holds with margin over the whole HSI tolerance, [`HSI_MIN_HZ`] to
 /// [`HSI_MAX_HZ`] (the `const` assertions below): input 12.47 to
 /// 12.99 MHz, VCO 773 to 806 MHz, the memory-mapped clock 96.6 to
@@ -92,7 +93,7 @@ const PLL2_DIVM: u8 = 5;
 const PLL2_DIVN: u16 = 62;
 const PLL2_DIVR: u8 = 4;
 
-/// The HSI over its whole tolerance (DS12117 Rev 10 Table 36: 63.7 to
+/// The HSI over its whole tolerance (DS12117 Rev 10 Table 133 (rev V): 63.7 to
 /// 64.3 MHz at 3.3 V and TJ 30 C, -2% to +1% over TJ -40 to 105 C, -0.12%
 /// to +0.03% over VDD), as [`crate::clock`]'s PLL1 reference uses it.
 const HSI_MIN_HZ: u32 = 62_350_000;
@@ -108,8 +109,8 @@ const fn ker_hz(hsi: u32) -> u32 {
 const KER_MAX_HZ: u32 = ker_hz(HSI_MAX_HZ);
 
 // The PLL2 limits at both ends of the HSI tolerance (DS12117 Rev 10
-// Table 39, wide VCO: fPLL_IN 2 to 16 MHz, RM0433 PLL2RGE range8 8 to
-// 16 MHz; VCO 192 to 836 MHz; R output <= 400 MHz at VOS1), and the
+// Table 136 (rev V), wide VCO: fPLL_IN 2 to 16 MHz, RM0433 PLL2RGE range8 8 to
+// 16 MHz; VCO 192 to 836 MHz (rev V allows 960); R output <= 400 MHz at VOS1), and the
 // NOR's limits at the fastest HSI (MX25L6433F Table 7: 0xEB 104 MHz at
 // CR.DC = 0, 0x03 50 MHz).
 const _: () = {
@@ -337,8 +338,13 @@ pub struct Qspi {
 fn regs() -> &'static pac::quadspi::RegisterBlock {
     // SAFETY: a shared reference to the memory-mapped register block, which
     // is valid for the whole program; every access is a volatile register
-    // access through the PAC, and only the [`Qspi`] owner touches it (no
-    // interrupt, no second thread in this firmware).
+    // access through the PAC, and only the [`Qspi`] owner touches it.
+    // Interrupts do run in the images, but none touches QUADSPI: the
+    // handlers are `audio_dac::on_dma` (DMA1 stream 0) and
+    // `lcd_dma::on_te` (EXTI, MDMA), and no QUADSPI interrupt enable (CR
+    // TEIE, TCIE, FTIE, SMIE, TOIE) is ever set, so no read-modify-write
+    // of a QUADSPI register can be preempted by a writer of the same
+    // register. One core, no other thread.
     unsafe { &*pac::QUADSPI::ptr() }
 }
 
@@ -407,9 +413,12 @@ impl Qspi {
             prescaler % 2 == 1,
             "QUADSPI prescaler must divide by an even factor"
         );
-        // SAFETY: shared access to the RCC and the four GPIO ports; no
-        // interrupt and no second thread exists, so register accesses
-        // never overlap. The pins set here belong to nobody else in this
+        // SAFETY: shared access to the RCC and the four GPIO ports. One
+        // core, no other thread; interrupts run in the images, but their
+        // handlers (`audio_dac::on_dma`, `lcd_dma::on_te`) touch only DMA1,
+        // EXTI and MDMA registers, never RCC or GPIO, so these
+        // read-modify-writes are not preempted by another writer of the
+        // same register. The pins set here belong to nobody else in this
         // lib (LEDs PB0, PB14, PE1; UART PD8).
         let (rcc, gpiob, gpiod, gpioe, gpiog) = unsafe {
             (
@@ -856,8 +865,10 @@ impl Mapped {
         // or erase would leave it stale. Clean as well as invalidate, since
         // the other cacheable regions (AXI SRAM) hold dirty lines.
         // SAFETY: SCB and CPUID are core registers; this firmware has one
-        // thread and no interrupt, so nothing else uses them meanwhile, and
-        // a clean-and-invalidate by set/way loses no data.
+        // core and no other thread, and no interrupt handler
+        // (`audio_dac::on_dma`, `lcd_dma::on_te`) uses SCB or CPUID. A
+        // handler running mid-loop would be harmless anyway: a
+        // clean-and-invalidate by set/way loses no data.
         let mut cp = unsafe { cortex_m::Peripherals::steal() };
         cp.SCB.clean_invalidate_dcache(&mut cp.CPUID);
         q
