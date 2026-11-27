@@ -45,7 +45,7 @@
 //! ```text
 //! stats display paced presented=<n> skipped=<n> transfers=<n> transfer_errors=<n> stuck=<n> aborts=<n> te_edges=<n> scale_mean=<c> scale_max=<c> present_mean=<c> present_max=<c> replaced=<n> deferred=<n> copy_mean=<c> copy_max=<c> [first_error=frame<n>:<e>]
 //! stats dac refills=<n> late=<n> spurious=<n> te=<n> dme=<n> fe=<n> udr1=<n> udr2=<n> restarts=<n> isr_min=<c> isr_max=<c> stop=<ok|timeout>
-//! stats paced board run_cycles=<c> run_refills=<n> dac_rate_millihz=<r> ramp_wait=<c> stack_used=<b>/<b> dbgmcu_cr_boot=<hex> sleep_gate_te=<c|untested> sleep_keep_te=<c|untested>
+//! stats paced board run_cycles=<c> run_refills=<n> dac_rate_millihz=<r> ramp_wait=<c> stack_used=<b>/<b> dbgmcu_cr_boot=<hex> sleep_gate_te=<c|untested|timeout> sleep_keep_te=<c|untested|timeout>
 //! ```
 //!
 //! `presented` frames went to the panel, `skipped` were superseded by a
@@ -77,7 +77,14 @@
 //! and set (kept running). `sleep_gate_te` and `sleep_keep_te` are the
 //! mean TE period in cycle-counter counts each time: if the counter stops
 //! with the CPU clock, the first is far below the second (about 7.9 M).
-//! `untested` if TE did not come within 100 ms.
+//! `untested` if TE did not come within 100 ms. The 30 periods (about
+//! 0.5 s) are bounded (comprehensive review K13): SysTick, clocked at
+//! CPU/8 (RM0433 clock tree; DWT may stop in Sleep, it need not), wraps
+//! every 2^24 counts (~284 ms) and wakes the `WFI` as a masked interrupt
+//! (TICKINT set only with PRIMASK set, cleared with its pend before
+//! PRIMASK clears, so its fatal default handler never runs). After 4 wraps
+//! (0.85-1.14 s, about twice the expected time) without the 30 periods the
+//! field reads `timeout` instead of hanging.
 #![no_std]
 #![no_main]
 
@@ -228,24 +235,100 @@ impl Idle for Wfi<'_> {
     }
 }
 
+/// Why [`sleep_te_cycles`] has no figure.
+#[derive(Clone, Copy)]
+enum SleepTe {
+    /// TE did not come within 100 ms (`untested`).
+    NoTe,
+    /// TE came, but the 30 periods did not within [`SLEEP_WRAPS`]
+    /// SysTick wraps (`timeout`).
+    Timeout,
+}
+
+/// SysTick wraps (2^24 counts at CPU/8, ~284 ms each) the 30 TE periods
+/// (~502 ms) may take: about twice that (module docs).
+const SLEEP_WRAPS: u32 = 4;
+// SysTick CSR (ARMv7-M B3.3.3; PM0253 4.4): ENABLE, TICKINT, COUNTFLAG;
+// CLKSOURCE (bit 2) left 0, the external CPU/8 clock.
+const SYST_ENABLE: u32 = 1 << 0;
+const SYST_TICKINT: u32 = 1 << 1;
+const SYST_COUNTFLAG: u32 = 1 << 16;
+// SCB ICSR PENDSTCLR (ARMv7-M B3.2.4).
+const ICSR_PENDSTCLR: u32 = 1 << 25;
+
 /// The mean TE period in cycle-counter counts over 30 periods slept in
-/// `WFI` (module docs, "Sleep and the cycle counter"); `None` if TE does
-/// not come within 100 ms (checked by spinning first, so `WFI` cannot wait
-/// forever for it).
-fn sleep_te_cycles(keep: bool) -> Option<u32> {
+/// `WFI` (module docs, "Sleep and the cycle counter"): `NoTe` if TE does
+/// not come within 100 ms (checked by spinning first), `Timeout` if the
+/// periods take more than [`SLEEP_WRAPS`] SysTick wraps (a SysTick wrap
+/// wakes the `WFI`, so it cannot wait forever for a TE that stopped).
+fn sleep_te_cycles(keep: bool) -> Result<u32, SleepTe> {
     set_sleep_clock(keep);
     lcd_dma::te_reset();
     let t0 = cycles();
     while lcd_dma::te_stats().edges < 2 {
         if cycles().wrapping_sub(t0) > CPU_HZ / 10 {
-            return None;
+            return Err(SleepTe::NoTe);
         }
     }
+    // SAFETY: SysTick and ICSR are used only here, on the main thread, and
+    // no handler touches them (crate docs, "Interrupt handlers": SysTick
+    // has none and falls to the fatal DefaultHandler, which is why TICKINT
+    // is only set while PRIMASK is). The writes are whole documented
+    // register values: the reload, the current value (any write clears
+    // it), CSR with CLKSOURCE 0.
+    let (syst, scb) = unsafe {
+        let syst = &*cortex_m::peripheral::SYST::PTR;
+        syst.csr.write(0);
+        syst.rvr.write(0x00FF_FFFF);
+        syst.cvr.write(0);
+        syst.csr.write(SYST_ENABLE);
+        (syst, &*cortex_m::peripheral::SCB::PTR)
+    };
     lcd_dma::te_reset();
-    while lcd_dma::te_stats().edges < 31 {
+    let mut wraps = 0u32;
+    let done = loop {
+        cortex_m::interrupt::disable();
+        if lcd_dma::te_stats().edges >= 31 {
+            break true;
+        }
+        if wraps >= SLEEP_WRAPS {
+            break false;
+        }
+        // SAFETY: as above; PRIMASK is set, so a SysTick pend only wakes
+        // the `WFI` (ARMv7-M B1.5.19: WFI wakes on a pending exception
+        // that PRIMASK alone masks) and is cleared below before PRIMASK.
+        unsafe { syst.csr.write(SYST_ENABLE | SYST_TICKINT) };
         cortex_m::asm::wfi();
+        // Reading CSR clears COUNTFLAG (a wrap since the last read).
+        wraps += u32::from(syst.csr.read() & SYST_COUNTFLAG != 0);
+        // SAFETY: as above: TICKINT off first, so no new pend, then the
+        // pend dropped (ICSR is write-1-to-act; other bits written 0 do
+        // nothing).
+        unsafe {
+            syst.csr.write(SYST_ENABLE);
+            cortex_m::asm::dsb();
+            scb.icsr.write(ICSR_PENDSTCLR);
+            cortex_m::asm::dsb();
+            cortex_m::asm::isb();
+        }
+        // SAFETY: re-enables what `disable` above masked, with no SysTick
+        // pend left; no critical section is open here, so none is broken.
+        // A pending TE runs its handler now.
+        unsafe { cortex_m::interrupt::enable() };
+    };
+    // SAFETY: as above; PRIMASK is still set (the loop breaks before
+    // re-enabling), SysTick stopped with no pend, then PRIMASK cleared.
+    unsafe {
+        syst.csr.write(0);
+        scb.icsr.write(ICSR_PENDSTCLR);
+        cortex_m::asm::dsb();
+        cortex_m::interrupt::enable();
     }
-    Some(lcd_dma::te_stats().mean)
+    if done {
+        Ok(lcd_dma::te_stats().mean)
+    } else {
+        Err(SleepTe::Timeout)
+    }
 }
 
 #[cortex_m_rt::entry]
@@ -350,8 +433,9 @@ fn main() -> ! {
     );
     for (name, v) in [("sleep_gate_te", gate), ("sleep_keep_te", keep)] {
         let _ = match v {
-            Some(c) => write!(cap, " {name}={c}"),
-            None => write!(cap, " {name}=untested"),
+            Ok(c) => write!(cap, " {name}={c}"),
+            Err(SleepTe::NoTe) => write!(cap, " {name}=untested"),
+            Err(SleepTe::Timeout) => write!(cap, " {name}=timeout"),
         };
     }
     let _ = writeln!(cap);

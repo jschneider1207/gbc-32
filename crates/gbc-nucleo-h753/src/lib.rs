@@ -46,7 +46,9 @@
 //! So no handler that returns touches RCC, GPIO, QUADSPI, the FMC's
 //! registers, USART3, PWR, the timers, SCB/CPUID or the MPU. SysTick and
 //! every other interrupt have no handler of their own (they fall to
-//! `DefaultHandler`, fatal).
+//! `DefaultHandler`, fatal). `paced`'s TE sleep uses SysTick as a masked
+//! wake-up only: TICKINT is set only while PRIMASK is, and cleared with its
+//! pend before PRIMASK clears, so SysTick's handler never runs (K13).
 #![no_std]
 
 pub mod audio_dac;
