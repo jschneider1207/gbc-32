@@ -1914,6 +1914,76 @@ Stack +120 B against the M5 figure (other changes since M5 too). The
 `--audio` columns are the second run of the same boot (no reflash, later
 game content), so they are not a clean audio-on/off pair.
 
+#### Session 31: stash swap (P2), stats cost (M4)
+
+`docs/reviews/stage2-comprehensive.md` P2 (16f88a3: a deferred frame is
+kept by swapping the loop's frame buffer with the display stash,
+`paced::SwapSink`, instead of the 46,080 B `copy_from_slice`) and M4
+(bd38750: `stats_max`, `fe_max_ex_stats`). Measured 2026-11-27, A/B of
+the `player` image at ce95a80 (before) and 16f88a3 (after, with M4), 472
+MHz, NUCLEO-H753ZI. Two runs each, alternated (before, after, before,
+after for Wario Land 3 then Pokemon Red, each freshly flashed: loader
+flashed first, so play-on-board never took its fast path), no input,
+no audio, same method as above (fe = mean of the windows' `fe_mean`;
+fe/busy max = largest window value; core mean = mean of the windows'
+`core_mean`; core max = `total_core_max`; presented/skipped since boot).
+
+With the swap the core draws into either buffer: the `player` frame in
+DTCM `.bss` or the stash in AXI SRAM (NORMAL_WBWA), whichever the last
+deferred frame left it.
+
+| Wario Land 3, 120 s | before 1 / 2 | after 1 / 2 | change (means) |
+|---|---|---|---|
+| fe mean | 170,406 / 166,593 | 153,555 / 154,639 | -14.4 k (-8.6%) |
+| fe max | 248,491 / 248,316 | 234,374 / 234,561 | -14.0 k |
+| busy max | 2,034,244 / 2,061,514 | 2,028,419 / 2,046,866 | -10 k |
+| core mean | 1,090,132 / 1,117,357 | 1,123,573 / 1,121,162 | +1.7% (before runs differ by 2.5%) |
+| core max | 1,874,976 / 1,886,596 | 1,878,688 / 1,887,843 | +0.1% |
+| presented / skipped | 8,412 / 303, 8,226 / 297 | 7,654 / 847, 7,965 / 536 | see below |
+| `stats_max` / `fe_max_ex_stats` (largest) | - | 71,628 / 163,643, 71,668 / 163,602 | |
+
+| Pokemon Red, 80 s | before 1 / 2 | after 1 / 2 | change (means) |
+|---|---|---|---|
+| fe mean | 168,896 / 169,205 | 155,068 / 155,144 | -13.9 k (-8.2%) |
+| fe max | 248,571 / 249,196 | 232,477 / 235,193 | -15.0 k |
+| busy max | 1,547,420 / 1,547,571 | 1,525,894 / 1,539,749 | -15 k |
+| core mean | 882,627 / 885,607 | 881,721 / 883,622 | -0.2% |
+| core max | 1,371,892 / 1,372,384 | 1,376,342 / 1,373,115 | +0.2% |
+| presented / skipped | 5,936 / 198, 5,532 / 579 | 5,677 / 485, 5,888 / 244 | see below |
+| `stats_max` / `fe_max_ex_stats` (largest) | - | 72,090 / 163,807, 71,905 / 163,929 | |
+
+All eight runs: 0 underruns, 0 over budget, 0 display errors;
+stack_used 13,120 before, 13,144 after (of 22,912). `.text` of `player`
++312 B, `.itcm` 64,088 B unchanged, ITCM checks OK.
+
+Reading: the swap takes 4-9 cycles (`copy_mean` of the scripted
+`stats display paced` line in the replay runs, max 29) instead of
+42-45 k; fe mean falls by 14 k, close to the review's ~20 k estimate
+for about 46% of frames (deferred share of presented frames in the
+replays: 13-86%
+by ROM). The core cost of drawing into AXI half the time is not seen:
+Pokemon Red -0.2%, Wario Land 3's two before runs are 27 k (2.5%) apart
+and the after runs sit beside the second (+0.3% against it), core max
+equal. Kept. Skipped frames vary from run to run with either image
+(Pokemon Red before 198 and 579; Session 30 Wario Land 3: 315-613);
+Wario Land 3's after runs (847, 536) are on the high side, which a few
+runs cannot separate from that spread: nothing in the change alters
+when a frame is deferred or superseded, only the 43 k cycles it no
+longer spends. Watch it in the next live measurements.
+
+**M4:** the report frame (`queue_stats`: about 0.9 kB of fields, u64
+formatting, COBS/CRC) costs 71-72 k cycles, and it was every window's
+`fe_max`: `fe_max` 232-235 k against `fe_max_ex_stats` 162-164 k. Its
+cycles stay in `busy`, `fe` and `over_budget` (the gates' check).
+
+**Replay set** (`cd crates/gbc-nucleo-h753 && ./run-replay.sh`, gate
+B3's invocation, at 16f88a3's tree): all six PASS equal=yes,
+underruns 0, over budget 0, mismatches 0 (cpu_instrs core_max 1,773,152,
+readbacks 12; cgb-acid2 756,851, 2; dmg-acid2 753,593, 2; cgb_sound
+2,468,349, 8; hdma_mode0 1,052,557, 2; rtc3test-sub-second 1,446,131,
+6, input 6/6, late 0). Host (gate H5): regenerated lists equal
+`tools/headless/expected/` (and the replay lists), no diff.
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce
