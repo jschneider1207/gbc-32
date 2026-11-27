@@ -1,8 +1,8 @@
-//! The panel as the paced loop's [`FrameSink`] (through [`SinkRef`]):
+//! The panel as the paced loop's [`SwapSink`] (through [`SinkRef`]):
 //! the newest completed frame goes to the panel at each TE; never waits
 //! (src/bin/paced.rs docs, "Wiring"; ADR 0039 amendment, M4 review P-7).
 //!
-//! [`FrameSink`]: gbc_firmware::headless::FrameSink
+//! [`SwapSink`]: gbc_firmware::paced::SwapSink
 //!
 //! Shared by the `paced` and `player` images (moved from src/bin/paced.rs).
 //!
@@ -28,8 +28,8 @@
 //!
 //! Meanwhile the newer frames wait in the stash as during a transfer
 //! (the newest is shown once the sample ends; the others are skipped).
-//! Frame and feed hashes and the core's cycles are untouched (the sink
-//! only reads the frame); a step's cost (about 0.8 M cycles) is awake
+//! Frame and feed hashes are untouched (the sink only reads the frame,
+//! or trades its buffer for the loop's, review P2); a step's cost (about 0.8 M cycles) is awake
 //! time, so it counts in the player's `busy`/`fe` and over-budget figures.
 //! After the run a sample still under way is finished, and a control
 //! readback with one buffer word inverted must give exactly 2
@@ -52,7 +52,7 @@ use crate::lcd::{self, FrameRate, Lcd};
 use crate::lcd_dma::{self, LcdDma};
 use crate::{CPU_HZ, cycles};
 use gbc_core::Frame;
-use gbc_firmware::headless::FrameSink;
+use gbc_firmware::paced::SwapSink;
 #[cfg(feature = "player-script")]
 use gbc_firmware::video::OUT_H;
 use gbc_firmware::video::scale_frame;
@@ -240,9 +240,13 @@ pub fn status_screen(rgb565: u16) {
 
 pub struct Display {
     dma: LcdDma,
-    /// A copy of the newest frame, taken while a transfer was running
-    /// (MDMA reading the output buffer), to be shown once it is done:
-    /// the core overwrites its own frame from the next frame on.
+    /// The newest frame, kept while a transfer was running (MDMA reading
+    /// the output buffer), to be shown once it is done. Not a copy (review
+    /// P2): the loop's frame buffer is traded for this one
+    /// ([`SwapSink`]), so the core draws its next frames into the buffer
+    /// that was here, and this one is the loop's again at the next
+    /// deferred frame. The two buffers are the loop's (DTCM in `player`)
+    /// and the stash the image gave [`init`] (AXI SRAM).
     stash: &'static mut Frame,
     /// The frame in `stash`, while it waits to be shown.
     held: Option<u32>,
@@ -258,6 +262,8 @@ pub struct Display {
     first_error: Option<(u32, lcd_dma::Error)>,
     scale: Range,
     present: Range,
+    /// The hand-off of a deferred frame (`copy_` fields): a buffer swap
+    /// since review P2, before it the 46,080 B copy.
     copy: Range,
     #[cfg(feature = "player-script")]
     sampler: Sampler,
@@ -563,16 +569,18 @@ impl Display {
         }
     }
 
-    fn frame(&mut self, n: u32, frame: &Frame) {
+    fn frame(&mut self, n: u32, frame: &mut &'static mut Frame) {
         #[cfg(feature = "player-script")]
         {
             self.sampler.armed = true;
         }
         if !self.writable(n) {
-            // MDMA is reading the buffer: keep a copy, shown once the
-            // transfer is done (`service`, or the next frame instead).
+            // MDMA is reading the buffer: keep the frame, shown once the
+            // transfer is done (`service`, or the next frame instead), by
+            // trading buffers with the loop (no copy, review P2). The
+            // stash's old frame, if any, is the skipped one below.
             let t0 = cycles();
-            self.stash.copy_from_slice(frame);
+            core::mem::swap(frame, &mut self.stash);
             self.copy.add(cycles().wrapping_sub(t0));
             if self.held.replace(n).is_some() {
                 self.skipped += 1;
@@ -595,11 +603,12 @@ impl Display {
 }
 
 /// The [`Display`] as the loop's sink; the idle hook services the same
-/// one ([`Display::service`]).
+/// one ([`Display::service`]). The loop's frame buffer must be `'static`,
+/// as the stash is: they trade places.
 pub struct SinkRef<'d>(pub &'d RefCell<Display>);
 
-impl FrameSink for SinkRef<'_> {
-    fn frame(&mut self, n: u32, frame: &Frame) {
+impl SwapSink<'static> for SinkRef<'_> {
+    fn frame_ready(&mut self, n: u32, frame: &mut &'static mut Frame) {
         self.0.borrow_mut().frame(n, frame);
     }
 }

@@ -273,10 +273,10 @@ where
 
 /// Checks the buffers, resets them to the run conditions and loads the
 /// cartridge.
-pub(crate) fn start<'a>(
+pub(crate) fn start<'a, 'b: 'a>(
     rom: &'a [u8],
-    bufs: Buffers<'a>,
-) -> Result<(Emulator<'a>, &'a mut Frame, &'a mut [StereoSample]), Error> {
+    bufs: Buffers<'b>,
+) -> Result<(Emulator<'a>, &'b mut Frame, &'b mut [StereoSample]), Error> {
     let need = cart_ram_size(rom).map_err(Error::RomHeader)?;
     let have = bufs.save_ram.len();
     if need > have {

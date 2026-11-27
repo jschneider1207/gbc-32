@@ -19,7 +19,9 @@ use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Raw, RawInputs, Shared};
 use gbc_firmware::fnv;
 use gbc_firmware::headless::{Buffers, FrameSink, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{Press, Script};
-use gbc_firmware::paced::{self, Error, Feed, FrameCycles, Hooks, Idle, Report, Service, Serviced};
+use gbc_firmware::paced::{
+    self, Error, Feed, FrameCycles, Hooks, Idle, Report, Service, Serviced, SwapSink,
+};
 use gbc_firmware::save;
 
 /// Counts its own reads (deterministic stats; they aren't compared).
@@ -193,11 +195,32 @@ impl<const N: usize> FrameSink for SinkSide<'_, '_, N> {
     }
 }
 
+/// [`SinkSide`], then trades the loop's frame buffer for its own on every
+/// frame (review P2: the board's display keeps a deferred frame so), and
+/// fills the buffer it hands the loop with a pattern no frame has: any
+/// pixel the core did not draw, or a hash of the wrong buffer, changes
+/// `fbs`.
+struct Swapper<'c, 'a, 'f, const N: usize> {
+    side: SinkSide<'c, 'a, N>,
+    spare: &'f mut Frame,
+    swaps: u32,
+}
+
+impl<'f, const N: usize> SwapSink<'f> for Swapper<'_, '_, 'f, N> {
+    fn frame_ready(&mut self, n: u32, frame: &mut &'f mut Frame) {
+        self.side.frame(n, frame);
+        core::mem::swap(frame, &mut self.spare);
+        frame.fill(0x5a5a);
+        self.swaps += 1;
+    }
+}
+
 struct Run {
     out: String,
     report: Report,
     idles: Vec<(usize, u64)>,
     waits: Vec<(usize, usize, bool)>,
+    swaps: u32,
 }
 
 fn run_paced<const N: usize>(
@@ -206,6 +229,18 @@ fn run_paced<const N: usize>(
     frames: u32,
     idle_pop: usize,
     sink_pop: fn(u32) -> usize,
+) -> Run {
+    run_paced_swapping::<N>(rom, presses, frames, idle_pop, sink_pop, false)
+}
+
+/// [`run_paced`], with `swap`: through a [`Swapper`].
+fn run_paced_swapping<const N: usize>(
+    rom: &[u8],
+    presses: &[Press],
+    frames: u32,
+    idle_pop: usize,
+    sink_pop: fn(u32) -> usize,
+    swap: bool,
 ) -> Run {
     let ring = Box::new(AudioRing::<N>::new());
     let tap = FeedTap::new();
@@ -220,6 +255,7 @@ fn run_paced<const N: usize>(
     let mut mem = Box::new(Memory::new());
     let mut save = vec![0u8; cart_ram_size(rom).unwrap()];
     let mut frame: Box<Frame> = Box::new([0; 160 * 144]);
+    let mut spare: Box<Frame> = Box::new([0x5a5a; 160 * 144]);
     let mut audio = vec![StereoSample { left: 9, right: 9 }; 1000];
     let bufs = Buffers {
         mem: &mut mem,
@@ -229,6 +265,13 @@ fn run_paced<const N: usize>(
     };
     let clock = CountingClock(Cell::new(0));
     let mut out = String::new();
+    let mut side = SinkSide(&consumer);
+    let mut swapper = Swapper {
+        side: SinkSide(&consumer),
+        spare: &mut spare,
+        swaps: 0,
+    };
+    let sink: &mut dyn SwapSink<'_> = if swap { &mut swapper } else { &mut side };
     let report = paced::run(
         rom,
         Script::new(presses),
@@ -240,17 +283,19 @@ fn run_paced<const N: usize>(
         },
         Hooks {
             clock: &clock,
-            sink: &mut SinkSide(&consumer),
+            sink,
             idle: &mut IdleSide(&consumer),
         },
         &mut out,
     )
     .unwrap();
+    let swaps = swapper.swaps;
     Run {
         out,
         report,
         idles: consumer.idles.into_inner(),
         waits: consumer.waits.into_inner(),
+        swaps,
     }
 }
 
@@ -447,6 +492,33 @@ fn cgb_sound_matches_the_reference() {
     for p in [&PATTERNS[0], &PATTERNS[5]] {
         let r = run_pattern(&rom, 600, p);
         assert_eq!(compared(&r.out), want, "{}", p.0);
+    }
+}
+
+/// Review P2: a sink that swaps the frame buffer on every frame (and
+/// fills the one it hands back with garbage) changes no compared line:
+/// the loop hashes the buffer the frame was drawn into, and each
+/// completed frame overwrites all of it. Synthetic ROM, then cgb-acid2
+/// and cgb_sound (real graphics, LCD switching) when present.
+#[test]
+fn swapping_the_frame_buffer_every_frame_changes_no_line() {
+    let mut roms = vec![("synthetic", synthetic_rom(), 120)];
+    for (name, rel) in [
+        ("cgb-acid2", "cgb-acid2/cgb-acid2.gbc"),
+        ("cgb_sound", "blargg/cgb_sound/cgb_sound.gb"),
+    ] {
+        if let Some(rom) = test_rom(rel) {
+            roms.push((name, rom, 600));
+        }
+    }
+    for (name, rom, frames) in &roms {
+        let want = reference(rom, &PRESSES, *frames, None);
+        let r = run_paced_swapping::<{ gbc_firmware::audio::RING_FRAMES }>(
+            rom, &PRESSES, *frames, 256, none, true,
+        );
+        assert_eq!(compared(&r.out), want, "{name}");
+        assert_eq!(r.swaps, r.report.ready, "{name}: one swap per frame");
+        assert!(r.swaps > 1, "{name}: no frames");
     }
 }
 

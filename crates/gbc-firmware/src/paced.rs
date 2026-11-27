@@ -4,7 +4,7 @@
 //! `run_frame` call at a time **while the sample ring has room for a
 //! whole call's samples** ([`MIN_AUDIO_SLOTS`] = 550, the most one call
 //! can produce), pushes the call's samples through the [`Conditioner`]
-//! into the ring, hands a completed frame to the [`FrameSink`], and
+//! into the ring, hands a completed frame to the [`SwapSink`], and
 //! otherwise calls the board's [`Idle`] hook (`WFI` on the MCU; the DMA
 //! refill interrupt, which pops the ring, wakes it). Since a push never
 //! exceeds the room checked before the call and the consumer only frees
@@ -126,12 +126,41 @@
 
 use core::fmt::Write;
 
-use gbc_core::{Buttons, CLOCK_HZ, Emulator, Events};
+use gbc_core::{Buttons, CLOCK_HZ, Emulator, Events, Frame};
 
 use crate::CycleClock;
 use crate::audio::{AudioRing, Conditioner, FeedHash, FeedTap, PcmFrame, RingStats};
 use crate::fnv::{self, Fnv1a};
 use crate::headless::{self, Buffers, CycleStats, FrameSink, MIN_AUDIO_SLOTS};
+
+/// The loop's frame hand-off (review P2): a sink may keep a completed
+/// frame without copying it, by trading it for a buffer of its own.
+///
+/// `frame` is the loop's frame buffer right after `run_frame` call `n`
+/// returned `FRAME_READY` (not called for a call that ended without a
+/// frame), already hashed for `fbs=`. The sink may swap `*frame` for
+/// another buffer of the same lifetime: the loop renders the following
+/// frames into that one. gbc-core allows the swap exactly there
+/// (`Emulator::run_until`, "Frame buffer": only right after a
+/// `FRAME_READY`), and a completed frame is drawn line by line over all of
+/// the buffer, so no line the loop prints depends on which buffer it was
+/// given (tests/paced.rs swaps on every frame against a buffer of
+/// garbage; the board's player-script replays compare with the host,
+/// which never swaps). The time spent here is the `sink` statistics, not
+/// the `run_frame` ones.
+///
+/// Every [`FrameSink`] is a `SwapSink` that never swaps.
+pub trait SwapSink<'f> {
+    fn frame_ready(&mut self, n: u32, frame: &mut &'f mut Frame);
+}
+
+impl<'f, S: FrameSink + ?Sized> SwapSink<'f> for S {
+    #[inline(always)]
+    fn frame_ready(&mut self, n: u32, frame: &mut &'f mut Frame) {
+        self.frame(n, frame);
+    }
+}
+
 use crate::input::{InputSource, Script};
 
 /// The board's wait for the consumer (`WFI` on the MCU).
@@ -297,18 +326,18 @@ const CHUNK: usize = 64;
 
 /// Runs `rom` for `frames` calls with `input`, paced by `feed.ring`, and
 /// prints the lines (module docs) to `out`.
-pub fn run<C, S, I, W, const N: usize>(
+pub fn run<'b, C, S, I, W, const N: usize>(
     rom: &[u8],
     input: Script<'_>,
     frames: u32,
-    bufs: Buffers<'_>,
+    bufs: Buffers<'b>,
     feed: Feed<'_, N>,
     hooks: Hooks<'_, C, S, I>,
     out: &mut W,
 ) -> Result<Report, Error>
 where
     C: CycleClock + ?Sized,
-    S: FrameSink + ?Sized,
+    S: SwapSink<'b> + ?Sized,
     I: Idle + ?Sized,
     W: Write + ?Sized,
 {
@@ -329,11 +358,11 @@ where
 /// player loop, M5). With a [`Script`] and [`NoService`] it is [`run`]:
 /// the same calls on the emulator in the same order, so the same lines.
 #[allow(clippy::too_many_arguments)]
-pub fn run_with<C, S, I, In, V, W, const N: usize>(
+pub fn run_with<'b, C, S, I, In, V, W, const N: usize>(
     rom: &[u8],
     input: &mut In,
     frames: u32,
-    bufs: Buffers<'_>,
+    bufs: Buffers<'b>,
     feed: Feed<'_, N>,
     hooks: Hooks<'_, C, S, I>,
     service: &mut V,
@@ -341,7 +370,7 @@ pub fn run_with<C, S, I, In, V, W, const N: usize>(
 ) -> Result<Report, Error>
 where
     C: CycleClock + ?Sized,
-    S: FrameSink + ?Sized,
+    S: SwapSink<'b> + ?Sized,
     I: Idle + ?Sized,
     In: InputSource + ?Sized,
     V: Service + ?Sized,
@@ -366,7 +395,7 @@ where
         )?;
         return Err(Error::NotFresh { fill, tap_frames });
     }
-    let (mut emu, frame, audio) = match headless::start(rom, bufs) {
+    let (mut emu, mut frame, audio) = match headless::start(rom, bufs) {
         Ok(s) => s,
         Err(e) => {
             headless::error_line(out, "paced", e)?;
@@ -453,7 +482,7 @@ where
             }
             ready += 1;
             let t3 = clock.now();
-            sink.frame(n, frame);
+            sink.frame_ready(n, &mut frame);
             let t4 = clock.now();
             hash.add(t3.wrapping_sub(t2), n);
             sinkc.add(t4.wrapping_sub(t3), n);

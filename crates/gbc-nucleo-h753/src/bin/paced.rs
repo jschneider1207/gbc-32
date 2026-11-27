@@ -361,9 +361,9 @@ fn main() -> ! {
     let b = buffers::take();
     let bufs = Buffers {
         mem: b.mem,
-        save_ram: &mut b.cart_ram[..],
+        save_ram: b.cart_ram,
         frame: b.frame,
-        audio: &mut b.audio[..],
+        audio: b.audio,
     };
     let display = RefCell::new(display::init(b.stash));
     let mut dac = AudioDac::new();
