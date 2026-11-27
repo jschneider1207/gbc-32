@@ -25,7 +25,28 @@
 //!
 //! Only the H753 at the D11 clock: no board or clock features. The image's
 //! `memory.x` comes from `memory_x::firmware_memory_x`, which defines the
-//! linker symbols [`tcm`] and [`fault`] read.
+//! linker symbols [`tcm`] and [`fault`] read. [`take_once`] hands out the
+//! images' static buffers; [`rcc`] does every driver's RCC clock enable
+//! and reset.
+//!
+//! # Interrupt handlers
+//!
+//! Every handler in the images (this crate's bins; `tools/h7-bench` has
+//! none of its own), read from each `#[interrupt]`, `#[exception]` and the
+//! `global_asm!` HardFault, and what it touches. SAFETY comments that rest
+//! on "no handler touches X" point here: a new handler, or a new access in
+//! one, updates this table.
+//!
+//! | Handler | Images | Body | Touches |
+//! |---|---|---|---|
+//! | `DMA1_STR0` | `paced`, `player`, `dac-probe` | [`audio_dac::on_dma`], calling the image's fill (`FeedTap::pop_into`/`pop_unhashed` and `AudioTee::offer`; dac-probe's `source`): RAM and atomics only | DMA1 LISR (read), LIFCR (stream 0's flags), stream 0 NDTR (read); the DAC buffer half the DMA is not reading |
+//! | `EXTI15_10` | `headless` (`display` builds), `lcd-dma-probe`, `paced`, `player` | [`lcd_dma::on_te`] | EXTI CPUPR1 (line 13: write-1-to-clear, read back); with a transfer pending, one RAMWR byte to the FMC command address and MDMA channel 0's CR (SWRQ) |
+//! | `HardFault` (`global_asm!`), `DefaultHandler` (every other exception, NMI included) | all | `fault::die` | masks interrupts for good first, then RCC, GPIOB, USART3, the DMA1/DMA2 streams and the MDMA channels; never returns, so it cannot split a read-modify-write it preempted |
+//!
+//! So no handler that returns touches RCC, GPIO, QUADSPI, the FMC's
+//! registers, USART3, PWR, the timers, SCB/CPUID or the MPU. SysTick and
+//! every other interrupt have no handler of their own (they fall to
+//! `DefaultHandler`, fatal).
 #![no_std]
 
 pub mod audio_dac;
@@ -46,7 +67,9 @@ pub mod mpu;
 pub mod paced_board;
 pub mod power;
 pub mod qspi;
+pub mod rcc;
 pub mod stack;
+pub mod take_once;
 pub mod tcm;
 pub mod uart;
 
@@ -114,15 +137,17 @@ pub fn init(prefix: &'static str) -> Board {
     assert!(pac::PWR::ptr() as usize == power::PWR_BASE);
 
     // GPIO clocks (D3 domain, RCC_AHB4ENR): ports B, D and E.
-    dp.RCC.ahb4enr.modify(|_, w| {
-        w.gpioben()
-            .set_bit()
-            .gpioden()
-            .set_bit()
-            .gpioeen()
-            .set_bit()
+    rcc::modify(|rcc| {
+        rcc.ahb4enr.modify(|_, w| {
+            w.gpioben()
+                .set_bit()
+                .gpioden()
+                .set_bit()
+                .gpioeen()
+                .set_bit()
+        });
+        let _ = rcc.ahb4enr.read(); // a read back: the clock is on before the first access
     });
-    let _ = dp.RCC.ahb4enr.read(); // a read back: the clock is on before the first access
     // First sign of life: LD1 on, LD2 and LD3 off.
     led::init(&dp.GPIOB, &dp.GPIOE);
 

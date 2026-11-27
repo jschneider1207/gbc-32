@@ -393,10 +393,10 @@ impl Qspi {
             prescaler % 2 == 1,
             "QUADSPI prescaler must divide by an even factor"
         );
-        // SAFETY: shared access to the RCC and the four GPIO ports. One
-        // core, no other thread; interrupts run in the images, but their
-        // handlers (`audio_dac::on_dma`, `lcd_dma::on_te`) touch only DMA1,
-        // EXTI and MDMA registers, never RCC or GPIO, so these
+        // SAFETY: shared access to the RCC (read here; the clock enables
+        // and the reset go through `crate::rcc::modify`) and the four GPIO
+        // ports. One core, no other thread, and no interrupt handler
+        // touches RCC or GPIO (the table in the crate docs), so the GPIO
         // read-modify-writes are not preempted by another writer of the
         // same register. The pins set here belong to nobody else in this
         // lib (LEDs PB0, PB14, PE1; UART PD8).
@@ -410,17 +410,19 @@ impl Qspi {
             )
         };
         // GPIO clocks (RCC_AHB4ENR); B, D and E are on since `init`.
-        rcc.ahb4enr.modify(|_, w| {
-            w.gpioben()
-                .set_bit()
-                .gpioden()
-                .set_bit()
-                .gpioeen()
-                .set_bit()
-                .gpiogen()
-                .set_bit()
+        crate::rcc::modify(|rcc| {
+            rcc.ahb4enr.modify(|_, w| {
+                w.gpioben()
+                    .set_bit()
+                    .gpioden()
+                    .set_bit()
+                    .gpioeen()
+                    .set_bit()
+                    .gpiogen()
+                    .set_bit()
+            });
+            let _ = rcc.ahb4enr.read();
         });
-        let _ = rcc.ahb4enr.read();
 
         // The kernel clock: pll2_r_ck (RM0433 section 8.7.19, RCC_D1CCIPR
         // QSPISEL = 10, [`KER_HZ`]), which `crate::clock::clock_up` started
@@ -431,11 +433,13 @@ impl Qspi {
         if let Err(e) = kernel_clock(rcc) {
             panic!("QUADSPI init: kernel clock not ready: {e:?}");
         }
-        rcc.ahb3enr.modify(|_, w| w.qspien().set_bit());
-        let _ = rcc.ahb3enr.read();
-        rcc.ahb3rstr.modify(|_, w| w.qspirst().set_bit());
-        rcc.ahb3rstr.modify(|_, w| w.qspirst().clear_bit());
-        let _ = rcc.ahb3rstr.read();
+        crate::rcc::modify(|rcc| {
+            rcc.ahb3enr.modify(|_, w| w.qspien().set_bit());
+            let _ = rcc.ahb3enr.read();
+            rcc.ahb3rstr.modify(|_, w| w.qspirst().set_bit());
+            rcc.ahb3rstr.modify(|_, w| w.qspirst().clear_bit());
+            let _ = rcc.ahb3rstr.read();
+        });
 
         // NCS with a pull-up, so the NOR stays deselected if the pin is
         // ever not driven (ST's BSPs do the same); the IOs without pulls.
@@ -805,8 +809,8 @@ impl Mapped {
         // or erase would leave it stale. Clean as well as invalidate, since
         // the other cacheable regions (AXI SRAM) hold dirty lines.
         // SAFETY: SCB and CPUID are core registers; this firmware has one
-        // core and no other thread, and no interrupt handler
-        // (`audio_dac::on_dma`, `lcd_dma::on_te`) uses SCB or CPUID. A
+        // core and no other thread, and no interrupt handler uses SCB or
+        // CPUID (the table in the crate docs). A
         // handler running mid-loop would be harmless anyway: a
         // clean-and-invalidate by set/way loses no data.
         let mut cp = unsafe { cortex_m::Peripherals::steal() };

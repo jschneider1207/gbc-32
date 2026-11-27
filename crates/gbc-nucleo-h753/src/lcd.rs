@@ -363,9 +363,9 @@ fn fmc() -> &'static pac::fmc::RegisterBlock {
 }
 
 fn rcc() -> &'static pac::rcc::RegisterBlock {
-    // SAFETY: as `fmc`; the RCC fields written here (AHB3ENR FMCEN,
-    // AHB3RSTR FMCRST, D1CCIPR FMCSEL and CKPERSEL) belong to this driver
-    // (`qspi` writes QSPISEL/QSPIEN with read-modify-writes; one thread).
+    // SAFETY: as `fmc`; only read through this handle (D1CCIPR). The
+    // driver's RCC writes (AHB3ENR FMCEN, AHB3RSTR FMCRST, D1CCIPR FMCSEL
+    // and CKPERSEL) go through `crate::rcc::modify`.
     unsafe { &*pac::RCC::ptr() }
 }
 
@@ -454,26 +454,27 @@ impl Lcd {
                 n += 1;
             }
         }
-        let rcc = rcc();
         // The kernel clock is switched with the FMC's clock off (RM0433
         // 8.7.19 allows it on the fly, but nothing needs that). Then the
         // bus clock (AHB3ENR FMCEN, 8.7.40), read back, and a reset pulse
         // (AHB3RSTR FMCRST, 8.7.28) for a known state: BCR1 = 0x30DB with
         // FMCEN = 0 (22.7.6).
-        rcc.ahb3enr.modify(|_, w| w.fmcen().clear_bit());
-        let _ = rcc.ahb3enr.read();
-        rcc.d1ccipr.modify(|_, w| {
-            let w = w.ckpersel().hsi();
-            match t.kernel {
-                Kernel::Hclk3 => w.fmcsel().rcc_hclk3(),
-                Kernel::PerHsi => w.fmcsel().per(),
-            }
+        crate::rcc::modify(|rcc| {
+            rcc.ahb3enr.modify(|_, w| w.fmcen().clear_bit());
+            let _ = rcc.ahb3enr.read();
+            rcc.d1ccipr.modify(|_, w| {
+                let w = w.ckpersel().hsi();
+                match t.kernel {
+                    Kernel::Hclk3 => w.fmcsel().rcc_hclk3(),
+                    Kernel::PerHsi => w.fmcsel().per(),
+                }
+            });
+            rcc.ahb3enr.modify(|_, w| w.fmcen().set_bit());
+            let _ = rcc.ahb3enr.read();
+            rcc.ahb3rstr.modify(|_, w| w.fmcrst().set_bit());
+            rcc.ahb3rstr.modify(|_, w| w.fmcrst().clear_bit());
+            let _ = rcc.ahb3rstr.read();
         });
-        rcc.ahb3enr.modify(|_, w| w.fmcen().set_bit());
-        let _ = rcc.ahb3enr.read();
-        rcc.ahb3rstr.modify(|_, w| w.fmcrst().set_bit());
-        rcc.ahb3rstr.modify(|_, w| w.fmcrst().clear_bit());
-        let _ = rcc.ahb3rstr.read();
 
         let f = fmc();
         // Timings first, then BCR1 with the bank configured, then FMCEN

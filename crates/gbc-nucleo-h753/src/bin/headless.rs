@@ -64,9 +64,8 @@
 #![no_std]
 #![no_main]
 
-use core::cell::{Cell, UnsafeCell};
+use core::cell::Cell;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use gbc_core::{Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
 use gbc_firmware::CycleClock;
@@ -141,50 +140,43 @@ mod buffers {
         pub capture: &'static mut [u8; CAPTURE_BYTES],
     }
 
-    struct Slot<T>(UnsafeCell<T>);
-
-    // SAFETY: the slots are private to this module and only reachable
-    // through `take`, which hands out one reference to each for the life
-    // of the program (guarded by `TAKEN`), so no two contexts ever access
-    // one.
-    unsafe impl<T: Send> Sync for Slot<T> {}
-
-    /// `.data` (`Memory::new()` is not all zeros): in DTCM in this
-    /// placement, copied from flash by the startup code.
-    static MEM: Slot<Memory> = Slot(UnsafeCell::new(Memory::new()));
-    // SAFETY (the four `link_section`s): `.axisram` is the NOLOAD output
-    // section of AXI SRAM that memory.x (memory_x::firmware_memory_x)
-    // defines for such buffers. It is not zeroed at boot, which is sound
-    // for these types (integers and structs of integers: every bit pattern
-    // is a value); `headless::run` fills the frame and cartridge RAM before
-    // it reads them, the audio buffer is written before it is read, and the
-    // capture is read only up to what was written.
-    #[unsafe(link_section = ".axisram.frame")]
-    static FRAME: Slot<Frame> = Slot(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
-    #[unsafe(link_section = ".axisram.audio")]
-    static AUDIO: Slot<[StereoSample; MIN_AUDIO_SLOTS]> = Slot(UnsafeCell::new(
-        [StereoSample { left: 0, right: 0 }; MIN_AUDIO_SLOTS],
-    ));
-    #[unsafe(link_section = ".axisram.cart_ram")]
-    static CART_RAM: Slot<[u8; CART_RAM_BYTES]> = Slot(UnsafeCell::new([0; CART_RAM_BYTES]));
-    #[unsafe(link_section = ".axisram.capture")]
-    static CAPTURE: Slot<[u8; CAPTURE_BYTES]> = Slot(UnsafeCell::new([0; CAPTURE_BYTES]));
-
-    static TAKEN: AtomicBool = AtomicBool::new(false);
-
     /// The buffers. Panics on a second call.
     pub fn take() -> Bufs {
-        assert!(!TAKEN.swap(true, Ordering::AcqRel), "buffers taken twice");
-        // SAFETY: the swap above lets exactly one caller through, ever, so
-        // these are the only references to the five statics.
-        unsafe {
-            Bufs {
-                mem: &mut *MEM.0.get(),
-                frame: &mut *FRAME.0.get(),
-                audio: &mut *AUDIO.0.get(),
-                cart_ram: &mut *CART_RAM.0.get(),
-                capture: &mut *CAPTURE.0.get(),
-            }
+        const TWICE: &str = "buffers taken twice";
+        Bufs {
+            // `.data` (`Memory::new()` is not all zeros): in DTCM in this
+            // placement, copied from flash by the startup code.
+            mem: gbc_nucleo_h753::take_once!(Memory = Memory::new()).expect(TWICE),
+            // SAFETY (the four `link_section`s): `.axisram` is the NOLOAD
+            // output section of AXI SRAM that memory.x
+            // (memory_x::firmware_memory_x) defines for such buffers. It
+            // is not zeroed at boot, which is sound for these types
+            // (integers and structs of integers: every bit pattern is a
+            // value); `headless::run` fills the frame and cartridge RAM
+            // before it reads them, the audio buffer is written before it
+            // is read, and the capture is read only up to what was
+            // written.
+            frame: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.frame")]
+                Frame = [0; SCREEN_WIDTH * SCREEN_HEIGHT]
+            )
+            .expect(TWICE),
+            audio: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.audio")]
+                [StereoSample; MIN_AUDIO_SLOTS] =
+                    [StereoSample { left: 0, right: 0 }; MIN_AUDIO_SLOTS]
+            )
+            .expect(TWICE),
+            cart_ram: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.cart_ram")]
+                [u8; CART_RAM_BYTES] = [0; CART_RAM_BYTES]
+            )
+            .expect(TWICE),
+            capture: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.capture")]
+                [u8; CAPTURE_BYTES] = [0; CAPTURE_BYTES]
+            )
+            .expect(TWICE),
         }
     }
 }

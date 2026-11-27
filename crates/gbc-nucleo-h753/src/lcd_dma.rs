@@ -93,7 +93,7 @@
 //! An image that links this lib without using [`LcdDma`] needs no handler:
 //! the interrupt is only unmasked by [`LcdDma::new`].
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gbc_firmware::video::{OUT_BYTES, OUT_H, OUT_W, OutFrame};
 
@@ -266,41 +266,32 @@ impl LcdDma {
     /// TE on EXTI13, and enables the EXTI15_10 interrupt (the image must
     /// define it, module docs). Panics on a second call.
     pub fn new(lcd: Lcd) -> LcdDma {
-        static TAKEN: AtomicBool = AtomicBool::new(false);
-        assert!(
-            !TAKEN.swap(true, Ordering::AcqRel),
-            "LcdDma::new called twice"
-        );
-        struct Slot(core::cell::UnsafeCell<DmaBuffer>);
-        // SAFETY: reachable only through the `TAKEN` guard above, once.
-        unsafe impl Sync for Slot {}
-        // SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x
-        // (memory_x::firmware_memory_x) defines for such buffers; not
-        // zeroed at boot, which is sound for `u32` words (every bit pattern
-        // is a value). The image converts a frame into it before the first
-        // transfer.
-        #[unsafe(link_section = ".axisram.lcd_dma")]
-        static BUF: Slot = Slot(core::cell::UnsafeCell::new(DmaBuffer(
-            [[0; OUT_W / 2]; OUT_H],
-        )));
-        // SAFETY: the guard lets exactly one caller through, so this is the
-        // only reference to BUF; MDMA reads it only between `present` and
-        // the completion, while `LcdDma` hands out no reference to it.
-        let buf = unsafe { &mut *BUF.0.get() };
+        // The only reference to the buffer; MDMA reads it only between
+        // `present` and the completion, while `LcdDma` hands out no
+        // reference to it.
+        let buf = crate::take_once!(
+            // SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x
+            // (memory_x::firmware_memory_x) defines for such buffers; not
+            // zeroed at boot, which is sound for `u32` words (every bit
+            // pattern is a value). The image converts a frame into it
+            // before the first transfer.
+            #[unsafe(link_section = ".axisram.lcd_dma")]
+            DmaBuffer = DmaBuffer([[0; OUT_W / 2]; OUT_H])
+        )
+        .expect("LcdDma::new called twice");
         mpu::dma_buffer_window(
             mpu::REGION_DMA_BUF,
             buf as *mut DmaBuffer as usize,
             DMA_BUFFER_BYTES,
         );
 
-        // SAFETY: RCC_AHB3ENR (MDMAEN) and APB4ENR (SYSCFGEN) by
-        // read-modify-write, the same single thread as `lcd`'s FMCEN; no
-        // interrupt touches RCC.
-        let rcc = unsafe { &*pac::RCC::ptr() };
-        rcc.ahb3enr.modify(|_, w| w.mdmaen().set_bit());
-        rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
-        let _ = rcc.ahb3enr.read();
-        let _ = rcc.apb4enr.read();
+        // RCC_AHB3ENR (MDMAEN) and APB4ENR (SYSCFGEN), read back.
+        crate::rcc::modify(|rcc| {
+            rcc.ahb3enr.modify(|_, w| w.mdmaen().set_bit());
+            rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
+            let _ = rcc.ahb3enr.read();
+            let _ = rcc.apb4enr.read();
+        });
         let ch = mdma();
         // A channel left enabled by an earlier image (a reset clears it,
         // but a debugger reset may not reset MDMA): disable and wait.

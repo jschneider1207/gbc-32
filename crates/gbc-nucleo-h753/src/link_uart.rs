@@ -44,9 +44,6 @@
 //!   write it (bytes would interleave with a DMA transfer); the fault
 //!   handler's report is the exception (the program has stopped then).
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use gbc_firmware::rx_ring::RxRing;
 
 pub use crate::uart::RxErrors;
@@ -64,20 +61,6 @@ struct Block {
 }
 const _: () = assert!(core::mem::size_of::<Block>() == BLOCK_BYTES);
 const _: () = assert!(core::mem::align_of::<Block>() == BLOCK_BYTES);
-
-struct Slot(UnsafeCell<Block>);
-// SAFETY: reached only through the one `LinkUart` (guarded by `TAKEN`);
-// the DMA writes `rx` and reads `tx` as the module docs describe.
-unsafe impl Sync for Slot {}
-// SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x defines for
-// DMA buffers; not zeroed at boot, which is sound for bytes, and
-// `mpu::dma_buffer_window` zeroes it before the DMA starts.
-#[unsafe(link_section = ".axisram.link")]
-static BUF: Slot = Slot(UnsafeCell::new(Block {
-    rx: [0; RX_BYTES],
-    tx: [0; TX_BYTES],
-}));
-static TAKEN: AtomicBool = AtomicBool::new(false);
 
 const RX_STREAM: usize = 1;
 const TX_STREAM: usize = 2;
@@ -137,6 +120,10 @@ fn stop_stream(n: usize) {
 
 /// The DMA-driven link UART (module docs). One per program.
 pub struct LinkUart {
+    /// The DMA block, from its take-once static. A raw pointer, not a
+    /// reference: the receive stream writes `rx` while a `LinkUart`
+    /// exists, so no reference to the block is held (module docs).
+    buf: *mut Block,
     rx: RxRing,
     tx_errors: u32,
     errors: RxErrors,
@@ -150,19 +137,30 @@ impl LinkUart {
     /// # Panics
     /// On a second call.
     pub fn new(uart: &mut Uart, bps: u32) -> Result<LinkUart, BaudError> {
-        assert!(!TAKEN.swap(true, Ordering::AcqRel), "LinkUart taken twice");
+        let buf: *mut Block = crate::take_once!(
+            // SAFETY: `.axisram` is the NOLOAD AXI SRAM section memory.x
+            // defines for DMA buffers; not zeroed at boot, which is sound
+            // for bytes, and `mpu::dma_buffer_window` zeroes it before the
+            // DMA starts.
+            #[unsafe(link_section = ".axisram.link")]
+            Block = Block {
+                rx: [0; RX_BYTES],
+                tx: [0; TX_BYTES],
+            }
+        )
+        .expect("LinkUart taken twice");
         let setting = uart.set_baud(bps)?;
-        let base = BUF.0.get() as usize;
+        let base = buf as usize;
         mpu::dma_buffer_window(mpu::REGION_LINK_BUF, base, BLOCK_BYTES);
-        // SAFETY: RCC_AHB1ENR read-modify-write of DMA1EN only (DMA1 and
-        // DMAMUX1, RM0433 8.7.41); the read back orders it before the
-        // first DMA access.
-        unsafe {
-            let rcc = &*pac::RCC::ptr();
+        // RCC_AHB1ENR: DMA1EN (DMA1 and DMAMUX1, RM0433 8.7.41); the read
+        // back orders it before the first DMA access.
+        crate::rcc::modify(|rcc| {
+            // SAFETY: DMA1EN is added to the value read, every other bit
+            // kept.
             rcc.ahb1enr
-                .modify(|r, w| w.bits(r.bits() | RCC_AHB1_DMA1EN));
+                .modify(|r, w| unsafe { w.bits(r.bits() | RCC_AHB1_DMA1EN) });
             let _ = rcc.ahb1enr.read();
-        }
+        });
         // Streams an earlier image may have left running (a debugger reset
         // may not reset DMA1).
         stop_stream(RX_STREAM);
@@ -191,6 +189,7 @@ impl LinkUart {
             u.cr3.modify(|r, w| w.bits(r.bits() | CR3_DMAR | CR3_DMAT));
         }
         Ok(LinkUart {
+            buf,
             rx: RxRing::new(RX_BYTES),
             tx_errors: 0,
             errors: RxErrors::default(),
@@ -208,7 +207,7 @@ impl LinkUart {
         self.count_errors();
         let (ndtr, marks) = rx_snapshot();
         let p = self.rx.poll(ndtr, marks & HTIF != 0, marks & TCIF != 0);
-        let rx = BUF.0.get() as *const u8;
+        let rx = self.buf as *const u8;
         let mut i = p.start;
         for _ in 0..p.avail {
             // SAFETY: in bounds (`RxRing` keeps indices < RX_BYTES); a
@@ -244,7 +243,7 @@ impl LinkUart {
         // SAFETY: the stream is idle, so the DMA is not reading `tx`; the
         // `&mut self` borrow keeps `start_tx` from starting one while the
         // buffer is lent.
-        Some(unsafe { &mut (*BUF.0.get()).tx })
+        Some(unsafe { &mut (*self.buf).tx })
     }
 
     /// Sends the first `n` bytes of the transmit buffer (at most
@@ -259,7 +258,7 @@ impl LinkUart {
             self.tx_errors += 1;
         }
         let st = &d.st[TX_STREAM];
-        let tx = BUF.0.get() as usize + RX_BYTES;
+        let tx = self.buf as usize + RX_BYTES;
         // The buffer writes (Normal memory) complete before the DMA reads.
         cortex_m::asm::dsb();
         // SAFETY: EN = 0 (checked), flags cleared before EN; PAR is

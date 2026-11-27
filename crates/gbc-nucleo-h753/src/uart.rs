@@ -84,8 +84,9 @@ pub struct RxErrors {
 pub struct Uart(());
 
 impl Uart {
-    /// A handle for USART3. Every handle shares the one peripheral; this
-    /// lib has no interrupts and no second thread, so accesses never
+    /// A handle for USART3. Every handle shares the one peripheral; no
+    /// interrupt handler that returns touches USART3 (the table in the
+    /// crate docs) and there is no second thread, so accesses never
     /// interleave.
     pub(crate) const fn new() -> Self {
         Uart(())
@@ -230,15 +231,17 @@ fn configure(s: &BaudSetting, fifo: bool) {
 /// safe to repeat (the fault handler does). Returns false if the D2
 /// domain's clocks did not come up.
 pub(crate) fn init() -> bool {
-    // SAFETY: shared access to RCC and GPIOD; no interrupt and no second
-    // thread exists, so register accesses never overlap.
+    // SAFETY: shared access to RCC (read here; the clock enables go
+    // through `crate::rcc::modify`) and GPIOD. No second thread, and no
+    // interrupt handler touches RCC or GPIOD (the table in the crate
+    // docs), so register accesses never overlap.
     let (rcc, gpiod) = unsafe { (&*pac::RCC::ptr(), &*pac::GPIOD::ptr()) };
-    rcc.ahb4enr.modify(|_, w| w.gpioden().set_bit());
+    crate::rcc::modify(|rcc| rcc.ahb4enr.modify(|_, w| w.gpioden().set_bit()));
     // USART3 is in the D2 domain. Enabling its clock from this CPU
     // allocates it to the CPU, which keeps D2 clocked (RM0433 section
     // 8.5.10 "Peripheral allocation"); D2CKRDY (RCC_CR bit 15) tells when
     // the domain's clocks run.
-    rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
+    crate::rcc::modify(|rcc| rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit()));
     let d2_ok = wait_for(4_000_000, || rcc.cr.read().d2ckrdy().bit_is_set());
     // PD8 TX and PD9 RX, AF7. RX gets a pull-up so it idles high (a
     // mark) if the ST-LINK ever stops driving it.

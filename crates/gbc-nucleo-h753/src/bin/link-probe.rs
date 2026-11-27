@@ -36,9 +36,7 @@
 #![no_std]
 #![no_main]
 
-use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use gbc_core::{
     CLOCK_HZ, Config, Emulator, FRAME_CLOCKS, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH,
@@ -79,35 +77,31 @@ mod buffers {
         pub save: &'static mut [u8; SAVE_BYTES],
     }
 
-    struct Slot<T>(UnsafeCell<T>);
-    // SAFETY: only reachable through `take`, which hands out one
-    // reference to each for the life of the program (guarded by `TAKEN`).
-    unsafe impl<T: Send> Sync for Slot<T> {}
-
-    static MEM: Slot<Memory> = Slot(UnsafeCell::new(Memory::new()));
-    // SAFETY (the `link_section`s): `.axisram` is the NOLOAD AXI SRAM
-    // section memory.x defines for such buffers; not zeroed at boot, which
-    // is sound for these integer arrays. `main` zeroes the cartridge RAM
-    // before `load`; the frame and the save buffer are written before they
-    // are read.
-    #[unsafe(link_section = ".axisram.frame")]
-    static FRAME: Slot<Frame> = Slot(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
-    #[unsafe(link_section = ".axisram.cart_ram")]
-    static CART_RAM: Slot<[u8; CART_RAM_BYTES]> = Slot(UnsafeCell::new([0; CART_RAM_BYTES]));
-    #[unsafe(link_section = ".axisram.save")]
-    static SAVE: Slot<[u8; SAVE_BYTES]> = Slot(UnsafeCell::new([0; SAVE_BYTES]));
-    static TAKEN: AtomicBool = AtomicBool::new(false);
-
+    /// The buffers. Panics on a second call.
     pub fn take() -> Bufs {
-        assert!(!TAKEN.swap(true, Ordering::AcqRel), "buffers taken twice");
-        // SAFETY: the swap lets exactly one caller through, ever.
-        unsafe {
-            Bufs {
-                mem: &mut *MEM.0.get(),
-                frame: &mut *FRAME.0.get(),
-                cart_ram: &mut *CART_RAM.0.get(),
-                save: &mut *SAVE.0.get(),
-            }
+        const TWICE: &str = "buffers taken twice";
+        Bufs {
+            mem: gbc_nucleo_h753::take_once!(Memory = Memory::new()).expect(TWICE),
+            // SAFETY (the `link_section`s): `.axisram` is the NOLOAD AXI
+            // SRAM section memory.x defines for such buffers; not zeroed
+            // at boot, which is sound for these integer arrays. `main`
+            // zeroes the cartridge RAM before `load`; the frame and the
+            // save buffer are written before they are read.
+            frame: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.frame")]
+                Frame = [0; SCREEN_WIDTH * SCREEN_HEIGHT]
+            )
+            .expect(TWICE),
+            cart_ram: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.cart_ram")]
+                [u8; CART_RAM_BYTES] = [0; CART_RAM_BYTES]
+            )
+            .expect(TWICE),
+            save: gbc_nucleo_h753::take_once!(
+                #[unsafe(link_section = ".axisram.save")]
+                [u8; SAVE_BYTES] = [0; SAVE_BYTES]
+            )
+            .expect(TWICE),
         }
     }
 }

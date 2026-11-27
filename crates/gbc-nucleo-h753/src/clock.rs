@@ -294,8 +294,10 @@ pub(crate) fn clock_up(
     if !wait_for(TRIES, || pwr.d3cr.read().vosrdy().bit_is_set()) {
         return Err("vos1 vosrdy");
     }
-    rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
-    let _ = rcc.apb4enr.read(); // the clock is on before the first access
+    crate::rcc::modify(|rcc| {
+        rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
+        let _ = rcc.apb4enr.read(); // the clock is on before the first access
+    });
     VOS0_DIAG[0].store(syscfg.pwrcr.read().bits(), Ordering::Relaxed);
     syscfg.pwrcr.modify(|_, w| w.oden().set_bit());
     if !syscfg.pwrcr.read().oden().bit_is_set() {

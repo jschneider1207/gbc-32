@@ -37,8 +37,9 @@ pub const TIM_HZ: u32 = CPU_HZ / 2;
 /// come up within about 5 s (DS12117 Table 131, rev V: tSU typically 2 s).
 pub fn start() -> Option<u32> {
     // SAFETY: the clock check owns PWR_CR1.DBP, RCC_BDCR's LSE bits,
-    // RCC_APB2ENR.TIM16EN and TIM16; no interrupt and no second thread
-    // exist.
+    // RCC_APB2ENR.TIM16EN (set through `crate::rcc::modify`) and TIM16;
+    // no second thread, and no interrupt handler touches PWR, RCC or
+    // TIM16 (the table in the crate docs).
     let (pwr, rcc, tim) = unsafe { (&*pac::PWR::ptr(), &*pac::RCC::ptr(), &*pac::TIM16::ptr()) };
     // RCC_BDCR is write-protected after reset until PWR_CR1.DBP = 1
     // (RM0433 section 8.7.26; PWR_CR1 bit 8, section 6.8.1).
@@ -76,8 +77,10 @@ pub fn start() -> Option<u32> {
     // input capture of TI1 (CC1S = 0b01), no filter, no input prescaler,
     // rising edges (CC1P = 0), counter free-running over 16 bits at the
     // kernel clock (PSC 0, ARR 0xFFFF).
-    rcc.apb2enr.modify(|_, w| w.tim16en().set_bit());
-    let _ = rcc.apb2enr.read();
+    crate::rcc::modify(|rcc| {
+        rcc.apb2enr.modify(|_, w| w.tim16en().set_bit());
+        let _ = rcc.apb2enr.read();
+    });
     tim.cr1.write(|w| w.cen().clear_bit());
     // SAFETY: 0b0010 is the documented LSE value of TI1SEL (section
     // 41.6.18), 0b01 the documented "IC1 mapped on TI1" value of CC1S, and

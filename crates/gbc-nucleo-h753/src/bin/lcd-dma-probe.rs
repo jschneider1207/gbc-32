@@ -27,7 +27,6 @@
 #![no_std]
 #![no_main]
 
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 
 use gbc_firmware::video::{OUT_H, OutFrame, scale_frame};
@@ -38,12 +37,8 @@ use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led, wait_since};
 
 /// Bytes of output kept for the replay.
 const LOG_BYTES: usize = 24 << 10;
-/// The run's output, kept (in DTCM `.bss`) and replayed every 5 s with the
-/// summary: the run is over before a serial reader started after the
-/// flash can catch it.
-static LOG: Slot<[u8; LOG_BYTES]> = Slot(UnsafeCell::new([0; LOG_BYTES]));
 
-/// The UART, with every byte also appended to [`LOG`] while it has room.
+/// The UART, with every byte also appended to the log while it has room.
 struct Out<'a> {
     uart: &'a mut Uart,
     log: &'static mut [u8; LOG_BYTES],
@@ -98,18 +93,9 @@ fn EXTI15_10() {
     lcd_dma::on_te();
 }
 
-struct Slot<T>(UnsafeCell<T>);
-// SAFETY: reached only from `main`, once each (`frame`, the log).
-unsafe impl<T> Sync for Slot<T> {}
 /// The core's frame, in DTCM (`.bss`), as the emulator's will be.
-static FRAME: Slot<Frame> = Slot(UnsafeCell::new([0; SW * SH]));
-
 fn frame() -> &'static mut Frame {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static TAKEN: AtomicBool = AtomicBool::new(false);
-    assert!(!TAKEN.swap(true, Ordering::AcqRel));
-    // SAFETY: the guard lets one caller through; the only reference.
-    unsafe { &mut *FRAME.0.get() }
+    gbc_nucleo_h753::take_once!(Frame = [0; SW * SH]).expect("frame taken twice")
 }
 
 fn us(c: u32) -> u32 {
@@ -319,8 +305,11 @@ fn send(out: &mut Out, dma: &mut LcdDma, s: &mut Summary) -> Option<Transfer> {
 fn main() -> ! {
     let mut board = board::init(PREFIX);
     board.banner(IMAGE);
-    // SAFETY: reached once, from `main`; the only reference to LOG.
-    let log = unsafe { &mut *LOG.0.get() };
+    // The run's output, kept (in DTCM `.bss`) and replayed every 5 s with
+    // the summary: the run is over before a serial reader started after
+    // the flash can catch it.
+    let log =
+        gbc_nucleo_h753::take_once!([u8; LOG_BYTES] = [0; LOG_BYTES]).expect("main runs once");
     let mut out = Out {
         uart: &mut board.uart,
         log,

@@ -271,9 +271,9 @@ pub(crate) fn qspi_window(w: Window) {
     // region, written as Armv7-M B3.5 lays them out; the MPU may be
     // updated while enabled (B3.5.4). The region only adds access to the
     // window, or removes it, and the caller ensures the QUADSPI answers
-    // there whenever it is open. Interrupts run in the images, but no
-    // handler (`audio_dac::on_dma`, `lcd_dma::on_te`, HardFault) writes an
-    // MPU register, and the other MPU writers (`fmc_window`,
+    // there whenever it is open. No interrupt handler writes an MPU
+    // register (the table in the crate docs), and the other MPU writers
+    // (`fmc_window`,
     // `dma_buffer_window`) run in the main thread, so the RBAR and RASR
     // writes are not interleaved with another update.
     unsafe {

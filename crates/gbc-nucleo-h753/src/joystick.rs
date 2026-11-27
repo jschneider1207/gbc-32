@@ -68,15 +68,16 @@ pub struct Joystick(());
 impl Joystick {
     /// Clocks the ports and sets the pins up.
     pub fn new() -> Self {
-        // SAFETY: RCC_AHB4ENR read-modify-write of four port clocks; the
-        // read back makes the clocks run before the first port access.
-        unsafe {
-            let rcc = &*pac::RCC::ptr();
-            rcc.ahb4enr.modify(|r, w| {
+        // RCC_AHB4ENR: four port clocks; the read back makes the clocks
+        // run before the first port access.
+        crate::rcc::modify(|rcc| {
+            // SAFETY: the four GPIO clock-enable bits are added to the
+            // value read, every other bit kept.
+            rcc.ahb4enr.modify(|r, w| unsafe {
                 w.bits(r.bits() | AHB4_GPIOA | AHB4_GPIOC | AHB4_GPIOE | AHB4_GPIOF)
             });
             let _ = rcc.ahb4enr.read();
-        }
+        });
         input(gpioe(), 3, PULL_UP);
         input(gpioa(), 0, PULL_UP);
         input(gpiof(), 7, PULL_UP);
