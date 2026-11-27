@@ -137,6 +137,10 @@ pub struct Stats {
     pub clocks: u64,
     pub min: u32,
     pub max: u32,
+    /// Index (0-based call number) of the first call that took `max` cycles;
+    /// 0 when no call took any. No warm-up is discarded: call 0 runs on cold
+    /// caches, so a max at 0 is a cold-cache max.
+    pub max_at: u32,
     pub sum: u64,
     /// Checksum of every call's clocks, events and audio samples, of every
     /// completed frame, and of the final frame buffer.
@@ -194,6 +198,7 @@ pub fn run(
         clocks: 0,
         min: u32::MAX,
         max: 0,
+        max_at: 0,
         sum: 0,
         hash: 0,
     };
@@ -205,7 +210,10 @@ pub fn run(
         s.calls += 1;
         s.clocks += r.clocks;
         s.min = s.min.min(dt);
-        s.max = s.max.max(dt);
+        if dt > s.max {
+            s.max = dt;
+            s.max_at = i;
+        }
         s.sum += u64::from(dt);
         h.u64(r.clocks);
         h.bytes(&r.events.bits().to_le_bytes());
@@ -250,14 +258,15 @@ pub fn report_line_from(out: &mut impl Write, source: &str, i: usize, r: &Result
     let _ = match r {
         Ok(s) => writeln!(
             out,
-            "h7bench v1 {source}{name} calls={} frames={} clocks={} min={} mean={} max={} hash={:016x}\r",
+            "h7bench v1 {source}{name} calls={} frames={} clocks={} min={} mean={} max={} hash={:016x} max_at={}\r",
             s.calls,
             s.frames,
             s.clocks,
             s.min,
             s.sum / u64::from(s.calls.max(1)),
             s.max,
-            s.hash
+            s.hash,
+            s.max_at
         ),
         Err(e) => writeln!(
             out,

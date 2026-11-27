@@ -450,9 +450,9 @@ whole report repeats every 3 s forever):
 ```
 h7bench v1 banner image=bench placement=itcm-dtcm board=NUCLEO-H753ZI clock=pll472 cpu_hz=472000000 lse_cpu_hz=... ...
 h7bench v1 start worst-case calls=120
-h7bench v1 worst-case calls=120 frames=... clocks=... min=... mean=... max=... hash=................
+h7bench v1 worst-case calls=120 frames=... clocks=... min=... mean=... max=... hash=................ max_at=...
 ...
-h7bench v1 storm-ppu calls=120 frames=... clocks=... min=... mean=... max=... hash=................
+h7bench v1 storm-ppu calls=120 frames=... clocks=... min=... mean=... max=... hash=................ max_at=...
 h7bench v1 stack used=3440 of=77592
 h7bench v1 end pass=1
 ```
@@ -502,9 +502,9 @@ in the window:
 
 ```
 h7bench v1 qspi pack ok len=524800 hash=b8aead06e9d0dc4e roms=15 same_as_flash=1 validate_cycles=8408320 qspi_hz=59000000 window=cached exit_fallbacks=0
-h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778
+h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778 max_at=...
 ...
-h7bench v1 qspi worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778
+h7bench v1 qspi worst-case calls=120 frames=119 clocks=8420792 min=... mean=... max=... hash=de590b88792b5778 max_at=...
 ...
 ```
 
@@ -613,7 +613,18 @@ second boot passed against it, largest |delta| 0.047%; `docs/perf.md`
 - DWT `CYCCNT`, read right before and right after each call. No interrupt is
   enabled, so nothing else runs in the window. Hashing (which walks the
   46 KB frame buffer and so evicts most of the 16 KB D-cache) and the LED
-  are outside it; a real front end's blit would evict the cache likewise.
+  are outside it. The shipped player does not evict like this: its scaler
+  reads the frame from DTCM and writes non-cacheable memory, so ROM and
+  cart-RAM lines survive between frames except on display-stash frames
+  (`docs/perf.md` "Display stash cache attribute (M7 P2)"). The bench's
+  QSPI cost (+1.24%, `docs/perf.md` M6) is therefore an upper bound for the
+  player.
+- Each workload line ends with `max_at=<n>`, the 0-based call that took
+  `max` (the first one if several tie; 0 on the host and QEMU, which have no
+  cycle counter). No warm-up call is discarded, so `max_at=0` means the
+  max is the cold-cache first call. The checks ignore the field's value:
+  `check-report.sh` sets it to 0 before comparing with `expected-hashes.txt`,
+  and `check-cycles.sh` leaves it out of the report-to-report comparison.
 - The calls are the bench's (`run_emulation` in `tools/bench/src/main.rs`):
   `run_until(clock + FRAME_CLOCKS)` with a 1024-sample audio buffer.
 - Phase A runs from the 64 MHz HSI with nothing clock-related written.

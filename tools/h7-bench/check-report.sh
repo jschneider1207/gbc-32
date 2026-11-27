@@ -59,7 +59,7 @@ fi
 names=$(sed -n 's/^h7bench v1 \([^ ]*\) .*/\1/p' "$expected" | paste -sd'|')
 lines() { # lines <source word or empty>
   grep -E "^h7bench v1 $1($names) " "$report" |
-    sed -E "s/^h7bench v1 $1/h7bench v1 /; s/ min=[0-9]+ mean=[0-9]+ max=[0-9]+ / min=0 mean=0 max=0 /"
+    sed -E "s/^h7bench v1 $1/h7bench v1 /; s/ min=[0-9]+ mean=[0-9]+ max=[0-9]+ / min=0 mean=0 max=0 /; s/ max_at=[0-9]+$/ max_at=0/"
 }
 check() { # check <source word or empty> <label>
   if diff -u "$expected" <(lines "$1") > "$report.$2.diff"; then

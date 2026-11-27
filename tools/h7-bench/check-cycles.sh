@@ -198,7 +198,7 @@ agree=$(awk '
     lo = field("min"); me = field("mean"); hi = field("max")
     if (!num(lo) || !num(me) || !num(hi)) { print "FAIL " k ": " r " report: no numeric min= / mean= / max="; next }
     if (!(lo + 0 <= me + 0 && me + 0 <= hi + 0)) print "FAIL " k ": " r " report: not min " lo " <= mean " me " <= max " hi
-    rest = $0; gsub(/ (min|mean|max)=[0-9]+/, "", rest)
+    rest = $0; gsub(/ (min|mean|max|max_at)=[0-9]+/, "", rest)
     if (r == "previous") { if (k in pr) print "FAIL " k ": twice in the previous report"; pr[k] = rest; pl[k] = lo; pm[k] = me; px[k] = hi; next }
     if (k in seen) print "FAIL " k ": twice in the last report"
     seen[k] = 1

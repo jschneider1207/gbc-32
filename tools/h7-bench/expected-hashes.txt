@@ -1,15 +1,15 @@
-h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=0 mean=0 max=0 hash=de590b88792b5778
-h7bench v1 cgb-raster calls=120 frames=118 clocks=8370434 min=0 mean=0 max=0 hash=28517598fd7f8e17
-h7bench v1 dmg-raster calls=120 frames=118 clocks=8411052 min=0 mean=0 max=0 hash=08ce100a696ecbd6
-h7bench v1 event-storm calls=120 frames=120 clocks=8426718 min=0 mean=0 max=0 hash=b03f0faee1117987
-h7bench v1 cpu_instrs calls=600 frames=597 clocks=42131558 min=0 mean=0 max=0 hash=d0e9954397cd56f4
-h7bench v1 dma-storm calls=120 frames=120 clocks=8426720 min=0 mean=0 max=0 hash=502bf87511d799cb
-h7bench v1 halt-irq calls=120 frames=120 clocks=8426716 min=0 mean=0 max=0 hash=8a1f79e8e93d84ab
-h7bench v1 apu-writes calls=120 frames=120 clocks=8426716 min=0 mean=0 max=0 hash=ad45a7bd9328fccb
-h7bench v1 oam-lines calls=120 frames=119 clocks=8396532 min=0 mean=0 max=0 hash=39e08ed53ff29055
-h7bench v1 storm-control calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=f8e810318f7827c6
-h7bench v1 storm-apu calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=9138ca07a7e124a2
-h7bench v1 storm-spsw calls=120 frames=119 clocks=8357218 min=0 mean=0 max=0 hash=bbdfa57379371fa3
-h7bench v1 storm-div calls=120 frames=119 clocks=8420232 min=0 mean=0 max=0 hash=7b2635c400f5d2fe
-h7bench v1 storm-gdma calls=120 frames=119 clocks=8420232 min=0 mean=0 max=0 hash=6292eca8fdd0188a
-h7bench v1 storm-ppu calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=31e4b880f2666ad4
+h7bench v1 worst-case calls=120 frames=119 clocks=8420792 min=0 mean=0 max=0 hash=de590b88792b5778 max_at=0
+h7bench v1 cgb-raster calls=120 frames=118 clocks=8370434 min=0 mean=0 max=0 hash=28517598fd7f8e17 max_at=0
+h7bench v1 dmg-raster calls=120 frames=118 clocks=8411052 min=0 mean=0 max=0 hash=08ce100a696ecbd6 max_at=0
+h7bench v1 event-storm calls=120 frames=120 clocks=8426718 min=0 mean=0 max=0 hash=b03f0faee1117987 max_at=0
+h7bench v1 cpu_instrs calls=600 frames=597 clocks=42131558 min=0 mean=0 max=0 hash=d0e9954397cd56f4 max_at=0
+h7bench v1 dma-storm calls=120 frames=120 clocks=8426720 min=0 mean=0 max=0 hash=502bf87511d799cb max_at=0
+h7bench v1 halt-irq calls=120 frames=120 clocks=8426716 min=0 mean=0 max=0 hash=8a1f79e8e93d84ab max_at=0
+h7bench v1 apu-writes calls=120 frames=120 clocks=8426716 min=0 mean=0 max=0 hash=ad45a7bd9328fccb max_at=0
+h7bench v1 oam-lines calls=120 frames=119 clocks=8396532 min=0 mean=0 max=0 hash=39e08ed53ff29055 max_at=0
+h7bench v1 storm-control calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=f8e810318f7827c6 max_at=0
+h7bench v1 storm-apu calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=9138ca07a7e124a2 max_at=0
+h7bench v1 storm-spsw calls=120 frames=119 clocks=8357218 min=0 mean=0 max=0 hash=bbdfa57379371fa3 max_at=0
+h7bench v1 storm-div calls=120 frames=119 clocks=8420232 min=0 mean=0 max=0 hash=7b2635c400f5d2fe max_at=0
+h7bench v1 storm-gdma calls=120 frames=119 clocks=8420232 min=0 mean=0 max=0 hash=6292eca8fdd0188a max_at=0
+h7bench v1 storm-ppu calls=120 frames=119 clocks=8420234 min=0 mean=0 max=0 hash=31e4b880f2666ad4 max_at=0

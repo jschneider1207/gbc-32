@@ -15,8 +15,8 @@ bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
 printf 'synthetic image bytes\n' > "$tmp/img.bin"
 read -r crc bytes < <(cksum < "$tmp/img.bin")
 banner="h7bench v1 banner image=bench image_bytes=$bytes image_cksum=$crc"
-flash_lines() { sed -E 's/ min=0 mean=0 max=0 / min=100 mean=150 max=200 /' "$exp"; }
-qspi_lines()  { sed -E 's/ min=0 mean=0 max=0 / min=101 mean=151 max=201 /; s/^h7bench v1 /h7bench v1 qspi /' "$exp"; }
+flash_lines() { sed -E 's/ min=0 mean=0 max=0 / min=100 mean=150 max=200 /; s/ max_at=0$/ max_at=7/' "$exp"; }
+qspi_lines()  { sed -E 's/ min=0 mean=0 max=0 / min=101 mean=151 max=201 /; s/ max_at=0$/ max_at=9/; s/^h7bench v1 /h7bench v1 qspi /' "$exp"; }
 pack="h7bench v1 qspi pack ok bytes=1 same_as_flash=1 "
 end="h7bench v1 end pass=1"
 

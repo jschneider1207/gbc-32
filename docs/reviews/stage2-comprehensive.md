@@ -55,8 +55,8 @@ vs the PC's 2 s timeout; cold-boot ECC state of NOLOAD AXI buffers; ITCM
 Methodology:
 - M1 (med): the +3% ratchet sits on ±1.7% BTAC layout noise (ADR 0042: 0.11% with BTAC off). Add a BTAC-off ratchet pass at ~+0.5-1% (stricter only).
 - M2 (med): LTO / opt-level / ITCM-tier decisions are one build each; use 4-8 layout-perturbed builds per variant.
-- M3 (low-med): `tools/h7-bench/README.md` claims the bench's cache state matches a real front end; the shipped player doesn't evict like the bench, so QSPI +1.24% is an upper bound.
-- M4 (low): `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` has no frame index or warm-up discard.
+- M3 (low-med): `tools/h7-bench/README.md` claims the bench's cache state matches a real front end; the shipped player doesn't evict like the bench, so QSPI +1.24% is an upper bound. **fixed**: `tools/h7-bench/README.md` Measurement now says the player reads the frame from DTCM and writes non-cacheable memory, so the bench is an upper bound.
+- M4 (low): `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` has no frame index or warm-up discard. **bench part fixed**: workload lines end with `max_at=<call>` (no warm-up discarded, ratchet unchanged); `fe_max`/`busy_max` part is not part of this fix.
 - M5 (low): 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the H735's 32 KiB D-cache push opposite ways, unmeasured.
 
 Agreed with recorded outcomes: LTO/opt-level, ITCM tier swaps, stash cache
@@ -82,7 +82,7 @@ attribute (M7 P2), QSPI clock/SIOO/TCEN, display cost to the core.
 | Q14 | low | link_session.rs:446-450, loader.rs:220,252 | `encode(..).unwrap_or(0)` silently sends nothing | const-assert reply sizes, count failures (S) | **fixed** 764f80e: `REPLY_FRAME_MAX <= REPLY_MAX` const assert + `every_reply_fits_the_reply_buffer` tests; failures counted in `replies_dropped` |
 | Q15 | low | gbc-pc lib.rs | `pub mod sim` ships in the exe | cfg-gate (S) | **fixed** c7739b4: `sim` feature, enabled by a self dev-dependency; df3d99c: docs name `crate::sim` and the cfg(windows) modules as plain text, `cargo doc -p gbc-pc` warning-free on host and windows-gnu |
 | Q16 | low | Cargo.toml, ADR 0036, lib.rs | Comment/doc drift ("h7-bench will depend", "bins hold only `#[entry]`") | S | **fixed** 1db0235 (Cargo.toml), e1a1972 (board lib.rs docs), ADR 0043 amends ADR 0036's "bins hold only `#[entry]`" |
-| Q17 | low | 7 probe bins (~3.2k lines) | Maintenance cost; decide which stay for Stage 3 | S | PENDING |
+| Q17 | low | 7 probe bins (~3.2k lines) | Maintenance cost; decide which stay for Stage 3 | S | **fixed** (docs only): all seven stay. Each is built by `build.sh` and is a documented bring-up/diagnostic procedure; `link-probe` is also used by the gate and run scripts, `qspi-mmap` by `run-loader-roundtrip.sh`. None is dead, none removed. `crates/gbc-nucleo-h753/README.md` "Probe bins" table says what each is for and whether Stage 3 reuses it |
 | Q18 | low | pedantic clippy | 144 / 29 / 192 warnings (firmware/link/pc), mostly docs/must_use/casts | optional | — |
 
 Overall (quality reviewer): good health for a 40k-line stage; gbc-firmware
