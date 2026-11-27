@@ -40,6 +40,7 @@
 
 pub mod audio;
 pub mod buttons;
+pub mod fmt_buf;
 pub mod fnv;
 pub mod headless;
 pub mod input;
