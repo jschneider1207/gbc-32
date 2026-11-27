@@ -26,10 +26,10 @@
 #![no_std]
 #![no_main]
 
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use gbc_firmware::fmt_buf::append_truncated;
 use gbc_nucleo_h753::audio_dac::{self, AudioDac, FRAMES, HALF, MID, SILENCE, frame};
 use gbc_nucleo_h753::pac::interrupt;
 use gbc_nucleo_h753::{self as board, CPU_HZ, Uart, cycles, led, mpu, wait_since};
@@ -39,14 +39,10 @@ const IMAGE: &str = "dac-probe";
 
 /// Bytes of output kept for the replay.
 const LOG_BYTES: usize = 8 << 10;
-struct Slot<T>(UnsafeCell<T>);
-// SAFETY: reached only from `main`, once.
-unsafe impl<T> Sync for Slot<T> {}
-/// The run's output, kept (in DTCM `.bss`) and replayed every 5 s: the run
-/// is over before a serial reader started after the flash can catch it.
-static LOG: Slot<[u8; LOG_BYTES]> = Slot(UnsafeCell::new([0; LOG_BYTES]));
-
-/// The UART, with every byte also appended to [`LOG`] while it has room.
+/// The UART, with every byte also appended to `log` while it has room
+/// (truncating, `fmt_buf::append_truncated`). `log` is the run's output,
+/// kept (a `take_once!` buffer in DTCM `.bss`) and replayed every 5 s: the
+/// run is over before a serial reader started after the flash can catch it.
 struct Out<'a> {
     uart: &'a mut Uart,
     log: &'static mut [u8; LOG_BYTES],
@@ -56,9 +52,7 @@ struct Out<'a> {
 impl Write for Out<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let _ = self.uart.write_str(s);
-        let n = s.len().min(LOG_BYTES - self.len);
-        self.log[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
+        append_truncated(&mut self.log[..], &mut self.len, s);
         Ok(())
     }
 }
@@ -178,8 +172,9 @@ fn main() -> ! {
     let mut board = board::init(PREFIX);
     let lse_cpu_hz = board.measure_clock();
     board.banner(IMAGE);
-    // SAFETY: reached once, from `main`; the only reference to LOG.
-    let log = unsafe { &mut *LOG.0.get() };
+    // `.bss` (all zeros, no `link_section`): DTCM.
+    let log =
+        gbc_nucleo_h753::take_once!([u8; LOG_BYTES] = [0; LOG_BYTES]).expect("log taken twice");
     let mut out = Out {
         uart: &mut board.uart,
         log,
