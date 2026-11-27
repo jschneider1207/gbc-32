@@ -626,9 +626,12 @@ step H7 "Host unit tests of the firmware logic, named"
 # =============================================================================
 # H2's `cargo test --workspace` runs these too; naming them makes deleting,
 # renaming or #[ignore]-ing one fail the gate. Each must be reported `ok`
-# by `cargo test -p <crate>`. The plan's list (converter, DC blocker,
-# debounce, serial framing, image header; gbc-link, tools/gbc-pc) is added
-# as those crates arrive (M2-M5).
+# by `cargo test -p <crate>`, exactly once. The plan's list: the video
+# converter (gbc-firmware video), the DC blocker and DAC conversion
+# (gbc-firmware audio), debounce (gbc-firmware buttons), the image header
+# (gbc-firmware rom_image), the save footer (gbc-firmware save), serial
+# framing (gbc-link COBS, CRC and message framing), and tools/gbc-pc's
+# ROM load, input and save/RTC host logic.
 sub "scripts/test-board-lock.sh (scripts/lib/board-lock.sh: serializes, re-enters, times out)"
 run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
@@ -671,6 +674,42 @@ gbc-firmware hashes_match_the_buffers
 gbc-firmware input_changes_exactly_the_pressed_frames
 gbc-firmware line_format
 gbc-firmware synthetic_run_is_deterministic
+gbc-firmware audio::tests::conversion_endpoints_and_rounding
+gbc-firmware audio::tests::extreme_steps_do_not_overflow
+gbc-firmware audio::tests::full_scale_square_waves_stay_bounded
+gbc-firmware audio::tests::negative_step_decays_to_exactly_zero_too
+gbc-firmware audio::tests::silence_is_exactly_mid_scale
+gbc-firmware audio::tests::small_constants_do_not_stick
+gbc-firmware audio::tests::step_response_decays_monotonically_to_zero
+gbc-firmware audio::tests::step_response_follows_a_to_the_n
+gbc-firmware buttons::tests::a_clean_press_and_release_take_samples_minus_one_periods
+gbc-firmware buttons::tests::chord_edge_fires_once_per_hold
+gbc-firmware buttons::tests::lines_debounce_independently_and_extra_bits_are_ignored
+gbc-firmware buttons::tests::live_input_debounces_merges_and_flags_the_chord_once
+gbc-firmware buttons::tests::mapping
+gbc-firmware buttons::tests::pc_bitmap_and_merge
+gbc-firmware buttons::tests::runs_shorter_than_samples_are_rejected
+gbc-firmware rom_image::tests::corrupt_fields
+gbc-firmware rom_image::tests::data_bit_flip
+gbc-firmware rom_image::tests::erased_is_distinct
+gbc-firmware rom_image::tests::flags_and_padding_not_checked
+gbc-firmware rom_image::tests::full_window_rom
+gbc-firmware rom_image::tests::length_bounds
+gbc-firmware rom_image::tests::matches_by_len_and_hash
+gbc-firmware rom_image::tests::round_trip
+gbc-firmware rom_image::tests::short_window
+gbc-firmware rom_image::tests::title_copied_from_rom
+gbc-firmware rom_image::tests::title_is_informational_but_checksummed
+gbc-firmware video::tests::bands_match_whole_frame
+gbc-firmware video::tests::matches_reference_on_random_frames
+gbc-firmware video::tests::row_and_column_map_is_floor_two_thirds
+gbc-firmware video::tests::white_black_and_single_channels
+gbc-firmware bad_footers_are_refused_at_the_field
+gbc-firmware footer_fields_decode_as_documented
+gbc-firmware link_probe_fixture_round_trips_across_frames
+gbc-firmware reload_replaces_ram_and_clock_of_a_running_game
+gbc-firmware round_trips_are_byte_identical
+gbc-firmware take_drops_the_part_second_and_stamps_huc3_at_the_minute
 memory-x tests::comments_budget_and_flash_ok_are_not_globs
 memory-x tests::drop_list_trims_and_skips_empty_entries
 memory-x tests::drops_a_tier_until_the_next_tier_header
@@ -688,6 +727,55 @@ memory-x tests::unmatched_drop_panics
 headless cgb_acid2_matches_expected
 headless cpu_instrs_matches_expected
 headless exit_codes
+gbc-link cobs::tests::empty_input_encodes_to_one_code_byte
+gbc-link cobs::tests::invalid_inputs_are_rejected
+gbc-link cobs::tests::small_output_buffer_is_an_error
+gbc-link cobs::tests::trailing_empty_block_after_full_block_is_accepted
+gbc-link cobs::tests::wikipedia_vectors
+gbc-link crc::tests::check_value
+gbc-link crc::tests::known_values
+gbc-link crc::tests::table_matches_bitwise
+gbc-link any_single_bit_flip_is_detected
+gbc-link bit_flip_in_body_is_a_crc_error
+gbc-link byte_soup_never_panics
+gbc-link empty_frames_are_ignored
+gbc-link encode_errors
+gbc-link every_message_round_trips
+gbc-link feed_slice_returns_frames_one_at_a_time
+gbc-link frame_of_exactly_the_buffer_size_is_accepted
+gbc-link garbage_then_valid_frame_resyncs
+gbc-link max_size_messages_fit_max_frame_exactly
+gbc-link oversize_frame_is_dropped_then_decoder_recovers
+gbc-link save_dump_stream_decodes_in_order
+gbc-link short_and_non_cobs_frames
+gbc-link unknown_types_are_errors
+gbc-link wrong_body_length_is_bad_length
+gbc-pc already_loaded_is_skipped
+gbc-pc corrupt_reply_is_resent
+gbc-pc corrupt_request_is_naked_and_resent
+gbc-pc dropped_reply_is_resent_and_deduplicated
+gbc-pc faults_on_every_stage
+gbc-pc full_round_trip
+gbc-pc read_back_hash_mismatch_is_an_error
+gbc-pc every_link_bit_is_the_firmware_button_of_the_same_name
+gbc-pc input_frames_carry_the_bitmap_unchanged
+gbc-pc input_frames_on_change_then_release_at_exit
+gbc-pc desktop_to_board_to_desktop_counts_real_time_once
+gbc-pc dump_restamp_changes_only_the_stamp
+gbc-pc dump_to_file_restamps_unless_raw
+gbc-pc load_advances_a_running_clock_by_the_time_since_the_stamp
+gbc-pc load_day_overflow_wraps_and_sets_the_carry
+gbc-pc load_leaves_a_halted_clock_and_stamps_it_now
+gbc-pc load_refuses_what_the_board_refuses_unless_raw
+gbc-pc load_syncs_huc3_as_the_desktop
+gbc-pc raw_save_is_byte_exact
+gbc-pc broken_dumps_are_errors_and_write_no_file
+gbc-pc corrupted_save_chunk_on_the_link_is_resent
+gbc-pc dump_file_equals_the_boards_save
+gbc-pc dump_receiver_checks_order_and_seq
+gbc-pc load_then_dump_round_trips_byte_identically
+gbc-pc save_failing_the_boards_hash_check_is_an_error_and_not_applied
+gbc-pc wrong_size_save_is_refused_and_nothing_applied
 "
 for crate in $(awk 'NF { print $1 }' <<< "${NAMED_TESTS}" | uniq); do
   sub "cargo test -p ${crate}"
