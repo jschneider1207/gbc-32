@@ -9,7 +9,19 @@
   fixed, tag `stage2-m6`). The human checks in M3-M5's acceptance (panel look,
   listening, buttons = sign-off items 1-3) are still open: the tags were
   set without them so work could continue overnight. **M7 (Stage 2 review
-  and sign-off) is next.** Plan: `docs/plan/stage-2.md` (D1-D11).
+  and sign-off): agent work done** (session 28): full `gate-stage2.sh`
+  with the board **exit 0** (2676 s), three reviews recorded in
+  `docs/reviews/stage2-m7.md` (no high; every medium fixed or rejected
+  with numbers). **Waiting on the human:** gate first-version approval,
+  the sign-off checklist (plan bottom, items 1, 2, 4, 5) and the Stage 2
+  completion call. No `stage2-m7` tag until then. Plan:
+  `docs/plan/stage-2.md` (D1-D11).
+- **M7 results:** soak +73 ppm (bound 1000), 0 over budget, 0 underruns;
+  worst case QSPI 3,382,818 (85.6% of the 50% line, report only); live
+  player front end 245k mean (hashing now scripted-only); `player-script`
+  reads its panel back (sampled; busy max 4.57 M = 58% in the soak). New
+  in the board bring-up: I/O compensation cell (`cccsr=0x00000101`, B1
+  checks it), DAC watchdog read order.
 - **Dev-board clock (D11):** NUCLEO-H753ZI at **472 MHz from the HSI**
   (DIVM1 5, fractional N 73.75, AXI 236, APB 118, VOS0 via ODEN, flash
   4 WS; DIVQ1/DIVR1 zeroed, c2e8e2b); LSE-measured 473.5-473.6 MHz.
@@ -59,23 +71,24 @@
   case 85.6% of 3,951,279 (H735 projection 73.5%); shipped player soak 10
   min: 0 over budget, core max 3,390,856 (42.9%). Facts: docs/perf.md M6
   sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
-- **Board state:** `player` flashed (M6, 99.2 MHz QSPI), Pokemon Red (scratch copy) in the NOR. To play:
+- **Board state:** `player` flashed (session 28 main, after the gate run), Pokemon Red (scratch copy) in the NOR. To play:
   `scripts/play-on-board.sh <rom>` (see Needs human).
-- **Last updated:** 2026-11-26, session 27 (log
-  `logs/2026-11-26-27-stage2-m6.md`; session 26: M5).
+- **Last updated:** 2026-11-26, session 28 (log
+  `logs/2026-11-26-28-stage2-m7.md`; session 27: M6).
 - **Model (human, 2026-11-25):** Opus is fine.
 
-## Next up: Stage 2 M7 (review and sign-off)
+## Next up: Stage 2 sign-off (human), then Stage 3 prep
 
-Tasks and acceptance: `docs/plan/stage-2.md` M7. First: implement the
-board steps B1-B5 of `scripts/gate-stage2.sh` (plan "Proposed
-`scripts/gate-stage2.sh`"; adding checks is stricter-only, but the plan
-says the human approves the gate's first version: show them the B-step
-diff before relying on it). B2 runs `tools/h7-bench/check-cycles.sh`
-against `expected-cycles.txt`; B3/B4/B5 wrap `run-replay.sh`,
-the soak set and `run-player-save.sh`. Then the three M7 reviews, lows to
-Stage 3 tasks, the architecture "Targets" carry-over list, and the human
-checklist. Open lows: end of each milestone in the plan (M1-M6).
+Stage 2's agent tasks are done; the gate passes. What's left is the
+human's (Needs human, plan "Hardware sign-off checklist"). Until they
+answer: the plan's "Stage 3 carry-over tasks" (end of
+`docs/plan/stage-2.md`) and architecture "Targets" carry-over list are
+the backlog; many need the H735 board (Stage 3 scope is the human's, so
+don't start Stage 3 itself). Board-independent ones that are fair game
+now: the M7 low fixes on this board (C3 fault path quiescing, C5 RX
+overflow count, C7 SAFETY comments, T9 exit code on board loss, T11
+tests of the gate's board-step parsing). Re-run `gate-stage2.sh` alone
+after any firmware or gate change (~45 min, board attached).
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
 `CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save` (RTC sync), `replay` (clock-table input), `player` (stats); root workspace), `crates/gbc-link`
@@ -160,16 +173,7 @@ Working rules that matter here:
   the WSL clock (it ran ~2% slow).
 
 ## In flight
-- Session 28 (2026-11-26), M7 in progress. Done and merged: gate board
-  steps B1-B5 (each run once on the board, all PASS; first version awaits
-  the human's approval, see Needs human), the three M7 reviews
-  (`docs/reviews/stage2-m7.md`, 30 findings, no high), fixes C1, C2, P1,
-  T1, T3, T4, T7, T10, and the Stage 3 carry-over list (architecture
-  "Targets", plan end). Open: T2 (panel readback inside `player-script`,
-  branch `m7-readback`, agent running), P2 (display stash MPU attribute,
-  measure first), then the full `gate-stage2.sh` run alone, then the
-  human checklist. Raw review notes were in the session scratchpad only;
-  the record is the reviews file.
+- None.
 - Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human

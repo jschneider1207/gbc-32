@@ -333,7 +333,7 @@ requirements are real-time frames and the cycle-baseline ratchet.
 - [x] (recorded at main a6a2995 in the main checkout, `bench-itcm-dtcm-pll480`, both passes; a second boot passes `check-cycles.sh`, largest boot-to-boot |delta| 0.047%; docs/perf.md "M6 worst-case report") On-board cycle baseline: `tools/h7-bench/expected-cycles.txt` (per workload, per placement, 472 MHz); the gate (step B2, M7 work; no gate step runs `check-cycles.sh` yet) fails at > +3% over it. Counts do not repeat exactly: the margin over layout noise for a core change on the bound set is about 1.3-1.8 points, and storms can exceed 3% from layout alone (ADR 0042 "Amendments"; review finding P3 is open for the human). It is a regression ratchet, not an absolute bar. Absorbing a +3% failure needs the human, as for `check-bench.sh`
 - [x] (QSPI max 3,382,280 = 85.6% of 3,951,279, 42.8% of a frame; H735 projection 73.5% of the 550 MHz 50% line; docs/perf.md "M6 worst-case report (shipped placement)") Report, in `docs/perf.md` and the log: `synth:worst-case` max cycles per frame at 472 MHz with ROMs in QSPI and the shipped placement, as a percentage of the 3,951,279 figure (and the projected margin on the H735 at 550 MHz, labelled as a projection)
 
-- [ ] M6 review P6 (low): the cycle ratchet guards the h7-bench image, not `player` (their `.itcm` differs by 56 B); gate B2 (M7) still has to run `check-cycles.sh`
+- [ ] M6 review P6 (low): the cycle ratchet guards the h7-bench image, not `player` (their `.itcm` differs by 56 B); gate B2 (M7) still has to run `check-cycles.sh` (B2 runs check-cycles since session 28; the bench-vs-player gap stays open)
 - [ ] M6 review P7 (low): ITCM has 1,192 B free in `player`; 57 ITCM->flash thunks (570 B) move with layout; the next drop in the tier order (per-line object path) is unmeasured on the board
 - [ ] M6 review P9 (low): add `.text.__aeabi_memmove*` to the ITCM builtins rule (tools/memory-x/src/lib.rs:253); today ITCM callers go ITCM -> flash -> ITCM through two thunks; changes the ITCM layout, so do it with the next baseline refresh
 - [ ] M6 review T4 (low): the h7-bench banner doesn't carry the ITCM drop (`H7_BENCH_ITCM_DROP`), and the capture behind `expected-cycles.txt` isn't archived in the repo (can't re-audit)
@@ -365,9 +365,9 @@ ITCM tiering does not carry over (the H735 puts the whole core in ITCM).
 
 ## M7: Stage 2 review and sign-off
 
-- [ ] Full `gate-stage2.sh` (host and board) passes
-- [ ] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ST7789V: clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
-- [ ] Turn lows into one-line Stage 3 plan tasks; write the carry-over list into `docs/architecture.md` "Targets"
+- [x] Full `gate-stage2.sh` (host and board) passes (session 28, exit 0, 2676 s; first version awaits the human's approval)
+- [x] Independent reviews in parallel (AGENTS.md): **platform correctness** (register sequences against RM0433, DS12117, ES0392, UM2407, UM2905, ST7789V: clock/power, MPU, DMA/cache coherence, QSPI, FMC timings, ISR races), **test integrity** (the on-board comparison and gate logic, any way a missing board or a garbled serial line can pass, determinism, nothing new in the core), **performance and portability** (front-end cost per frame, ITCM/DTCM use, what will and won't move to the H735)
+- [x] Turn lows into one-line Stage 3 plan tasks; write the carry-over list into `docs/architecture.md` "Targets"
 - [ ] Human sign-off checklist (bottom)
 
 **Acceptance:** `gate-stage2.sh` exits 0 with the board attached; no
