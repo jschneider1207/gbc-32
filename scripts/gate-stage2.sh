@@ -28,7 +28,9 @@
 #       (tools/h7-bench/run-qspi.sh): internal-flash and QSPI hashes equal
 #       expected-hashes.txt (check-report.sh); check-cycles.sh --fresh:
 #       every line <= expected-cycles.txt + 3% (two agreeing reports),
-#       worst-case and cpu_instrs max < 7,902,557 (real time); the
+#       worst-case and cpu_instrs max < 7,902,557 (real time: the two
+#       sign-off workloads the bench runs; the other replay ROMs get their
+#       real-time bound from B3, over_budget=0 in the player image); the
 #       worst-case max against 3,951,279 is a REPORT line, not a check
 #   B3  scripts/check-stage2-sets.sh (the run lists equal
 #       acceptance/stage2.toml); the display readback self-test
@@ -886,10 +888,14 @@ fresh_image() {
 }
 
 step BUILD "Builds for the board steps (before the board lock)"
-# The run scripts build nothing while the gate holds the board lock (their
-# builds are skipped under GBC_BOARD_LOCK_HELD, or are images and tools
-# named here), so everything they flash or run is built now, from this
-# tree. h7-bench's images come from H4 when it ran; else they are built here.
+# Everything the run scripts flash or run is built now, from this tree,
+# before the board lock. Most of them then build nothing under the lock
+# (run-player-save.sh skips its builds under GBC_BOARD_LOCK_HELD), but
+# run-replay.sh (B3, B4) still runs cargo build (headless, replay-input,
+# gbc-pc), build.sh loader, and per entry build.sh player-script (each
+# entry's input and frame count are compiled in) and, for a synth entry,
+# bench --write-synth, all while the gate holds the board lock; those
+# builds are incremental after this step, except player-script. h7-bench's images come from H4 when it ran; else they are built here.
 if want B1 || want B2; then
   if ! want H4; then
     sub "tools/h7-bench/build.sh (selftest, the bench images, the bench pack)"

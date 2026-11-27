@@ -78,7 +78,9 @@ usage="usage: check-cycles.sh [--fresh] <capture> <image.bin> [<expected-cycles.
 REAL_TIME=7902557   # one real-time frame at 472 MHz (472e6 / 59.7275)
 HALF=3951279        # the 50% figure (plan M6), report only
 # The sign-off workloads in this bench (plan B2: synth:worst-case and the
-# replay ROMs; cpu_instrs is the only replay ROM the bench runs).
+# replay ROMs; cpu_instrs is the only replay ROM the bench runs). The other
+# replay ROMs' real-time bound is not checked here: it comes from gate B3
+# (run-replay.sh, stats player total_over_budget=0 in the player image).
 SIGNOFF="worst-case cpu_instrs"
 
 update=0 force=0 absorb=0 fresh=0
