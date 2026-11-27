@@ -72,7 +72,7 @@ fn main() {
 }
 
 /// `GBC_DISPLAY_START` for the `display` feature: what starts a transfer
-/// (src/bin/headless.rs `display::Start`); default `te-wait`.
+/// (src/display/measure.rs `Start`); default `te-wait`.
 fn display_start() {
     println!("cargo:rerun-if-env-changed=GBC_DISPLAY_START");
     let start = env::var("GBC_DISPLAY_START").unwrap_or_else(|_| "te-wait".into());

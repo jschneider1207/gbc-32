@@ -11,7 +11,7 @@
 # starting `headless ` (a trailing `\r` stripped from both). Everything
 # else (`stats ` lines, the banner) is not compared, except:
 #
-# A display image (plan Stage 2 M3, src/bin/headless.rs `display`) must
+# A display image (plan Stage 2 M3, src/display/measure.rs) must
 # also pass its self-test (M3 review T-1). The image is a display image if
 # its file name starts `headless-display-`, or the .bin contains the
 # `stats display start=` format text, or the report has a `stats display`

@@ -34,6 +34,16 @@
 //! After the run a sample still under way is finished, and a control
 //! readback with one buffer word inverted must give exactly 2
 //! mismatching pixels. Line: `stats display readback`.
+//!
+//! # The measurement sink (`display` feature)
+//!
+//! The `headless-display-<rom>` images' sink, `measure::Measure` (plan
+//! Stage 2 M3), waits for and reads back every frame instead; it shares
+//! the panel set-up, the control readback, [`Range`] and the
+//! `first_bad` / `first_error` fields with this one.
+
+#[cfg(feature = "display")]
+pub mod measure;
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -52,23 +62,83 @@ use gbc_firmware::video::scale_frame;
 /// 8.1 ms, so a healthy one is done within 25 ms).
 pub const STUCK: u32 = CPU_HZ / 10;
 
-/// Count, max and sum of cycle counts.
+/// Count, min, max and sum of a series of cycle counts (both sinks'
+/// figures; `min` is printed by `measure` only).
 #[derive(Clone, Copy, Default)]
-struct Range {
-    n: u32,
-    max: u32,
-    sum: u64,
+pub struct Range {
+    pub n: u32,
+    pub min: u32,
+    pub max: u32,
+    pub sum: u64,
 }
 
 impl Range {
-    fn add(&mut self, v: u32) {
-        self.n += 1;
+    pub const fn new() -> Range {
+        Range {
+            n: 0,
+            min: 0,
+            max: 0,
+            sum: 0,
+        }
+    }
+    pub fn add(&mut self, v: u32) {
+        self.min = if self.n == 0 { v } else { self.min.min(v) };
         self.max = self.max.max(v);
         self.sum += u64::from(v);
+        self.n += 1;
     }
-    fn mean(&self) -> u64 {
+    pub fn mean(&self) -> u64 {
         self.sum / u64::from(self.n.max(1))
     }
+}
+
+/// (x, y, got, want), as `lcd_dma::Readback::first`.
+#[cfg(any(feature = "player-script", feature = "display"))]
+type BadPixel = (u16, u16, [u8; 3], [u8; 3]);
+
+/// The ` first_bad=` field (none without a mismatching pixel): frame `n`'s
+/// first mismatching pixel.
+#[cfg(any(feature = "player-script", feature = "display"))]
+fn write_first_bad(out: &mut dyn Write, bad: Option<(u32, BadPixel)>) -> fmt::Result {
+    if let Some((n, (x, y, got, want))) = bad {
+        write!(
+            out,
+            " first_bad=frame{n}:({x},{y}) got={:02x}{:02x}{:02x} want={:02x}{:02x}{:02x}",
+            got[0], got[1], got[2], want[0], want[1], want[2]
+        )?;
+    }
+    Ok(())
+}
+
+/// The ` first_error=` field (none without a transfer error).
+fn write_first_error(out: &mut dyn Write, e: Option<(u32, lcd_dma::Error)>) -> fmt::Result {
+    if let Some((n, e)) = e {
+        write!(out, " first_error=frame{n}:{e:?}")?;
+    }
+    Ok(())
+}
+
+/// The panel set up for a sink (FMC at `SPEC`, the Game Boy frame rate,
+/// all black) and the transfer (ADR 0039).
+fn panel() -> LcdDma {
+    let mut l = Lcd::init(lcd::SPEC);
+    l.set_frame_rate(FrameRate::GAME_BOY);
+    l.set_window(0, 0, lcd::WIDTH - 1, lcd::HEIGHT - 1);
+    l.begin_pixels();
+    l.fill(0, u32::from(lcd::WIDTH) * u32::from(lcd::HEIGHT));
+    LcdDma::new(l)
+}
+
+/// The readback's control: with the last transfer done, the panel holds
+/// the buffer, so one buffer word inverted (both its pixels, every bit)
+/// must give exactly 2 mismatching pixels; the count it gave.
+#[cfg(any(feature = "player-script", feature = "display"))]
+fn control_readback(dma: &mut LcdDma) -> u32 {
+    let (l, buf) = dma.parts();
+    buf[100][60] ^= 0xFFFF_FFFF;
+    let rb = lcd_dma::readback(l, buf);
+    buf[100][60] ^= 0xFFFF_FFFF;
+    rb.mismatches
 }
 
 /// The first readback sample: the first frame shown at or after this loop
@@ -100,10 +170,6 @@ enum Phase {
     Readback(usize),
 }
 
-/// (x, y, got, want), as `lcd_dma::Readback::first`.
-#[cfg(feature = "player-script")]
-type BadPixel = (u16, u16, [u8; 3], [u8; 3]);
-
 #[cfg(feature = "player-script")]
 struct Sampler {
     phase: Phase,
@@ -133,11 +199,7 @@ impl Sampler {
             readbacks: 0,
             mismatches: 0,
             first_bad: None,
-            step: Range {
-                n: 0,
-                max: 0,
-                sum: 0,
-            },
+            step: Range::new(),
         }
     }
 
@@ -204,13 +266,8 @@ pub struct Display {
 /// Sets the panel up (FMC at `SPEC`, the Game Boy frame rate, all
 /// black) and the transfer (ADR 0039).
 pub fn init(stash: &'static mut Frame) -> Display {
-    let mut l = Lcd::init(lcd::SPEC);
-    l.set_frame_rate(FrameRate::GAME_BOY);
-    l.set_window(0, 0, lcd::WIDTH - 1, lcd::HEIGHT - 1);
-    l.begin_pixels();
-    l.fill(0, u32::from(lcd::WIDTH) * u32::from(lcd::HEIGHT));
     Display {
-        dma: LcdDma::new(l),
+        dma: panel(),
         stash,
         held: None,
         queued_at: None,
@@ -222,9 +279,9 @@ pub fn init(stash: &'static mut Frame) -> Display {
         errors: 0,
         stuck: 0,
         first_error: None,
-        scale: Range::default(),
-        present: Range::default(),
-        copy: Range::default(),
+        scale: Range::new(),
+        present: Range::new(),
+        copy: Range::new(),
         #[cfg(feature = "player-script")]
         sampler: Sampler::new(),
     }
@@ -365,9 +422,7 @@ impl Display {
             self.copy.mean(),
             self.copy.max,
         )?;
-        if let Some((n, e)) = self.first_error {
-            write!(out, " first_error=frame{n}:{e:?}")?;
-        }
+        write_first_error(out, self.first_error)?;
         writeln!(out)?;
         #[cfg(feature = "player-script")]
         self.readback_report(out)?;
@@ -465,19 +520,14 @@ impl Display {
         }
     }
 
-    /// The `stats display readback` line, after a control: with the last
-    /// frame's transfer done (`report`), the panel holds the buffer, so
-    /// one buffer word inverted (both its pixels, every bit) must give
-    /// exactly 2 mismatching pixels (as the headless `display` feature).
+    /// The `stats display readback` line, after the control
+    /// ([`control_readback`]; the last frame's transfer is done,
+    /// `report`), as the measurement sink's.
     #[cfg(feature = "player-script")]
     fn readback_report(&mut self, out: &mut dyn Write) -> fmt::Result {
         let s = &self.sampler;
         let control = if s.readbacks > 0 && self.queued_at.is_none() {
-            let (l, buf) = self.dma.parts();
-            buf[100][60] ^= 0xFFFF_FFFF;
-            let rb = lcd_dma::readback(l, buf);
-            buf[100][60] ^= 0xFFFF_FFFF;
-            Some(rb.mismatches)
+            Some(control_readback(&mut self.dma))
         } else {
             None
         };
@@ -499,13 +549,7 @@ impl Display {
             s.step.mean(),
             s.step.max,
         )?;
-        if let Some((n, (x, y, got, want))) = s.first_bad {
-            write!(
-                out,
-                " first_bad=frame{n}:({x},{y}) got={:02x}{:02x}{:02x} want={:02x}{:02x}{:02x}",
-                got[0], got[1], got[2], want[0], want[1], want[2]
-            )?;
-        }
+        write_first_bad(out, s.first_bad)?;
         writeln!(out)
     }
 
