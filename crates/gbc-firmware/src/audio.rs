@@ -163,6 +163,98 @@ pub const fn u12_lanes(pcm: u32) -> u32 {
     t - ((t >> 12) & 0x0001_0001)
 }
 
+/// What an output takes for a [`PcmFrame::to_bits`] word: a zero-sized
+/// type whose [`map`](Self::map) the pop applies as it writes each word
+/// (monomorphised; no dispatch). Lets the board's DMA buffer get its own
+/// format in the same pass that reads the ring, one store per frame, with
+/// the tap and the tee still seeing [`PcmFrame`] words ([`Popped`]).
+pub trait FrameMap {
+    fn map(pcm: u32) -> u32;
+}
+
+/// The frame words unchanged (the host stand-ins; a 16-bit codec).
+pub struct Pcm;
+impl FrameMap for Pcm {
+    #[inline(always)]
+    fn map(pcm: u32) -> u32 {
+        pcm
+    }
+}
+
+/// [`u12_lanes`]: the H753's `DAC_DHR12RD` (ADR 0044).
+pub struct U12Lanes;
+impl FrameMap for U12Lanes {
+    #[inline(always)]
+    fn map(pcm: u32) -> u32 {
+        u12_lanes(pcm)
+    }
+}
+
+/// An output half to pop into, its format `M`. Write-only: it gives the
+/// words back to no one, so the only way to fill it is a pop
+/// ([`AudioRing::pop_to`], [`FeedTap::pop_to`]), which writes every word
+/// exactly once (the real frames, then the held last frame), already
+/// mapped. The board makes one over its DMA half and hands it to the
+/// image's source, so the source cannot skip the conversion.
+pub struct HalfOut<'a, M: FrameMap> {
+    words: &'a mut [u32],
+    _map: core::marker::PhantomData<M>,
+}
+
+impl<'a, M: FrameMap> HalfOut<'a, M> {
+    pub fn new(words: &'a mut [u32]) -> Self {
+        Self {
+            words,
+            _map: core::marker::PhantomData,
+        }
+    }
+
+    /// Frames in the half.
+    pub fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+}
+
+/// The frames one pop handed out, as the pop's `inspect` callback sees
+/// them (before the ring frees their slots): the real frames, in order,
+/// read from the ring as [`PcmFrame::to_bits`] words (never the output's
+/// mapped words: an output buffer may be non-cacheable, and the hash and
+/// the tee are board-independent), and how many filler frames followed.
+pub struct Popped<'a> {
+    /// The real frames, in up to two runs (the ring wraps).
+    a: &'a [AtomicU32],
+    b: &'a [AtomicU32],
+    held: usize,
+}
+
+impl Popped<'_> {
+    /// Real frames.
+    pub fn len(&self) -> usize {
+        self.a.len() + self.b.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Underrun filler frames after them (the last frame repeated).
+    pub fn held(&self) -> usize {
+        self.held
+    }
+
+    /// Calls `f` with each real frame's word, in order.
+    #[inline]
+    pub fn for_each(&self, mut f: impl FnMut(u32)) {
+        for s in self.a.iter().chain(self.b) {
+            f(s.load(Ordering::Relaxed));
+        }
+    }
+}
+
 /// Both channels' blockers: core samples to output frames. Owned by the
 /// producer (the main loop).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -211,6 +303,11 @@ impl FeedHash {
         for &w in words {
             self.0.u32(w);
         }
+    }
+
+    /// Folds the real frames of a pop.
+    pub fn fold_popped(&mut self, p: &Popped<'_>) {
+        p.for_each(|w| self.0.u32(w));
     }
 
     /// Folds frames.
@@ -277,37 +374,66 @@ impl FeedTap {
         }
     }
 
-    /// Consumer: [`AudioRing::pop_into`], then folds `out[..n]`. Returns
-    /// `n`.
-    pub fn pop_into<const N: usize>(&self, ring: &AudioRing<N>, out: &mut [u32]) -> usize {
-        let n = ring.pop_into(out);
-        if let Some(real) = out.get(..n).filter(|r| !r.is_empty()) {
-            let state = u64::from(self.lo.load(Ordering::Relaxed))
-                | u64::from(self.hi.load(Ordering::Relaxed)) << 32;
-            let mut h = FeedHash(Fnv1a::resume(state));
-            h.fold(real);
-            let state = h.get();
-            self.lo.store(state as u32, Ordering::Relaxed);
-            self.hi.store((state >> 32) as u32, Ordering::Relaxed);
-            let f = self.frames.load(Ordering::Relaxed);
-            self.frames
-                .store(f.wrapping_add(n as u32), Ordering::Release);
-        }
+    /// Consumer: [`AudioRing::pop_to`], folding the real frames (as
+    /// [`PcmFrame`] words, whatever `M` writes to `out`) into the hash
+    /// before `inspect` sees them. Returns the real frame count.
+    #[inline]
+    pub fn pop_to<const N: usize, M: FrameMap>(
+        &self,
+        ring: &AudioRing<N>,
+        out: HalfOut<'_, M>,
+        inspect: impl FnOnce(&Popped<'_>),
+    ) -> usize {
+        let n = ring.pop_to(out, |p| {
+            if !p.is_empty() {
+                let state = u64::from(self.lo.load(Ordering::Relaxed))
+                    | u64::from(self.hi.load(Ordering::Relaxed)) << 32;
+                let mut h = FeedHash(Fnv1a::resume(state));
+                h.fold_popped(p);
+                let state = h.get();
+                self.lo.store(state as u32, Ordering::Relaxed);
+                self.hi.store((state >> 32) as u32, Ordering::Relaxed);
+            }
+            inspect(p);
+        });
+        self.count(n);
         n
     }
 
-    /// Consumer: [`AudioRing::pop_into`] and the frame count of
-    /// [`pop_into`](Self::pop_into), without the fold: for a feed nobody
+    /// Consumer: [`AudioRing::pop_to`] and the frame count of
+    /// [`pop_to`](Self::pop_to), without the fold: for a feed nobody
     /// compares (the live player; [`crate::paced::Service::HASHES`]). The
-    /// hash stays where it was. One consumer uses one of the two.
+    /// hash stays where it was. One consumer uses one of the two families.
+    #[inline]
+    pub fn pop_unhashed_to<const N: usize, M: FrameMap>(
+        &self,
+        ring: &AudioRing<N>,
+        out: HalfOut<'_, M>,
+        inspect: impl FnOnce(&Popped<'_>),
+    ) -> usize {
+        let n = ring.pop_to(out, inspect);
+        self.count(n);
+        n
+    }
+
+    /// [`pop_to`](Self::pop_to) into plain [`PcmFrame`] words (the host
+    /// stand-ins for the ISR): `out[..n]` are the real frames.
+    pub fn pop_into<const N: usize>(&self, ring: &AudioRing<N>, out: &mut [u32]) -> usize {
+        self.pop_to(ring, HalfOut::<Pcm>::new(out), |_| {})
+    }
+
+    /// [`pop_unhashed_to`](Self::pop_unhashed_to) into plain words.
     pub fn pop_unhashed<const N: usize>(&self, ring: &AudioRing<N>, out: &mut [u32]) -> usize {
-        let n = ring.pop_into(out);
+        self.pop_unhashed_to(ring, HalfOut::<Pcm>::new(out), |_| {})
+    }
+
+    /// Publishes `n` more real frames (after the hash, `Release`).
+    fn count(&self, n: usize) {
         if n != 0 {
             let f = self.frames.load(Ordering::Relaxed);
             self.frames
                 .store(f.wrapping_add(n as u32), Ordering::Release);
         }
-        n
     }
 
     /// Real frames popped so far.
@@ -477,28 +603,55 @@ impl<const N: usize> AudioRing<N> {
     }
 
     /// Consumer: fills `out` with frames from the ring, as
-    /// [`PcmFrame::to_bits`] words (so the board can convert them in place
-    /// in its DMA buffer), and returns the number of **real** frames
+    /// [`PcmFrame::to_bits`] words ([`pop_to`](Self::pop_to) converts them
+    /// for a board's DMA buffer), and returns the number of **real** frames
     /// (`out[..n]`). On a shortage the rest of `out` is filled with the
     /// last frame handed out ([`PcmFrame::SILENCE`] if none yet): the
     /// output holds its level instead of stepping to silence, the smallest
     /// click available. That counts one underrun event and the missing
     /// frames. Hash only `out[..n]` ([`FeedHash`]).
     pub fn pop_into(&self, out: &mut [u32]) -> usize {
+        self.pop_to(HalfOut::<Pcm>::new(out), |_| {})
+    }
+
+    /// Consumer: [`pop_into`](Self::pop_into), writing each word through
+    /// `M` ([`FrameMap`]) as it goes, so the output gets exactly one store
+    /// per frame and is never read: the real frames, then `M::map` of the
+    /// last frame in every remaining slot. `inspect` sees the real frames
+    /// as [`PcmFrame`] words, read from the ring before their slots are
+    /// freed (the feed hash, the tee). Returns their count.
+    #[inline]
+    pub fn pop_to<M: FrameMap>(
+        &self,
+        out: HalfOut<'_, M>,
+        inspect: impl FnOnce(&Popped<'_>),
+    ) -> usize {
+        let out = out.words;
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
         let avail = head.wrapping_sub(tail) as usize;
         let n = out.len().min(avail);
-        let mut last = self.last.load(Ordering::Relaxed);
-        for (i, o) in out.iter_mut().enumerate() {
-            if i < n {
-                let idx = tail.wrapping_add(i as u32) & Self::MASK;
-                if let Some(slot) = self.slots.get(idx as usize) {
-                    last = slot.load(Ordering::Relaxed);
-                }
-            }
-            *o = last;
-        }
+        // The real frames: slots start.. up to the end of the array, then
+        // from 0 (n <= avail <= N, so at most one wrap).
+        let start = (tail & Self::MASK) as usize;
+        let first = n.min(N - start);
+        let a = self.slots.get(start..start + first).unwrap_or(&[]);
+        let b = self.slots.get(..n - first).unwrap_or(&[]);
+        // Copy n, then fill the rest: no per-slot `i < n` test (P5).
+        let (oa, rest) = out.split_at_mut(a.len().min(out.len()));
+        let (ob, held) = rest.split_at_mut(b.len().min(rest.len()));
+        map_run::<M>(oa, a);
+        map_run::<M>(ob, b);
+        let last = match b.last().or(a.last()) {
+            Some(s) => s.load(Ordering::Relaxed),
+            None => self.last.load(Ordering::Relaxed),
+        };
+        held.fill(M::map(last));
+        inspect(&Popped {
+            a,
+            b,
+            held: held.len(),
+        });
         self.last.store(last, Ordering::Relaxed);
         self.tail
             .store(tail.wrapping_add(n as u32), Ordering::Release);
@@ -528,6 +681,15 @@ impl<const N: usize> AudioRing<N> {
     pub fn reset_watermarks(&self) {
         self.min_fill.store(u32::MAX, Ordering::Relaxed);
         self.max_fill.store(0, Ordering::Relaxed);
+    }
+}
+
+/// `out[i] = M::map(src[i])` over the shorter of the two. Out of line: one
+/// unrolled copy serves both runs of a pop (the ISR's code size).
+#[inline(never)]
+fn map_run<M: FrameMap>(out: &mut [u32], src: &[AtomicU32]) {
+    for (o, s) in out.iter_mut().zip(src) {
+        *o = M::map(s.load(Ordering::Relaxed));
     }
 }
 
@@ -568,7 +730,8 @@ pub struct TeeStats {
 }
 
 /// A copy of the DAC feed for the PC (ADR 0041): the DMA ISR, right after
-/// it refilled a half ([`FeedTap::pop_into`]), offers that half here; the
+/// it refilled a half ([`FeedTap::pop_to`]), offers that half here
+/// ([`offer_popped`](Self::offer_popped), from the pop's `inspect`); the
 /// main loop takes whole halves and sends them as `Message::Audio`. A
 /// single-producer (the ISR) single-consumer (the main loop) queue of `H`
 /// halves (a power of two), with the [`AudioRing`] ordering rules: the
@@ -650,7 +813,34 @@ impl<const F: usize, const H: usize> AudioTee<F, H> {
     /// `real` the real frames at its start (the rest is underrun filler).
     /// At most `F` (the board's DMA half) frames are kept.
     pub fn offer(&self, half: &[u32], real: usize) {
-        let real = real.min(half.len()).min(F);
+        let src = half.get(..real.min(half.len())).unwrap_or(&[]);
+        self.offer_with(real.min(half.len()), half.len(), |slot| {
+            for (d, &s) in slot.iter().zip(src) {
+                d.store(s, Ordering::Relaxed);
+            }
+        });
+    }
+
+    /// Producer: [`offer`](Self::offer) of the half one pop just filled,
+    /// its real frames read from the ring (`inspect` of
+    /// [`FeedTap::pop_to`]): the board's DMA half, in its own format, is
+    /// not read back.
+    pub fn offer_popped(&self, p: &Popped<'_>) {
+        self.offer_with(p.len(), p.len() + p.held(), |slot| {
+            let mut d = slot.iter();
+            p.for_each(|w| {
+                if let Some(d) = d.next() {
+                    d.store(w, Ordering::Relaxed);
+                }
+            });
+        });
+    }
+
+    /// `real` real frames of a half of `len`; `copy` stores the real
+    /// frames (at most `F`) into the slot it is given.
+    #[inline]
+    fn offer_with(&self, real: usize, len: usize, copy: impl FnOnce(&[AtomicU32; F])) {
+        let real = real.min(F);
         let first = self.seen.load(Ordering::Relaxed);
         self.seen
             .store(first.wrapping_add(real as u32), Ordering::Relaxed);
@@ -666,12 +856,10 @@ impl<const F: usize, const H: usize> AudioTee<F, H> {
             return;
         }
         let i = head as usize & (H - 1);
-        if let (Some(slot), Some(src)) = (self.slots.get(i), half.get(..real)) {
-            for (d, &s) in slot.iter().zip(src) {
-                d.store(s, Ordering::Relaxed);
-            }
+        if let Some(slot) = self.slots.get(i) {
+            copy(slot);
         }
-        let held = (half.len() - real).min(0xFFFF) as u32;
+        let held = (len - real).min(0xFFFF) as u32;
         if let (Some(c), Some(f)) = (self.counts.get(i), self.firsts.get(i)) {
             c.store(real as u32 | held << 16, Ordering::Relaxed);
             f.store(first, Ordering::Relaxed);
@@ -1050,6 +1238,100 @@ mod tests {
         assert_eq!(out[..2], [11, 11]);
         let s = r.stats();
         assert_eq!((s.underrun_events, s.underrun_frames), (3, 8));
+    }
+
+    /// Frame words whose 12-bit codes differ from their own bits, and
+    /// whose codes all differ from each other.
+    fn pcm(k: i16) -> PcmFrame {
+        PcmFrame::new(k.wrapping_mul(997), k.wrapping_mul(-1_201))
+    }
+
+    #[test]
+    fn pop_to_maps_real_frames_and_the_held_fill_across_the_wrap() {
+        let r = AudioRing::<8>::new();
+        // Tail at 6: the next pop wraps after 2 slots.
+        let six: Vec<PcmFrame> = (1..=6).map(pcm).collect();
+        assert_eq!(r.push_frames(&six), 6);
+        assert_eq!(r.pop_into(&mut [0; 6]), 6);
+        let five: Vec<PcmFrame> = (7..=11).map(pcm).collect();
+        assert_eq!(r.push_frames(&five), 5);
+        let mut out = [0xdead_beef_u32; 8];
+        let mut seen = Vec::new();
+        let mut held = usize::MAX;
+        let n = r.pop_to(HalfOut::<U12Lanes>::new(&mut out), |p| {
+            p.for_each(|w| seen.push(w));
+            held = p.held();
+            assert_eq!(p.len(), 5);
+        });
+        assert_eq!(n, 5);
+        let want: Vec<u32> = five.iter().map(|f| u12_lanes(f.to_bits())).collect();
+        assert_eq!(out[..5], want[..], "real frames, mapped");
+        assert_eq!(out[5..], [u12_lanes(pcm(11).to_bits()); 3], "held, mapped");
+        assert_eq!(
+            seen,
+            five.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            "inspect sees PcmFrame words"
+        );
+        assert_eq!(held, 3);
+        // Empty: every slot is the mapped last frame, inspect sees none.
+        let mut out = [0u32; 4];
+        assert_eq!(
+            r.pop_to(HalfOut::<U12Lanes>::new(&mut out), |p| assert!(
+                p.is_empty()
+            )),
+            0
+        );
+        assert_eq!(out, [u12_lanes(pcm(11).to_bits()); 4]);
+        // Nothing ever pushed: the mapped silence.
+        let r = AudioRing::<8>::new();
+        assert_eq!(r.pop_to(HalfOut::<U12Lanes>::new(&mut out), |_| {}), 0);
+        assert_eq!(out, [u12_lanes(0); 4]);
+        assert_eq!(u12_lanes(0), 2048 | 2048 << 16);
+    }
+
+    #[test]
+    fn tap_pop_to_hashes_and_tees_pcm_words_not_the_output() {
+        const F: usize = 8;
+        let frames: Vec<PcmFrame> = (1..=13).map(pcm).collect();
+        // Reference: plain words through pop_into and offer.
+        let (r0, t0) = (AudioRing::<16>::new(), FeedTap::new());
+        let tee0: AudioTee<F, 4> = AudioTee::new();
+        tee0.set_on(true);
+        // Fused: U12 words out, hash and tee from inspect.
+        let (r1, t1) = (AudioRing::<16>::new(), FeedTap::new());
+        let tee1: AudioTee<F, 4> = AudioTee::new();
+        tee1.set_on(true);
+        let mut plain = [0u32; F];
+        let mut dac = [0u32; F];
+        for chunk in [&frames[..5], &frames[5..13], &[][..]] {
+            r0.push_frames(chunk);
+            r1.push_frames(chunk);
+            let n0 = t0.pop_into(&r0, &mut plain);
+            tee0.offer(&plain, n0);
+            let n1 = t1.pop_to(&r1, HalfOut::<U12Lanes>::new(&mut dac), |p| {
+                tee1.offer_popped(p)
+            });
+            assert_eq!(n0, n1);
+            assert_eq!(dac, plain.map(u12_lanes));
+            assert_eq!((t0.hash(), t0.frames()), (t1.hash(), t1.frames()));
+        }
+        let mut want = FeedHash::new();
+        want.fold_frames(&frames);
+        assert_eq!(t1.hash(), want.get());
+        assert_eq!(tee0.stats(), tee1.stats());
+        let (mut o0, mut o1) = ([PcmFrame::SILENCE; F], [PcmFrame::SILENCE; F]);
+        for _ in 0..3 {
+            assert_eq!(tee0.pop_into(&mut o0), tee1.pop_into(&mut o1));
+            assert_eq!(o0, o1);
+        }
+        // Unhashed: counts, no fold.
+        let (r2, t2) = (AudioRing::<16>::new(), FeedTap::new());
+        r2.push_frames(&frames[..3]);
+        let n = t2.pop_unhashed_to(&r2, HalfOut::<U12Lanes>::new(&mut dac), |p| {
+            assert_eq!((p.len(), p.held()), (3, F - 3))
+        });
+        assert_eq!((n, t2.frames(), t2.hash()), (3, 3, FeedTap::new().hash()));
+        assert_eq!(dac[3..], [u12_lanes(pcm(3).to_bits()); F - 3]);
     }
 
     #[test]

@@ -92,7 +92,7 @@
 //! # Board use
 //!
 //! - `RING: FeedRing` and `TAP: FeedTap` are statics. The DMA ISR is
-//!   `audio_dac::on_dma(|_, out| { TAP.pop_into(&RING, out); })`.
+//!   `audio_dac::on_dma(|_, out| { TAP.pop_to(&RING, out, |_| {}); })`.
 //! - Start the DAC (`AudioDac::start`) before [`run`]: its 250 ms ramp
 //!   comes before the first pop, and the loop fills the ring within the
 //!   first four calls. Started right before [`run`], the ramp counts in
