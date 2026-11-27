@@ -14,7 +14,10 @@
 //!   the last frame (each PC session restarts `seq` at 0).
 //! - A frame that fails COBS, CRC or its length check is answered `Nak`
 //!   with [`gbc_link::DecodeError::nak_code`], with its `seq` when the CRC
-//!   vouches for it, else 0. It is not remembered.
+//!   vouches for it, else 0. It is not remembered, and its `Nak` never
+//!   replaces the stored reply (a resend corrupted on the way, after the
+//!   first answer was lost, must not turn the next good resend's replay
+//!   into that `Nak`).
 //! - `Hello`: `HelloReply` with this board's protocol version (even if
 //!   the PC's differs), [`MAX_CHUNK`] and the NOR size; any load in
 //!   progress is dropped.
@@ -153,8 +156,12 @@ pub struct Loader<N: Nor> {
     /// The last answered request, as on the wire; length 0 = none.
     last_req: [u8; MAX_ENCODED],
     last_req_len: usize,
+    /// The reply to `last_req`, replayed for a resend.
     reply: [u8; REPLY_MAX],
     reply_len: usize,
+    /// The `Nak` for a frame that did not decode: kept apart from `reply`
+    /// so the stored reply survives it.
+    bad_reply: [u8; REPLY_MAX],
 }
 
 impl<N: Nor> Loader<N> {
@@ -171,6 +178,7 @@ impl<N: Nor> Loader<N> {
             last_req_len: 0,
             reply: [0; REPLY_MAX],
             reply_len: 0,
+            bad_reply: [0; REPLY_MAX],
         }
     }
 
@@ -217,10 +225,10 @@ impl<N: Nor> Loader<N> {
             Err(e) => {
                 self.counters.bad_frames += 1;
                 let nak = Message::Nak { code: e.nak_code() };
-                self.reply_len =
-                    gbc_link::encode(&nak, e.seq().unwrap_or(0), &mut self.reply).unwrap_or(0);
+                let n =
+                    gbc_link::encode(&nak, e.seq().unwrap_or(0), &mut self.bad_reply).unwrap_or(0);
                 return Some(Reply {
-                    wire: self.reply.get(..self.reply_len).unwrap_or(&[]),
+                    wire: self.bad_reply.get(..n).unwrap_or(&[]),
                     request: None,
                     duplicate: false,
                 });

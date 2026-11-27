@@ -552,6 +552,31 @@ fn link_faults_are_survived_without_redoing_work() {
 }
 
 #[test]
+fn a_corrupt_resend_after_a_lost_reply_keeps_the_stored_reply() {
+    // Request 3 (RomChunk 1) is answered but its Ack is lost; the resend
+    // (request 4) arrives corrupted and is Nak'd; the next resend
+    // (request 5) is byte-identical to the stored request and must get the
+    // stored Ack, not the bad frame's Nak.
+    let rom = rom(10_000, 9);
+    let mut b = Board::new();
+    b.drop_reply_at = Some(3);
+    b.corrupt_request_at = Some(4);
+    let mut c = Client::new(&mut b, cfg());
+    let out = c.load(&rom, &mut |_, _| {}).unwrap();
+    assert_eq!(
+        out,
+        LoadOutcome::Loaded {
+            hash: fnv::hash(&rom)
+        }
+    );
+    assert_eq!(c.stats.resends, 2);
+    assert_eq!(b.loader.counters.bad_frames, 1);
+    assert_eq!(b.loader.counters.duplicates, 1);
+    assert_eq!(b.loader.counters.chunks as usize, rom.len().div_ceil(1024));
+    assert_eq!(rom_image::validate(&b.nor().flash).unwrap(), &rom[..]);
+}
+
+#[test]
 fn reply_type_matches_the_client() {
     // The board's HelloReply goes through the client's own parser.
     let mut b = Board::new();
