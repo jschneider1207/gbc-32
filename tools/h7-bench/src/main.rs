@@ -39,6 +39,13 @@ use qemu::run;
 mod pack;
 #[cfg(not(feature = "selftest"))]
 mod workload;
+// The take-once statics (the board lib's `take_once`): from the lib in
+// the board images, the same file by path in the QEMU image (no lib).
+#[cfg(all(feature = "board", not(feature = "selftest")))]
+use board::take_once;
+#[cfg(all(not(feature = "board"), not(feature = "selftest")))]
+#[path = "../../../crates/gbc-nucleo-h753/src/take_once.rs"]
+mod take_once;
 
 /// The start of every line, the lib's banner and fault report included
 /// (`h7bench v1 FAULT ...`).
@@ -164,52 +171,38 @@ mod bench {
 /// The emulator's large buffers, as statics handed out once.
 #[cfg(not(feature = "selftest"))]
 mod buffers {
-    use core::cell::UnsafeCell;
-    use core::sync::atomic::{AtomicBool, Ordering};
-
     use gbc_core::{Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
 
     use crate::bench::Buffers;
     use crate::workload::{AUDIO_SLOTS, CART_RAM_SLOTS};
 
-    struct Cell<T>(UnsafeCell<T>);
-
-    // SAFETY: the cells are private to this module and only reachable
-    // through `take`, which gives out one reference to each for the life
-    // of the program (guarded by the atomic `TAKEN`), so no two contexts
-    // can ever access one.
-    unsafe impl<T: Send> Sync for Cell<T> {}
-
-    /// `.bss`: DTCM or AXI SRAM, by placement.
-    static MEM: Cell<Memory> = Cell(UnsafeCell::new(Memory::new()));
-    // SAFETY (the three `link_section`s): `.axisram` is a NOLOAD output
-    // section of RAM that build.rs's memory.x defines for exactly these
-    // statics. It is not zeroed at boot, which is sound for these types
-    // (plain integers: every bit pattern is a value), and `workload::run`
-    // fills all three before it reads them.
-    #[unsafe(link_section = ".axisram.frame")]
-    static FRAME: Cell<Frame> = Cell(UnsafeCell::new([0; SCREEN_WIDTH * SCREEN_HEIGHT]));
-    #[unsafe(link_section = ".axisram.audio")]
-    static AUDIO: Cell<[StereoSample; AUDIO_SLOTS]> = Cell(UnsafeCell::new(
-        [StereoSample { left: 0, right: 0 }; AUDIO_SLOTS],
-    ));
-    #[unsafe(link_section = ".axisram.cart_ram")]
-    static CART_RAM: Cell<[u8; CART_RAM_SLOTS]> = Cell(UnsafeCell::new([0; CART_RAM_SLOTS]));
-
-    static TAKEN: AtomicBool = AtomicBool::new(false);
-
     /// The buffers. Panics on a second call.
     pub fn take() -> Buffers {
-        assert!(!TAKEN.swap(true, Ordering::AcqRel), "buffers taken twice");
-        // SAFETY: the swap above lets exactly one caller through, ever, so
-        // these are the only references to the four statics.
-        unsafe {
-            Buffers {
-                mem: &mut *MEM.0.get(),
-                frame: &mut *FRAME.0.get(),
-                audio: &mut *AUDIO.0.get(),
-                cart_ram: &mut *CART_RAM.0.get(),
-            }
+        const TWICE: &str = "buffers taken twice";
+        Buffers {
+            // `.data`: DTCM or AXI SRAM, by placement.
+            mem: crate::take_once!(Memory = Memory::new()).expect(TWICE),
+            // SAFETY (the three `link_section`s): `.axisram` is a NOLOAD
+            // output section of RAM that build.rs's memory.x defines for
+            // exactly these statics. It is not zeroed at boot, which is
+            // sound for these types (plain integers: every bit pattern is
+            // a value), and `workload::run` fills all three before it
+            // reads them.
+            frame: crate::take_once!(
+                #[unsafe(link_section = ".axisram.frame")]
+                Frame = [0; SCREEN_WIDTH * SCREEN_HEIGHT]
+            )
+            .expect(TWICE),
+            audio: crate::take_once!(
+                #[unsafe(link_section = ".axisram.audio")]
+                [StereoSample; AUDIO_SLOTS] = [StereoSample { left: 0, right: 0 }; AUDIO_SLOTS]
+            )
+            .expect(TWICE),
+            cart_ram: crate::take_once!(
+                #[unsafe(link_section = ".axisram.cart_ram")]
+                [u8; CART_RAM_SLOTS] = [0; CART_RAM_SLOTS]
+            )
+            .expect(TWICE),
         }
     }
 }

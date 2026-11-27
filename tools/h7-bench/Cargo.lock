@@ -116,6 +116,14 @@ name = "gbc-link"
 version = "0.1.0"
 
 [[package]]
+name = "gbc-link-board"
+version = "0.1.0"
+dependencies = [
+ "gbc-firmware",
+ "gbc-link",
+]
+
+[[package]]
 name = "gbc-nucleo-h753"
 version = "0.1.0"
 dependencies = [
@@ -123,6 +131,7 @@ dependencies = [
  "cortex-m-rt",
  "gbc-firmware",
  "gbc-link",
+ "gbc-link-board",
  "memory-x",
  "stm32h7",
 ]
