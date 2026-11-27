@@ -14,7 +14,7 @@ use gbc_core::{
     Buttons, Config, Emulator, Events, Frame, Memory, StereoSample, WHITE, cart_ram_size,
 };
 use gbc_firmware::CycleClock;
-use gbc_firmware::audio::{AudioRing, FeedRing, FeedTap, dac_feed_hash};
+use gbc_firmware::audio::{AudioRing, FeedRing, FeedTap, PcmFrame, dac_feed_hash};
 use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Raw, RawInputs, Shared};
 use gbc_firmware::fnv;
 use gbc_firmware::headless::{Buffers, FrameSink, MIN_AUDIO_SLOTS};
@@ -371,7 +371,7 @@ fn refuses_a_used_ring() {
     let rom = synthetic_rom();
     let ring = FeedRing::new();
     let tap = FeedTap::new();
-    ring.push_frames(&[1, 2, 3]);
+    ring.push_frames(&[1, 2, 3].map(PcmFrame::from_bits));
     let mut mem = Box::new(Memory::new());
     let mut frame: Box<Frame> = Box::new([0; 160 * 144]);
     let mut audio = vec![StereoSample::default(); MIN_AUDIO_SLOTS];

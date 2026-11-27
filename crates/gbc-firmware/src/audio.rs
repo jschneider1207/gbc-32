@@ -1,26 +1,26 @@
 //! Audio out, board-independent (Stage 2 M4): the DC blocker ADR 0035
-//! leaves to the platform, the `i16` to 12-bit DAC conversion, the sample
-//! ring between the main loop (producer) and the DMA refill ISR
-//! (consumer), and the hash of exactly what the DAC is fed.
+//! leaves to the platform, the sample ring between the main loop
+//! (producer) and the DAC's refill ISR (consumer), the hash of exactly
+//! what the output is fed, and the tee that copies it for the PC.
 //!
 //! The data path is `StereoSample` (core, 32,768 Hz) -> [`DcBlocker`] per
-//! channel -> [`dac_code`] -> [`pack`] (one `u32` per frame, the layout of
-//! the DAC's `DAC_DHR12RD` register) -> [`AudioRing`] -> ISR -> DMA buffer.
-//!
-//! # Packing
-//!
-//! RM0433 DAC_DHR12RD: DACC1DHR in bits 11:0, DACC2DHR in bits 27:16, the
-//! rest reserved (0). **Left is DAC channel 1 (OUT1, PA4), right is
-//! channel 2 (OUT2, PA5).**
+//! channel -> saturate to `i16` ([`sample`]) -> [`PcmFrame`] -> [`AudioRing`]
+//! -> ISR -> the board's output. Nothing here knows an output's format
+//! (ADR 0044): the board converts [`PcmFrame`]s when it fills its DMA
+//! buffer (the H753's 12-bit DAC: `gbc_nucleo_h753::audio_dac`; a 16-bit
+//! I2S codec takes them as they are), and its DMA geometry is the board's
+//! too (the tee and the host stand-ins take the half size as a parameter).
 //!
 //! # Scale
 //!
-//! One DAC step is 16 `i16` units: code = 2048 + y/16, so core full scale
-//! (+-32,768) is the DAC's full swing and 0 is mid-scale 2048. The blocker's
-//! output can reach +-65,535 (ADR 0035, "Headroom"; only after the mix sits
-//! at one extreme and swings to the other), which saturates at the rails
-//! (0 and 4095) rather than being halved: ordinary content (a full-range
-//! square wave is +-30,720) has the full resolution.
+//! A [`PcmFrame`] is signed 16-bit PCM, the core's own scale: 0 is
+//! silence, core full scale (+-32,768) is full scale. The blocker's output
+//! can reach +-65,535 (ADR 0035, "Headroom"; only after the mix sits at
+//! one extreme and swings to the other), which saturates at the `i16`
+//! limits rather than being halved: ordinary content (a full-range square
+//! wave is +-30,720) has the full resolution. The H753 DAC's code is
+//! `2048 + n/16` rounded and clamped, exactly the code it had before the
+//! frame went neutral (ADR 0044; test there).
 
 use crate::fnv::Fnv1a;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -37,12 +37,45 @@ const FRAC: u32 = 8;
 /// samples = 15.6 ms.
 pub const DC_CUTOFF_MILLIHZ: u32 = 10_186;
 
-/// Mid-scale DAC code (zero signal).
-pub const MID: u16 = 2048;
-/// The largest DAC code.
-pub const MAX_CODE: u16 = 4095;
-/// A frame of silence: both channels at mid-scale.
-pub const MID_FRAME: u32 = pack(MID, MID);
+/// One stereo output frame: signed 16-bit PCM, left and right (module
+/// docs, "Scale"). Left is the board's first channel (the H753: DAC
+/// channel 1, PA4).
+///
+/// Rings, the tap and the tee hold it as one `u32` ([`to_bits`]: left in
+/// bits 15:0, right in 31:16, each two's complement), so a slot is one
+/// atomic word and its four little-endian bytes are the interleaved
+/// `s16le` stereo stream (what [`FeedHash`] hashes).
+///
+/// [`to_bits`]: Self::to_bits
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PcmFrame {
+    pub left: i16,
+    pub right: i16,
+}
+
+impl PcmFrame {
+    /// Both channels at 0.
+    pub const SILENCE: PcmFrame = PcmFrame { left: 0, right: 0 };
+
+    pub const fn new(left: i16, right: i16) -> Self {
+        Self { left, right }
+    }
+
+    /// The frame as one word: left in bits 15:0, right in 31:16.
+    #[inline]
+    pub const fn to_bits(self) -> u32 {
+        self.left as u16 as u32 | (self.right as u16 as u32) << 16
+    }
+
+    /// The frame of a [`to_bits`](Self::to_bits) word.
+    #[inline]
+    pub const fn from_bits(w: u32) -> Self {
+        Self {
+            left: w as u16 as i16,
+            right: (w >> 16) as u16 as i16,
+        }
+    }
+}
 
 /// An integer one-pole high-pass, `y[n] = x[n] - x[n-1] + a y[n-1]`,
 /// `a = 1 - 2^-9`, for one channel. Deterministic: integers only.
@@ -102,36 +135,36 @@ impl DcBlocker {
     }
 }
 
-/// A blocker output (`i16` units) to a 12-bit DAC code: `2048 + y/16`,
-/// rounded to nearest with ties up (`(y + 8) >> 4`, arithmetic shift),
-/// saturated to 0..=4095. -32,768 gives 0, 0 gives 2048, 32,767 gives 4095.
+/// A blocker output (`i16` units, `i32`) as an output sample: saturated
+/// to `i16` (module docs, "Scale").
 #[inline]
-pub fn dac_code(y: i32) -> u16 {
-    let c = (y.saturating_add(8) >> 4) + i32::from(MID);
-    c.clamp(0, i32::from(MAX_CODE)) as u16
+pub fn sample(y: i32) -> i16 {
+    y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
-/// Two codes as one `DAC_DHR12RD` word: left (channel 1) in bits 11:0,
-/// right (channel 2) in bits 27:16. Codes above 4095 are masked.
-#[inline]
-pub const fn pack(left: u16, right: u16) -> u32 {
-    (left as u32 & 0xfff) | ((right as u32 & 0xfff) << 16)
+/// Both channels of a [`PcmFrame::to_bits`] word as 12-bit offset-binary
+/// codes, each in its own 16-bit lane: left in bits 11:0, right in 27:16,
+/// the rest 0. Per channel `code = 2048 + n/16`, rounded to nearest with
+/// ties up and clamped to 0..=4095: -32,768 gives 0, 0 gives 2048, 32,744
+/// and above give 4095. For a 12-bit output (the H753's DAC writes this
+/// word to `DAC_DHR12RD` unchanged, whose channels sit in the same lanes;
+/// ADR 0044). Together with [`sample`] it is bit-identical to the code the
+/// DAC got before the frame went neutral (`clamp((y + 8) >> 4) + 2048`
+/// over the blocker output `y`; test `u12_lanes_equal_the_old_dac_code`).
+///
+/// Both lanes at once, without a branch (it runs in the DMA ISR, 256
+/// frames per refill): flipping bit 15 of each lane gives `u = n + 32,768`
+/// (0..=65,535); `(u + 8) >> 4` is `(u >> 4) + bit 3 of u` (0..=4,096, so
+/// no carry leaves a lane), and 4,096 (bit 12 set) becomes 4,095.
+#[inline(always)]
+pub const fn u12_lanes(pcm: u32) -> u32 {
+    let u = pcm ^ 0x8000_8000;
+    let t = ((u >> 4) & 0x0fff_0fff) + ((u >> 3) & 0x0001_0001);
+    t - ((t >> 12) & 0x0001_0001)
 }
 
-/// The left code of a packed frame.
-#[inline]
-pub const fn left_code(frame: u32) -> u16 {
-    (frame & 0xfff) as u16
-}
-
-/// The right code of a packed frame.
-#[inline]
-pub const fn right_code(frame: u32) -> u16 {
-    ((frame >> 16) & 0xfff) as u16
-}
-
-/// Both channels' blockers: core samples to packed DAC frames. Owned by
-/// the producer (the main loop).
+/// Both channels' blockers: core samples to output frames. Owned by the
+/// producer (the main loop).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Conditioner {
     left: DcBlocker,
@@ -146,20 +179,24 @@ impl Conditioner {
         }
     }
 
-    /// One core sample to the packed word the DAC is fed.
+    /// One core sample to the frame the output is fed.
     #[inline]
-    pub fn frame(&mut self, s: StereoSample) -> u32 {
-        let l = dac_code(self.left.step(s.left));
-        let r = dac_code(self.right.step(s.right));
-        pack(l, r)
+    pub fn frame(&mut self, s: StereoSample) -> PcmFrame {
+        PcmFrame {
+            left: sample(self.left.step(s.left)),
+            right: sample(self.right.step(s.right)),
+        }
     }
 }
 
-/// The hash of the DAC feed: FNV-1a (`fnv.rs`) over the packed `u32`
-/// frames in order, each as its four little-endian bytes. The board folds
-/// the real frames the ISR pops (the first `n` that [`AudioRing::pop_into`]
-/// returns, never the underrun filler); the host folds the same stream with
-/// [`dac_feed_hash`]. They agree when every produced frame was fed.
+/// The hash of the output feed: FNV-1a (`fnv.rs`) over the frames in
+/// order, each as the four little-endian bytes of its
+/// [`PcmFrame::to_bits`] word (left `s16le`, then right: the interleaved
+/// PCM stream). The board folds the real frames the ISR pops (the first
+/// `n` that [`AudioRing::pop_into`] returns, never the underrun filler);
+/// the host folds the same stream with [`dac_feed_hash`]. They agree when
+/// every produced frame was fed. Board-independent since ADR 0044 (before,
+/// it hashed the H753's `DAC_DHR12RD` words).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeedHash(Fnv1a);
 
@@ -168,9 +205,18 @@ impl FeedHash {
         Self(Fnv1a::new())
     }
 
-    pub fn fold(&mut self, frames: &[u32]) {
+    /// Folds frames given as [`PcmFrame::to_bits`] words (what
+    /// [`AudioRing::pop_into`] writes).
+    pub fn fold(&mut self, words: &[u32]) {
+        for &w in words {
+            self.0.u32(w);
+        }
+    }
+
+    /// Folds frames.
+    pub fn fold_frames(&mut self, frames: &[PcmFrame]) {
         for &f in frames {
-            self.0.u32(f);
+            self.0.u32(f.to_bits());
         }
     }
 
@@ -179,20 +225,20 @@ impl FeedHash {
     }
 }
 
-/// The DAC-feed hash of a whole run's core samples (what the host
-/// `headless` prints to compare with the board): a fresh [`Conditioner`],
-/// every sample in order. Call it on the concatenation of all
-/// `run_frame` outputs of the run.
+/// The feed hash of a whole run's core samples (what the host `headless`
+/// prints to compare with the board): a fresh [`Conditioner`], every
+/// sample in order. Call it on the concatenation of all `run_frame`
+/// outputs of the run.
 pub fn dac_feed_hash(samples: &[StereoSample]) -> u64 {
     let mut c = Conditioner::new();
     let mut h = FeedHash::new();
     for &s in samples {
-        h.fold(&[c.frame(s)]);
+        h.fold_frames(&[c.frame(s)]);
     }
     h.get()
 }
 
-/// The consumer side of the DAC feed: pops from an [`AudioRing`] and folds
+/// The consumer side of the output feed: pops from an [`AudioRing`] and folds
 /// the real frames (`out[..n]`, never the underrun filler) into a
 /// [`FeedHash`], so the board can show that what the DMA buffer got is what
 /// the main loop pushed. A `static` shared by `&'static` like the ring; the
@@ -289,9 +335,6 @@ impl Default for FeedTap {
 /// (3.7 frames of slack for main-loop jitter) and the audio latency under
 /// 50 ms. A larger ring would only add latency.
 pub const RING_FRAMES: usize = 2048;
-/// The DMA half-buffer the ISR refills: 256 frames (7.8 ms, 1 KiB per
-/// half), so 128 half-transfer interrupts a second and 8 halves in the ring.
-pub const DMA_HALF_FRAMES: usize = 256;
 
 /// The ring the board uses.
 pub type FeedRing = AudioRing<RING_FRAMES>;
@@ -314,7 +357,7 @@ pub struct RingStats {
     pub max_fill: u32,
 }
 
-/// A single-producer single-consumer ring of packed DAC frames, in a
+/// A single-producer single-consumer ring of [`PcmFrame`]s, in a
 /// `static`, shared by `&'static` between the main loop (producer) and an
 /// ISR (consumer). `N` must be a power of two (checked at compile time).
 ///
@@ -371,7 +414,7 @@ impl<const N: usize> AudioRing<N> {
             slots: [const { AtomicU32::new(0) }; N],
             head: AtomicU32::new(0),
             tail: AtomicU32::new(0),
-            last: AtomicU32::new(MID_FRAME),
+            last: AtomicU32::new(PcmFrame::SILENCE.to_bits()),
             underrun_events: AtomicU32::new(0),
             underrun_frames: AtomicU32::new(0),
             overrun_events: AtomicU32::new(0),
@@ -398,14 +441,16 @@ impl<const N: usize> AudioRing<N> {
     /// Pushes as many as fit and returns that count; the rest are dropped
     /// (an overrun, counted) without touching `cond`.
     pub fn push_slice(&self, cond: &mut Conditioner, s: &[StereoSample]) -> usize {
-        self.push_with(s.len(), |i| s.get(i).map_or(MID_FRAME, |&x| cond.frame(x)))
+        self.push_with(s.len(), |i| {
+            s.get(i).map_or(0, |&x| cond.frame(x).to_bits())
+        })
     }
 
     /// Producer: pushes already converted frames (see [`push_slice`]).
     ///
     /// [`push_slice`]: Self::push_slice
-    pub fn push_frames(&self, f: &[u32]) -> usize {
-        self.push_with(f.len(), |i| f.get(i).copied().unwrap_or(MID_FRAME))
+    pub fn push_frames(&self, f: &[PcmFrame]) -> usize {
+        self.push_with(f.len(), |i| f.get(i).map_or(0, |x| x.to_bits()))
     }
 
     fn push_with(&self, want: usize, mut frame: impl FnMut(usize) -> u32) -> usize {
@@ -431,10 +476,12 @@ impl<const N: usize> AudioRing<N> {
         n
     }
 
-    /// Consumer: fills `out` from the ring and returns the number of
-    /// **real** frames (`out[..n]`). On a shortage the rest of `out` is
-    /// filled with the last frame handed out (mid-scale if none yet): the
-    /// DAC holds its level instead of stepping to mid-scale, the smallest
+    /// Consumer: fills `out` with frames from the ring, as
+    /// [`PcmFrame::to_bits`] words (so the board can convert them in place
+    /// in its DMA buffer), and returns the number of **real** frames
+    /// (`out[..n]`). On a shortage the rest of `out` is filled with the
+    /// last frame handed out ([`PcmFrame::SILENCE`] if none yet): the
+    /// output holds its level instead of stepping to silence, the smallest
     /// click available. That counts one underrun event and the missing
     /// frames. Hash only `out[..n]` ([`FeedHash`]).
     pub fn pop_into(&self, out: &mut [u32]) -> usize {
@@ -539,10 +586,10 @@ pub struct TeeStats {
 /// Every field is an integer atomic, so a tee in memory that is not
 /// zeroed at boot (a board's NOLOAD section) is sound; [`AudioTee::reset`]
 /// then sets it up before the ISR runs.
-pub struct AudioTee<const H: usize = TEE_HALVES> {
+pub struct AudioTee<const F: usize, const H: usize = TEE_HALVES> {
     /// 0 off, 1 on.
     on: AtomicU32,
-    slots: [[AtomicU32; DMA_HALF_FRAMES]; H],
+    slots: [[AtomicU32; F]; H],
     /// Per slot: real frames in bits 15:0, held frames in 31:16.
     counts: [AtomicU32; H],
     firsts: [AtomicU32; H],
@@ -554,13 +601,13 @@ pub struct AudioTee<const H: usize = TEE_HALVES> {
     queued: AtomicU32,
 }
 
-impl<const H: usize> AudioTee<H> {
+impl<const F: usize, const H: usize> AudioTee<F, H> {
     /// Off and empty.
     pub const fn new() -> Self {
         const { assert!(H.is_power_of_two() && H <= 1 << 16) };
         Self {
             on: AtomicU32::new(0),
-            slots: [const { [const { AtomicU32::new(0) }; DMA_HALF_FRAMES] }; H],
+            slots: [const { [const { AtomicU32::new(0) }; F] }; H],
             counts: [const { AtomicU32::new(0) }; H],
             firsts: [const { AtomicU32::new(0) }; H],
             head: AtomicU32::new(0),
@@ -598,11 +645,12 @@ impl<const H: usize> AudioTee<H> {
         }
     }
 
-    /// Producer: `half` is the DMA half just refilled, `real` the real
-    /// frames at its start (the rest is underrun filler). At most
-    /// [`DMA_HALF_FRAMES`] frames are kept.
+    /// Producer: `half` is the DMA half just refilled, as
+    /// [`PcmFrame::to_bits`] words (before the board converts them),
+    /// `real` the real frames at its start (the rest is underrun filler).
+    /// At most `F` (the board's DMA half) frames are kept.
     pub fn offer(&self, half: &[u32], real: usize) {
-        let real = real.min(half.len()).min(DMA_HALF_FRAMES);
+        let real = real.min(half.len()).min(F);
         let first = self.seen.load(Ordering::Relaxed);
         self.seen
             .store(first.wrapping_add(real as u32), Ordering::Relaxed);
@@ -634,18 +682,18 @@ impl<const H: usize> AudioTee<H> {
 
     /// Consumer: the oldest queued half into `out` (its real frames at
     /// `out[..real]`), or `None` if none is queued.
-    pub fn pop_into(&self, out: &mut [u32; DMA_HALF_FRAMES]) -> Option<TeeHalf> {
+    pub fn pop_into(&self, out: &mut [PcmFrame; F]) -> Option<TeeHalf> {
         let mut it = out.iter_mut();
-        self.pop_with(|w| {
+        self.pop_with(|f| {
             if let Some(o) = it.next() {
-                *o = w;
+                *o = f;
             }
         })
     }
 
     /// Consumer: the oldest queued half, its real frames handed to `each`
     /// in order (no copy buffer needed), or `None` if none is queued.
-    pub fn pop_with(&self, mut each: impl FnMut(u32)) -> Option<TeeHalf> {
+    pub fn pop_with(&self, mut each: impl FnMut(PcmFrame)) -> Option<TeeHalf> {
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
         if head == tail {
@@ -657,7 +705,7 @@ impl<const H: usize> AudioTee<H> {
         let real = (c & 0xFFFF) as usize;
         if let Some(slot) = self.slots.get(i) {
             for s in slot.iter().take(real) {
-                each(s.load(Ordering::Relaxed));
+                each(PcmFrame::from_bits(s.load(Ordering::Relaxed)));
             }
         }
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
@@ -695,7 +743,7 @@ impl<const H: usize> AudioTee<H> {
     }
 }
 
-impl<const H: usize> Default for AudioTee<H> {
+impl<const F: usize, const H: usize> Default for AudioTee<F, H> {
     fn default() -> Self {
         Self::new()
     }
@@ -704,6 +752,15 @@ impl<const H: usize> Default for AudioTee<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The H753's DMA half, as the host stand-ins use it.
+    const HALF: usize = 256;
+
+    /// Test frames from their bit patterns (the ring tests use the words
+    /// as tokens).
+    fn fr(w: &[u32]) -> Vec<PcmFrame> {
+        w.iter().map(|&w| PcmFrame::from_bits(w)).collect()
+    }
 
     extern crate std;
     use std::collections::VecDeque;
@@ -794,70 +851,139 @@ mod tests {
     }
 
     #[test]
-    fn silence_is_exactly_mid_scale() {
+    fn silence_is_exactly_zero() {
         let mut c = Conditioner::new();
-        assert_eq!(c.frame(ss(0, 0)), MID_FRAME);
-        // A burst then silence settles back to exactly mid-scale.
+        assert_eq!(c.frame(ss(0, 0)), PcmFrame::SILENCE);
+        // A burst then silence settles back to exactly zero.
         for i in 0..1_000 {
             c.frame(ss(((i * 37) % 20_000) as i16, 25_000));
         }
-        let mut last = 0;
+        let mut last = PcmFrame::new(1, 1);
         for _ in 0..30_000 {
             last = c.frame(ss(0, 0));
         }
-        assert_eq!(last, MID_FRAME);
+        assert_eq!(last, PcmFrame::SILENCE);
         // And a constant (DC) input, the idle-DAC case of ADR 0035.
         let mut c = Conditioner::new();
         for _ in 0..30_000 {
             last = c.frame(ss(30_720, -30_720));
         }
-        assert_eq!(last, MID_FRAME);
+        assert_eq!(last, PcmFrame::SILENCE);
     }
 
     #[test]
-    fn conversion_endpoints_and_rounding() {
-        assert_eq!(dac_code(-32_768), 0);
-        assert_eq!(dac_code(32_767), 4095);
-        assert_eq!(dac_code(0), 2048);
-        assert_eq!(dac_code(-65_535), 0);
-        assert_eq!(dac_code(65_535), 4095);
-        assert_eq!(dac_code(i32::MAX), 4095);
-        assert_eq!(dac_code(i32::MIN), 0);
-        // Ties round up: 8/16 = 0.5 -> 1, 7/16 -> 0, -8/16 -> 0, -9/16 -> -1.
-        assert_eq!(dac_code(8), 2049);
-        assert_eq!(dac_code(7), 2048);
-        assert_eq!(dac_code(-8), 2048);
-        assert_eq!(dac_code(-9), 2047);
-        // Monotone over the whole range.
-        let mut prev = 0;
+    fn sample_saturates_to_i16() {
+        assert_eq!(sample(0), 0);
+        assert_eq!(sample(-32_768), -32_768);
+        assert_eq!(sample(32_767), 32_767);
+        assert_eq!(sample(32_768), 32_767);
+        assert_eq!(sample(-32_769), -32_768);
+        assert_eq!(sample(65_535), 32_767);
+        assert_eq!(sample(-65_535), -32_768);
+        assert_eq!(sample(i32::MAX), 32_767);
+        assert_eq!(sample(i32::MIN), -32_768);
         for y in -70_000..=70_000 {
-            let c = dac_code(y);
-            assert!(c >= prev);
-            prev = c;
+            let n = i32::from(sample(y));
+            assert_eq!(n, y.clamp(-32_768, 32_767));
         }
     }
 
+    /// The DAC code before ADR 0044 (`dac_code` of the blocker output `y`,
+    /// as it was), copied unchanged: the reference [`u12_lanes`] must
+    /// match.
+    fn old_dac_code(y: i32) -> u16 {
+        let c = (y.saturating_add(8) >> 4) + 2048;
+        c.clamp(0, 4095) as u16
+    }
+
+    /// The old `DAC_DHR12RD` word (`pack(dac_code(l), dac_code(r))`).
+    fn old_word(l: i32, r: i32) -> u32 {
+        u32::from(old_dac_code(l)) & 0xfff | (u32::from(old_dac_code(r)) & 0xfff) << 16
+    }
+
+    /// Requirement of ADR 0044: the H753's DAC words are bit-identical to
+    /// before for every blocker output (its whole range +-65,535, with
+    /// margin, and the `i32` extremes the saturation guards), on either
+    /// channel, through the neutral frame (`sample`, `to_bits`) and the
+    /// conversion the ISR does.
     #[test]
-    fn packing_puts_left_in_the_low_half() {
-        let f = pack(0x123, 0xabc);
-        assert_eq!(f, 0x0abc_0123);
-        assert_eq!(left_code(f), 0x123);
-        assert_eq!(right_code(f), 0xabc);
-        assert_eq!(pack(0xffff, 0xffff), 0x0fff_0fff);
-        let mut c = Conditioner::new();
-        let f = c.frame(ss(-32_768, 32_767));
-        assert_eq!((left_code(f), right_code(f)), (0, 4095));
+    fn u12_lanes_equal_the_old_dac_code() {
+        let new = |l: i32, r: i32| u12_lanes(PcmFrame::new(sample(l), sample(r)).to_bits());
+        let ys = (-70_000..=70_000).chain([i32::MIN, i32::MIN + 7, i32::MAX - 8, i32::MAX]);
+        for y in ys {
+            assert_eq!(
+                new(y, -y.saturating_add(1)),
+                old_word(y, -y.saturating_add(1)),
+                "y = {y}"
+            );
+            assert_eq!(new(0, y), old_word(0, y), "right y = {y}");
+        }
+        // Every i16 on one lane against a spread of values on the other
+        // (no lane leaks into its neighbour).
+        let others = [
+            i16::MIN,
+            -32_761,
+            -32_760,
+            -9,
+            -8,
+            -1,
+            0,
+            7,
+            8,
+            32_759,
+            32_760,
+            i16::MAX,
+        ];
+        for n in i16::MIN..=i16::MAX {
+            for &o in &others {
+                let (a, b) = (i32::from(n), i32::from(o));
+                assert_eq!(new(a, b), old_word(a, b), "({n}, {o})");
+                assert_eq!(new(b, a), old_word(b, a), "({o}, {n})");
+            }
+        }
+        // The fixed points of the docs.
+        assert_eq!(u12_lanes(PcmFrame::new(-32_768, 0).to_bits()), 2048 << 16);
+        assert_eq!(
+            u12_lanes(PcmFrame::new(32_744, 32_743).to_bits()),
+            4095 | 4094 << 16
+        );
+        assert_eq!(u12_lanes(PcmFrame::SILENCE.to_bits()), 2048 | 2048 << 16);
     }
 
     #[test]
-    fn feed_hash_matches_manual_fnv_of_frames() {
+    fn frame_bits_put_left_in_the_low_half() {
+        let f = PcmFrame::new(0x1234, -2);
+        assert_eq!(f.to_bits(), 0xfffe_1234);
+        assert_eq!(PcmFrame::from_bits(0xfffe_1234), f);
+        assert_eq!(PcmFrame::new(-32_768, 32_767).to_bits(), 0x7fff_8000);
+        assert_eq!(PcmFrame::SILENCE.to_bits(), 0);
+        for w in [
+            0,
+            1,
+            0x8000,
+            0xffff,
+            0x1_0000,
+            0x8000_0000,
+            u32::MAX,
+            0x7fff_8001,
+        ] {
+            assert_eq!(PcmFrame::from_bits(w).to_bits(), w);
+        }
+        let mut c = Conditioner::new();
+        assert_eq!(c.frame(ss(-32_768, 32_767)), PcmFrame::new(-32_768, 32_767));
+    }
+
+    #[test]
+    fn feed_hash_matches_manual_fnv_of_s16le_frames() {
         let s: Vec<StereoSample> = (0..500)
             .map(|i| ss((i * 91) as i16, (i * -57) as i16))
             .collect();
         let mut c = Conditioner::new();
         let mut bytes = Vec::new();
         for &x in &s {
-            bytes.extend_from_slice(&c.frame(x).to_le_bytes());
+            let f = c.frame(x);
+            bytes.extend_from_slice(&f.left.to_le_bytes());
+            bytes.extend_from_slice(&f.right.to_le_bytes());
         }
         assert_eq!(dac_feed_hash(&s), crate::fnv::hash(&bytes));
         // Order matters.
@@ -879,7 +1005,7 @@ mod tests {
                     next
                 })
                 .collect();
-            assert_eq!(r.push_frames(&v), k as usize);
+            assert_eq!(r.push_frames(&fr(&v)), k as usize);
             let mut out = vec![0u32; k as usize];
             assert_eq!(r.pop_into(&mut out), k as usize);
             for o in out {
@@ -899,7 +1025,7 @@ mod tests {
         let r = AudioRing::<4>::new();
         r.head.store(u32::MAX - 1, Ordering::Relaxed);
         r.tail.store(u32::MAX - 1, Ordering::Relaxed);
-        assert_eq!(r.push_frames(&[1, 2, 3, 4]), 4);
+        assert_eq!(r.push_frames(&fr(&[1, 2, 3, 4])), 4);
         assert_eq!(r.fill(), 4);
         let mut out = [0u32; 4];
         assert_eq!(r.pop_into(&mut out), 4);
@@ -913,8 +1039,8 @@ mod tests {
         let mut out = [0u32; 4];
         // Nothing ever pushed: mid-scale.
         assert_eq!(r.pop_into(&mut out), 0);
-        assert_eq!(out, [MID_FRAME; 4]);
-        assert_eq!(r.push_frames(&[10, 11]), 2);
+        assert_eq!(out, [0; 4]);
+        assert_eq!(r.push_frames(&fr(&[10, 11])), 2);
         assert_eq!(r.pop_into(&mut out), 2);
         assert_eq!(out, [10, 11, 11, 11]);
         let s = r.stats();
@@ -929,9 +1055,9 @@ mod tests {
     #[test]
     fn overrun_drops_the_newest_and_counts() {
         let r = AudioRing::<4>::new();
-        assert_eq!(r.push_frames(&[1, 2, 3]), 3);
-        assert_eq!(r.push_frames(&[4, 5, 6]), 1);
-        assert_eq!(r.push_frames(&[7]), 0);
+        assert_eq!(r.push_frames(&fr(&[1, 2, 3])), 3);
+        assert_eq!(r.push_frames(&fr(&[4, 5, 6])), 1);
+        assert_eq!(r.push_frames(&fr(&[7])), 0);
         let s = r.stats();
         assert_eq!((s.overrun_events, s.overrun_frames), (2, 3));
         let mut out = [0u32; 4];
@@ -951,8 +1077,8 @@ mod tests {
     fn fill_watermarks() {
         let r = AudioRing::<16>::new();
         assert_eq!(r.stats().min_fill, u32::MAX);
-        r.push_frames(&[0; 10]);
-        r.push_frames(&[0; 3]);
+        r.push_frames(&fr(&[0; 10]));
+        r.push_frames(&fr(&[0; 3]));
         assert_eq!(r.stats().max_fill, 13);
         let mut out = [0u32; 8];
         r.pop_into(&mut out);
@@ -973,10 +1099,10 @@ mod tests {
         let r = FeedRing::new();
         let mut c = Conditioner::new();
         let mut h = FeedHash::new();
-        let mut out = [0u32; DMA_HALF_FRAMES];
+        let mut out = [0u32; HALF];
         for chunk in s.chunks(550) {
             assert_eq!(r.push_slice(&mut c, chunk), chunk.len());
-            while r.fill() >= DMA_HALF_FRAMES {
+            while r.fill() >= HALF {
                 let n = r.pop_into(&mut out);
                 h.fold(&out[..n]);
             }
@@ -998,7 +1124,7 @@ mod tests {
         let tap = FeedTap::new();
         assert_eq!(tap.hash(), FeedHash::new().get());
         let mut c = Conditioner::new();
-        let mut out = [0u32; DMA_HALF_FRAMES];
+        let mut out = [0u32; HALF];
         // Pop more than is there each time: every pop but the first
         // underruns.
         let mut pops = 0;
@@ -1023,7 +1149,7 @@ mod tests {
         let (r, q) = (FeedRing::new(), FeedRing::new());
         let (hashed, unhashed) = (FeedTap::new(), FeedTap::new());
         let (mut c, mut d) = (Conditioner::new(), Conditioner::new());
-        let (mut a, mut b) = ([0u32; DMA_HALF_FRAMES], [0u32; DMA_HALF_FRAMES]);
+        let (mut a, mut b) = ([0u32; HALF], [0u32; HALF]);
         for chunk in s.chunks(100) {
             r.push_slice(&mut c, chunk);
             q.push_slice(&mut d, chunk);
@@ -1041,7 +1167,7 @@ mod tests {
         for seed in 1..=20u64 {
             let r = AudioRing::<16>::new();
             let mut model: VecDeque<u32> = VecDeque::new();
-            let mut last = MID_FRAME;
+            let mut last = 0;
             let (mut ue, mut uf, mut oe, mut of) = (0u32, 0u32, 0u32, 0u32);
             let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             let mut next = 0u32;
@@ -1057,7 +1183,7 @@ mod tests {
                             next
                         })
                         .collect();
-                    let n = r.push_frames(&v);
+                    let n = r.push_frames(&fr(&v));
                     let fit = k.min(16 - model.len());
                     assert_eq!(n, fit);
                     model.extend(&v[..fit]);
@@ -1101,9 +1227,9 @@ mod tests {
 
     #[test]
     fn tee_copies_real_frames_counts_and_drops() {
-        let tee: AudioTee<4> = AudioTee::new();
-        let half: [u32; DMA_HALF_FRAMES] = core::array::from_fn(|i| i as u32 * 7);
-        let mut out = [0u32; DMA_HALF_FRAMES];
+        let tee: AudioTee<HALF, 4> = AudioTee::new();
+        let half: [u32; HALF] = core::array::from_fn(|i| i as u32 * 7);
+        let mut out = [PcmFrame::SILENCE; HALF];
         // Off: counted, not copied.
         tee.offer(&half, 256);
         assert!(tee.is_empty());
@@ -1120,8 +1246,8 @@ mod tests {
                 held: 0
             }
         );
-        assert_eq!(out, half);
-        out = [0; DMA_HALF_FRAMES];
+        assert_eq!(out.map(PcmFrame::to_bits), half);
+        out = [PcmFrame::SILENCE; HALF];
         let b = tee.pop_into(&mut out).unwrap();
         assert_eq!(
             b,
@@ -1131,8 +1257,8 @@ mod tests {
                 held: 56
             }
         );
-        assert_eq!(out[..200], half[..200]);
-        assert_eq!(out[200], 0, "filler not copied");
+        assert_eq!(out.map(PcmFrame::to_bits)[..200], half[..200]);
+        assert_eq!(out[200], PcmFrame::SILENCE, "filler not copied");
         assert_eq!(tee.pop_into(&mut out), None);
         // Full: the fifth half is dropped and leaves a gap in `first`.
         for _ in 0..5 {

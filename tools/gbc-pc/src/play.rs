@@ -92,11 +92,13 @@ pub enum PlayEvent {
     WriteFailed(String),
     /// F5 or a board dump without `--sav-out`.
     NoSavOut,
-    /// An `Audio` message (only with [`PlayOptions::audio`]).
+    /// An `Audio` message (only with [`PlayOptions::audio`]), its frames
+    /// decoded to 16-bit samples (`gbc_link::audio::decode`). A sample
+    /// format this build does not know ends the play with an error.
     Audio {
         first: u32,
         held: u16,
-        data: Vec<u8>,
+        frames: Vec<crate::live::Frame>,
     },
 }
 
@@ -212,13 +214,28 @@ pub fn play<T: Transport>(
                     cycles_max: *cycles_max,
                     extra: extra.clone(),
                 }),
-                Incoming::Audio { first, held, data } => {
+                Incoming::Audio {
+                    first,
+                    held,
+                    format,
+                    data,
+                } => {
                     if opts.audio {
+                        let mut frames = Vec::with_capacity(data.len() / 3);
+                        if let Err(gbc_link::audio::UnknownFormat(f)) =
+                            gbc_link::audio::decode(*format, data, |l, r| frames.push([l, r]))
+                        {
+                            return Err(Error::Io(io::Error::other(format!(
+                                "the board sends audio in sample format {f}, which this \
+                                 gbc-pc cannot play (it knows 1 = 12-bit codes and 2 = \
+                                 s16le; ADR 0044): build gbc-pc from the firmware's commit"
+                            ))));
+                        }
                         report.audio += 1;
                         event(PlayEvent::Audio {
                             first: *first,
                             held: *held,
-                            data: data.clone(),
+                            frames,
                         });
                     }
                 }

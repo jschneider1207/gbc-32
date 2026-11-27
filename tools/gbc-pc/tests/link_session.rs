@@ -416,6 +416,7 @@ fn caller_frames_go_after_replies_and_before_the_dump() {
         &Message::Audio {
             first: 77,
             held: 0,
+            format: gbc_link::audio::U12,
             data: &[1, 2, 3],
         },
         0,

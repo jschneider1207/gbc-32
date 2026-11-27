@@ -271,8 +271,8 @@ impl LivePlayer {
         ))
     }
 
-    fn on_audio(&self, first: u32, held: u16, data: &[u8]) {
-        self.shared.lock().unwrap().on_audio(first, held, data);
+    fn on_audio(&self, first: u32, held: u16, frames: &[gbc_pc::live::Frame]) {
+        self.shared.lock().unwrap().on_audio(first, held, frames);
     }
 
     #[cfg(windows)]
@@ -471,7 +471,11 @@ fn play<T: Transport>(
             }
             last_extra = extra;
         }
-        PlayEvent::Audio { first, held, data } => {
+        PlayEvent::Audio {
+            first,
+            held,
+            frames: data,
+        } => {
             let t = Instant::now();
             audio_span = Some(audio_span.map_or((t, t), |(a, _)| (a, t)));
             if let Some(l) = &live {

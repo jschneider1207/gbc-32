@@ -59,7 +59,11 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use gbc_core::{Config, Emulator, Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
-use gbc_firmware::audio::{AudioTee, DMA_HALF_FRAMES, FeedRing, FeedTap};
+use gbc_firmware::audio::{AudioTee, FeedRing, FeedTap};
+use gbc_link::audio::{U12, U12_BYTES, encode_u12};
+
+/// One DMA refill (the tee's half).
+const DMA_HALF_FRAMES: usize = audio_dac::HALF;
 use gbc_firmware::buttons::{FRAME_SAMPLES, LiveInput, Shared};
 use gbc_firmware::headless::{Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, InputSource, Press, Script};
@@ -136,11 +140,13 @@ static TAP: FeedTap = FeedTap::new();
 // atomics, and `main` calls `TEE.reset()` before the DAC starts. Only the
 // CPU touches it (no DMA), so caching needs no maintenance.
 #[unsafe(link_section = ".axisram.audio_tee")]
-static TEE: AudioTee = AudioTee::new();
+static TEE: AudioTee<DMA_HALF_FRAMES> = AudioTee::new();
 
-/// The largest `Audio` frame: one DMA half of real frames.
+/// The largest `Audio` frame: one DMA half of real frames, as 12-bit codes
+/// (ADR 0044: [`U12`], 3 bytes a frame, keeps the UART's headroom).
 const AUDIO_WIRE_MAX: usize =
-    gbc_link::cobs::max_encoded_len(2 + 6 + DMA_HALF_FRAMES * gbc_link::audio::FRAME_BYTES + 4) + 1;
+    gbc_link::cobs::max_encoded_len(2 + 7 + DMA_HALF_FRAMES * U12_BYTES + 4) + 1;
+const _: () = assert!(DMA_HALF_FRAMES <= gbc_link::audio::max_frames(U12));
 
 /// The most bytes one transmit carries while audio streams: 15.4 ms at
 /// 2 Mbit/s, so the transfer ends within a video frame and every
@@ -431,16 +437,13 @@ impl AudioOut {
     /// more surely fits; the bytes written.
     fn fill(&mut self, room: &mut [u8]) -> usize {
         let mut n = 0;
-        let mut packed = [0u8; DMA_HALF_FRAMES * gbc_link::audio::FRAME_BYTES];
+        let mut packed = [0u8; DMA_HALF_FRAMES * U12_BYTES];
         while room.len() - n >= AUDIO_WIRE_MAX {
             let t0 = cycles();
-            let mut dst = packed
-                .as_chunks_mut::<{ gbc_link::audio::FRAME_BYTES }>()
-                .0
-                .iter_mut();
-            let Some(h) = TEE.pop_with(|w| {
+            let mut dst = packed.as_chunks_mut::<U12_BYTES>().0.iter_mut();
+            let Some(h) = TEE.pop_with(|f| {
                 if let Some(d) = dst.next() {
-                    d.copy_from_slice(&gbc_link::audio::pack(w));
+                    *d = encode_u12(f.left, f.right);
                 }
             }) else {
                 break;
@@ -449,7 +452,8 @@ impl AudioOut {
             let msg = Message::Audio {
                 first: h.first,
                 held: h.held,
-                data: &packed[..real * gbc_link::audio::FRAME_BYTES],
+                format: U12,
+                data: &packed[..real * U12_BYTES],
             };
             if let Ok(k) = gbc_link::encode(&msg, 0, &mut room[n..]) {
                 n += k;

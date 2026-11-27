@@ -20,8 +20,8 @@
 //!   and the save-dump chord.
 //! - [`save`]: the `.sav` image (ADR 0023 format): strict checks, loading
 //!   into the core and taking it back out (M5).
-//! - [`audio`]: DC blocker, 12-bit DAC conversion, the sample ring and the
-//!   DAC-feed hash (M4).
+//! - [`audio`]: DC blocker, the neutral output frame (`PcmFrame`), the
+//!   sample ring and the feed hash (M4; ADR 0044).
 //! - [`fnv`]: 64-bit FNV-1a, the hash on every output line.
 //! - [`headless`]: the headless frame loop and its line format.
 //! - [`paced`]: the audio-paced main loop (M4): runs the core while the

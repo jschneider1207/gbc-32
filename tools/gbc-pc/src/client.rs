@@ -235,10 +235,12 @@ pub enum Incoming {
         /// docs/reference/player.md; lossy UTF-8, empty from a v1 board).
         extra: String,
     },
-    /// `Audio` (ADR 0041): `data` is 3 bytes per frame.
+    /// `Audio` (ADR 0041): `data` in sample `format` (`gbc_link::audio`,
+    /// ADR 0044; not checked here).
     Audio {
         first: u32,
         held: u16,
+        format: u8,
         data: Vec<u8>,
     },
     Other,
@@ -276,9 +278,15 @@ impl Incoming {
                 cycles_max,
                 extra: String::from_utf8_lossy(extra).into_owned(),
             },
-            Message::Audio { first, held, data } => Self::Audio {
+            Message::Audio {
                 first,
                 held,
+                format,
+                data,
+            } => Self::Audio {
+                first,
+                held,
+                format,
                 data: data.to_vec(),
             },
             _ => Self::Other,

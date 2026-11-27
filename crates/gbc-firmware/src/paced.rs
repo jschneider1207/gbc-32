@@ -53,7 +53,7 @@
 //!   rather than one stream over all pixels, so a mismatch can be located
 //!   against the `headless` per-frame lines; calls without a frame, LCD
 //!   off, add nothing); `feed_frames`/`feed` are the count and
-//!   [`FeedHash`] of every packed frame pushed into the ring (producer
+//!   [`FeedHash`] of every frame pushed into the ring (producer
 //!   side). With no overrun that is every core sample of the run, and
 //!   `feed` equals [`dac_feed_hash`] of all of them in order.
 //! - `drain` (printed once the consumer has popped every pushed frame):
@@ -115,21 +115,21 @@
 //!   with a stopped consumer the drain never ends.
 //!
 //! On the host (`tools/headless --paced`), [`Idle`] pops one DMA half
-//! ([`DMA_HALF_FRAMES`]) through a tap, standing in for the ISR.
+//! (256 frames, the H753's `audio_dac::HALF`) through a tap, standing in
+//! for the ISR.
 //!
 //! [`Conditioner`]: crate::audio::Conditioner
 //! [`FeedHash`]: crate::audio::FeedHash
 //! [`FeedTap`]: crate::audio::FeedTap
 //! [`dac_feed_hash`]: crate::audio::dac_feed_hash
 //! [`RING_FRAMES`]: crate::audio::RING_FRAMES
-//! [`DMA_HALF_FRAMES`]: crate::audio::DMA_HALF_FRAMES
 
 use core::fmt::Write;
 
 use gbc_core::{Buttons, CLOCK_HZ, Emulator, Events};
 
 use crate::CycleClock;
-use crate::audio::{AudioRing, Conditioner, FeedHash, FeedTap, RingStats};
+use crate::audio::{AudioRing, Conditioner, FeedHash, FeedTap, PcmFrame, RingStats};
 use crate::fnv::{self, Fnv1a};
 use crate::headless::{self, Buffers, CycleStats, FrameSink, MIN_AUDIO_SLOTS};
 use crate::input::{InputSource, Script};
@@ -392,7 +392,7 @@ where
         CycleStats::EMPTY,
         CycleStats::EMPTY,
     );
-    let mut words = [0u32; CHUNK];
+    let mut words = [PcmFrame::SILENCE; CHUNK];
     for n in 0..frames {
         while ring.free() < MIN_AUDIO_SLOTS {
             if steady_from.is_none() {
@@ -428,7 +428,7 @@ where
             // went in is hashed (and the overrun is counted).
             let k = ring.push_frames(words);
             if V::HASHES {
-                feed_h.fold(&words[..k]);
+                feed_h.fold_frames(&words[..k]);
             }
             feed_frames += k as u64;
         }

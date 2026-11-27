@@ -15,10 +15,10 @@
 //! (256 frames) through a `FeedTap`, as the board's DMA ISR would during
 //! `WFI`. The `stats paced speed` line is meaningless here (no real-time
 //! consumer). `--dac-feed <out.bin>` also writes every real frame that
-//! consumer popped, in order, as little-endian `u32` DAC words (left code
-//! in bits 11:0, right in 27:16): what the board's DAC is fed and streams
-//! to the PC (ADR 0041), to compare with a `gbc-pc play --audio-wav`
-//! capture.
+//! consumer popped, in order, as interleaved `s16le` stereo PCM (4 bytes a
+//! frame, left first; `gbc_firmware::audio::PcmFrame`, ADR 0044): what the
+//! board's output is fed and streams to the PC (ADR 0041), to compare with
+//! a `gbc-pc play --audio-wav` capture.
 //!
 //! With `--paced`, `--input` may also be a `clocks v1` table
 //! (`gbc_firmware::replay`: an `acceptance/*.toml` `input` script as
@@ -42,7 +42,11 @@ use std::time::Instant;
 
 use gbc_core::{Frame, Memory, StereoSample, WHITE, cart_ram_size};
 use gbc_firmware::CycleClock;
-use gbc_firmware::audio::{DMA_HALF_FRAMES, FeedRing, FeedTap};
+use gbc_firmware::audio::{FeedRing, FeedTap};
+
+/// The DMA half the host stand-in for the ISR pops: 256 frames, the H753's
+/// `audio_dac::HALF` (the board equality of the gate compares the result).
+const DMA_HALF_FRAMES: usize = 256;
 use gbc_firmware::headless::NoSink;
 use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};

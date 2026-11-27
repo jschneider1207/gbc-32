@@ -96,10 +96,10 @@
 //!   do `Hello` and 90 frames (1.5 s) without any frame from the PC
 //!   (`gbc-pc play` repeats `Input` every 500 ms). A board without audio
 //!   answers `Nak UnexpectedType`.
-//! - `Audio { first, held, data }`: `data` holds the **real** frames the
-//!   DAC was fed (not underrun filler), [`audio::FRAME_BYTES`] = 3 bytes
-//!   each ([`audio::pack`]: the two 12-bit DAC codes, left = DAC channel
-//!   1); `first` counts real frames since the board started (wrapping
+//! - `Audio { first, held, format, data }`: `data` holds the **real**
+//!   frames the output was fed (not underrun filler) in the sample
+//!   `format` ([`audio`]: 1 = 12-bit codes, 3 bytes a frame, what the H753
+//!   sends; 2 = `s16le`, 4 bytes; ADR 0044); `first` counts real frames since the board started (wrapping
 //!   u32), so the next message's `first` is this one's plus its frame
 //!   count unless frames were dropped; `held` is the number of filler
 //!   frames (the last frame repeated) the DAC played after them, 0 unless
@@ -147,33 +147,118 @@ pub mod buttons {
     pub const UP: u8 = 1 << 6;
     pub const DOWN: u8 = 1 << 7;
 }
-/// `Message::Audio` frame packing (ADR 0041): one stereo frame of two
-/// 12-bit DAC codes in 3 bytes, little-endian bit order: bits 0..=11 the
-/// left code (DAC channel 1), bits 12..=23 the right (channel 2). Input
-/// and output are the board's DAC feed words (`DAC_DHR12RD` layout: left
-/// in bits 11:0, right in 27:16; `gbc_firmware::audio::pack`).
+/// `Message::Audio` sample formats (ADR 0041, versioned by ADR 0044).
+/// Every `Audio` carries its format byte; a frame is one stereo sample
+/// pair of signed 16-bit PCM (`gbc_firmware::audio::PcmFrame`: 0 is
+/// silence) in one of these encodings:
+///
+/// - [`U12`] (1): the two 12-bit codes a 12-bit DAC is fed, in 3 bytes,
+///   little-endian bit order: bits 0..=11 the left code, 12..=23 the
+///   right. `code = clamp(2048 + n/16)`, rounded to nearest with ties up
+///   ([`code`]); the receiver gets `(code - 2048) << 4` back ([`sample`]).
+///   What the H753 sends: 3 bytes a frame leave the 2 Mbit/s UART room
+///   for the rest (ADR 0044, "Bandwidth").
+/// - [`S16`] (2): both samples as they are, left then right, each `i16`
+///   little-endian (4 bytes, `s16le`), for a board with a 16-bit output
+///   and the link to carry it. A DMA half of 256 frames does not fit one
+///   message (at most [`max_frames`] = 255); such a board splits it.
+///
+/// Any other value is a format this version cannot play: [`frame_bytes`]
+/// is `None`, the message still decodes (any data length), and the
+/// receiver refuses it ([`decode`]).
 pub mod audio {
-    /// Bytes per packed frame.
-    pub const FRAME_BYTES: usize = 3;
+    /// 12-bit codes, 3 bytes a frame (module docs).
+    pub const U12: u8 = 1;
+    /// `s16le` pairs, 4 bytes a frame.
+    pub const S16: u8 = 2;
+    /// Bytes per [`U12`] frame.
+    pub const U12_BYTES: usize = 3;
+    /// Bytes per [`S16`] frame.
+    pub const S16_BYTES: usize = 4;
 
-    /// One `DAC_DHR12RD` word as 3 bytes (the reserved bits are dropped).
-    pub const fn pack(word: u32) -> [u8; FRAME_BYTES] {
-        let l = word & 0xFFF;
-        let r = (word >> 16) & 0xFFF;
-        let v = l | r << 12;
+    /// Bytes per frame of `format`, `None` for an unknown one.
+    pub const fn frame_bytes(format: u8) -> Option<usize> {
+        match format {
+            U12 => Some(U12_BYTES),
+            S16 => Some(S16_BYTES),
+            _ => None,
+        }
+    }
+
+    /// The most frames one `Audio` of `format` holds (0 if unknown):
+    /// [`crate::MAX_AUDIO_BYTES`] / [`frame_bytes`], 340 for [`U12`], 255
+    /// for [`S16`].
+    pub const fn max_frames(format: u8) -> usize {
+        match frame_bytes(format) {
+            Some(b) => crate::MAX_AUDIO_BYTES / b,
+            None => 0,
+        }
+    }
+
+    /// The 12-bit code of a sample: `2048 + n/16`, ties up, at most 4095
+    /// (`(n + 32,768 + 8) >> 4`; -32,768 gives 0, 32,744 and up 4095).
+    /// The same code as `gbc_firmware::audio::u12_lanes` (checked in
+    /// `tools/gbc-pc/tests/audio.rs`).
+    pub const fn code(n: i16) -> u16 {
+        let c = (n as i32 + 32_768 + 8) >> 4;
+        if c > 4095 { 4095 } else { c as u16 }
+    }
+
+    /// The sample a 12-bit code stands for, `(code - 2048) << 4` (bits
+    /// above 11 are ignored); `code(sample(c)) == c`.
+    pub const fn sample(code: u16) -> i16 {
+        (((code & 0xFFF) as i32 - 2048) << 4) as i16
+    }
+
+    /// One frame as [`U12`].
+    pub const fn encode_u12(left: i16, right: i16) -> [u8; U12_BYTES] {
+        let v = code(left) as u32 | (code(right) as u32) << 12;
         [v as u8, (v >> 8) as u8, (v >> 16) as u8]
     }
 
-    /// 3 bytes back to the `DAC_DHR12RD` word.
-    pub const fn unpack(b: [u8; FRAME_BYTES]) -> u32 {
+    /// The left and right codes of a [`U12`] frame.
+    pub const fn codes_u12(b: [u8; U12_BYTES]) -> (u16, u16) {
         let v = b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16;
-        (v & 0xFFF) | (v >> 12) << 16
+        ((v & 0xFFF) as u16, (v >> 12) as u16)
     }
 
-    /// The left (channel 1) and right (channel 2) codes of a packed frame.
-    pub const fn codes(b: [u8; FRAME_BYTES]) -> (u16, u16) {
-        let w = unpack(b);
-        ((w & 0xFFF) as u16, (w >> 16) as u16)
+    /// One frame as [`S16`].
+    pub const fn encode_s16(left: i16, right: i16) -> [u8; S16_BYTES] {
+        let (l, r) = (left.to_le_bytes(), right.to_le_bytes());
+        [l[0], l[1], r[0], r[1]]
+    }
+
+    /// An `Audio` format this version does not know.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct UnknownFormat(pub u8);
+
+    /// Calls `each(left, right)` for every whole frame of `data` in
+    /// `format`, as 16-bit samples ([`sample`] for [`U12`]); returns the
+    /// frame count, or the format if it is unknown (then `each` is never
+    /// called). A partial trailing frame (never sent) is ignored.
+    pub fn decode(
+        format: u8,
+        data: &[u8],
+        mut each: impl FnMut(i16, i16),
+    ) -> Result<usize, UnknownFormat> {
+        match format {
+            U12 => {
+                let (frames, _) = data.as_chunks::<U12_BYTES>();
+                for &f in frames {
+                    let (l, r) = codes_u12(f);
+                    each(sample(l), sample(r));
+                }
+                Ok(frames.len())
+            }
+            S16 => {
+                let (frames, _) = data.as_chunks::<S16_BYTES>();
+                for &[a, b, c, d] in frames {
+                    each(i16::from_le_bytes([a, b]), i16::from_le_bytes([c, d]));
+                }
+                Ok(frames.len())
+            }
+            other => Err(UnknownFormat(other)),
+        }
     }
 }
 mod crc;
@@ -183,16 +268,17 @@ pub use crc::{Crc32, crc32};
 pub use message::{Message, NakCode, ty};
 
 /// The protocol version this crate speaks (`Hello`/`HelloReply`).
-pub const PROTOCOL_VERSION: u16 = 1;
+/// 2: `Audio` carries a sample format (ADR 0044).
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Largest data length of a `RomChunk` or `SaveChunk`.
 pub const MAX_CHUNK: usize = 1024;
 
-/// Largest `Audio.data`: 340 frames, the most whole frames that fit
-/// [`MAX_BODY`] after its 6 bytes.
-pub const MAX_AUDIO_BYTES: usize = (MAX_BODY - 6) / audio::FRAME_BYTES * audio::FRAME_BYTES;
-/// Largest `Audio` frame count.
-pub const MAX_AUDIO_FRAMES: usize = MAX_AUDIO_BYTES / audio::FRAME_BYTES;
+/// Largest `Audio.data`: 1,020 bytes, what fits [`MAX_BODY`] after its 7
+/// bytes, cut to a multiple of 12 so it is whole frames in every format
+/// (340 [`audio::U12`] or 255 [`audio::S16`]; [`audio::max_frames`]).
+pub const MAX_AUDIO_BYTES: usize = (MAX_BODY - 7) / 12 * 12;
+const _: () = assert!(MAX_AUDIO_BYTES == 1020);
 
 /// Largest message body: a chunk's offset plus [`MAX_CHUNK`] data bytes.
 pub const MAX_BODY: usize = 4 + MAX_CHUNK;

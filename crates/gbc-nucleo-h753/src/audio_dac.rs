@@ -86,6 +86,20 @@
 //! }
 //! ```
 //!
+//! # Samples in, DAC words out (ADR 0044)
+//!
+//! [`on_dma`]'s source writes board-independent frames
+//! (`gbc_firmware::audio::PcmFrame::to_bits` words, signed 16-bit PCM,
+//! what the sample ring holds) into a scratch half; `on_dma` then
+//! converts them into the DMA half as `DAC_DHR12RD` words with
+//! `gbc_firmware::audio::u12_lanes` (12-bit codes `2048 + n/16`, rounded
+//! and clamped; DHR12RD's channels sit in the same 16-bit lanes as the
+//! frame's, so no shuffle). This is the only
+//! place the DAC's register layout and resolution meet the audio path;
+//! the codes are bit-identical to the ones the shared code produced
+//! before ADR 0044. [`on_dma_codes`] takes DAC words directly (the
+//! dac-probe image's test patterns).
+//!
 //! An image that links this lib without [`AudioDac`] needs no handler:
 //! the interrupt is only unmasked by [`AudioDac::start`].
 
@@ -428,10 +442,34 @@ fn count_errors(flags: u32) {
     }
 }
 
+/// The DMA1 stream 0 interrupt with a source of board-independent frames:
+/// [`on_dma_codes`], with `fill` writing [`HALF`]
+/// `gbc_firmware::audio::PcmFrame::to_bits` words into a scratch half on
+/// the ISR's stack (DTCM, 1 KiB), which are then converted into the DMA
+/// half as [`frame`]s (module docs, "Samples in, DAC words out"). The
+/// source may read what it wrote (the feed hash, the PC tee) before it
+/// returns; the DMA only ever sees DAC words.
+///
+/// The scratch keeps the ISR's cost where it was (ADR 0044): the ring's
+/// pop, the hash and the tee now touch DTCM instead of the non-cacheable
+/// DMA buffer (before, the hash and the tee read the buffer back), and the
+/// buffer still gets exactly one store per frame, now from the
+/// conversion (about 8 instructions a frame).
+#[inline(always)]
+pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
+    on_dma_codes(|h, out| {
+        let mut pcm = [0u32; HALF];
+        fill(h, &mut pcm);
+        for (o, &p) in out.iter_mut().zip(&pcm) {
+            *o = gbc_firmware::audio::u12_lanes(p);
+        }
+    });
+}
+
 /// The DMA1 stream 0 interrupt: counts and clears the flags, then fills
 /// the half the DMA is not reading: from the start ramp, from `fill`
-/// (`fill(half, frames)`: half 0 or 1, [`HALF`] frames of [`frame`]s), from
-/// the stop ramp or with zeros, by phase (module docs).
+/// (`fill(half, frames)`: half 0 or 1, [`HALF`] frames of [`frame`]s, DAC
+/// words), from the stop ramp or with zeros, by phase (module docs).
 ///
 /// The free half is chosen from NDTR, not from which flag is set, so a
 /// late interrupt (both flags) still refills the half the DMA has left.
@@ -445,7 +483,7 @@ fn count_errors(flags: u32) {
 /// again would pop [`HALF`] frames over the unplayed first refill
 /// (M4 review P-3; before, neither was counted). On time, the flag and
 /// NDTR always agree (the latency is microseconds, a half 7.8 ms).
-pub fn on_dma<F: FnOnce(usize, &mut [u32])>(fill: F) {
+pub fn on_dma_codes<F: FnOnce(usize, &mut [u32])>(fill: F) {
     let t0 = cycles();
     let d = dma();
     let flags = d.lisr.read().bits() & ISR_ALL;

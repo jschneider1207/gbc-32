@@ -2,17 +2,21 @@
 //! feed's gap and `held` handling, the resampler, and the drift control
 //! against a simulated board and sound card over 10 simulated minutes.
 
-use gbc_link::audio::pack;
+use gbc_link::audio::{encode_u12, sample};
 use gbc_pc::audio::to_i16;
 use gbc_pc::live::{
     Controller, Feed, IN_RATE, Live, MAX_GAP_FILL, Playback, Resampler, Ring, State, Tuning,
 };
 
-fn data(frames: &[(u16, u16)]) -> Vec<u8> {
-    frames
+/// Pairs of 12-bit codes as the frames the PC decodes from a U12 `Audio`.
+fn data(frames: &[(u16, u16)]) -> Vec<[i16; 2]> {
+    let bytes: Vec<u8> = frames
         .iter()
-        .flat_map(|&(l, r)| pack(u32::from(l) | u32::from(r) << 16))
-        .collect()
+        .flat_map(|&(l, r)| encode_u12(sample(l), sample(r)))
+        .collect();
+    let mut f = Vec::new();
+    gbc_link::audio::decode(gbc_link::audio::U12, &bytes, |l, r| f.push([l, r])).unwrap();
+    f
 }
 
 fn drain(r: &mut Ring) -> Vec<[i16; 2]> {

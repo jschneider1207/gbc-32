@@ -30,10 +30,6 @@
 //!   burst would otherwise be latency); a fill above
 //!   [`Tuning::skip_ms`] is trimmed the same way (counted as a skip).
 
-use gbc_link::audio::{FRAME_BYTES, codes};
-
-use crate::audio::to_i16;
-
 /// The board's DAC rate (`docs/reference/audio-dac.md`).
 pub const IN_RATE: f64 = 32_768.675;
 
@@ -128,7 +124,7 @@ pub struct Feed {
 }
 
 impl Feed {
-    pub fn on_audio(&mut self, ring: &mut Ring, first: u32, held: u16, data: &[u8]) {
+    pub fn on_audio(&mut self, ring: &mut Ring, first: u32, held: u16, frames: &[Frame]) {
         let put = |ring: &mut Ring, f: Frame, s: &mut FeedStats| {
             if !ring.push(f) {
                 s.overflow += 1;
@@ -150,10 +146,9 @@ impl Feed {
                 }
             }
         }
-        let n = (data.len() / FRAME_BYTES) as u32;
-        for f in data.as_chunks::<FRAME_BYTES>().0 {
-            let (l, r) = codes(*f);
-            self.last = [to_i16(l), to_i16(r)];
+        let n = frames.len() as u32;
+        for &f in frames {
+            self.last = f;
             put(ring, self.last, s);
         }
         s.frames += u64::from(n);
@@ -487,8 +482,8 @@ impl Live {
         }
     }
 
-    pub fn on_audio(&mut self, first: u32, held: u16, data: &[u8]) {
-        self.feed.on_audio(&mut self.ring, first, held, data);
+    pub fn on_audio(&mut self, first: u32, held: u16, frames: &[Frame]) {
+        self.feed.on_audio(&mut self.ring, first, held, frames);
     }
 
     pub fn ready(&self) -> bool {

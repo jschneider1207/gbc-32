@@ -13,13 +13,15 @@
 //! - **What is written:** the real frames only. Underrun filler (`held`)
 //!   is counted, not written: the WAV is the game's sound as the DAC was
 //!   fed, frame for frame, and compares with the host's feed.
-//! - **Scale:** a 12-bit DAC code c becomes the `i16` `(c - 2048) << 4`
-//!   (exact: `c = (s >> 4) + 2048` gives it back), the inverse of
-//!   `gbc_firmware::audio::dac_code`'s 16 units per step.
+//! - **Format:** the frames arrive decoded ([`crate::play`] refuses a
+//!   sample format it does not know; ADR 0044). A 12-bit code c (the
+//!   H753's format) becomes the `i16` `(c - 2048) << 4`
+//!   (`gbc_link::audio::sample`; exact: `c = (s >> 4) + 2048` gives it
+//!   back), the inverse of the board's 16 units per DAC step.
 //! - **Rate:** the WAV header says [`WAV_RATE_HZ`] = 32,768 Hz; the board
 //!   plays at 32,768.675 Hz (`docs/reference/audio-dac.md`, +20.6 ppm).
 
-use gbc_link::audio::{FRAME_BYTES, codes};
+use crate::live::Frame;
 
 /// The WAV header's sample rate (the board's nominal rate).
 pub const WAV_RATE_HZ: u32 = 32_768;
@@ -30,7 +32,7 @@ pub const MAX_FILL: u32 = 32_768;
 
 /// A DAC code as a WAV sample (module docs).
 pub const fn to_i16(code: u16) -> i16 {
-    ((code as i32 - 2048) << 4) as i16
+    gbc_link::audio::sample(code)
 }
 
 /// The DAC code back from a WAV sample.
@@ -70,8 +72,8 @@ impl Capture {
         Self::default()
     }
 
-    /// One `Audio { first, held, data }`.
-    pub fn on_audio(&mut self, first: u32, held: u16, data: &[u8]) {
+    /// One `Audio { first, held, .. }`, its frames decoded.
+    pub fn on_audio(&mut self, first: u32, held: u16, frames: &[Frame]) {
         let s = &mut self.stats;
         s.messages += 1;
         s.held += u64::from(held);
@@ -90,10 +92,9 @@ impl Capture {
                 }
             }
         }
-        let n = (data.len() / FRAME_BYTES) as u32;
-        for f in data.as_chunks::<FRAME_BYTES>().0 {
-            let (l, r) = codes(*f);
-            self.last = [to_i16(l), to_i16(r)];
+        let n = frames.len() as u32;
+        for &f in frames {
+            self.last = f;
             self.samples.extend_from_slice(&self.last);
         }
         s.frames += u64::from(n);

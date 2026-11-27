@@ -266,10 +266,14 @@ fn empty_rom_is_refused() {
 #[test]
 fn protocol_version_mismatch_is_an_error() {
     let mut board = SimBoard::new(FLASH);
-    board.protocol = 2;
+    const V: u16 = gbc_link::PROTOCOL_VERSION;
+    board.protocol = V + 1;
     let mut t = Faulty::new(board, &[]);
     let e = load(&mut t, &rom(100)).unwrap_err();
-    assert!(matches!(e, Error::Version { board: 2, ours: 1 }), "{e:?}");
+    assert!(
+        matches!(e, Error::Version { board, ours } if board == V + 1 && ours == V),
+        "{e:?}"
+    );
     assert_eq!(t.requests, 1, "nothing after Hello");
 }
 

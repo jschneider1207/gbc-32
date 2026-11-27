@@ -94,9 +94,13 @@ pub struct SimBoard {
     pub audio_capable: bool,
     /// The audio stream is on (ADR 0041).
     pub audio_on: bool,
-    /// `Audio` messages `(first, held, DAC words)` sent once the stream
+    /// `Audio` messages `(first, held, code words: left 12-bit code in
+    /// bits 11:0, right in 27:16)` sent once the stream
     /// is on, right after the answer that turned it on.
     pub audio_script: Vec<(u32, u16, Vec<u32>)>,
+    /// The `Audio.format` byte it sends ([`gbc_link::audio::U12`]; the
+    /// data is always U12, so a test can send an unknown format).
+    pub audio_format: u8,
     /// The save load in progress: length, hash, bytes so far.
     save_load: Option<(u32, u64, Vec<u8>)>,
     state: State,
@@ -124,6 +128,7 @@ impl SimBoard {
             audio_capable: true,
             audio_on: false,
             audio_script: Vec::new(),
+            audio_format: gbc_link::audio::U12,
             save_load: None,
             state: State::Idle,
             link: Responder::new(),
@@ -153,13 +158,15 @@ impl SimBoard {
     /// Queues an `Audio` message of the DAC words `frames` (whatever
     /// [`SimBoard::audio_on`] says: the test decides).
     pub fn push_audio(&mut self, first: u32, held: u16, frames: &[u32]) {
+        use gbc_link::audio::{encode_u12, sample};
         let data: Vec<u8> = frames
             .iter()
-            .flat_map(|&w| gbc_link::audio::pack(w))
+            .flat_map(|&w| encode_u12(sample(w as u16), sample((w >> 16) as u16)))
             .collect();
         let m = Message::Audio {
             first,
             held,
+            format: self.audio_format,
             data: &data,
         };
         self.out.extend(encode(&m, 0));

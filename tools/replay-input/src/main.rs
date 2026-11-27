@@ -48,7 +48,11 @@ use gbc_core::{
     StereoSample, WHITE, cart_ram_size,
 };
 use gbc_firmware::CycleClock;
-use gbc_firmware::audio::{DMA_HALF_FRAMES, FeedRing, FeedTap};
+use gbc_firmware::audio::{FeedRing, FeedTap};
+
+/// The DMA half the host stand-in for the ISR pops: 256 frames, the H753's
+/// `audio_dac::HALF` (the board equality of the gate compares the result).
+const DMA_HALF_FRAMES: usize = 256;
 use gbc_firmware::fnv::Fnv1a;
 use gbc_firmware::headless::{Buffers, FrameSink, MIN_AUDIO_SLOTS};
 use gbc_firmware::paced::{self, Feed, Hooks, Idle, NoService};

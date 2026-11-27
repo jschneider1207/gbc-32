@@ -141,15 +141,18 @@ pub enum Message<'a> {
         cycles_max: u32,
         extra: &'a [u8],
     },
-    /// Frames the DAC was fed, after `AudioStart` (ADR 0041): `first` is
-    /// the index of `data`'s first frame among every real frame the DAC
-    /// has been fed since boot (wrapping), so a jump shows a gap; `data`
-    /// is [`audio::FRAME_BYTES`] bytes per frame ([`audio::pack`]), at most
-    /// [`MAX_AUDIO_BYTES`]; `held` is how many underrun filler frames (the
-    /// last frame repeated) the DAC played right after them.
+    /// Frames the output was fed, after `AudioStart` (ADR 0041): `first`
+    /// is the index of `data`'s first frame among every real frame the
+    /// output has been fed since boot (wrapping), so a jump shows a gap;
+    /// `format` is the sample format ([`audio`], ADR 0044) and `data`
+    /// whole frames of it, at most [`MAX_AUDIO_BYTES`] (any length for an
+    /// unknown format, which the receiver refuses); `held` is how many
+    /// underrun filler frames (the last frame repeated) were played right
+    /// after them. Body: `first` u32, `held` u16, `format` u8, `data`.
     Audio {
         first: u32,
         held: u16,
+        format: u8,
         data: &'a [u8],
     },
 }
@@ -200,9 +203,10 @@ impl Message<'_> {
             Self::Stats { extra, .. } if extra.len() > MAX_STATS_EXTRA => {
                 Err(EncodeError::BodyTooLarge)
             }
-            Self::Audio { data, .. }
+            Self::Audio { format, data, .. }
                 if data.len() > MAX_AUDIO_BYTES
-                    || !data.len().is_multiple_of(audio::FRAME_BYTES) =>
+                    || audio::frame_bytes(*format)
+                        .is_some_and(|b| !data.len().is_multiple_of(b)) =>
             {
                 Err(EncodeError::BodyTooLarge)
             }
@@ -250,9 +254,15 @@ impl Message<'_> {
                 s.put_all(&cycles_max.to_le_bytes())?;
                 s.put_all(extra)
             }
-            Self::Audio { first, held, data } => {
+            Self::Audio {
+                first,
+                held,
+                format,
+                data,
+            } => {
                 s.put_all(&first.to_le_bytes())?;
                 s.put_all(&held.to_le_bytes())?;
+                s.put(format)?;
                 s.put_all(data)
             }
         }
@@ -341,10 +351,16 @@ pub(crate) fn parse(t: u8, seq: u8, body: &[u8]) -> Result<Message<'_>, DecodeEr
         }),
         ty::AUDIO => r.u32().and_then(|first| {
             let held = r.u16()?;
+            let format = r.u8()?;
             let data = r.rest(MAX_AUDIO_BYTES)?;
-            data.len()
-                .is_multiple_of(audio::FRAME_BYTES)
-                .then_some(Message::Audio { first, held, data })
+            audio::frame_bytes(format)
+                .is_none_or(|b| data.len().is_multiple_of(b))
+                .then_some(Message::Audio {
+                    first,
+                    held,
+                    format,
+                    data,
+                })
         }),
         _ => return Err(DecodeError::UnknownType { ty: t, seq }),
     };

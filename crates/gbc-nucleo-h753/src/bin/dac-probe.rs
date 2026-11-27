@@ -111,7 +111,7 @@ const fn sine() -> [i16; 256] {
 const INC_L: u32 = 440 << 17;
 const INC_R: u32 = 660 << 17;
 
-/// The source `on_dma` calls with the half to fill.
+/// The source `on_dma_codes` calls with the half to fill (DAC words).
 fn source(half: usize, out: &mut [u32]) {
     match MODE.load(Ordering::Relaxed) {
         MODE_HALVES => {
@@ -140,7 +140,7 @@ fn source(half: usize, out: &mut [u32]) {
 
 #[interrupt]
 fn DMA1_STR0() {
-    audio_dac::on_dma(source);
+    audio_dac::on_dma_codes(source);
 }
 
 fn ms(c: u32) -> u32 {
