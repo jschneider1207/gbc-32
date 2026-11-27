@@ -5,7 +5,8 @@
 //! sends the [`Reply`] bytes it gets back). `tools/gbc-pc/tests/board.rs`
 //! runs the PC client against it on the host over a fake NOR.
 //!
-//! Behavior (the PC side's reference is `tools/gbc-pc/src/sim.rs`):
+//! Behavior (`tools/gbc-pc/src/sim.rs` runs this server for the PC
+//! tests):
 //! - Stop-and-wait ([`crate::responder`]). A frame byte-identical to the
 //!   last answered request (same `seq`, same content: a resend) is
 //!   answered with the stored reply and not redone. `Hello` is always

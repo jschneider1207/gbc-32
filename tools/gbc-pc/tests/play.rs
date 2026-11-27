@@ -91,7 +91,7 @@ fn input_frames_on_change_then_release_at_exit() {
         keys(&[Key::Up]),
         keys(&[Key::Enter, Key::Backspace]),
     ];
-    let (c, r, _) = run(SimBoard::new(1 << 20), script, PlayOptions::default());
+    let (c, r, _) = run(SimBoard::player(1 << 20), script, PlayOptions::default());
     assert_eq!(r.exit, Exit::Esc);
     assert_eq!(
         c.transport().inputs,
@@ -108,7 +108,7 @@ fn unchanged_keys_are_refreshed_every_period() {
         refresh: Duration::from_millis(500),
         ..PlayOptions::default()
     };
-    let (c, _, _) = run(SimBoard::new(1 << 20), script, opts);
+    let (c, _, _) = run(SimBoard::player(1 << 20), script, opts);
     let sent = &c.transport().inputs;
     // First send, then one per 500 ms over 2.4 s, then the release.
     assert_eq!(sent.len(), 1 + 4 + 1, "{sent:?}");
@@ -123,7 +123,7 @@ fn seconds_bound_ends_play_without_esc() {
         duration: Some(Duration::from_millis(200)),
         ..PlayOptions::default()
     };
-    let (_, r, _) = run(SimBoard::new(1 << 20), script, opts);
+    let (_, r, _) = run(SimBoard::player(1 << 20), script, opts);
     assert_eq!(r.exit, Exit::Time);
 }
 
@@ -137,8 +137,8 @@ fn sav_out(name: &str) -> PathBuf {
 #[test]
 fn f5_dumps_the_save_once_per_press() {
     let save: Vec<u8> = (0..9000u32).map(|i| (i % 253) as u8).collect();
-    let mut board = SimBoard::new(1 << 20);
-    board.save = Some(save.clone());
+    let mut board = SimBoard::player(1 << 20);
+    board.game.save = Some(save.clone());
     board.push_stats(60, 1000, 2000);
     let out = sav_out("f5");
     let mut script = vec![keys(&[])];
@@ -151,7 +151,7 @@ fn f5_dumps_the_save_once_per_press() {
     let (c, r, events) = run(board, script, opts);
     assert_eq!(std::fs::read(&out).unwrap(), save);
     assert!(!part_path(&out).exists());
-    assert_eq!(c.transport().work.dumps, 1);
+    assert_eq!(c.transport().work().dumps, 1);
     assert_eq!(r.saves, 1);
     assert!(events.contains(&PlayEvent::Stats {
         frames: 60,
@@ -167,8 +167,8 @@ fn f5_dumps_the_save_once_per_press() {
 
 #[test]
 fn broken_dump_in_play_writes_no_file_and_play_goes_on() {
-    let mut board = SimBoard::new(1 << 20);
-    board.save = Some(vec![7; 5000]);
+    let mut board = SimBoard::player(1 << 20);
+    board.game.save = Some(vec![7; 5000]);
     board.dump_faults = vec![(EVERY_DUMP, DumpFault::Truncate(2))];
     let out = sav_out("broken");
     let mut script = vec![keys(&[Key::F5])];
@@ -182,7 +182,7 @@ fn broken_dump_in_play_writes_no_file_and_play_goes_on() {
     assert!(!out.exists());
     assert!(!part_path(&out).exists());
     assert_eq!(r.dumps_failed, 1);
-    assert_eq!(c.transport().work.dumps, 3, "first try + 2 retries");
+    assert_eq!(c.transport().work().dumps, 3, "first try + 2 retries");
     assert!(
         matches!(events.last(), Some(PlayEvent::DumpFailed(_))),
         "{events:?}"
@@ -202,8 +202,8 @@ fn f5_dump_restamps_the_clock_footer_unless_raw() {
     save.extend_from_slice(&[0; 40]);
     save.extend_from_slice(&5u64.to_le_bytes());
     for (clock, stamp) in [(Some(forty_two as fn() -> u64), 42u64), (None, 5)] {
-        let mut board = SimBoard::new(1 << 20);
-        board.save = Some(save.clone());
+        let mut board = SimBoard::player(1 << 20);
+        board.game.save = Some(save.clone());
         let out = sav_out(&format!("stamp-{stamp}"));
         let mut script = vec![keys(&[Key::F5])];
         script.extend(vec![keys(&[]); 30]);
@@ -224,8 +224,8 @@ fn f5_dump_restamps_the_clock_footer_unless_raw() {
 #[test]
 fn board_dump_with_corrupt_begin_is_requested_again() {
     let save: Vec<u8> = (0..2500u32).map(|i| (i % 251) as u8).collect();
-    let mut board = SimBoard::new(1 << 20);
-    board.save = Some(save.clone());
+    let mut board = SimBoard::player(1 << 20);
+    board.game.save = Some(save.clone());
     board.dump_faults = vec![(0, DumpFault::CorruptBegin)];
     board.board_dump();
     let out = sav_out("chord-begin");
@@ -237,15 +237,15 @@ fn board_dump_with_corrupt_begin_is_requested_again() {
     assert_eq!(std::fs::read(&out).unwrap(), save);
     assert_eq!(r.saves, 1);
     // The chord's dump plus exactly one requested again, not one per chunk.
-    assert_eq!(c.transport().work.dumps, 2);
+    assert_eq!(c.transport().work().dumps, 2);
 }
 
 /// The chunks that follow a dump's last failure are not a new board-started
 /// dump: no endless re-request.
 #[test]
 fn leftover_chunks_of_a_failed_dump_do_not_restart_it() {
-    let mut board = SimBoard::new(1 << 20);
-    board.save = Some(vec![7; 5000]);
+    let mut board = SimBoard::player(1 << 20);
+    board.game.save = Some(vec![7; 5000]);
     board.dump_faults = vec![(EVERY_DUMP, DumpFault::CorruptChunk(0))];
     let out = sav_out("leftover");
     let mut script = vec![keys(&[Key::F5])];
@@ -257,5 +257,5 @@ fn leftover_chunks_of_a_failed_dump_do_not_restart_it() {
     let (c, r, _) = run(board, script, opts);
     assert!(!out.exists());
     assert_eq!(r.dumps_failed, 1);
-    assert_eq!(c.transport().work.dumps, 3, "first try + 2 retries");
+    assert_eq!(c.transport().work().dumps, 3, "first try + 2 retries");
 }

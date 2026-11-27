@@ -3,8 +3,9 @@
 //! over a fake NOR that behaves like one: erase sets 0xFF, program can
 //! only clear bits, and programming a byte that is not erased is counted
 //! as an error. `tests/load.rs` runs the same client against the
-//! simulated board (`gbc_pc::sim`); this checks that the firmware's own
-//! logic agrees with it, and the NOR-side rules (lazy erase, header last).
+//! simulated board (`gbc_pc::sim`, the same loader over an in-memory NOR,
+//! with link faults); this adds the NOR-side rules (lazy erase, header
+//! last, no program over unerased bytes).
 
 use std::collections::VecDeque;
 use std::io;

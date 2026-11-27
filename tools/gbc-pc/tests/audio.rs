@@ -153,7 +153,7 @@ fn run(board: SimBoard, audio: bool) -> (Client<SimBoard>, Result<u32, Error>, V
 
 #[test]
 fn play_asks_for_audio_and_hands_on_every_message() {
-    let mut b = SimBoard::new(1 << 20);
+    let mut b = SimBoard::player(1 << 20);
     let halves: Vec<(u32, u16, Vec<u32>)> = (0..3u32)
         .map(|h| {
             (
@@ -180,12 +180,12 @@ fn play_asks_for_audio_and_hands_on_every_message() {
     let want: Vec<(u32, u16, Vec<[i16; 2]>)> =
         halves.iter().map(|(f, h, w)| (*f, *h, data(w))).collect();
     assert_eq!(got, want);
-    assert!(!c.transport().audio_on, "AudioStop sent at the end");
+    assert!(!c.transport().audio_on(), "AudioStop sent at the end");
 }
 
 #[test]
 fn play_without_audio_never_asks() {
-    let mut b = SimBoard::new(1 << 20);
+    let mut b = SimBoard::player(1 << 20);
     b.audio_script = vec![(0, 0, vec![word(1, 1)])];
     let (c, r, events) = run(b, false);
     assert_eq!(r.unwrap(), 0);
@@ -197,7 +197,7 @@ fn play_without_audio_never_asks() {
 /// an error that names it; nothing of it is handed on.
 #[test]
 fn an_unknown_audio_format_fails_the_play_clearly() {
-    let mut b = SimBoard::new(1 << 20);
+    let mut b = SimBoard::player(1 << 20);
     b.audio_script = vec![(0, 0, vec![word(1, 1)])];
     b.audio_format = 9;
     let (_, r, events) = run(b, true);
@@ -205,7 +205,7 @@ fn an_unknown_audio_format_fails_the_play_clearly() {
     assert!(e.contains("sample format 9"), "{e}");
     assert!(!events.iter().any(|e| matches!(e, PlayEvent::Audio { .. })));
     // The same script in the H753's format plays.
-    let mut b = SimBoard::new(1 << 20);
+    let mut b = SimBoard::player(1 << 20);
     b.audio_script = vec![(0, 0, vec![word(1, 1)])];
     b.audio_format = gbc_link::audio::U12;
     assert_eq!(run(b, true).1.unwrap(), 1);
@@ -213,8 +213,8 @@ fn an_unknown_audio_format_fails_the_play_clearly() {
 
 #[test]
 fn a_board_without_audio_fails_the_play() {
-    let mut b = SimBoard::new(1 << 20);
-    b.audio_capable = false;
+    let mut b = SimBoard::player(1 << 20);
+    b.set_audio_capable(false);
     let (_, r, _) = run(b, true);
     assert!(r.is_err());
 }

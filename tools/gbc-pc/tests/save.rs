@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use gbc_link::NakCode;
 use gbc_pc::save::{DumpError, dump_to_file, part_path};
-use gbc_pc::sim::{DumpFault, EVERY_DUMP, Fault, Faulty, SimBoard};
-use gbc_pc::{Client, Config, Error, Failure, fnv};
+use gbc_pc::sim::{DumpFault, EVERY_DUMP, Fault, Faulty, SimBoard, ram_only};
+use gbc_pc::{Client, Config, Error, Failure, LoadOutcome, fnv};
 
 fn cfg() -> Config {
     Config {
@@ -23,9 +23,16 @@ fn sav(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 7 + i / 251) as u8).collect()
 }
 
+/// A player whose cartridge takes a save of exactly `len` bytes.
+fn board_taking(len: usize) -> SimBoard {
+    let mut b = SimBoard::player(1 << 20);
+    b.game.layout = Some(ram_only(len));
+    b
+}
+
 fn board_with_save(save: &[u8]) -> SimBoard {
-    let mut b = SimBoard::new(1 << 20);
-    b.save = Some(save.to_vec());
+    let mut b = SimBoard::player(1 << 20);
+    b.game.save = Some(save.to_vec());
     b
 }
 
@@ -46,16 +53,22 @@ fn assert_no_output(path: &std::path::Path) {
 fn load_rom_then_save_board_gets_exact_bytes() {
     let rom = sav(40_000);
     let save = sav(32 * 1024 + 48);
-    let mut board = SimBoard::new(1 << 20);
-    board.save_len = Some(save.len() as u32);
-    let mut c = Client::new(board, cfg());
+    let mut c = Client::new(SimBoard::loader(1 << 20), cfg());
     c.load(&rom, &mut |_, _| {}).unwrap();
+    // The loader image stores the ROM; the player image, booted into it,
+    // answers `AlreadyLoaded` and takes the save (`gbc-pc load <rom> --sav`
+    // against the player; no one image takes both, link-protocol.md).
+    let b = c.transport_mut();
+    b.boot_player();
+    b.game.layout = Some(ram_only(save.len()));
+    let again = c.load(&rom, &mut |_, _| {}).unwrap();
+    assert_eq!(again, LoadOutcome::AlreadyLoaded);
     let mut last = (0, 0);
     c.send_save(&save, &mut |a, b| last = (a, b)).unwrap();
     let b = c.transport();
-    assert_eq!(b.save.as_deref(), Some(&save[..]));
-    assert_eq!(b.work.save_begins, 1);
-    assert_eq!(b.work.save_chunks as usize, save.len().div_ceil(1024));
+    assert_eq!(b.game.save.as_deref(), Some(&save[..]));
+    assert_eq!(b.work().save_begins, 1);
+    assert_eq!(b.work().save_chunks as usize, save.len().div_ceil(1024));
     assert_eq!(last, (save.len(), save.len()));
     assert_eq!(c.stats, Default::default());
 }
@@ -63,12 +76,12 @@ fn load_rom_then_save_board_gets_exact_bytes() {
 #[test]
 fn save_chunks_follow_the_boards_chunk_size() {
     let save = sav(8 * 1024);
-    let mut board = SimBoard::new(1 << 20);
-    board.max_chunk = 256;
+    let mut board = board_taking(save.len());
+    board.hello_max_chunk = Some(256);
     let mut c = Client::new(board, cfg());
     c.send_save(&save, &mut |_, _| {}).unwrap();
-    assert_eq!(c.transport().work.save_chunks, 32);
-    assert_eq!(c.transport().save.as_deref(), Some(&save[..]));
+    assert_eq!(c.transport().work().save_chunks, 32);
+    assert_eq!(c.transport().game.save.as_deref(), Some(&save[..]));
 }
 
 #[test]
@@ -76,12 +89,12 @@ fn corrupted_save_chunk_on_the_link_is_resent() {
     let save = sav(5000);
     // Requests: 0 Hello, 1 SaveBegin, 2.. chunks.
     let link = Faulty::new(
-        SimBoard::new(1 << 20),
+        board_taking(save.len()),
         &[(3, Fault::CorruptRequest), (4, Fault::DropReply)],
     );
     let mut c = Client::new(link, cfg());
     c.send_save(&save, &mut |_, _| {}).unwrap();
-    assert_eq!(c.transport().board.save.as_deref(), Some(&save[..]));
+    assert_eq!(c.transport().board.game.save.as_deref(), Some(&save[..]));
     assert_eq!(c.stats.resends, 2);
 }
 
@@ -89,7 +102,7 @@ fn corrupted_save_chunk_on_the_link_is_resent() {
 fn wrong_size_save_is_refused_and_nothing_applied() {
     let save = sav(1000);
     let mut board = board_with_save(&[1, 2, 3]);
-    board.save_len = Some(8192);
+    board.game.layout = Some(ram_only(8192));
     let mut c = Client::new(board, cfg());
     let e = c.send_save(&save, &mut |_, _| {}).unwrap_err();
     assert!(
@@ -103,13 +116,14 @@ fn wrong_size_save_is_refused_and_nothing_applied() {
         ),
         "{e}"
     );
-    assert_eq!(c.transport().save.as_deref(), Some(&[1u8, 2, 3][..]));
+    assert_eq!(c.transport().game.save.as_deref(), Some(&[1u8, 2, 3][..]));
 }
 
 #[test]
 fn save_failing_the_boards_hash_check_is_an_error_and_not_applied() {
     let save = sav(3000);
     let mut board = board_with_save(&[9; 16]);
+    board.game.layout = Some(ram_only(save.len()));
     board.corrupt_save_at = Some(2500);
     let mut c = Client::new(board, cfg());
     let e = c.send_save(&save, &mut |_, _| {}).unwrap_err();
@@ -124,17 +138,17 @@ fn save_failing_the_boards_hash_check_is_an_error_and_not_applied() {
         ),
         "{e}"
     );
-    assert_eq!(c.transport().save.as_deref(), Some(&[9u8; 16][..]));
+    assert_eq!(c.transport().game.save.as_deref(), Some(&[9u8; 16][..]));
 }
 
 #[test]
 fn empty_save_is_refused_locally() {
-    let mut c = Client::new(SimBoard::new(1 << 20), cfg());
+    let mut c = Client::new(SimBoard::player(1 << 20), cfg());
     assert!(matches!(
         c.send_save(&[], &mut |_, _| {}),
         Err(Error::SaveEmpty)
     ));
-    assert_eq!(c.transport().work.save_begins, 0);
+    assert_eq!(c.transport().work().save_begins, 0);
 }
 
 #[test]
@@ -152,14 +166,14 @@ fn dump_file_equals_the_boards_save() {
     );
     assert_eq!(std::fs::read(&out).unwrap(), save);
     assert!(!part_path(&out).exists());
-    assert_eq!(c.transport().work.dumps, 1);
+    assert_eq!(c.transport().work().dumps, 1);
     assert_eq!(c.stats.other as usize, save.len().div_ceil(1024));
 }
 
 #[test]
 fn load_then_dump_round_trips_byte_identically() {
     let save = sav(8 * 1024 + 48);
-    let mut c = Client::new(SimBoard::new(1 << 20), cfg());
+    let mut c = Client::new(board_taking(save.len()), cfg());
     c.send_save(&save, &mut |_, _| {}).unwrap();
     assert_eq!(c.dump_save().unwrap(), save);
 }
@@ -176,7 +190,7 @@ fn a_dump_broken_once_is_retried_with_a_fresh_request() {
         board.dump_faults = vec![(0, fault)];
         let mut c = Client::new(board, cfg());
         assert_eq!(c.dump_save().unwrap(), save, "{fault:?}");
-        assert_eq!(c.transport().work.dumps, 2, "{fault:?}");
+        assert_eq!(c.transport().work().dumps, 2, "{fault:?}");
         assert_eq!(c.stats.resends, 1, "{fault:?}");
     }
 }
@@ -217,7 +231,7 @@ fn broken_dumps_are_errors_and_write_no_file() {
 fn nak_to_a_dump_request_is_an_error_and_writes_no_file() {
     let dir = out_dir("nak");
     let out = dir.join("game.sav");
-    let mut c = Client::new(SimBoard::new(1 << 20), cfg());
+    let mut c = Client::new(SimBoard::player(1 << 20), cfg());
     let e = dump_to_file(&mut c, &out, None).unwrap_err();
     assert!(
         matches!(

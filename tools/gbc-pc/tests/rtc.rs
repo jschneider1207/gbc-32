@@ -235,8 +235,8 @@ fn dump_to_file_restamps_unless_raw() {
         timeout: Duration::from_millis(50),
         ..LinkConfig::default()
     };
-    let mut board = SimBoard::new(1 << 20);
-    board.save = Some(sav.clone());
+    let mut board = SimBoard::player(1 << 20);
+    board.game.save = Some(sav.clone());
     let mut c = Client::new(board, cfg);
     assert_eq!(
         dump_to_file(&mut c, &out, Some(later)).unwrap(),

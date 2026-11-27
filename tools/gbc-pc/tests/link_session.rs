@@ -3,7 +3,8 @@
 //! `link-probe` images run) over a fake game: `load --sav` (ROM
 //! `AlreadyLoaded`, then the save), dumps, refusals that apply nothing,
 //! live input and its timeout.
-//! `tests/save.rs` runs the same client against the simulated board.
+//! `tests/save.rs` runs the same client against the simulated board (the
+//! same session, with dump and link faults).
 
 use std::collections::VecDeque;
 use std::io;
