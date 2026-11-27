@@ -487,10 +487,18 @@ fi
 if want H5; then
 step H5 "Host hash lists equal the committed lists"
 # =============================================================================
-# The plan's H5 compares the replay set's host hash lists (the replay list
-# of acceptance/stage2.toml). That manifest does not exist yet: the human
-# creates it (plan D10). Until then the set is the two M1 acceptance ROMs,
-# whose committed board targets are tools/headless/expected/*.txt.
+# Three sets of committed host lists, each regenerated here and compared
+# byte for byte: h7-bench's expected-hashes.txt; the two M1 acceptance ROMs'
+# 600-frame lines (tools/headless/expected/*.txt, the M1 board targets);
+# and the plan's "replay set's host hash lists": one file per entry of
+# crates/gbc-nucleo-h753/replay-set.txt (B3's check-stage2-sets.sh holds it
+# equal to acceptance/stage2.toml's `replay`), at
+# tools/headless/expected/replay/<name>.txt. Each is the `paced ` lines of
+# exactly the host run run-replay.sh compares the board against (its step
+# 2: `headless <rom> --paced --frames <N> [--input <replay-input table>]`;
+# run-paced.sh compares the `paced ` lines). A missing list, an extra one,
+# or a differing one fails H5. After an intended core change, regenerate
+# them with this step's loop and commit them with the reason.
 
 sub "tools/h7-bench/host: report equals tools/h7-bench/expected-hashes.txt"
 set +e
@@ -526,6 +534,61 @@ for entry in "${HEADLESS_ROMS[@]}"; do
   fi
   echo "  ${rom}: equal, $(wc -l < "${TMP}/${rom}.got") lines"
 done
+
+sub "replay set: regenerated host paced lines equal tools/headless/expected/replay/"
+run_status cargo build -q --release -p replay-input
+[ "${rc}" -eq 0 ] || fail "replay-input build failed (exit ${rc})"
+replay_input=$(dirname "${headless}")/replay-input
+[ -x "${replay_input}" ] || fail "cannot find the replay-input binary next to ${headless}"
+REPLAY_SET=crates/gbc-nucleo-h753/replay-set.txt REPLAY_EXP=tools/headless/expected/replay
+[ -f "${REPLAY_SET}" ] || fail "${REPLAY_SET} missing"
+mkdir "${TMP}/replay"
+replay_names=()
+# Parsed as run-replay.sh parses it: <rom> <frames> [<stage1 group>], plus
+# max_ppm= fields (a speed bound, no effect on the host run); the entry's
+# name is the group, else the ROM's file stem.
+while read -r -a fld <&3; do
+  case "${fld[0]:-}" in '' | '#'*) continue ;; esac
+  pos=()
+  for x in "${fld[@]}"; do case $x in max_ppm=*) ;; *) pos+=("$x") ;; esac; done
+  [ "${#pos[@]}" -ge 2 ] && [ "${#pos[@]}" -le 3 ] || tool_error "${REPLAY_SET}: malformed entry: ${fld[*]}"
+  rom_rel=${pos[0]} frames=${pos[1]} group=${pos[2]:-}
+  case ${rom_rel} in synth:*) tool_error "${REPLAY_SET}: ${rom_rel}: H5 has no host list for a synthetic entry" ;; esac
+  name=$(basename "${rom_rel%.*}"); [ -n "${group}" ] && name=${group}
+  case " ${replay_names[*]} " in *" ${name} "*) tool_error "${REPLAY_SET}: entry ${name} twice" ;; esac
+  replay_names+=("${name}")
+  [ -f "test-roms/${rom_rel}" ] || tool_error "test-roms/${rom_rel} missing"
+  input_args=()
+  if [ -n "${group}" ]; then
+    run_status "${replay_input}" table --manifest acceptance/stage1.toml --group "${group}" > "${TMP}/replay/${name}.clocks"
+    [ "${rc}" -eq 0 ] || fail "replay-input table --group ${group} exited ${rc}"
+    want_frames=$(sed -n 's/^end \([0-9]*\)$/\1/p' "${TMP}/replay/${name}.clocks")
+    [ "${frames}" = - ] && frames=${want_frames}
+    [ "${frames}" = "${want_frames}" ] || fail "${name}: frames ${frames} differs from the table's end ${want_frames}"
+    input_args=(--input "${TMP}/replay/${name}.clocks")
+  fi
+  case ${frames} in '' | *[!0-9]*) tool_error "${REPLAY_SET}: ${name}: frames '${frames}' is not a number" ;; esac
+  run_status "${headless}" "test-roms/${rom_rel}" --paced --frames "${frames}" "${input_args[@]}" > "${TMP}/replay/${name}.out"
+  [ "${rc}" -eq 0 ] || fail "headless ${name} --paced --frames ${frames} exited ${rc}"
+  tr -d '\r' < "${TMP}/replay/${name}.out" | grep '^paced ' > "${TMP}/replay/${name}.got" || true
+  grep -q "^paced v1 .* frames=${frames}\$" "${TMP}/replay/${name}.got" || fail "headless ${name}: no 'paced v1 ... frames=${frames}' line"
+  grep -q '^paced end ' "${TMP}/replay/${name}.got" || fail "headless ${name}: no 'paced end' line"
+  want_f=${REPLAY_EXP}/${name}.txt
+  [ -f "${want_f}" ] || fail "${want_f} missing (the committed host list of replay entry ${name})"
+  if ! cmp -s "${want_f}" "${TMP}/replay/${name}.got"; then
+    diff "${want_f}" "${TMP}/replay/${name}.got" | head -n 6 || true
+    fail "replay ${name}: host paced lines differ from ${want_f}"
+  fi
+  echo "  ${name}: equal, $(wc -l < "${want_f}") lines (frames ${frames})"
+done 3< "${REPLAY_SET}" < /dev/null
+[ "${#replay_names[@]}" -gt 0 ] || fail "${REPLAY_SET} has no entries"
+for f in "${REPLAY_EXP}"/*; do
+  [ -e "$f" ] || continue
+  n=$(basename "$f" .txt)
+  case " ${replay_names[*]} " in *" ${n} "*) [ "$f" = "${REPLAY_EXP}/${n}.txt" ] && continue ;; esac
+  fail "$f is not the host list of a ${REPLAY_SET} entry"
+done
+echo "  ${#replay_names[@]} replay entries checked"
 fi
 
 # =============================================================================
