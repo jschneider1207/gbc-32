@@ -234,6 +234,12 @@ struct Wfi<'d> {
 
 impl Idle for Wfi<'_> {
     fn idle(&mut self, waiting: &dyn Fn() -> bool) {
+        // Scripted mode: one step of a display readback sample while the
+        // loop is ahead (src/display.rs, "Readback samples"); awake time.
+        #[cfg(feature = "player-script")]
+        if waiting() {
+            self.display.borrow_mut().sample_step();
+        }
         cortex_m::interrupt::disable();
         if waiting() {
             let t0 = cycles();

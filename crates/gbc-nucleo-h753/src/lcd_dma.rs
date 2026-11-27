@@ -744,10 +744,22 @@ pub struct Readback {
 /// "Readback self-test"). Takes the panel and buffer from
 /// [`LcdDma::parts`] (no transfer may run). About 90 ms at [`lcd::SPEC`] (90.3 ms measured).
 pub fn readback(l: &mut Lcd, buf: &OutFrame) -> Readback {
-    l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
-    l.begin_readback();
+    readback_rows(l, buf, 0, OUT_H)
+}
+
+/// [`readback`] of the window's rows `y0..y1` only (buffer rows; RAMRD
+/// starts at the window's start, ST7789V 9.1.23), so a caller can spread
+/// one readback over several calls (the `player-script` image, between
+/// frames). `first` has the buffer row. About 0.42 ms a row.
+pub fn readback_rows(l: &mut Lcd, buf: &OutFrame, y0: usize, y1: usize) -> Readback {
+    let y1 = y1.min(OUT_H);
     let mut r = Readback::default();
-    for (y, row) in buf.iter().enumerate() {
+    if y0 >= y1 {
+        return r;
+    }
+    l.set_window(0, Y0 + y0 as u16, lcd::WIDTH - 1, Y0 + y1 as u16 - 1);
+    l.begin_readback();
+    for (y, row) in buf.iter().enumerate().take(y1).skip(y0) {
         for (i, &w) in row.iter().enumerate() {
             // The two pixels of a word: memory bytes hi0 lo0 hi1 lo1.
             let b = w.to_le_bytes();
@@ -783,9 +795,19 @@ pub fn readback(l: &mut Lcd, buf: &OutFrame) -> Readback {
 /// from [`LcdDma::parts`] (no transfer may run). About 12 ms (25,920
 /// word stores through the FMC); not part of a real frame loop.
 pub fn write_inverse(l: &mut Lcd, buf: &OutFrame) {
-    l.set_window(0, Y0, lcd::WIDTH - 1, Y1);
+    write_inverse_rows(l, buf, 0, OUT_H);
+}
+
+/// [`write_inverse`] of the window's rows `y0..y1` only (buffer rows), as
+/// [`readback_rows`]. About 56 µs a row plus the 20 µs drain.
+pub fn write_inverse_rows(l: &mut Lcd, buf: &OutFrame, y0: usize, y1: usize) {
+    let y1 = y1.min(OUT_H);
+    if y0 >= y1 {
+        return;
+    }
+    l.set_window(0, Y0 + y0 as u16, lcd::WIDTH - 1, Y0 + y1 as u16 - 1);
     l.begin_pixels();
-    for row in buf.iter() {
+    for row in buf.iter().take(y1).skip(y0) {
         for &w in row.iter() {
             // The buffer's memory byte order is the wire order, as the
             // MDMA sends it (module docs); a word store sends its bytes

@@ -5,6 +5,35 @@
 //! [`FrameSink`]: gbc_firmware::headless::FrameSink
 //!
 //! Shared by the `paced` and `player` images (moved from src/bin/paced.rs).
+//!
+//! # Readback samples (`player-script` only)
+//!
+//! The scripted player checks its own panel path (plan Stage 2 B3: "the
+//! display readback has 0 mismatches"): a full RAMRD readback takes
+//! 90 ms, five frames, so it cannot follow every frame of a real-time
+//! loop. Instead, by a fixed rule independent of the ROM: the first frame
+//! shown at or after loop frame [`SAMPLE_FIRST`], and then the first one
+//! at least [`SAMPLE_EVERY`] frames after the previous sample started, is
+//! a **sample**. It is scaled into the buffer as usual, then, one step
+//! per loop iteration and only while the loop is ahead of the DAC (the
+//! idle hook with the ring full, [`Display::sample_step`]):
+//!
+//! 1. the sentinel ([`lcd_dma::write_inverse_rows`], [`SENTINEL_ROWS`]
+//!    rows a step, 8 steps): the inverse of the frame written into the
+//!    window by the CPU, so every pixel its transfer fails to write reads
+//!    back wrong (as the headless `display` feature, M3 review T-2);
+//! 2. the transfer queued for TE, as any frame, and waited for (polled);
+//! 3. the readback ([`lcd_dma::readback_rows`], [`READBACK_ROWS`] rows a
+//!    step, 54 steps) against the buffer, which still holds the frame.
+//!
+//! Meanwhile the newer frames wait in the stash as during a transfer
+//! (the newest is shown once the sample ends; the others are skipped).
+//! Frame and feed hashes and the core's cycles are untouched (the sink
+//! only reads the frame); a step's cost (about 0.8 M cycles) is awake
+//! time, so it counts in the player's `busy`/`fe` and over-budget figures.
+//! After the run a sample still under way is finished, and a control
+//! readback with one buffer word inverted must give exactly 2
+//! mismatching pixels. Line: `stats display readback`.
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -14,6 +43,8 @@ use crate::lcd_dma::{self, LcdDma};
 use crate::{CPU_HZ, cycles};
 use gbc_core::Frame;
 use gbc_firmware::headless::FrameSink;
+#[cfg(feature = "player-script")]
+use gbc_firmware::video::OUT_H;
 use gbc_firmware::video::scale_frame;
 
 /// A transfer still pending or running this long after `present` is
@@ -37,6 +68,93 @@ impl Range {
     }
     fn mean(&self) -> u64 {
         self.sum / u64::from(self.n.max(1))
+    }
+}
+
+/// The first readback sample: the first frame shown at or after this loop
+/// frame (2 s in: most ROMs have drawn something by then).
+#[cfg(feature = "player-script")]
+pub const SAMPLE_FIRST: u32 = 120;
+/// Samples start at least this many loop frames apart (5.0 s).
+#[cfg(feature = "player-script")]
+pub const SAMPLE_EVERY: u32 = 300;
+/// Rows read back per step: 4 x 0.42 ms = 1.7 ms (54 steps a sample).
+#[cfg(feature = "player-script")]
+pub const READBACK_ROWS: usize = 4;
+/// Sentinel rows written per step: 27 x 56 us = 1.5 ms (8 steps).
+#[cfg(feature = "player-script")]
+pub const SENTINEL_ROWS: usize = 27;
+#[cfg(feature = "player-script")]
+const _: () = assert!(OUT_H.is_multiple_of(READBACK_ROWS) && OUT_H.is_multiple_of(SENTINEL_ROWS));
+
+/// Where a readback sample is (module docs, "Readback samples").
+#[cfg(feature = "player-script")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    /// The sentinel, from this buffer row on.
+    Sentinel(usize),
+    /// The sample's transfer queued or running.
+    Transfer,
+    /// The readback, from this buffer row on.
+    Readback(usize),
+}
+
+/// (x, y, got, want), as `lcd_dma::Readback::first`.
+#[cfg(feature = "player-script")]
+type BadPixel = (u16, u16, [u8; 3], [u8; 3]);
+
+#[cfg(feature = "player-script")]
+struct Sampler {
+    phase: Phase,
+    /// The loop frame from which the next sample may start.
+    next_at: u32,
+    /// The sample's loop frame.
+    frame: u32,
+    /// One step per loop iteration: set by each frame, cleared by a step.
+    armed: bool,
+    samples: u32,
+    readbacks: u32,
+    mismatches: u32,
+    first_bad: Option<(u32, BadPixel)>,
+    /// The cycles of each step that did work.
+    step: Range,
+}
+
+#[cfg(feature = "player-script")]
+impl Sampler {
+    const fn new() -> Sampler {
+        Sampler {
+            phase: Phase::Idle,
+            next_at: SAMPLE_FIRST,
+            frame: 0,
+            armed: false,
+            samples: 0,
+            readbacks: 0,
+            mismatches: 0,
+            first_bad: None,
+            step: Range {
+                n: 0,
+                max: 0,
+                sum: 0,
+            },
+        }
+    }
+
+    /// Starts a sample with frame `n` if one is due: the frame scaled
+    /// into the buffer (no transfer may be queued), not yet queued.
+    fn begin(&mut self, n: u32, dma: &mut LcdDma, scale: &mut Range, frame: &Frame) -> bool {
+        if self.phase != Phase::Idle || n < self.next_at {
+            return false;
+        }
+        let t0 = cycles();
+        scale_frame(frame, dma.buffer());
+        scale.add(cycles().wrapping_sub(t0));
+        self.phase = Phase::Sentinel(0);
+        self.next_at = n.saturating_add(SAMPLE_EVERY);
+        self.frame = n;
+        self.samples += 1;
+        true
     }
 }
 
@@ -79,6 +197,8 @@ pub struct Display {
     scale: Range,
     present: Range,
     copy: Range,
+    #[cfg(feature = "player-script")]
+    sampler: Sampler,
 }
 
 /// Sets the panel up (FMC at `SPEC`, the Game Boy frame rate, all
@@ -105,6 +225,8 @@ pub fn init(stash: &'static mut Frame) -> Display {
         scale: Range::default(),
         present: Range::default(),
         copy: Range::default(),
+        #[cfg(feature = "player-script")]
+        sampler: Sampler::new(),
     }
 }
 
@@ -128,6 +250,11 @@ impl Display {
     /// it held becomes a skipped one: `replaced`). False while MDMA is
     /// reading the buffer.
     fn writable(&mut self, n: u32) -> bool {
+        #[cfg(feature = "player-script")]
+        if self.sampler.phase != Phase::Idle {
+            // The buffer holds the sample until its readback is done.
+            return false;
+        }
         let Some(at) = self.queued_at else {
             return true;
         };
@@ -177,6 +304,15 @@ impl Display {
             return;
         }
         self.held = None;
+        #[cfg(feature = "player-script")]
+        if self
+            .sampler
+            .begin(n, &mut self.dma, &mut self.scale, self.stash)
+        {
+            self.presented += 1;
+            self.deferred += 1;
+            return;
+        }
         let t2 = Self::show(
             &mut self.dma,
             &mut self.scale,
@@ -193,6 +329,8 @@ impl Display {
     /// line.
     pub fn report(&mut self, out: &mut dyn Write) -> fmt::Result {
         for _ in 0..2 {
+            #[cfg(feature = "player-script")]
+            self.finish_sample();
             if self.queued_at.is_some() {
                 let r = self.dma.wait(STUCK);
                 if matches!(r, Err(lcd_dma::Error::Timeout { .. })) {
@@ -203,6 +341,8 @@ impl Display {
             }
             self.service();
         }
+        #[cfg(feature = "player-script")]
+        self.finish_sample();
         let te = lcd_dma::te_stats();
         write!(
             out,
@@ -228,6 +368,144 @@ impl Display {
         if let Some((n, e)) = self.first_error {
             write!(out, " first_error=frame{n}:{e:?}")?;
         }
+        writeln!(out)?;
+        #[cfg(feature = "player-script")]
+        self.readback_report(out)?;
+        Ok(())
+    }
+
+    /// From the idle hook while the loop is ahead (the ring full): one
+    /// step of a readback sample, at most one per loop iteration (module
+    /// docs, "Readback samples").
+    #[cfg(feature = "player-script")]
+    pub fn sample_step(&mut self) {
+        if !self.sampler.armed || self.sampler.phase == Phase::Idle {
+            return;
+        }
+        let t0 = cycles();
+        // A finished transfer costs no step: the readback's first step
+        // follows at once.
+        let worked = self.step_once() || self.step_once();
+        if worked {
+            self.sampler.armed = false;
+            self.sampler.step.add(cycles().wrapping_sub(t0));
+        }
+    }
+
+    /// Advances the sample by one step; whether it did work (false while
+    /// its transfer is still pending or running, or with no sample).
+    #[cfg(feature = "player-script")]
+    fn step_once(&mut self) -> bool {
+        match self.sampler.phase {
+            Phase::Idle => false,
+            Phase::Sentinel(y) => {
+                let (l, buf) = self.dma.parts();
+                lcd_dma::write_inverse_rows(l, buf, y, y + SENTINEL_ROWS);
+                let y = y + SENTINEL_ROWS;
+                self.sampler.phase = if y >= OUT_H {
+                    self.dma.present();
+                    self.queued_at = Some(cycles());
+                    Phase::Transfer
+                } else {
+                    Phase::Sentinel(y)
+                };
+                true
+            }
+            Phase::Transfer => {
+                let n = self.sampler.frame;
+                if let Some(at) = self.queued_at {
+                    match self.dma.try_wait() {
+                        Some(r) => self.outcome(n, r),
+                        None if cycles().wrapping_sub(at) > STUCK => {
+                            let r = self.dma.wait(0);
+                            self.stuck += 1;
+                            self.outcome(n, r);
+                        }
+                        None => return false,
+                    }
+                    self.queued_at = None;
+                }
+                self.sampler.phase = Phase::Readback(0);
+                false
+            }
+            Phase::Readback(y) => {
+                let (l, buf) = self.dma.parts();
+                let rb = lcd_dma::readback_rows(l, buf, y, y + READBACK_ROWS);
+                let s = &mut self.sampler;
+                s.mismatches += rb.mismatches;
+                if let (None, Some(p)) = (s.first_bad, rb.first) {
+                    s.first_bad = Some((s.frame, p));
+                }
+                let y = y + READBACK_ROWS;
+                s.phase = if y >= OUT_H {
+                    s.readbacks += 1;
+                    Phase::Idle
+                } else {
+                    Phase::Readback(y)
+                };
+                true
+            }
+        }
+    }
+
+    /// After the run: a sample under way finished, its transfer waited
+    /// for (at most [`STUCK`]).
+    #[cfg(feature = "player-script")]
+    fn finish_sample(&mut self) {
+        while self.sampler.phase != Phase::Idle {
+            if self.sampler.phase == Phase::Transfer && self.queued_at.is_some() {
+                let r = self.dma.wait(STUCK);
+                if matches!(r, Err(lcd_dma::Error::Timeout { .. })) {
+                    self.stuck += 1;
+                }
+                self.outcome(self.sampler.frame, r);
+                self.queued_at = None;
+            }
+            self.step_once();
+        }
+    }
+
+    /// The `stats display readback` line, after a control: with the last
+    /// frame's transfer done (`report`), the panel holds the buffer, so
+    /// one buffer word inverted (both its pixels, every bit) must give
+    /// exactly 2 mismatching pixels (as the headless `display` feature).
+    #[cfg(feature = "player-script")]
+    fn readback_report(&mut self, out: &mut dyn Write) -> fmt::Result {
+        let s = &self.sampler;
+        let control = if s.readbacks > 0 && self.queued_at.is_none() {
+            let (l, buf) = self.dma.parts();
+            buf[100][60] ^= 0xFFFF_FFFF;
+            let rb = lcd_dma::readback(l, buf);
+            buf[100][60] ^= 0xFFFF_FFFF;
+            Some(rb.mismatches)
+        } else {
+            None
+        };
+        let s = &self.sampler;
+        write!(
+            out,
+            "stats display readback samples={} readbacks={} mismatches={} control_mismatches=",
+            s.samples, s.readbacks, s.mismatches,
+        )?;
+        match control {
+            Some(c) => write!(out, "{c}")?,
+            None => write!(out, "none")?,
+        }
+        write!(
+            out,
+            " first={SAMPLE_FIRST} every={SAMPLE_EVERY} readback_rows={READBACK_ROWS} \
+             sentinel_rows={SENTINEL_ROWS} steps={} step_mean={} step_max={}",
+            s.step.n,
+            s.step.mean(),
+            s.step.max,
+        )?;
+        if let Some((n, (x, y, got, want))) = s.first_bad {
+            write!(
+                out,
+                " first_bad=frame{n}:({x},{y}) got={:02x}{:02x}{:02x} want={:02x}{:02x}{:02x}",
+                got[0], got[1], got[2], want[0], want[1], want[2]
+            )?;
+        }
         writeln!(out)
     }
 
@@ -242,6 +520,10 @@ impl Display {
     }
 
     fn frame(&mut self, n: u32, frame: &Frame) {
+        #[cfg(feature = "player-script")]
+        {
+            self.sampler.armed = true;
+        }
         if !self.writable(n) {
             // MDMA is reading the buffer: keep a copy, shown once the
             // transfer is done (`service`, or the next frame instead).
@@ -256,6 +538,11 @@ impl Display {
         if self.held.take().is_some() {
             // Superseded before it could be shown.
             self.skipped += 1;
+        }
+        #[cfg(feature = "player-script")]
+        if self.sampler.begin(n, &mut self.dma, &mut self.scale, frame) {
+            self.presented += 1;
+            return;
         }
         let t2 = Self::show(&mut self.dma, &mut self.scale, &mut self.present, frame);
         self.presented += 1;
