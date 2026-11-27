@@ -614,14 +614,14 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (P8) H753 D2 SRAM1-3 (288 KiB) unused: room for 128 KiB saves (no speed gain; doesn't carry to the H735)
 - [ ] (M1) BTAC-off ratchet pass in h7-bench at ~+0.5-1% (ADR 0042: 0.11% layout noise vs +-1.7% with it on); stricter-only
 - [ ] (M2) variant decisions (LTO, opt-level, ITCM tier) from 4-8 ITCM start-pad builds per variant, not one build each
-- [ ] (M3) h7-bench README: the bench's cache state is not the shipped player's (scaler reads DTCM, writes non-cacheable); QSPI +1.24% is an upper bound
-- [ ] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard
+- [x] (M3) h7-bench README: the bench's cache state is not the shipped player's (scaler reads DTCM, writes non-cacheable); QSPI +1.24% is an upper bound (done session 30; see review row)
+- [ ] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard (bench `max_at=` done 6a14794; player part open)
 - [ ] (M5) 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the 32 KiB D-cache unmeasured
 - [ ] (Q5) use PAC field writers instead of `w.bits()` + hand-coded constants (138 sites) while porting to the H735 PAC
-- [ ] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies
+- [ ] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies (display fold done c2aac36, board diff format-identical; dac-probe left)
 - [x] (Q11 rest) one source for the 2,000,000 baud default, `parse_baud`, and build.sh's memory map (read it from memory-x) (done session 30; see review row)
 - [x] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature (done session 30; see review row)
-- [ ] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire
+- [x] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire (done session 30; see review row)
 - [x] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043) (done session 30; see review row)
 - [x] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human (d2cfb51; human-approved 2026-11-27)
 
