@@ -608,7 +608,7 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [x] (K13) bin/paced.rs `sleep_te_cycles`: bound the `wfi` wait for TE edges (done session 30; see review row)
 - [x] (P2) display stash: swap frame buffers instead of `copy_from_slice` (42-45k cycles on ~46% of frames); the core allows a swap after FRAME_READY — board A/B (done: P2 16f88a3, M4 bd38750, dac-probe e59c536)
 - [ ] (P2 follow-up) Wario Land 3 live skipped frames after the stash swap 536-847 vs 297-613 before (2 runs each, spread large); check over more live runs
-- [ ] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only)
+- [x] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only) (done 4df60a8: slicing-by-4 CRC + block COBS, byte-identical; audio_cyc_per_frame 116 -> 51, fe mean -34.1k; HW CRC not needed)
 - [ ] (P5 rest) measure `audio_isr_max` after the fused pop (ea6e9dc); ISRs to ITCM on the H735
 - [ ] (P6) `-C llvm-args=-align-loops=1`: ~4.4-6.3 KB ITCM back; A/B with layout-perturbed builds (M2 below)
 - [ ] (P7) H735 RAM plan: FRAME out of DTCM first, keep cart RAM internal, spend the 65,600 B save staging buffer, reuse the panel MPU region's 27 KB slack for DMA buffers, boot-check `TCM_AXI_SHARED`
