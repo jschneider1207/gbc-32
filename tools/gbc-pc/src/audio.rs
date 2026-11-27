@@ -111,8 +111,15 @@ impl Capture {
     }
 }
 
-/// A canonical 44-byte-header PCM WAV of interleaved stereo `i16`s.
+/// The most `i16` samples a canonical WAV can hold: the RIFF size field
+/// (`36 + data_len`) is a u32; whole stereo frames only (~9.1 h at 32 kHz).
+pub const WAV_MAX_SAMPLES: usize = ((u32::MAX - 36) / 2) as usize & !1;
+
+/// A canonical 44-byte-header PCM WAV of interleaved stereo `i16`s. A
+/// capture longer than [`WAV_MAX_SAMPLES`] is cut to that (the size
+/// fields cannot express more) rather than written with wrapped sizes.
 pub fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
+    let samples = &samples[..samples.len().min(WAV_MAX_SAMPLES)];
     let data_len = (samples.len() * 2) as u32;
     let mut w = Vec::with_capacity(44 + samples.len() * 2);
     w.extend_from_slice(b"RIFF");
@@ -131,4 +138,19 @@ pub fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
         w.extend_from_slice(&s.to_le_bytes());
     }
     w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// K5: the size fields of a maximal capture fit a u32, and one more
+    /// frame would not (so `wav` never writes wrapped sizes).
+    #[test]
+    fn wav_max_samples_fits_the_size_fields() {
+        let size = |n: usize| 36 + (n as u64) * 2;
+        assert!(size(WAV_MAX_SAMPLES) <= u64::from(u32::MAX));
+        assert!(size(WAV_MAX_SAMPLES + 2) > u64::from(u32::MAX));
+        assert_eq!(WAV_MAX_SAMPLES % 2, 0, "whole stereo frames");
+    }
 }
