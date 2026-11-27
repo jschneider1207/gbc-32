@@ -579,7 +579,7 @@ reliably on the H753 after the 2026-11-25 USB drop.
 
 From the M7 review (`docs/reviews/stage2-m7.md`):
 
-- [ ] (M7 C3) `fault::die()`: quiesce IRQs and DMA and clear `CR3.DMAT` before the FAULT line
+- [x] (M7 C3, d8c8588) `fault::die()`: quiesce IRQs and DMA and clear `CR3.DMAT` before the FAULT line. Done: cpsid i, every clocked DMA1/DMA2 stream and MDMA channel stopped (bounded), CR3.DMAT/DMAR cleared; board smoke (throwaway probe, panic in DMA1_STR0 during a 4 KiB link TX): FAULT line clean, while the old path lost it under the TX payload
 - [ ] (M7 C4) DAC/SAI underrun: re-init per RM0433 26.4.8 (RM0468 for the H735)
 - [ ] (M7 C5) `link_uart` RX overflow (ring lap) detected and counted
 - [ ] (M7 C6) check NDTR reads against posted writes (ordering)
