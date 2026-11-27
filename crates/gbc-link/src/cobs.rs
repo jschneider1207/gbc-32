@@ -72,6 +72,39 @@ impl<'o> Writer<'o> {
         Some(())
     }
 
+    /// `push` for every byte of `data`, a run at a time: the bytes up to
+    /// the next zero (or the end of the block's room) are found with a
+    /// scan and copied in one go (review P3). Same output and the same
+    /// `None` cases as the per-byte loop: a run that does not fit fails
+    /// before it is copied, which only changes bytes past the error,
+    /// where nothing is meaningful.
+    pub(crate) fn push_slice(&mut self, mut data: &[u8]) -> Option<()> {
+        while !data.is_empty() {
+            if self.code == 0xFF {
+                self.close_block()?;
+            }
+            // Data bytes the block still takes (1..=254).
+            let room = usize::from(0xFF - self.code);
+            let window = data.get(..room).unwrap_or(data);
+            let run = window.iter().position(|&b| b == 0);
+            let n = run.unwrap_or(window.len());
+            let end = self.pos.checked_add(n)?;
+            self.out
+                .get_mut(self.pos..end)?
+                .copy_from_slice(window.get(..n)?);
+            self.pos = end;
+            // `n <= room = 0xFF - code`, so this stays <= 0xFF.
+            self.code += n as u8;
+            if run.is_some() {
+                self.close_block()?;
+                data = data.get(n + 1..)?;
+            } else {
+                data = data.get(n..)?;
+            }
+        }
+        Some(())
+    }
+
     /// Writes the last code byte; returns the encoded length.
     pub(crate) fn finish(self) -> Option<usize> {
         *self.out.get_mut(self.code_idx)? = self.code;
@@ -84,9 +117,7 @@ impl<'o> Writer<'o> {
 /// (`max_encoded_len(src.len())` always suffices).
 pub fn encode(src: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut w = Writer::new(out)?;
-    for &b in src {
-        w.push(b)?;
-    }
+    w.push_slice(src)?;
     w.finish()
 }
 
@@ -224,5 +255,98 @@ mod tests {
         assert_eq!(encode(&[1, 2, 3, 4], &mut out), None);
         assert_eq!(encode(&[1, 2, 3], &mut out), Some(4));
         assert_eq!(encode(&[], &mut []), None);
+    }
+
+    /// The per-byte encoder (`push` for every byte: the implementation
+    /// before `push_slice`), the reference the block-wise path must match.
+    fn reference(src: &[u8], out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out)?;
+        for &b in src {
+            w.push(b)?;
+        }
+        w.finish()
+    }
+
+    /// Byte-identical to the per-byte encoder for every length
+    /// 0..=MAX_PAYLOAD at several zero densities (none, rare, half, all,
+    /// and zeros only at block boundaries' neighbours via the 1/256 rate),
+    /// whole and fed as random pieces mixing `push` and `push_slice`.
+    #[test]
+    fn push_slice_matches_per_byte_push() {
+        let mut rng = crate::crc::TestRng(0x2545_F491_4F6C_DD1D);
+        let mut src = [0u8; crate::MAX_PAYLOAD];
+        let mut want = [0u8; crate::MAX_ENCODED];
+        let mut got = [0u8; crate::MAX_ENCODED];
+        for zero in [0, 1, 16, 128, 256] {
+            for len in 0..=crate::MAX_PAYLOAD {
+                rng.bytes(len, zero, &mut src);
+                let src = &src[..len];
+                let n = reference(src, &mut want).unwrap();
+                assert_eq!(encode(src, &mut got), Some(n), "len {len} zero {zero}");
+                assert_eq!(&got[..n], &want[..n], "len {len} zero {zero}");
+                got.fill(0xAA);
+                let mut w = Writer::new(&mut got).unwrap();
+                let mut rest = src;
+                while !rest.is_empty() {
+                    let k = (rng.next() as usize % 300).min(rest.len());
+                    let (piece, r) = rest.split_at(k);
+                    if rng.next() & 3 == 0 {
+                        piece.iter().for_each(|&b| w.push(b).unwrap());
+                    } else {
+                        w.push_slice(piece).unwrap();
+                    }
+                    rest = r;
+                }
+                assert_eq!(w.finish(), Some(n), "pieces, len {len} zero {zero}");
+                assert_eq!(&got[..n], &want[..n], "pieces, len {len} zero {zero}");
+            }
+        }
+    }
+
+    /// Zero runs around the 254-byte block limit, exhaustively: a zero (or
+    /// none) at every position of payloads 250..=512 bytes long.
+    #[test]
+    fn push_slice_matches_at_block_edges() {
+        let mut want = [0u8; 600];
+        let mut got = [0u8; 600];
+        for len in 250..=512usize {
+            for z in 0..=len {
+                let src: std::vec::Vec<u8> = (0..len)
+                    .map(|i| if i == z { 0 } else { (i % 255) as u8 + 1 })
+                    .collect();
+                let n = reference(&src, &mut want).unwrap();
+                assert_eq!(encode(&src, &mut got), Some(n), "len {len} zero at {z}");
+                assert_eq!(&got[..n], &want[..n], "len {len} zero at {z}");
+            }
+        }
+    }
+
+    /// A too-small `out` is `None` exactly when the per-byte encoder says
+    /// so, at every buffer size.
+    #[test]
+    fn push_slice_small_buffers_match() {
+        let mut rng = crate::crc::TestRng(0xDEAD_BEEF_CAFE_F00D);
+        let mut src = [0u8; 700];
+        for (len, zero) in [
+            (0, 0),
+            (1, 256),
+            (253, 0),
+            (254, 0),
+            (255, 0),
+            (600, 8),
+            (700, 0),
+        ] {
+            rng.bytes(len, zero, &mut src);
+            let src = &src[..len];
+            for size in 0..=max_encoded_len(len) + 1 {
+                let mut a = std::vec![0u8; size];
+                let mut b = std::vec![0u8; size];
+                let ra = reference(src, &mut a);
+                assert_eq!(encode(src, &mut b), ra, "len {len} size {size}");
+                if let Some(n) = ra {
+                    assert_eq!(a[..n], b[..n]);
+                }
+            }
+        }
     }
 }

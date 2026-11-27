@@ -387,6 +387,18 @@ impl message::Sink for FrameWriter<'_> {
         self.crc.update(b);
         self.cobs.push(b).ok_or(EncodeError::BufferTooSmall)
     }
+
+    // A field's bytes in one go: the CRC four bytes a step, COBS a zero
+    // run at a time (review P3; the player streams ~550 audio frames,
+    // 1.6 kB, per video frame through here). Out of line for the same
+    // code-size reason as `put`.
+    #[inline(never)]
+    fn put_all(&mut self, data: &[u8]) -> Result<(), EncodeError> {
+        self.crc.update_slice(data);
+        self.cobs
+            .push_slice(data)
+            .ok_or(EncodeError::BufferTooSmall)
+    }
 }
 
 /// Encodes `msg` as frame `seq` into `out`: the full on-wire bytes,
@@ -402,9 +414,9 @@ pub fn encode(msg: &Message<'_>, seq: u8, out: &mut [u8]) -> Result<usize, Encod
     w.put(msg.type_code())?;
     w.put(seq)?;
     msg.write_body(&mut w)?;
-    for b in w.crc.finish().to_le_bytes() {
-        w.cobs.push(b).ok_or(EncodeError::BufferTooSmall)?;
-    }
+    w.cobs
+        .push_slice(&w.crc.finish().to_le_bytes())
+        .ok_or(EncodeError::BufferTooSmall)?;
     let n = w.cobs.finish().ok_or(EncodeError::BufferTooSmall)?;
     *out.get_mut(n).ok_or(EncodeError::BufferTooSmall)? = 0;
     Ok(n + 1)
@@ -500,5 +512,82 @@ impl<const N: usize> Decoder<N> {
             }
         }
         (data.len(), None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use std::vec::Vec;
+
+    /// The frame encoder before review P3, rebuilt from its parts: every
+    /// body byte through `put` alone (the trait's per-byte `put_all`), the
+    /// nibble-table CRC, and a per-byte COBS `push` loop.
+    fn reference_encode(msg: &Message<'_>, seq: u8) -> Vec<u8> {
+        struct Bytes(Vec<u8>);
+        impl message::Sink for Bytes {
+            fn put(&mut self, b: u8) -> Result<(), EncodeError> {
+                self.0.push(b);
+                Ok(())
+            }
+        }
+        let mut p = Bytes(std::vec![msg.type_code(), seq]);
+        msg.write_body(&mut p).unwrap();
+        let crc = crc::reference_crc32(&p.0);
+        p.0.extend_from_slice(&crc.to_le_bytes());
+        let mut out = std::vec![0u8; MAX_FRAME];
+        let mut w = cobs::Writer::new(&mut out).unwrap();
+        for &b in &p.0 {
+            w.push(b).unwrap();
+        }
+        let n = w.finish().unwrap();
+        out.truncate(n);
+        out.push(0);
+        out
+    }
+
+    /// `encode` is byte-identical to the pre-P3 encoder for `Audio`,
+    /// `SaveChunk` and `Stats` frames of every data length the protocol
+    /// allows, at several zero densities, with random header fields (so
+    /// zeros in `first`/`held`/`offset` move the block edges too).
+    #[test]
+    fn encode_matches_reference_encoder() {
+        let mut rng = crc::TestRng(0x0123_4567_89AB_CDEF);
+        let mut data = [0u8; MAX_CHUNK];
+        let mut out = [0u8; MAX_FRAME];
+        for zero in [0, 1, 64, 256] {
+            for len in 0..=MAX_CHUNK {
+                rng.bytes(len, zero, &mut data);
+                let d = &data[..len];
+                let r = rng.next();
+                let seq = (r >> 56) as u8;
+                let mut msgs = std::vec![
+                    Message::SaveChunk {
+                        offset: (r as u32) & 0x00FF_FF00,
+                        data: d
+                    },
+                    Message::Audio {
+                        first: (r >> 8) as u32,
+                        held: (r >> 40) as u16 & 0xFF0F,
+                        format: audio::U12,
+                        data: d.get(..len.min(MAX_AUDIO_BYTES) / 3 * 3).unwrap(),
+                    },
+                ];
+                if len <= MAX_STATS_EXTRA {
+                    msgs.push(Message::Stats {
+                        frames: r as u32,
+                        cycles_mean: (r >> 16) as u32,
+                        cycles_max: 0,
+                        extra: d,
+                    });
+                }
+                for m in &msgs {
+                    let want = reference_encode(m, seq);
+                    let n = encode(m, seq, &mut out).unwrap();
+                    assert_eq!(&out[..n], &want[..], "len {len} zero {zero} {m:?}");
+                }
+            }
+        }
     }
 }
