@@ -71,12 +71,12 @@ use gbc_firmware::paced::{self, Feed, FrameCycles, Hooks, Idle, Service, Service
 use gbc_firmware::player::{COMPAT_PALETTE, Window, frame_budget};
 use gbc_firmware::replay::{self, Change, ClockScript};
 use gbc_firmware::save::{self, Image, Layout};
-use gbc_link::{MAX_FRAME, Message};
+use gbc_link::{DEFAULT_BAUD, MAX_FRAME, Message, parse_baud};
 use gbc_nucleo_h753::audio_dac::{self, AudioDac};
 use gbc_nucleo_h753::display::{self, Display};
 use gbc_nucleo_h753::joystick::Joystick;
 use gbc_nucleo_h753::link_session::{Game, Session};
-use gbc_nucleo_h753::link_uart::{LinkUart, parse_baud};
+use gbc_nucleo_h753::link_uart::LinkUart;
 use gbc_nucleo_h753::pac::interrupt;
 use gbc_nucleo_h753::paced_board::{
     Capture, Dwt, RAMP_LEFT, dac_line, report, set_sleep_clock, start_dac,
@@ -96,7 +96,7 @@ const HASHES: bool = cfg!(feature = "player-script");
 
 const ROM_NAME: &str = "qspi";
 
-const LINK_BAUD: u32 = parse_baud(option_env!("GBC_LINK_BAUD"), 2_000_000);
+const LINK_BAUD: u32 = parse_baud(option_env!("GBC_LINK_BAUD"), DEFAULT_BAUD);
 /// Statistics period: 300 frames, 5.02 s at 59.7275 Hz.
 const STATS_FRAMES: u32 = 300;
 /// A PC session is active while a link frame came within this many

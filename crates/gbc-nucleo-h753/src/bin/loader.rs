@@ -31,7 +31,7 @@ use core::fmt::{self, Write};
 
 use gbc_firmware::fmt_buf::FmtBuf;
 use gbc_firmware::rom_image::{ImageError, ImageHeader};
-use gbc_link::ty;
+use gbc_link::{DEFAULT_BAUD, parse_baud, ty};
 use gbc_nucleo_h753::loader::{Loader, Nor, Progress};
 use gbc_nucleo_h753::qspi::{self, NOR_BYTES, NorError, NorFlash, QUAD_IO_READ_XIP, Qspi};
 use gbc_nucleo_h753::uart::{self, Uart};
@@ -46,26 +46,10 @@ const IMAGE: &str = "loader";
 /// 4 Mbit/s cannot be exact (29.5 clocks per bit: -1.67% at best) and was
 /// not chosen although its loads were clean (`docs/reference/loader.md`
 /// "Baud rate").
-const DEFAULT_BAUD: u32 = 2_000_000;
-
+/// ([`DEFAULT_BAUD`], shared with the player, link-probe and gbc-pc.)
+///
 /// The rate the protocol is served at.
 const LOADER_BAUD: u32 = parse_baud(option_env!("GBC_LOADER_BAUD"), DEFAULT_BAUD);
-
-/// A decimal rate from the build environment (a bad value fails the
-/// build).
-const fn parse_baud(s: Option<&str>, default: u32) -> u32 {
-    let Some(s) = s else { return default };
-    let b = s.as_bytes();
-    assert!(!b.is_empty(), "GBC_LOADER_BAUD is empty");
-    let mut v: u32 = 0;
-    let mut i = 0;
-    while i < b.len() {
-        assert!(b[i].is_ascii_digit(), "GBC_LOADER_BAUD is not a number");
-        v = v * 10 + (b[i] - b'0') as u32;
-        i += 1;
-    }
-    v
-}
 
 /// The NOR behind the loader's trait: erase and program in indirect mode
 /// at [`qspi::PRESCALER_SAFE`], reads through the window at

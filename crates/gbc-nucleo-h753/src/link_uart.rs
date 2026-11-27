@@ -399,19 +399,3 @@ fn rx_snapshot() -> (usize, u32) {
     }
     (ndtr as usize, marks)
 }
-
-/// A baud rate from a build-time variable (`GBC_LINK_BAUD`): `default`
-/// when unset; a compile error when empty or not a decimal number.
-pub const fn parse_baud(s: Option<&str>, default: u32) -> u32 {
-    let Some(s) = s else { return default };
-    let b = s.as_bytes();
-    assert!(!b.is_empty(), "the baud variable is empty");
-    let mut v: u32 = 0;
-    let mut i = 0;
-    while i < b.len() {
-        assert!(b[i].is_ascii_digit(), "the baud variable is not a number");
-        v = v * 10 + (b[i] - b'0') as u32;
-        i += 1;
-    }
-    v
-}

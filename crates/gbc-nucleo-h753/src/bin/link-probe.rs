@@ -47,9 +47,10 @@ use gbc_firmware::buttons::{
 use gbc_firmware::fmt_buf::FmtBuf;
 use gbc_firmware::fnv;
 use gbc_firmware::save::{self, Image, Layout};
+use gbc_link::{DEFAULT_BAUD, parse_baud};
 use gbc_nucleo_h753::joystick::Joystick;
 use gbc_nucleo_h753::link_session::{Game, Progress, Session};
-use gbc_nucleo_h753::link_uart::{LinkUart, parse_baud};
+use gbc_nucleo_h753::link_uart::LinkUart;
 use gbc_nucleo_h753::qspi::NOR_BYTES;
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, led};
 
@@ -59,7 +60,6 @@ const IMAGE: &str = "link-probe";
 static ROM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/headless.gb"));
 const ROM_NAME: &str = env!("GBC_HEADLESS_ROM_NAME");
 
-const DEFAULT_BAUD: u32 = 2_000_000;
 const LINK_BAUD: u32 = parse_baud(option_env!("GBC_LINK_BAUD"), DEFAULT_BAUD);
 /// One emulated frame in CPU cycles: 70,224 / 4,194,304 s.
 const FRAME_CYCLES: u32 = (CPU_HZ as u64 * FRAME_CLOCKS as u64 / CLOCK_HZ as u64) as u32;

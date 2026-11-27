@@ -86,7 +86,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         port: "COM5".into(),
         // The loader image's rate (crates/gbc-nucleo-h753 src/bin/loader.rs,
         // docs/reference/loader.md).
-        baud: 2_000_000,
+        baud: gbc_link::DEFAULT_BAUD,
         cfg: Config::default(),
         raw_save: false,
         audio: false,

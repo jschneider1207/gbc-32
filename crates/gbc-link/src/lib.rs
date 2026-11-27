@@ -267,6 +267,30 @@ mod message;
 pub use crc::{Crc32, crc32};
 pub use message::{Message, NakCode, ty};
 
+/// The link's default rate in bit/s: the board images' (loader, player,
+/// link-probe; each overridable at build time, [`parse_baud`]) and
+/// `gbc-pc`'s `--baud` default. USARTDIV 59 at the 118 MHz USART clock,
+/// exact (`docs/reference/loader.md` "Baud rate"). The shell scripts that
+/// pass it (`scripts/play-on-board.sh`, `crates/gbc-nucleo-h753/run-*.sh`)
+/// carry the literal; `tests/default_baud.rs` checks they agree.
+pub const DEFAULT_BAUD: u32 = 2_000_000;
+
+/// A baud rate from a build-time variable (`option_env!("GBC_LINK_BAUD")`
+/// and the like): `default` when unset; a panic (a compile error in a
+/// `const`) when empty or not a decimal number.
+pub const fn parse_baud(s: Option<&str>, default: u32) -> u32 {
+    let Some(s) = s else { return default };
+    let mut b = s.as_bytes();
+    assert!(!b.is_empty(), "the baud variable is empty");
+    let mut v: u32 = 0;
+    while let [d, rest @ ..] = b {
+        assert!(d.is_ascii_digit(), "the baud variable is not a number");
+        v = v * 10 + (*d - b'0') as u32;
+        b = rest;
+    }
+    v
+}
+
 /// The protocol version this crate speaks (`Hello`/`HelloReply`).
 /// 2: `Audio` carries a sample format (ADR 0044).
 pub const PROTOCOL_VERSION: u16 = 2;
