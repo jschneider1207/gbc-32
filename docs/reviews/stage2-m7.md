@@ -24,7 +24,7 @@ high findings. "Stage 3 task" = one-line task in `docs/plan/stage-2.md`
 | # | Sev | Where | Finding | Outcome |
 |---|---|---|---|---|
 | T1 | med | gate-stage2.sh:189-265 (H1) | H1 doesn't refuse `BASH_ENV`/`ENV`/`SHELLOPTS`; verified `BASH_ENV` re-injects `RUN_PACED_CAPTURE`, so B3/B4 pass from an old capture | **fixed** 3df7272: H1 refuses `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, exported functions; demo exit 1, clean exit 3 |
-| T2 | med | gate-stage2.sh:846-856 (B3) | display readback runs in headless-display-cgb-acid2, not player-script (plan stage-2.md:423-426) | PENDING (readback into player-script; headless-display run kept) |
+| T2 | med | gate-stage2.sh:846-856 (B3) | display readback runs in headless-display-cgb-acid2, not player-script (plan stage-2.md:423-426) | **fixed** 117ad8c, 3c8a734: `player-script` reads its panel back (fixed rule: first shown frame at or after frame 120, then at least every 300; a full readback is ~90 ms) plus a 2-pixel control; run-replay requires readbacks>=1, mismatches=0, control=2 per entry; headless-display run kept. Board: B3 PASS, 6/6, hashes unchanged; board negative (one inverted word) exit 1; 7/8 mutants caught (survivor equivalent) |
 | T3 | med | gate-stage2.sh:469-472 (H5) | no committed, regenerated host hash lists for the replay set | **fixed** 08fb34b: `tools/headless/expected/replay/*.txt` regenerated and compared; tamper exit 1; fbs equal the M5 board evidence |
 | T4 | med | gate-stage2.sh:546-607 (H7) | named tests missing: debounce, gbc-link cobs/crc, gbc-pc save/rtc, DC blocker, image header | **fixed** 9365cbf: 85 names; `#[ignore]` or rename gives exit 1 |
 | T5 | low | B4 | soak runs player-script, not the live player | needs the human (asked) |
