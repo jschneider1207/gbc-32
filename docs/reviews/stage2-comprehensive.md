@@ -11,8 +11,8 @@ Outcome column: PENDING = not yet triaged into a fix or a plan task.
 
 | # | Sev | Where | Finding | Outcome |
 |---|---|---|---|---|
-| K1 | med | nucleo loader.rs:216-224, :232-238 | Decode-error Nak is encoded into `self.reply` (the stored reply for `last_req`) without clearing `last_req`; "reply lost, then resend corrupted" makes every later resend get the stale `Nak`, load ends `GaveUp`. `link_session.rs` and `sim.rs` keep them separate. Untested (fault pairs never adjacent) | *verified*; PENDING |
-| K2 | med | gbc-pc play.rs:145 + link_session.rs:322-331 | `play` sends no `Hello`, seqs restart at 0; after a run that ended without `AudioStop`, the next `AudioStart` seq 0 is byte-equal to `last_req` → treated as duplicate, audio never starts, PC stuck in Prefill | *verified* (dedup path); PENDING |
+| K1 | med | nucleo loader.rs:216-224, :232-238 | Decode-error Nak is encoded into `self.reply` (the stored reply for `last_req`) without clearing `last_req`; "reply lost, then resend corrupted" makes every later resend get the stale `Nak`, load ends `GaveUp`. `link_session.rs` and `sim.rs` keep them separate. Untested (fault pairs never adjacent) | *verified*; **fixed** a77fca6: the bad-frame Nak has its own buffer; test `a_corrupt_resend_after_a_lost_reply_keeps_the_stored_reply` |
+| K2 | med | gbc-pc play.rs:145 + link_session.rs:322-331 | `play` sends no `Hello`, seqs restart at 0; after a run that ended without `AudioStop`, the next `AudioStart` seq 0 is byte-equal to `last_req` → treated as duplicate, audio never starts, PC stuck in Prefill | *verified* (dedup path); **fixed** 724dfe0: `play --audio` opens with flush + `Hello` (no-audio `play` unchanged); test `play_audio_after_a_run_that_ended_without_audio_stop` |
 | K3 | low | gbc-firmware save.rs:90, player.rs:847 | Board-started game without a loaded save dumps footer stamp 0; a later sync runs `Clock::sync(0, now)` (~20,000 days, MBC3 day carry) | PENDING |
 | K4 | low | gbc-pc play.rs:219 | Chord dump whose `SaveBegin` is corrupted: all `SaveChunk`s dropped, no retry, no save | PENDING |
 | K5 | low | gbc-pc audio.rs:116-119 | WAV size truncates/overflows past ~9.1 h capture | PENDING |
@@ -22,7 +22,7 @@ Outcome column: PENDING = not yet triaged into a fix or a plan task.
 | K9 | low | player.rs:555-571 | Stats > 1016 B dropped uncounted (`Text<1024>`) | already plan task (stage-2.md:295, :601) |
 | K10 | low | player.rs:123-127, paced.rs:330 | Live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; 8 MiB ~240 ms → startup underruns; the hash is discarded in live mode | PENDING (board check) |
 | K11 | low | link_uart.rs:206-220 | RX DMA TEIF/FEIF/DMEIF never checked; a bus error freezes the link silently | PENDING |
-| K12 | low | link_session.rs:477-486 | `Hello` doesn't cancel a dump in progress (harmless today) | PENDING |
+| K12 | low | link_session.rs:477-486 | `Hello` doesn't cancel a dump in progress (harmless today) | **fixed** d8f4698: `Hello` drops the dump; test `hello_drops_a_dump_being_sent` |
 | K13 | low | bin/paced.rs:252-254 | Unbounded `wfi` wait for TE edges (probe only) | PENDING |
 | K14 | low | audio_dac.rs:589 | SAFETY comment: "GPIOA belongs to nobody else" (joystick uses PA0; main thread only, no race) | PENDING |
 
@@ -79,7 +79,7 @@ attribute (M7 P2), QSPI clock/SIOO/TCEN, display cost to the core.
 | Q11 | low-med | 6 places | Baud 2,000,000, `parse_baud`, NOR sector sizes, `IMAGE_HEADER_LEN`, memory map in build.sh duplicated | single source (S) | PENDING |
 | Q12 | low | gbc-pc fnv.rs | Own FNV; comment says gbc-firmware isn't a dependency, but it is (*verified*) | use `gbc_firmware::fnv` (S) | PENDING |
 | Q13 | low | 3× tests/hard_rules.rs | Same ~440-line checker copied (a real tokenizer, not grep) | dev-dep crate (M; gbc-core part needs human) | PENDING |
-| Q14 | low | link_session.rs:446-450, loader.rs:220,252 | `encode(..).unwrap_or(0)` silently sends nothing | const-assert reply sizes, count failures (S) | PENDING |
+| Q14 | low | link_session.rs:446-450, loader.rs:220,252 | `encode(..).unwrap_or(0)` silently sends nothing | const-assert reply sizes, count failures (S) | **fixed** 764f80e: `REPLY_FRAME_MAX <= REPLY_MAX` const assert + `every_reply_fits_the_reply_buffer` tests; failures counted in `replies_dropped` |
 | Q15 | low | gbc-pc lib.rs | `pub mod sim` ships in the exe | cfg-gate (S) | PENDING |
 | Q16 | low | Cargo.toml, ADR 0036, lib.rs | Comment/doc drift ("h7-bench will depend", "bins hold only `#[entry]`") | S | PENDING |
 | Q17 | low | 7 probe bins (~3.2k lines) | Maintenance cost; decide which stay for Stage 3 | S | PENDING |
