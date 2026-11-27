@@ -384,6 +384,10 @@ struct Player<'a> {
     /// Frames since a link frame came (saturating).
     quiet: u32,
     since_stats: u32,
+    /// Cycles of the last `queue_stats`, for the next frame's `stats`
+    /// (gbc_firmware::player "Statistics": in `busy`, out of
+    /// `fe_max_ex_stats` only).
+    stats_cost: u32,
     stats_sent: u32,
     stats_dropped: u32,
     sessions: u32,
@@ -657,8 +661,11 @@ impl Service for Player<'_> {
         let slept = self.asleep.replace(0);
         if let Some(last) = self.last.replace(now) {
             let busy = now.wrapping_sub(last).saturating_sub(slept);
-            self.window.add(self.core, busy, self.budget);
-            self.total.add(self.core, busy, self.budget);
+            let stats = core::mem::take(&mut self.stats_cost);
+            self.window
+                .add_with_stats(self.core, busy, stats, self.budget);
+            self.total
+                .add_with_stats(self.core, busy, stats, self.budget);
             self.frames_seen = self.frames_seen.wrapping_add(1);
             self.since_stats = self.since_stats.saturating_add(1);
         }
@@ -667,7 +674,9 @@ impl Service for Player<'_> {
         }
         let r = self.link_service(emu);
         if self.link.is_some() && self.since_stats >= STATS_FRAMES {
+            let t0 = cycles();
             self.queue_stats();
+            self.stats_cost = cycles().wrapping_sub(t0);
         }
         self.send_pending();
         if n.is_multiple_of(30) {
@@ -813,6 +822,7 @@ fn main() -> ! {
         frames_seen: 0,
         quiet: ACTIVE_FRAMES,
         since_stats: 0,
+        stats_cost: 0,
         stats_sent: 0,
         stats_dropped: 0,
         sessions: 0,

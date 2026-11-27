@@ -101,6 +101,8 @@ Per window (the frames since the last report):
 | `slack_min` | `budget - busy_max` (negative: over) |
 | `over_budget` | frames with `busy > budget` |
 | `budget` | one Game Boy frame of real time: 70,224 / 4,194,304 s = 1/59.7275 s = **7,902,557** cycles |
+| `stats_max` | cycles of the statistics report itself (formatting these fields, and for a `Stats` frame its COBS/CRC encoding), the largest in the window. The report runs in one frame per window, and its cycles **stay in that frame's `busy` and `fe`** (and so in `over_budget`); review M4 |
+| `fe_max_ex_stats` | the largest `fe` with that frame's report cycles taken out: the loop's own front end (the report frame is otherwise usually `fe_max`) |
 
 Since boot: `underruns`/`underrun_frames` (DAC refills that found the
 ring short; 0 = no audible gap), `overruns`, `presented`/`skipped`

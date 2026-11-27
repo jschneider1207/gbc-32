@@ -24,6 +24,19 @@
 //! heard.
 //!
 //! `fe` (front end) is `busy - core`; `slack` is `budget - busy`.
+//!
+//! The statistics report itself (formatting the fields, and for a `Stats`
+//! frame its COBS/CRC encoding: about 0.9 kB of text, u64 formatting
+//! included) runs in the service hook of one frame per report (the
+//! board's `STATS_FRAMES`), so it is in that frame's `busy` and `fe`
+//! (review M4). It stays there: `busy` is what the over-budget count (and
+//! the gates' `over_budget=0`) checks, so it keeps every cycle the CPU
+//! spent awake. The board times
+//! the report and passes it as `stats` ([`Window::add_with_stats`]):
+//! `stats_max` is the largest such count in the window, and
+//! `fe_max_ex_stats` the largest `fe` with the frame's `stats` cycles
+//! taken out, the front end of the loop itself.
+//!
 //! `core_p99` comes from a fixed histogram of [`BINS`] bins of
 //! 2^[`BIN_SHIFT`] cycles (no allocation): it is the upper edge of the bin
 //! holding the 99th-percentile frame (rank `ceil(0.99 n)`), capped at
@@ -75,6 +88,8 @@ pub struct Window {
     busy_max: u32,
     busy_sum: u64,
     over: u32,
+    stats_max: u32,
+    fe_ex_stats_max: u32,
 }
 
 impl Default for Window {
@@ -96,6 +111,8 @@ impl Window {
             busy_max: 0,
             busy_sum: 0,
             over: 0,
+            stats_max: 0,
+            fe_ex_stats_max: 0,
         }
     }
 
@@ -106,7 +123,16 @@ impl Window {
     /// One frame: its `core` and `busy` counts (module docs) against
     /// `budget` ([`frame_budget`]).
     pub fn add(&mut self, core: u32, busy: u32, budget: u32) {
+        self.add_with_stats(core, busy, 0, budget);
+    }
+
+    /// [`Window::add`] for a frame whose `busy` includes `stats` cycles
+    /// of statistics reporting (module docs): they count in `busy` and
+    /// `fe` as any other work, and are taken out of `fe_max_ex_stats`
+    /// only.
+    pub fn add_with_stats(&mut self, core: u32, busy: u32, stats: u32, budget: u32) {
         self.frames += 1;
+        self.stats_max = self.stats_max.max(stats);
         self.core_min = self.core_min.min(core);
         self.core_max = self.core_max.max(core);
         self.core_sum += u64::from(core);
@@ -115,6 +141,7 @@ impl Window {
         let fe = busy.saturating_sub(core);
         self.fe_max = self.fe_max.max(fe);
         self.fe_sum += u64::from(fe);
+        self.fe_ex_stats_max = self.fe_ex_stats_max.max(fe.saturating_sub(stats));
         self.busy_max = self.busy_max.max(busy);
         self.busy_sum += u64::from(busy);
         if busy > budget {
@@ -171,12 +198,14 @@ impl Window {
 
     /// `frames=<n> core_min=<c> core_mean=<c> core_p99=<c> core_max=<c>
     /// fe_mean=<c> fe_max=<c> busy_mean=<c> busy_max=<c> slack_min=<+-c>
-    /// over_budget=<n> budget=<c>`, no line end.
+    /// over_budget=<n> budget=<c> stats_max=<c> fe_max_ex_stats=<c>`, no
+    /// line end.
     pub fn write_fields(&self, out: &mut dyn Write, budget: u32) -> fmt::Result {
         write!(
             out,
             "frames={} core_min={} core_mean={} core_p99={} core_max={} fe_mean={} fe_max={} \
-             busy_mean={} busy_max={} slack_min={} over_budget={} budget={budget}",
+             busy_mean={} busy_max={} slack_min={} over_budget={} budget={budget} stats_max={} \
+             fe_max_ex_stats={}",
             self.frames,
             self.core_min(),
             self.core_mean(),
@@ -188,6 +217,8 @@ impl Window {
             self.busy_max,
             i64::from(budget) - i64::from(self.busy_max),
             self.over,
+            self.stats_max,
+            self.fe_ex_stats_max,
         )
     }
 }
@@ -250,7 +281,7 @@ mod tests {
         assert_eq!(
             core::str::from_utf8(&s.buf[..s.len]).unwrap(),
             "frames=0 core_min=0 core_mean=0 core_p99=0 core_max=0 fe_mean=0 fe_max=0 \
-             busy_mean=0 busy_max=0 slack_min=100 over_budget=0 budget=100"
+             busy_mean=0 busy_max=0 slack_min=100 over_budget=0 budget=100 stats_max=0 fe_max_ex_stats=0"
         );
     }
 
@@ -270,10 +301,28 @@ mod tests {
         assert_eq!(
             core::str::from_utf8(&s.buf[..s.len]).unwrap(),
             "frames=4 core_min=10 core_mean=1502 core_p99=3000 core_max=3000 fe_mean=125 \
-             fe_max=500 busy_mean=1376 busy_max=2001 slack_min=-1 over_budget=1 budget=2000"
+             fe_max=500 busy_mean=1376 busy_max=2001 slack_min=-1 over_budget=1 budget=2000 \
+             stats_max=0 fe_max_ex_stats=500"
         );
         w.reset();
         assert_eq!(w, Window::new());
+    }
+
+    #[test]
+    fn stats_cycles_stay_in_busy_and_fe_and_leave_fe_max_ex_stats() {
+        let mut w = Window::new();
+        w.add_with_stats(1000, 1900, 600, 1800); // fe 900, 300 without stats
+        w.add(1000, 1400, 1800); // fe 400
+        w.add_with_stats(1000, 1100, 700, 1800); // stats > fe: 0, not negative
+        assert_eq!(w.busy_max(), 1900);
+        assert_eq!(w.over_budget(), 1, "the stats frame stays over budget");
+        let s = fields(&w, 1800);
+        assert_eq!(
+            core::str::from_utf8(&s.buf[..s.len]).unwrap(),
+            "frames=3 core_min=1000 core_mean=1000 core_p99=1000 core_max=1000 fe_mean=466 \
+             fe_max=900 busy_mean=1466 busy_max=1900 slack_min=-100 over_budget=1 budget=1800 \
+             stats_max=700 fe_max_ex_stats=400"
+        );
     }
 
     #[test]
