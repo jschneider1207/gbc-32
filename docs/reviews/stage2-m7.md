@@ -40,7 +40,7 @@ high findings. "Stage 3 task" = one-line task in `docs/plan/stage-2.md`
 | # | Sev | Where | Finding | Outcome |
 |---|---|---|---|---|
 | P1 | med | paced.rs:432, :419, audio.rs:242 (FeedTap in the DAC ISR) | frame and feed hashes run every frame in the live player (~184,920 cycles mean); player.md's "fe mostly scaler+audio" was wrong | **fixed** 3c0a4a7 (+ docs 264a4d6): live player skips both hashes; fe mean 427,482 -> 244,589, max 516,128 -> 321,577 (Pokemon Red, 80 s); tests seen failing |
-| P2 | med | display.rs:249, :159; mpu.rs:116, :134 | display stash is AXI NORMAL_WBWA: the 46,080 B copy on ~45% of frames evicts the D-cache (est. up to 220k cycles refetch) | PENDING (agent after the readback work; estimate only; coherence is fine, CPU-only; needs a 64 KiB MPU region with subregions) |
+| P2 | med | display.rs:249, :159; mpu.rs:116, :134 | display stash is AXI NORMAL_WBWA: the 46,080 B copy on ~45% of frames evicts the D-cache (est. up to 220k cycles refetch) | **rejected, measured** 89049cd (docs/perf.md "Display stash cache attribute (M7 P2)"): Wario Land 3, 120 s live player: WB no-WA equal to WBWA within noise (core mean 1,264,547 vs 1,260,983/1,264,834); non-cacheable -0.7% core but +78k fe mean, +150k busy max; the estimated 220k refetch is not seen. WBWA kept |
 | P3 | med | benches | no bench with a realistic ROM / cart-RAM footprint; only storm-gdma (+7.56% / +15% QSPI) | accepted, Stage 3 task (HyperRAM miss path) |
 | P4 | med | gbc-firmware audio.rs:6-14, :117; paced.rs:409-419 | audio sample format tied to the H753 DAC | accepted, Stage 3 task (generic when SAI lands; ADR 0036) |
 | P5 | low | video.rs:54-60 | ST7789V pixel format lives in the shared crate | Stage 3 task |
