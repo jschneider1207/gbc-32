@@ -20,6 +20,7 @@ pub mod live;
 pub mod play;
 pub mod rtc;
 pub mod save;
+#[cfg(feature = "sim")]
 pub mod sim;
 pub mod transport;
 
