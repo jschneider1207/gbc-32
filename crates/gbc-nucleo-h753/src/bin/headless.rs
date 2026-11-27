@@ -64,19 +64,18 @@
 #![no_std]
 #![no_main]
 
-use core::cell::Cell;
-use core::fmt::{self, Write};
+use core::fmt::Write;
 
 use gbc_core::{Frame, Memory, SCREEN_HEIGHT, SCREEN_WIDTH, StereoSample};
-use gbc_firmware::CycleClock;
 use gbc_firmware::headless::{self, Buffers, MIN_AUDIO_SLOTS};
 use gbc_firmware::input::{self, Press, Script};
+use gbc_nucleo_h753::paced_board::{self, Capture, Dwt};
 use gbc_nucleo_h753::{self as board, CPU_HZ, cycles, image, led, stack, wait_since};
 
 #[cfg(feature = "rom-qspi")]
-use gbc_firmware::rom_image::{self, ImageHeader};
+use gbc_firmware::rom_image::ImageHeader;
 #[cfg(feature = "rom-qspi")]
-use gbc_nucleo_h753::qspi::{self, Qspi};
+use gbc_nucleo_h753::qspi;
 
 const PREFIX: &str = "gbc-nucleo-h753";
 // `display` and `rom-qspi` each name the image; build.sh never combines them
@@ -181,69 +180,6 @@ mod buffers {
     }
 }
 
-/// The DWT cycle counter as a [`CycleClock`]. It also extends the counter
-/// to 64 bits on every reading, so [`Dwt::total`] spans a run longer than
-/// one 32-bit wrap (9.1 s) as long as readings are less than a wrap apart
-/// (`headless::run` reads it twice per frame).
-struct Dwt {
-    last: Cell<u32>,
-    total: Cell<u64>,
-}
-
-impl Dwt {
-    fn new() -> Self {
-        Dwt {
-            last: Cell::new(cycles()),
-            total: Cell::new(0),
-        }
-    }
-
-    /// Cycles since [`Dwt::new`], as of this call.
-    fn total(&self) -> u64 {
-        self.now();
-        self.total.get()
-    }
-}
-
-impl CycleClock for Dwt {
-    fn now(&self) -> u32 {
-        let c = cycles();
-        let d = c.wrapping_sub(self.last.replace(c));
-        self.total.set(self.total.get() + u64::from(d));
-        c
-    }
-
-    fn hz(&self) -> u32 {
-        CPU_HZ
-    }
-}
-
-/// The run's lines, kept for the reports. Writing past the end fails (and
-/// so ends the run with `headless::Error::Write`) and sets `overflow`.
-struct Capture {
-    buf: &'static mut [u8; CAPTURE_BYTES],
-    len: usize,
-    overflow: bool,
-}
-
-impl Write for Capture {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let Some(dst) = self.buf.get_mut(self.len..self.len + s.len()) else {
-            self.overflow = true;
-            return Err(fmt::Error);
-        };
-        dst.copy_from_slice(s.as_bytes());
-        self.len += s.len();
-        Ok(())
-    }
-}
-
-impl Capture {
-    fn bytes(&self) -> &[u8] {
-        &self.buf[..self.len]
-    }
-}
-
 /// What the reports say about the run.
 struct Run {
     frames: u32,
@@ -254,7 +190,7 @@ struct Run {
     qspi: QspiRom,
 }
 
-fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
+fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture<CAPTURE_BYTES>) {
     board.banner(IMAGE);
     #[cfg(feature = "rom-qspi")]
     run.qspi.print(board);
@@ -283,19 +219,7 @@ fn report(board: &mut board::Board, n: u32, run: &Run, cap: &Capture) {
         run.qspi.header.hash,
         qspi::exit_fallbacks()
     );
-    // The captured lines end in `\n` alone; the UART sends `\r\n`, as
-    // every other line of the board does.
-    for line in cap.bytes().split_inclusive(|&b| b == b'\n') {
-        let (body, nl) = match line.split_last() {
-            Some((b'\n', body)) => (body, true),
-            _ => (line, false),
-        };
-        // The capture holds only what `fmt::Write` wrote: UTF-8.
-        let _ = out.write_str(core::str::from_utf8(body).unwrap_or("<not utf-8>"));
-        if nl {
-            let _ = out.write_str("\r\n");
-        }
-    }
+    paced_board::send_lines(out, cap.bytes());
     let _ = writeln!(
         out,
         "{PREFIX} headless end n={n} rom={ROM_NAME} bytes={} cksum={} overflow={}\r",
@@ -345,7 +269,7 @@ impl QspiRom {
 /// Prints the QSPI error once a second, forever: no frame runs without a
 /// valid image (and there is no embedded ROM to fall back to).
 #[cfg(feature = "rom-qspi")]
-fn qspi_error(board: &mut board::Board, stage: &str, error: &dyn fmt::Debug) -> ! {
+fn qspi_error(board: &mut board::Board, stage: &str, error: &dyn core::fmt::Debug) -> ! {
     loop {
         let _ = writeln!(
             board.uart,
@@ -357,40 +281,23 @@ fn qspi_error(board: &mut board::Board, stage: &str, error: &dyn fmt::Debug) -> 
     }
 }
 
-/// Maps the NOR and validates the image in it. The returned [`qspi::Mapped`]
-/// must outlive every use of the ROM slice (`rom_image::validate` over its
-/// window), which `main` guarantees by never returning.
+/// Maps the NOR and validates the image in it ([`qspi::map_rom_image`]).
+/// The returned [`qspi::RomImage`] must outlive every use of the ROM slice,
+/// which `main` guarantees by never returning.
 #[cfg(feature = "rom-qspi")]
-fn map_qspi(board: &mut board::Board) -> qspi::Mapped {
-    let mut q = Qspi::init(qspi::PRESCALER_SAFE);
-    if let Err(e) = q.set_prescaler(qspi::PRESCALER_MMAP) {
-        qspi_error(board, "map", &e);
+fn map_qspi(board: &mut board::Board) -> (qspi::RomImage, QspiRom) {
+    match qspi::map_rom_image() {
+        Ok(image) => {
+            let info = QspiRom {
+                header: image.header,
+                validate_cycles: image.validate_cycles,
+                qspi_hz: image.mapped.clock_hz(),
+            };
+            info.print(board);
+            (image, info)
+        }
+        Err(e) => qspi_error(board, e.stage(), e.error()),
     }
-    match q.memory_mapped(&qspi::QUAD_IO_READ_XIP) {
-        Ok(m) => m,
-        Err((_, e)) => qspi_error(board, "map", &e),
-    }
-}
-
-#[cfg(feature = "rom-qspi")]
-fn validate_qspi<'a>(board: &mut board::Board, m: &'a qspi::Mapped) -> (&'a [u8], QspiRom) {
-    let window = m.bytes();
-    let t0 = cycles();
-    let header = match rom_image::read_header(window) {
-        Ok(h) => h,
-        Err(e) => qspi_error(board, "header", &e),
-    };
-    let rom = match rom_image::validate(window) {
-        Ok(r) => r,
-        Err(e) => qspi_error(board, "validate", &e),
-    };
-    let info = QspiRom {
-        header,
-        validate_cycles: cycles().wrapping_sub(t0),
-        qspi_hz: m.clock_hz(),
-    };
-    info.print(board);
-    (rom, info)
 }
 
 #[cortex_m_rt::entry]
@@ -406,9 +313,9 @@ fn main() -> ! {
     let rom = ROM;
     // Mapped for good: `main` never returns, so the slice stays valid.
     #[cfg(feature = "rom-qspi")]
-    let mapped = map_qspi(&mut board);
+    let (nor_image, qspi_rom) = map_qspi(&mut board);
     #[cfg(feature = "rom-qspi")]
-    let (rom, qspi_rom) = validate_qspi(&mut board, &mapped);
+    let rom = nor_image.rom();
 
     let mut presses = [Press::NONE; MAX_PRESSES];
     let (count, end) = match input::parse(INPUT, &mut presses) {
@@ -437,6 +344,7 @@ fn main() -> ! {
         buf: b.capture,
         len: 0,
         overflow: false,
+        live: None,
     };
     let bufs = Buffers {
         mem: b.mem,

@@ -63,6 +63,7 @@ use crate::clock::{self, wait_for};
 use crate::gpio::pin_af;
 use crate::nor::{self, BusError, FORBIDDEN, SpiFlashBus};
 use crate::pac;
+use gbc_firmware::rom_image::{self, ImageError, ImageHeader};
 
 // The NOR's size and the flash operations moved to [`crate::nor`] (Q8); the
 // old paths keep working.
@@ -1061,4 +1062,82 @@ impl SpiFlashBus for Qspi {
         write_cr(cr);
         r
     }
+}
+
+/// Where [`map_rom_image`] stopped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RomImageError {
+    /// Raising the clock to [`PRESCALER_MMAP`] or entering memory-mapped
+    /// mode failed.
+    Map(Error),
+    /// `rom_image::read_header` refused the window.
+    Header(ImageError),
+    /// `rom_image::validate` refused it (the data hash, or the length).
+    Validate(ImageError),
+}
+
+impl RomImageError {
+    /// The stage, as the images print it: `map`, `header` or `validate`.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            RomImageError::Map(_) => "map",
+            RomImageError::Header(_) => "header",
+            RomImageError::Validate(_) => "validate",
+        }
+    }
+
+    /// The underlying error, for `error={:?}` (without the stage's
+    /// variant around it).
+    pub fn error(&self) -> &dyn core::fmt::Debug {
+        match self {
+            RomImageError::Map(e) => e,
+            RomImageError::Header(e) | RomImageError::Validate(e) => e,
+        }
+    }
+}
+
+/// A valid ADR 0037 image in the NOR, mapped ([`map_rom_image`]).
+pub struct RomImage {
+    /// The window, mapped. Every slice of it ([`RomImage::rom`]) borrows
+    /// this, so it stays mapped while one is in use.
+    pub mapped: Mapped,
+    pub header: ImageHeader,
+    /// Cycles of the header read and `rom_image::validate` (the hash of
+    /// the whole data through the cold window).
+    pub validate_cycles: u32,
+}
+
+impl RomImage {
+    /// The image's data (the ROM, or a pack), as `rom_image::validate`
+    /// returned it.
+    pub fn rom(&self) -> &[u8] {
+        // `map_rom_image` validated exactly this range of the same window,
+        // which cannot change while `mapped` exists (`Mapped::bytes`).
+        &self.mapped.bytes()[rom_image::HEADER_LEN..][..self.header.len as usize]
+    }
+}
+
+/// Maps the NOR the way every image that runs from it does (init at
+/// [`PRESCALER_SAFE`], then [`PRESCALER_MMAP`], then memory-mapped with
+/// 0xEB, [`QUAD_IO_READ_XIP`], cached) and checks the ADR 0037 image in
+/// it: `read_header`, then `validate`. On an error the controller and
+/// the window are dropped as they are (neither has a `Drop`: a window
+/// that was mapped stays mapped, unused).
+pub fn map_rom_image() -> Result<RomImage, RomImageError> {
+    let mut q = Qspi::init(PRESCALER_SAFE);
+    q.set_prescaler(PRESCALER_MMAP)
+        .map_err(RomImageError::Map)?;
+    let mapped = q
+        .memory_mapped(&QUAD_IO_READ_XIP)
+        .map_err(|(_, e)| RomImageError::Map(e))?;
+    let window = mapped.bytes();
+    let t0 = crate::cycles();
+    let header = rom_image::read_header(window).map_err(RomImageError::Header)?;
+    rom_image::validate(window).map_err(RomImageError::Validate)?;
+    let validate_cycles = crate::cycles().wrapping_sub(t0);
+    Ok(RomImage {
+        mapped,
+        header,
+        validate_cycles,
+    })
 }

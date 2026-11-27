@@ -1,12 +1,13 @@
 //! Pieces of the audio-paced images (`paced`, `player`; moved from
 //! src/bin/paced.rs): the DWT as the loop's [`CycleClock`], the CPU clock
 //! kept running in Sleep, and the captured run lines with their framed
-//! report.
+//! report. The `headless` image uses the clock and the capture too.
 
 use core::cell::Cell;
 use core::fmt::{self, Write};
 
 use gbc_firmware::CycleClock;
+use gbc_firmware::fmt_buf::append_whole;
 
 use crate::{Board, CPU_HZ, Uart, audio_dac, cycles, image, pac};
 
@@ -103,13 +104,35 @@ impl<const N: usize> Write for Capture<'_, N> {
                 let _ = u.write_str(part);
             }
         }
-        let Some(dst) = self.buf.get_mut(self.len..self.len + s.len()) else {
+        if !append_whole(&mut self.buf[..], &mut self.len, s) {
             self.overflow = true;
             return Err(fmt::Error);
-        };
-        dst.copy_from_slice(s.as_bytes());
-        self.len += s.len();
+        }
         Ok(())
+    }
+}
+
+impl<const N: usize> Capture<'_, N> {
+    /// What was captured.
+    pub fn bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Sends captured lines to the UART: they end in `\n` alone, the UART
+/// sends `\r\n`, as every other line of the board does.
+pub fn send_lines(out: &mut Uart, cap: &[u8]) {
+    for line in cap.split_inclusive(|&b| b == b'\n') {
+        let (body, nl) = match line.split_last() {
+            Some((b'\n', body)) => (body, true),
+            _ => (line, false),
+        };
+        // The capture holds only what `fmt::Write` wrote: UTF-8. The UART
+        // writer never fails.
+        let _ = out.write_str(core::str::from_utf8(body).unwrap_or("<not utf-8>"));
+        if nl {
+            let _ = out.write_str("\r\n");
+        }
     }
 }
 
@@ -142,17 +165,7 @@ pub fn report(
         "{prefix} paced report n={n} rom={rom_name} frames={frames} \
          image_bytes={image_bytes} image_cksum={image_cksum}\r"
     );
-    for line in cap.split_inclusive(|&b| b == b'\n') {
-        let (body, nl) = match line.split_last() {
-            Some((b'\n', body)) => (body, true),
-            _ => (line, false),
-        };
-        // The capture holds only what `fmt::Write` wrote: UTF-8.
-        let _ = out.write_str(core::str::from_utf8(body).unwrap_or("<not utf-8>"));
-        if nl {
-            let _ = out.write_str("\r\n");
-        }
-    }
+    send_lines(out, cap);
     let _ = writeln!(
         out,
         "{prefix} paced report-end n={n} rom={rom_name} bytes={} cksum={} overflow={}\r",
