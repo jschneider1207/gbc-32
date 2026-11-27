@@ -331,12 +331,13 @@ fn status(
     )?;
     write!(
         t,
-        " overruns={} framing={} noise={} rx_high={} tx_errors={} core_cycles_last={core_last} \
-         core_cycles_max={core_max} unix_time={} baud={}\r\n",
+        " overruns={} framing={} noise={} rx_high={} rx_overflow={} tx_errors={} \
+         core_cycles_last={core_last} core_cycles_max={core_max} unix_time={} baud={}\r\n",
         e.overruns,
         e.framing,
         e.noise,
         link.rx_high(),
+        link.rx_overflow(),
         link.tx_errors(),
         game.unix_time,
         link.setting().actual,

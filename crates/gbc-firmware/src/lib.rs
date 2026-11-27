@@ -31,6 +31,8 @@
 //! - [`player`]: the player image's DMG compatibility palette and its
 //!   per-frame statistics window (M5).
 //! - [`rom_image`]: the QSPI NOR ROM image header (ADR 0037).
+//! - [`rx_ring`]: the reader of a circular-DMA receive ring: new bytes and
+//!   lap detection (M7 C5).
 //! - [`video`]: the RGB555 to RGB565 1.5x scaler (240x216) for the panel (M3).
 
 #![no_std]
@@ -45,6 +47,7 @@ pub mod paced;
 pub mod player;
 pub mod replay;
 pub mod rom_image;
+pub mod rx_ring;
 pub mod save;
 pub mod video;
 

@@ -536,8 +536,9 @@ impl Player<'_> {
         if let Some(link) = &self.link {
             write!(
                 out,
-                " rx_high={} tx_errors={} baud={}",
+                " rx_high={} rx_overflow={} tx_errors={} baud={}",
                 link.rx_high(),
+                link.rx_overflow(),
                 link.tx_errors(),
                 link.setting().actual
             )?;

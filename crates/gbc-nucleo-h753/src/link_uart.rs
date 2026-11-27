@@ -14,6 +14,17 @@
 //!   the PC waits for the answer) and `Input` frames (6-7 bytes on a
 //!   change, every 500 ms otherwise) never send. [`LinkUart::rx_high`]
 //!   records the most bytes taken in one poll, to show the margin.
+//! - **Lap detection** (M7 review C5): NDTR alone cannot tell `k` new
+//!   bytes from `k + RX_BYTES`, so each read also takes the stream's
+//!   sticky HTIF and TCIF (set at the half and the end of every lap
+//!   whether or not their interrupts are on, RM0433 15.3.19 and 15.4
+//!   Table 116; cleared by writing LIFCR, 15.5.3). A read that finds both
+//!   set counts in [`LinkUart::rx_overflow`]: that includes every lap
+//!   (bytes lost) and never a read of at most half the ring
+//!   (`gbc_firmware::rx_ring`, which also says why not an interrupt). The
+//!   bytes are still delivered as before (the newest ones are intact; the
+//!   frame that lost its middle fails CRC). USART ORE does not help here:
+//!   the DMA keeps RDR drained while it overwrites the ring.
 //! - **Transmit:** DMA1 stream 2 (DMAMUX1 channel 2, request 46
 //!   `usart3_tx_dma`), normal mode, from a [`TX_BYTES`] buffer into
 //!   USART_TDR. [`LinkUart::tx_buf`] lends the buffer while the stream is
@@ -35,6 +46,8 @@
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use gbc_firmware::rx_ring::RxRing;
 
 pub use crate::uart::RxErrors;
 use crate::uart::{BaudError, BaudSetting, Uart};
@@ -88,6 +101,8 @@ const TX_SCR: u32 = SCR_TRBUFF | SCR_PL_MEDIUM | SCR_MINC | SCR_DIR_M2P;
 // stream 2's at 16.
 const FLAGS: u32 = 0b11_1101;
 const TEIF: u32 = 1 << 3;
+const HTIF: u32 = 1 << 4;
+const TCIF: u32 = 1 << 5;
 const RX_SHIFT: u32 = 6;
 const TX_SHIFT: u32 = 16;
 // USART_CR3 (48.7.3), USART_ISR (48.7.10), USART_ICR (48.7.11).
@@ -122,8 +137,7 @@ fn stop_stream(n: usize) {
 
 /// The DMA-driven link UART (module docs). One per program.
 pub struct LinkUart {
-    rx_pos: usize,
-    rx_high: usize,
+    rx: RxRing,
     tx_errors: u32,
     errors: RxErrors,
     setting: BaudSetting,
@@ -177,8 +191,7 @@ impl LinkUart {
             u.cr3.modify(|r, w| w.bits(r.bits() | CR3_DMAR | CR3_DMAT));
         }
         Ok(LinkUart {
-            rx_pos: 0,
-            rx_high: 0,
+            rx: RxRing::new(RX_BYTES),
             tx_errors: 0,
             errors: RxErrors::default(),
             setting,
@@ -193,23 +206,28 @@ impl LinkUart {
     /// Calls `f` with each byte received since the last call, in order.
     pub fn read(&mut self, mut f: impl FnMut(u8)) {
         self.count_errors();
-        let ndtr = dma().st[RX_STREAM].ndtr.read().bits() as usize;
-        // NDTR counts down from RX_BYTES and reloads after 1 (circular).
-        let write = (RX_BYTES - ndtr.min(RX_BYTES)) % RX_BYTES;
-        let avail = (write + RX_BYTES - self.rx_pos) % RX_BYTES;
-        self.rx_high = self.rx_high.max(avail);
+        let (ndtr, marks) = rx_snapshot();
+        let p = self.rx.poll(ndtr, marks & HTIF != 0, marks & TCIF != 0);
         let rx = BUF.0.get() as *const u8;
-        for _ in 0..avail {
-            // SAFETY: in bounds (rx_pos < RX_BYTES); a volatile read of a
-            // byte the DMA wrote (non-cacheable memory, module docs).
-            f(unsafe { rx.add(self.rx_pos).read_volatile() });
-            self.rx_pos = (self.rx_pos + 1) % RX_BYTES;
+        let mut i = p.start;
+        for _ in 0..p.avail {
+            // SAFETY: in bounds (`RxRing` keeps indices < RX_BYTES); a
+            // volatile read of a byte the DMA wrote (non-cacheable memory,
+            // module docs).
+            f(unsafe { rx.add(i).read_volatile() });
+            i = (i + 1) % RX_BYTES;
         }
     }
 
     /// The most bytes one [`LinkUart::read`] found waiting.
     pub fn rx_high(&self) -> usize {
-        self.rx_high
+        self.rx.high()
+    }
+
+    /// Reads that found the receive ring possibly lapped (module docs,
+    /// "Lap detection"): 0 means no received byte was overwritten unread.
+    pub fn rx_overflow(&self) -> u32 {
+        self.rx.laps()
     }
 
     /// Whether the transmit stream is idle (its last transfer is done:
@@ -297,6 +315,36 @@ impl LinkUart {
         // positions as the ISR flags); other bits written 0.
         u.icr.write(|w| unsafe { w.bits(isr) });
     }
+}
+
+/// The receive stream's NDTR and its HTIF/TCIF (at bit 4/5), the flags
+/// read then cleared, taken at one instant: NDTR is read before and after
+/// LISR and the pair retried until they agree, so no byte landed between
+/// them and the flags cover exactly the bytes up to that NDTR. Only the
+/// flags read are cleared (LIFCR is write-1-to-clear, RM0433 15.5.3): a
+/// mark crossed after the read stays for the next call. Clearing a flag
+/// that was set again between the read and the clear would take a whole
+/// lap. A byte takes 5 us at 2 Mbit/s and the three reads well under
+/// 1 us, so the first try nearly always agrees; after 4 the last pair is
+/// used (at worst a byte at a mark is counted one read late).
+fn rx_snapshot() -> (usize, u32) {
+    let d = dma();
+    let st = &d.st[RX_STREAM];
+    let mut tries = 0;
+    let (ndtr, marks) = loop {
+        let n0 = st.ndtr.read().bits();
+        let marks = (d.lisr.read().bits() >> RX_SHIFT) & (HTIF | TCIF);
+        let n1 = st.ndtr.read().bits();
+        tries += 1;
+        if n0 == n1 || tries == 4 {
+            break (n1, marks);
+        }
+    };
+    if marks != 0 {
+        // SAFETY: write-1-to-clear of this stream's HTIF/TCIF only.
+        d.lifcr.write(|w| unsafe { w.bits(marks << RX_SHIFT) });
+    }
+    (ndtr as usize, marks)
 }
 
 /// A baud rate from a build-time variable (`GBC_LINK_BAUD`): `default`
