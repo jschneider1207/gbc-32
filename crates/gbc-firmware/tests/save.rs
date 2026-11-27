@@ -373,3 +373,16 @@ fn link_probe_fixture_round_trips_across_frames() {
     assert_eq!(n, want.len());
     assert_eq!(out, want);
 }
+
+/// K3: a footer stamped 0 means "unknown" (the board has no wall clock),
+/// so syncing from it must not advance the clock by ~55 years.
+#[test]
+fn sync_from_a_zero_stamp_does_not_advance() {
+    let clock = Clock::Mbc3(RtcState::default());
+    let now = 1_760_000_000;
+    assert_eq!(clock.sync(0, now), clock);
+    let huc = Clock::Huc3(Huc3RtcState::default());
+    assert_eq!(huc.sync(0, now), huc);
+    // A real stamp still advances.
+    assert_ne!(clock.sync(now - 3600, now), clock);
+}

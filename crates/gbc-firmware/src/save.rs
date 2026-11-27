@@ -82,11 +82,17 @@ impl Clock {
     /// at `saved_unix`: advanced by `now - saved_unix` seconds by the
     /// core's `advance_seconds` (a halted MBC3 clock stays put; the day
     /// counter wraps and sets the carry flag as the hardware would). A
-    /// stored time in the future counts as no time passed. This is the
+    /// stored time in the future counts as no time passed, and so does a
+    /// stamp of 0: that means "unknown" (the board has no wall clock, so a
+    /// game started without a loaded save dumps a footer stamped 0), not
+    /// 1970, and syncing from it would add ~20,000 days. This is the
     /// desktop front end's sync on load (ADR 0023), shared with
     /// `tools/gbc-pc` (ADR 0040).
     #[must_use]
     pub fn sync(self, saved_unix: u64, now: u64) -> Self {
+        if saved_unix == 0 {
+            return self;
+        }
         let elapsed = now.saturating_sub(saved_unix);
         match self {
             Self::Mbc3(s) => Self::Mbc3(s.advance_seconds(elapsed)),

@@ -66,6 +66,10 @@ save it loaded. The PC does both ends, with the desktop's rule
   RAM and clock registers are written as received. The footer is found
   from the length (RAM sizes are 0 or powers of two ≥ 512: mod 512 = 48
   MBC3, 17 HuC3); anything else is written as received.
+- A stamp of 0 means "unknown", not 1970: a board-started game with no
+  loaded save dumps a footer stamped 0 (the board has no clock), and
+  `Clock::sync` leaves the clock as it is for it (K3). Real stamps are
+  never 0, so this does not affect BGB/VBA/SameBoy saves.
 - `--raw-save` (load, dump, play): neither; the bytes go and come
   unchanged. The round-trip scripts (`run-save-roundtrip.sh`,
   `run-player-save.sh`) use it: they check the transport.
