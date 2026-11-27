@@ -47,7 +47,10 @@
 //!
 //! Clock (M6 tuning, `docs/reference/qspi-nor.md` "Clock"): the kernel
 //! clock is pll2_r_ck (RCC_D1CCIPR QSPISEL = 10), [`KER_HZ`] = 198.4 MHz,
-//! divided by PRESCALER + 1. rcc_hclk3 (236 MHz) gives only 118 MHz (over
+//! divided by PRESCALER + 1. The clock plan ([`crate::clock`], at
+//! [`crate::init`]) starts PLL2 and selects it; this driver only checks it
+//! (review Q7), so it never stops a PLL another consumer may share.
+//! rcc_hclk3 (236 MHz) gives only 118 MHz (over
 //! 0xEB's 104 MHz at CR.DC = 0) or 59 MHz with an even factor; PLL2 gives
 //! 99.2 MHz. RM0433 23.5.1 (and DS12117 Rev 10 Table 170) say an odd division
 //! factor does not give a 50% duty cycle, which the NOR needs (tCH, tCL
@@ -55,7 +58,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::clock::{HSI_HZ, wait_for};
+use crate::clock::{self, wait_for};
 use crate::gpio::pin_af;
 use crate::pac;
 
@@ -76,49 +79,20 @@ const FSIZE: u32 = (2 * NOR_BYTES).trailing_zeros() - 1;
 /// QUADSPI bank, 0x9000_0000 to 0x9FFF_FFFF).
 pub const WINDOW: usize = 0x9000_0000;
 
-/// The QUADSPI kernel clock: pll2_r_ck, started by [`Qspi::init`]: HSI
-/// 64 MHz / DIVM2 5 = 12.8 MHz (the reference PLL1 uses, [`crate::clock`];
-/// PLL2RGE 8 to 16 MHz, RM0433 8.7.12), x DIVN2 62 = 793.6 MHz VCO (wide
-/// range, 192 to 960 MHz, DS12117 Rev 10 Table 136, rev V; the assertions
-/// below keep to 836 MHz, the rev Y limit in Table 39), / DIVR2 4. Every limit
-/// holds with margin over the whole HSI tolerance, [`HSI_MIN_HZ`] to
-/// [`HSI_MAX_HZ`] (the `const` assertions below): input 12.47 to
-/// 12.99 MHz, VCO 773 to 806 MHz, the memory-mapped clock 96.6 to
-/// 100.7 MHz. DIVM2 4 (16 MHz nominal) sat exactly on the 16 MHz input
-/// maximum, and over it on this board (HSI measured 64.228 MHz, 16.06 MHz).
-pub const KER_HZ: u32 = ker_hz(HSI_HZ);
-/// PLL2 dividers for [`KER_HZ`] (RM0433 8.7.10 PLLCKSELR DIVM2, 8.7.14
-/// PLL2DIVR: fields are N - 1 and R - 1).
-const PLL2_DIVM: u8 = 5;
-const PLL2_DIVN: u16 = 62;
-const PLL2_DIVR: u8 = 4;
-
-/// The HSI over its whole tolerance (DS12117 Rev 10 Table 133 (rev V): 63.7 to
-/// 64.3 MHz at 3.3 V and TJ 30 C, -2% to +1% over TJ -40 to 105 C, -0.12%
-/// to +0.03% over VDD), as [`crate::clock`]'s PLL1 reference uses it.
-const HSI_MIN_HZ: u32 = 62_350_000;
-const HSI_MAX_HZ: u32 = 64_960_000;
-
-/// pll2_r_ck for an HSI at `hsi` Hz.
-const fn ker_hz(hsi: u32) -> u32 {
-    (hsi / PLL2_DIVM as u32) * PLL2_DIVN as u32 / PLL2_DIVR as u32
-}
+/// The QUADSPI kernel clock: pll2_r_ck, 198.4 MHz, which the clock plan
+/// sets up ([`crate::clock::PLL2_R_HZ`]: HSI 64 MHz / DIVM2 5 x DIVN2 62 /
+/// DIVR2 4; PLL2's limits are asserted there) and [`Qspi::init`] checks.
+/// Over the whole HSI tolerance the memory-mapped clock is 96.6 to
+/// 100.7 MHz.
+pub const KER_HZ: u32 = clock::PLL2_R_HZ;
 
 /// The highest QUADSPI kernel clock the HSI tolerance allows: what
 /// [`write_dcr`]'s CSHT is sized for.
-const KER_MAX_HZ: u32 = ker_hz(HSI_MAX_HZ);
+const KER_MAX_HZ: u32 = clock::PLL2_R_MAX_HZ;
 
-// The PLL2 limits at both ends of the HSI tolerance (DS12117 Rev 10
-// Table 136 (rev V), wide VCO: fPLL_IN 2 to 16 MHz, RM0433 PLL2RGE range8 8 to
-// 16 MHz; VCO 192 to 836 MHz (rev V allows 960); R output <= 400 MHz at VOS1), and the
-// NOR's limits at the fastest HSI (MX25L6433F Table 7: 0xEB 104 MHz at
+// The NOR's limits at the fastest HSI (MX25L6433F Table 7: 0xEB 104 MHz at
 // CR.DC = 0, 0x03 50 MHz).
 const _: () = {
-    let (lo, hi) = (HSI_MIN_HZ / PLL2_DIVM as u32, HSI_MAX_HZ / PLL2_DIVM as u32);
-    assert!(lo >= 8_000_000 && hi <= 16_000_000);
-    let n = PLL2_DIVN as u32;
-    assert!(lo * n >= 192_000_000 && hi * n <= 836_000_000);
-    assert!(KER_MAX_HZ <= 400_000_000);
     assert!(KER_MAX_HZ / (PRESCALER_MMAP as u32 + 1) <= 104_000_000);
     assert!(KER_MAX_HZ / (PRESCALER_SAFE as u32 + 1) <= 50_000_000);
     assert!(KER_HZ == 198_400_000);
@@ -325,6 +299,10 @@ pub enum Error {
     /// The dummy-cycle count does not fit DCYC, the address and length
     /// run past the NOR ([`NOR_BYTES`]), or the buffer is empty.
     Argument,
+    /// The kernel clock is not the clock plan's: PLL2 not locked, its
+    /// dividers not [`KER_HZ`]'s, or QSPISEL not pll2_r_ck
+    /// ([`crate::clock`] sets it up in [`crate::init`]).
+    Clock,
 }
 
 /// The QUADSPI, set up by [`Qspi::init`]. Owns the peripheral: only one
@@ -401,11 +379,13 @@ fn write_dcr(prescaler: u8) {
 
 impl Qspi {
     /// Turns the QUADSPI on and sets it up for the shield's NOR, at
-    /// [`KER_HZ`] / (`prescaler` + 1). Call once, after [`crate::init`].
+    /// [`KER_HZ`] / (`prescaler` + 1). Call once, after [`crate::init`]
+    /// (which starts the kernel clock).
     ///
     /// # Panics
     /// If `prescaler` is even (an odd division factor, ES0392 2.7.6 and
-    /// RM0433 23.5.1), if the QUADSPI stays busy through the ES0392
+    /// RM0433 23.5.1), if the kernel clock is not ready ([`Error::Clock`],
+    /// [`kernel_clock`]), if the QUADSPI stays busy through the ES0392
     /// 2.7.4 sequence, or if taking the NOR out of enhance mode fails
     /// ([`Qspi::release_enhance`]: busy, or no completion).
     pub fn init(prescaler: u8) -> Qspi {
@@ -443,13 +423,14 @@ impl Qspi {
         let _ = rcc.ahb4enr.read();
 
         // The kernel clock: pll2_r_ck (RM0433 section 8.7.19, RCC_D1CCIPR
-        // QSPISEL = 10, [`KER_HZ`]), set while the peripheral clock is
-        // off, once PLL2 runs (`pll2_on`). Then the
-        // bus clock (RCC_AHB3ENR QSPIEN, 8.7.40), read back so it is on
-        // before the reset, and a reset pulse (RCC_AHB3RSTR QSPIRST,
-        // 8.7.28) for a known state whatever ran before.
-        pll2_on(rcc);
-        rcc.d1ccipr.modify(|_, w| w.qspisel().pll2_r());
+        // QSPISEL = 10, [`KER_HZ`]), which `crate::clock::clock_up` started
+        // and selected while the peripheral clock was off; only checked
+        // here. Then the bus clock (RCC_AHB3ENR QSPIEN, 8.7.40), read back
+        // so it is on before the reset, and a reset pulse (RCC_AHB3RSTR
+        // QSPIRST, 8.7.28) for a known state whatever ran before.
+        if let Err(e) = kernel_clock(rcc) {
+            panic!("QUADSPI init: kernel clock not ready: {e:?}");
+        }
         rcc.ahb3enr.modify(|_, w| w.qspien().set_bit());
         let _ = rcc.ahb3enr.read();
         rcc.ahb3rstr.modify(|_, w| w.qspirst().set_bit());
@@ -643,57 +624,16 @@ fn abort() {
     regs().fcr.write(|w| unsafe { w.bits(FCR_CTEF | FCR_CTCF) });
 }
 
-/// Starts PLL2 for [`KER_HZ`] (RM0433 8.5.5 "PLL initialization phase":
-/// DIVM2, the input range and VCO, the dividers, then PLL2ON and a wait
-/// for PLL2RDY), integer mode, only the R output. The source is the one
-/// PLLCKSELR.PLLSRC already selects for PLL1 (HSI, [`crate::clock`]).
-/// If PLL2 already runs (nothing in the lib starts it, but a debugger
-/// might), the QUADSPI is moved to rcc_hclk3 and PLL2 restarted.
-///
-/// # Panics
-/// If PLL2 does not lock.
-fn pll2_on(rcc: &pac::rcc::RegisterBlock) {
-    if rcc.cr.read().pll2on().bit_is_set() {
-        rcc.d1ccipr.modify(|_, w| w.qspisel().rcc_hclk3());
-        rcc.cr.modify(|_, w| w.pll2on().clear_bit());
-        assert!(
-            wait_for(POLLS, || rcc.cr.read().pll2rdy().bit_is_clear()),
-            "PLL2 did not stop"
-        );
+/// The kernel clock check of [`Qspi::init`]: PLL2 and QSPISEL as the clock
+/// plan set them ([`crate::clock`]). The driver never starts, stops or
+/// retunes PLL2 itself (review Q7): on Stage 3 another consumer (SAI on
+/// PLL2_P) may share it.
+fn kernel_clock(rcc: &pac::rcc::RegisterBlock) -> Result<(), Error> {
+    if clock::qspi_kernel_ready(rcc) {
+        Ok(())
+    } else {
+        Err(Error::Clock)
     }
-    rcc.pllckselr.modify(|_, w| w.divm2().bits(PLL2_DIVM));
-    rcc.pllcfgr.modify(|_, w| {
-        w.pll2rge()
-            .range8()
-            .pll2vcosel()
-            .wide_vco()
-            .pll2fracen()
-            .reset()
-            .divp2en()
-            .disabled()
-            .divq2en()
-            .disabled()
-            .divr2en()
-            .enabled()
-    });
-    // SAFETY: DIVN2 field 61 (x62, valid 4..512), DIVR2 field 3 (/4);
-    // DIVP2 and DIVQ2 0 for disabled outputs (RM0433 8.5.5, as clock.rs
-    // does for PLL1).
-    rcc.pll2divr.write(|w| unsafe {
-        w.divn2()
-            .bits(PLL2_DIVN - 1)
-            .divp2()
-            .bits(0)
-            .divq2()
-            .bits(0)
-            .divr2()
-            .bits(PLL2_DIVR - 1)
-    });
-    rcc.cr.modify(|_, w| w.pll2on().set_bit());
-    assert!(
-        wait_for(POLLS, || rcc.cr.read().pll2rdy().bit_is_set()),
-        "PLL2 did not lock"
-    );
 }
 
 /// ES0392 section 2.7.4, "QUADSPI internal timing criticality": a

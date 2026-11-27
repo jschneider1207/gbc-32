@@ -234,10 +234,16 @@ tolerance (62.35 to 64.96 MHz: DS12117 Table 36, 63.7 to 64.3 MHz at
 `clock.rs` uses for PLL1) the PLL2 input stays at 12.47 to 12.99 MHz
 (PLL2RGE 8 to 16 MHz), the VCO at 773 to 806 MHz and the memory-mapped
 clock at 96.6 to 100.7 MHz, under 104 MHz; `const` assertions in
-`qspi.rs` check each bound. The first M6 set, DIVM2 4 x DIVN2 50 (16 MHz
-input, 800 MHz VCO, 200 MHz), put the input exactly on its 16 MHz
-maximum, and over it on this board (HSI measured 64.228 MHz: 16.06 MHz;
-M6 review T6). PLL2 is otherwise unused; `Qspi::init` starts it.
+`clock.rs` (PLL2) and `qspi.rs` (the NOR) check each bound. The first M6
+set, DIVM2 4 x DIVN2 50 (16 MHz input, 800 MHz VCO, 200 MHz), put the
+input exactly on its 16 MHz maximum, and over it on this board (HSI
+measured 64.228 MHz: 16.06 MHz; M6 review T6). PLL2 is otherwise unused.
+Since review Q7 the clock plan (`clock::clock_up`, after VOS0 and PLL1)
+starts PLL2 and sets QSPISEL in every image; `Qspi::init` only checks
+both (`Error::Clock`, a panic) and never stops or retunes PLL2, which a
+Stage 3 SAI may share. QSPISEL = pll2_r_ck needs VOS0: the kernel clock's
+maximum is 250 MHz at VOS0 but 200 MHz at VOS1 (RM0433 section 8.5.8,
+Table 60), and the fastest HSI gives 201.4 MHz.
 Indirect commands (ID, status, program, erase, the loader's reads) keep
 their prescalers: PRESCALER_SAFE 5 is now 33.1 MHz (was 39.3 at HCLK3).
 

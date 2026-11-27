@@ -27,6 +27,14 @@
 //! wait states: AXI in ]225; 240] MHz at VOS0 is 4 (RM0433 Table 17), and
 //! 4 stay valid (more than needed) down to the HSI's lower bound (AXI
 //! 229.9 MHz).
+//!
+//! PLL2: the QUADSPI kernel clock (review Q7: the clock plan owns every
+//! PLL, so no driver stops or retunes a PLL another consumer may share,
+//! e.g. SAI on PLL2_P on Stage 3). 64 MHz / DIVM2 5 = 12.8 MHz, x DIVN2 62
+//! = 793.6 MHz VCO, / DIVR2 4 = [`PLL2_R_HZ`] 198.4 MHz, integer mode,
+//! only the R output; RCC_D1CCIPR QSPISEL = pll2_r_ck. The QUADSPI driver
+//! only checks it ([`qspi_kernel_ready`]); `docs/reference/qspi-nor.md`
+//! "Clock".
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -64,6 +72,48 @@ pub const CLOCK_NAME: &str = "pll472";
 const PLL_REF_DIV: u8 = 5;
 /// x 73.75: DIVN1 field 72 (N 73), FRACN1 0.75 x 8192.
 const PLL_N_FRAC: (u16, u16) = (73 - 1, 6144);
+
+/// The HSI over its whole tolerance (DS12117 Rev 10 Table 133 (rev V): 63.7
+/// to 64.3 MHz at 3.3 V and TJ 30 C, -2% to +1% over TJ -40 to 105 C,
+/// -0.12% to +0.03% over VDD), as [`PLL_REF_DIV`] uses it.
+const HSI_MIN_HZ: u32 = 62_350_000;
+const HSI_MAX_HZ: u32 = 64_960_000;
+
+/// PLL2's dividers for [`PLL2_R_HZ`] (RM0433 section 8.7.11 PLLCKSELR
+/// DIVM2; section 8.7.15 PLL2DIVR, whose fields hold N - 1 and R - 1).
+/// DIVM2 5 is PLL1's reference (12.8 MHz, see [`PLL_REF_DIV`]); DIVM2 4
+/// (16 MHz nominal) sat exactly on the 16 MHz input maximum, and over it on
+/// this board (HSI measured 64.228 MHz, 16.06 MHz).
+const PLL2_DIVM: u8 = 5;
+const PLL2_DIVN: u16 = 62;
+const PLL2_DIVR: u8 = 4;
+
+/// pll2_r_ck for an HSI at `hsi` Hz.
+const fn pll2_r_hz(hsi: u32) -> u32 {
+    (hsi / PLL2_DIVM as u32) * PLL2_DIVN as u32 / PLL2_DIVR as u32
+}
+
+/// pll2_r_ck, nominal: 198.4 MHz, the QUADSPI kernel clock.
+pub const PLL2_R_HZ: u32 = pll2_r_hz(HSI_HZ);
+/// pll2_r_ck at the fastest HSI the tolerance allows (201.4 MHz).
+pub const PLL2_R_MAX_HZ: u32 = pll2_r_hz(HSI_MAX_HZ);
+
+// PLL2's limits at both ends of the HSI tolerance (DS12117 Rev 10 Table 136
+// (rev V), wide VCO: fPLL_IN 2 to 16 MHz, RM0433 PLL2RGE range8 8 to
+// 16 MHz; VCO 192 to 836 MHz (the rev Y limit, Table 39; rev V allows
+// 960); R output <= 400 MHz), and the QUADSPI kernel clock's maximum at
+// VOS0, 250 MHz (RM0433 section 8.5.8, Table 60; VOS1 allows only
+// 200 MHz, which the fastest HSI exceeds, so QSPISEL = pll2_r_ck needs
+// VOS0 first, as [`clock_up`] orders it). Input 12.47 to 12.99 MHz, VCO
+// 773 to 806 MHz.
+const _: () = {
+    let (lo, hi) = (HSI_MIN_HZ / PLL2_DIVM as u32, HSI_MAX_HZ / PLL2_DIVM as u32);
+    assert!(lo >= 8_000_000 && hi <= 16_000_000);
+    let n = PLL2_DIVN as u32;
+    assert!(lo * n >= 192_000_000 && hi * n <= 836_000_000);
+    assert!(PLL2_R_MAX_HZ <= 250_000_000);
+    assert!(PLL2_R_HZ == 198_400_000);
+};
 
 /// Polls `ready` up to `tries` times.
 pub(crate) fn wait_for(tries: u32, mut ready: impl FnMut() -> bool) -> bool {
@@ -127,6 +177,74 @@ fn pll1_on(rcc: &pac::RCC, tries: u32) -> bool {
     wait_for(tries, || rcc.cr.read().pll1rdy().bit_is_set())
 }
 
+/// Programs PLL2 for [`PLL2_R_HZ`] (RM0433 section 8.5.5 "PLL
+/// initialization phase": DIVM2, the input range and VCO, the dividers,
+/// then PLL2ON and a wait for PLL2RDY), integer mode, only the R output,
+/// and selects it as the QUADSPI kernel clock (RCC_D1CCIPR QSPISEL = 10,
+/// section 8.7.19). The source is the PLLSRC [`pll1_on`] set (HSI; PLLSRC
+/// is writable only with every PLL off, section 8.7.11, so PLL1 first).
+/// DIVM2, PLLCFGR's PLL2 bits and PLL2DIVR are writable only with PLL2 off
+/// (sections 8.7.11 to 8.7.15). PLL2 is off after reset; if it runs
+/// anyway (a debugger), the QUADSPI is moved to rcc_hclk3 and PLL2
+/// stopped first. QUADSPIEN is off here (reset), so the mux switch has no
+/// consumer yet.
+fn pll2_on(rcc: &pac::RCC, tries: u32) -> Result<(), &'static str> {
+    if rcc.cr.read().pll2on().bit_is_set() {
+        rcc.d1ccipr.modify(|_, w| w.qspisel().rcc_hclk3());
+        rcc.cr.modify(|_, w| w.pll2on().clear_bit());
+        if !wait_for(tries, || rcc.cr.read().pll2rdy().bit_is_clear()) {
+            return Err("pll2 stop");
+        }
+    }
+    rcc.pllckselr.modify(|_, w| w.divm2().bits(PLL2_DIVM));
+    rcc.pllcfgr.modify(|_, w| {
+        w.pll2rge()
+            .range8()
+            .pll2vcosel()
+            .wide_vco()
+            .pll2fracen()
+            .reset()
+            .divp2en()
+            .disabled()
+            .divq2en()
+            .disabled()
+            .divr2en()
+            .enabled()
+    });
+    // SAFETY: DIVN2 field 61 (x62, valid 4..512), DIVR2 field 3 (/4);
+    // DIVP2 and DIVQ2 0 for disabled outputs (RM0433 section 8.5.5, as
+    // `pll1_on` does for PLL1).
+    rcc.pll2divr.write(|w| unsafe {
+        w.divn2()
+            .bits(PLL2_DIVN - 1)
+            .divp2()
+            .bits(0)
+            .divq2()
+            .bits(0)
+            .divr2()
+            .bits(PLL2_DIVR - 1)
+    });
+    rcc.cr.modify(|_, w| w.pll2on().set_bit());
+    if !wait_for(tries, || rcc.cr.read().pll2rdy().bit_is_set()) {
+        return Err("pll2 lock");
+    }
+    rcc.d1ccipr.modify(|_, w| w.qspisel().pll2_r());
+    Ok(())
+}
+
+/// Whether the QUADSPI kernel clock is what [`pll2_on`] set up: PLL2
+/// locked with DIVM2, DIVN2 and DIVR2 as planned and its R output on, and
+/// QSPISEL = pll2_r_ck. So the QUADSPI's [`PLL2_R_HZ`] holds. Read-only.
+pub(crate) fn qspi_kernel_ready(rcc: &pac::rcc::RegisterBlock) -> bool {
+    let divr = rcc.pll2divr.read();
+    rcc.cr.read().pll2rdy().bit_is_set()
+        && rcc.pllckselr.read().divm2().bits() == PLL2_DIVM
+        && rcc.pllcfgr.read().divr2en().is_enabled()
+        && divr.divn2().bits() == PLL2_DIVN - 1
+        && divr.divr2().bits() == PLL2_DIVR - 1
+        && rcc.d1ccipr.read().qspisel().is_pll2_r()
+}
+
 /// What [`clock_up`] saw of the VOS0 ramp, for the banner: SYSCFG_PWRCR
 /// before ODEN was written; the polls until VOSRDY or ACTVOSRDY first read
 /// 0 after it (`u32::MAX`: never seen low); the polls that then read
@@ -148,9 +266,11 @@ pub fn vos0_diag() -> (u32, u32, u32) {
 /// RCC_CFGR.SWS), and `init` panics with it once the UART is set up.
 ///
 /// Order: supply valid; VOS1 then VOS0 (voltage before frequency, RM0433
-/// section 6.8.6 VOS); PLL1; flash wait states up (before the faster
-/// clock, RM0433 section 4.3.8 "Adjusting system frequency"); prescalers;
-/// the switch.
+/// section 6.8.6 VOS); PLL1 (it sets PLLSRC, writable only with every PLL
+/// off); PLL2 and the QUADSPI kernel mux (after VOS0: the kernel clock's
+/// maximum, see [`PLL2_R_MAX_HZ`]); flash wait states up (before the
+/// faster clock, RM0433 section 4.3.8 "Adjusting system frequency");
+/// prescalers; the switch.
 pub(crate) fn clock_up(
     pwr: &pac::PWR,
     rcc: &pac::RCC,
@@ -215,6 +335,9 @@ pub(crate) fn clock_up(
     if !pll1_on(rcc, TRIES) {
         return Err("pll1 lock");
     }
+    // PLL2: 12.8 MHz x 62 = VCO 793.6 MHz, /4 = 198.4 MHz, the QUADSPI
+    // kernel clock (see `PLL2_DIVM`).
+    pll2_on(rcc, TRIES)?;
     // RM0433 Table 17: AXI clock in ]225; 240] MHz at VOS0 (236 MHz) is 4
     // wait states with WRHIGHFREQ = 0b10 (FLASH_ACR 0x24). Section 4.3.8: set
     // and read back before the clock goes up; more wait states than needed
