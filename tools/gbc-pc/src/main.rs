@@ -100,6 +100,11 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--retries" => args.cfg.retries = number(&value("--retries")?, "--retries")?,
             "--timeout-ms" => {
                 let ms: u64 = number(&value("--timeout-ms")?, "--timeout-ms")?;
+                if ms == 0 {
+                    return Err(
+                        "--timeout-ms must be at least 1 (0 would give up on every request)".into(),
+                    );
+                }
                 args.cfg.timeout = Duration::from_millis(ms);
             }
             "--sav" => match &mut args.cmd {
@@ -638,6 +643,7 @@ mod tests {
         assert!(parse("load a b").is_err());
         assert!(parse("load a --baud x").is_err());
         assert!(parse("load a --bogus").is_err());
+        assert!(parse("hello --timeout-ms 0").is_err_and(|e| e.contains("--timeout-ms")));
         assert!(parse("load a --port").is_err());
         assert!(parse("flash a").is_err());
         assert!(parse("dump").is_err());
