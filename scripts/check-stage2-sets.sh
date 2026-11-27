@@ -22,6 +22,8 @@
 #     rounded to the nearest integer, and worst_case_report_cycles half of
 #     that, rounded; they equal check-cycles.sh's REAL_TIME= and HALF=;
 #   - roms_release equals stage1.toml's;
+#   - model = "cgb-c" (the one model the core emulates, ADR 0003), as in
+#     stage1.toml;
 #   - `save_roundtrip = { fixture = "<path>", rom = "generated:link-probe" }`
 #     (the one ROM run-player-save.sh runs), the fixture a file under the
 #     repository root. On success the last line is `save_fixture=<path>`
@@ -31,8 +33,8 @@
 #
 # The manifest is parsed for exactly the forms above: a key = value line
 # (string, integer) or an array of one-line inline tables. A line it
-# cannot parse, a missing or repeated key, an unknown key in an entry, or
-# an empty list is exit 2, never a pass.
+# cannot parse, a missing or repeated key, an unknown key (top-level or in
+# an entry), or an empty list is exit 2, never a pass.
 #
 # Exit: 0 equal, 1 a difference, 2 a parse or usage error.
 set -euo pipefail
@@ -106,6 +108,7 @@ parse() {
       if (s ~ /^[a-z_]+[ \t]*=/) {
         k = s; sub(/[ \t]*=.*/, "", k); v = s; sub(/^[^=]*=[ \t]*/, "", v)
         if (k in top) bad("repeated key " k)
+        if (k !~ /^(roms_release|model|cpu_mhz|frame_budget_cycles|worst_case_report_cycles|soak_minutes|save_roundtrip)$/) bad("unknown top-level key " k)
         if (k == "save_roundtrip") { top[k] = 1; entry(v, "V"); next }
         top[k] = 1; print "K", k, (v ~ /^"/ ? "S" : "I"), value(v); next
       }
@@ -169,6 +172,12 @@ rel=$(key roms_release); case "$rel" in "S "*) rel=${rel#S } ;; *) die "$toml: r
 rel1=$(sed -n 's/^roms_release[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' "$s1")
 [ -n "$rel1" ] || die "$s1: no roms_release"
 [ "$rel" = "$rel1" ] || bad "roms_release = $rel, $s1 has $rel1"
+# The model: gbc-core emulates CGB-C only (ADR 0003; romtest refuses any
+# other, tools/romtest/src/manifest.rs MODEL), and so do the board images.
+model=$(key model); case "$model" in "S "*) model=${model#S } ;; *) die "$toml: model is not a string";; esac
+[ "$model" = cgb-c ] || bad "model = $model; the core and the board images emulate cgb-c only (ADR 0003)"
+model1=$(sed -n 's/^model[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' "$s1")
+[ "$model" = "$model1" ] || bad "model = $model, $s1 has ${model1:-none}"
 
 # The save round trip: run-player-save.sh runs only the generated link-probe
 # ROM; the fixture (relative to the repository root) must exist.

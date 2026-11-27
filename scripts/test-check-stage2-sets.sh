@@ -64,6 +64,9 @@ run "roms_release differs from stage1.toml" 1 "$S1" 's/^roms_release = "v7.0"/ro
 run "save_roundtrip rom differs" 1 "$T" 's/rom = "generated:link-probe"/rom = "generated:other"/'
 run "save_roundtrip fixture missing" 1 "$T" 's/link-probe.sav/no-such.sav/'
 run "save_roundtrip fixture outside the repository" 1 "$T" 's|fixture = "tools/|fixture = "../tools/|'
+run "model is not cgb-c" 1 "$T" 's/^model = "cgb-c"/model = "dmg"/'
+run "model differs from stage1.toml (both edited)" 1 "$T" 's/^model = "cgb-c"/model = "cgb-d"/' "$S1" 's/^model = "cgb-c"/model = "cgb-d"/'
+run "stage1.toml model differs" 1 "$S1" 's/^model = "cgb-c"/model = "dmg"/'
 
 # --- parse errors: rc 2 ---
 run "unknown key in a replay entry" 2 "$T" 's/(rom = "dmg-acid2\/dmg-acid2.gb",)/\1 frames = 1,/'
@@ -80,6 +83,10 @@ run "an unrecognized line" 2 "$T" '$a this is not toml'
 run "a non-integer cpu_mhz" 2 "$T" 's/^cpu_mhz = 472/cpu_mhz = "472"/'
 run "no frame_budget_cycles" 2 "$T" '/^frame_budget_cycles/d'
 run "no save_roundtrip" 2 "$T" '/^save_roundtrip/d'
+run "no model" 2 "$T" '/^model =/d'
+run "a non-string model" 2 "$T" 's/^model = "cgb-c"/model = 3/'
+run "unknown top-level key" 2 "$T" '$a speed_ppm = 1000'
+run "unknown top-level key before the lists" 2 "$T" 's/^cpu_mhz = 472/cpu_mhz = 472\nmax_over_budget = 5/'
 run "check-cycles.sh without REAL_TIME" 2 "$CC" '/^REAL_TIME=/d'
 run "stage1.toml without roms_release" 2 "$S1" '/^roms_release/d'
 out=$(bash "$script" "$T" 2>&1); rc=$?; [ $rc = 2 ] && ok "wrong argument count: rc 2" || bad "wrong argument count: rc $rc"
