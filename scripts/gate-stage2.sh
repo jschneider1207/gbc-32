@@ -195,6 +195,27 @@ for v in $(compgen -e); do
       ;;
   esac
 done
+# Refused too: the shell settings every child script inherits. Each step
+# runs bash scripts, which are non-interactive shells: they source
+# $BASH_ENV (ENV in sh/posix mode) before their first line, after the
+# unsets below, so such a file could set RUN_PACED_CAPTURE and the like
+# again and replace the board with a stored capture. SHELLOPTS and BASHOPTS
+# would turn shell options on in every child (noglob, ...; bash 5 refuses
+# to import SHELLOPTS, refused here all the same), CDPATH
+# redirects their `cd DIR`, GLOBIGNORE drops files from their globs. An
+# exported shell function replaces the command of that name (cargo, cmp,
+# diff, ...) in every child bash.
+for v in BASH_ENV ENV SHELLOPTS BASHOPTS CDPATH GLOBIGNORE; do
+  if printenv "$v" > /dev/null; then
+    printf '\nGATE FAILED (H1): %s is set in the environment (%q); child scripts would inherit it. Unset it and rerun.\n' "$v" "$(printenv "$v")" >&2
+    finish 1
+  fi
+done
+exported_fns=$(declare -Fx | sed 's/^declare -f[a-z]* //')
+if [ -n "${exported_fns}" ]; then
+  printf '\nGATE FAILED (H1): exported shell functions (%s) would replace commands in the child scripts. Unset them (unset -f) and rerun.\n' "$(tr '\n' ' ' <<< "${exported_fns}")" >&2
+  finish 1
+fi
 # The same settings from a cargo config file outside the repository (cargo
 # merges $CARGO_HOME/config.toml and those of every parent directory).
 for d in "${CARGO_HOME:-$HOME/.cargo}" $(p=$(dirname "${ROOT}"); while :; do echo "$p/.cargo"; [ "$p" = / ] && break; p=$(dirname "$p"); done); do
