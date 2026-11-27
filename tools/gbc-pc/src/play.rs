@@ -12,9 +12,16 @@
 //! starts on its own (a `SaveBegin` while none was asked for, e.g. its
 //! button combo) is received the same way.
 //!
-//! With [`PlayOptions::audio`] the loop first asks for the audio stream
-//! (`AudioStart`, answered `Ack`; ADR 0041), hands each `Audio` message
-//! to the caller as [`PlayEvent::Audio`] and sends `AudioStop` at the end.
+//! With [`PlayOptions::audio`] the loop first opens a session
+//! ([`Client::hello`]: the 0x00 flush, then `Hello`), asks for the audio
+//! stream (`AudioStart`, answered `Ack`; ADR 0041), hands each `Audio`
+//! message to the caller as [`PlayEvent::Audio`] and sends `AudioStop` at
+//! the end. `AudioStart` is the only request `play` waits for, and the
+//! board tells a resend from a new request by its bytes: each run's seqs
+//! restart at 0, so without `Hello` (which makes the board forget the
+//! last request) a run after one that ended without `AudioStop` (Ctrl-C,
+//! a lost frame) would send a byte-identical `AudioStart` and get the
+//! stored `Ack` without the stream being turned on.
 
 use std::io;
 use std::path::PathBuf;
@@ -142,6 +149,7 @@ pub fn play<T: Transport>(
         audio: 0,
     };
     if opts.audio {
+        client.hello()?;
         match client.request(&Message::AudioStart)? {
             crate::client::Reply::Ack => {}
             r => {

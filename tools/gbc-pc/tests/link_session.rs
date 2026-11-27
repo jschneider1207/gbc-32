@@ -10,11 +10,13 @@ mod link_session;
 
 use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gbc_firmware::buttons::Shared;
 use gbc_firmware::save::{ClockKind, Image, Layout};
 use gbc_link::{FrameDecoder, Message, NakCode, buttons};
+use gbc_pc::input::{Key, KeySet};
+use gbc_pc::play::{Keyboard, PlayOptions, play};
 use gbc_pc::sim::encode;
 use gbc_pc::{Client, Config, Error, Failure, LoadOutcome, Transport, fnv};
 use link_session::{Game, PC_TIMEOUT_FRAMES, Session};
@@ -410,4 +412,110 @@ fn caller_frames_go_after_replies_and_before_the_dump() {
     assert!(f[2].contains("SaveBegin"), "{}", f[2]);
     assert!(f[3..].iter().all(|s| s.contains("SaveChunk")));
     assert_eq!(room_seen, 4096 - encode(&Message::Ack, 9).len());
+}
+
+/// The board behind a link that loses every `AudioStop` frame.
+struct LoseAudioStop<'a> {
+    board: &'a mut Board,
+    raw: Vec<u8>,
+}
+
+impl Transport for LoseAudioStop<'_> {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        for &b in data {
+            self.raw.push(b);
+            if b != 0 {
+                continue;
+            }
+            let frame = std::mem::take(&mut self.raw);
+            let mut dec = FrameDecoder::new();
+            let mut stop = false;
+            for &x in &frame {
+                stop |= matches!(dec.feed(x), Some(Ok((_, Message::AudioStop))));
+            }
+            if !stop {
+                self.board.write_all(&frame)?;
+            }
+        }
+        Ok(())
+    }
+    fn read_timeout(&mut self, buf: &mut [u8], t: Duration) -> io::Result<usize> {
+        self.board.read_timeout(buf, t)
+    }
+}
+
+/// `play --audio` for `polls` loop turns (then Esc), no keys held.
+fn play_audio<T: Transport>(t: T, polls: usize) -> gbc_pc::play::PlayReport {
+    struct Polls(usize);
+    impl Keyboard for Polls {
+        fn held(&mut self) -> io::Result<KeySet> {
+            self.0 = self.0.saturating_sub(1);
+            Ok(if self.0 == 0 {
+                KeySet::of(&[Key::Esc])
+            } else {
+                KeySet::default()
+            })
+        }
+    }
+    let mut c = Client::new(
+        t,
+        Config {
+            retries: 2,
+            timeout: Duration::from_millis(20),
+        },
+    );
+    let t0 = Instant::now();
+    let mut n = 0u32;
+    let mut now = || {
+        n += 1;
+        t0 + Duration::from_millis(10) * n
+    };
+    let opts = PlayOptions {
+        audio: true,
+        poll: Duration::ZERO,
+        ..PlayOptions::default()
+    };
+    play(&mut c, &mut Polls(polls), &opts, &mut now, &mut |_| {}).unwrap()
+}
+
+#[test]
+fn play_audio_after_a_run_that_ended_without_audio_stop() {
+    let mut b = Board::new();
+    b.session.set_audio_capable(true);
+    // Run 1: its AudioStop is lost, so the stream stays on until the
+    // board's PC timeout ends it.
+    play_audio(
+        LoseAudioStop {
+            board: &mut b,
+            raw: Vec::new(),
+        },
+        5,
+    );
+    assert!(b.session.audio_on(), "AudioStop was lost");
+    for _ in 0..PC_TIMEOUT_FRAMES {
+        b.session.end_frame(b.shared);
+    }
+    assert!(!b.session.audio_on());
+    // Run 2, a new process: its seqs restart. Its AudioStart must turn
+    // the stream on again, not be taken for a resend of run 1's.
+    let mut on_during_run = false;
+    {
+        struct Watch<'a>(&'a mut Board, &'a mut bool);
+        impl Transport for Watch<'_> {
+            fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+                self.0.write_all(data)?;
+                *self.1 |= self.0.session.audio_on();
+                Ok(())
+            }
+            fn read_timeout(&mut self, buf: &mut [u8], t: Duration) -> io::Result<usize> {
+                self.0.read_timeout(buf, t)
+            }
+        }
+        play_audio(Watch(&mut b, &mut on_during_run), 5);
+    }
+    assert!(on_during_run, "run 2's AudioStart turned the stream on");
+    assert!(!b.session.audio_on(), "run 2's AudioStop turned it off");
+    let c = b.session.counters();
+    assert_eq!((c.audio_starts, c.audio_stops), (2, 1));
+    assert_eq!(c.duplicates, 0);
 }

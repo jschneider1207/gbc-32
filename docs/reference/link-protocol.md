@@ -94,7 +94,10 @@ as its emulation keeps real time.
   spaces, starting with `image=player` (`docs/reference/player.md`);
   `gbc-pc play` prints them as `stats: <extra>`.
 
-`play` does not send `Hello`; it can follow a `load` in a separate run.
+`play` without audio sends no `Hello` (it can follow a `load` in a
+separate run, and `--port null` needs no board). With `--audio` or
+`--audio-wav` it opens with the 0x00 flush and `Hello` before
+`AudioStart` (see "Audio to the PC").
 `gbc-pc play --port null --seconds 2` runs the loop with no board.
 
 ## Board side (as implemented, 2026-11-26)
@@ -186,6 +189,13 @@ Opt-in: a board sends no audio until asked, so nothing else changes.
 |---|---|
 | `AudioStart` | `Ack`, then `Audio` messages (any seq, never answered) until stopped; `Nak UnexpectedType` from an image without audio (link-probe, the player's no-ROM loop) |
 | `AudioStop` | `Ack`; no more `Audio` (ones already queued may follow) |
+
+`play` sends the 0x00 flush and `Hello` first: its seqs restart at 0
+every run and the board takes a frame byte-identical to the last answered
+request as a resend, so after a run that ended without `AudioStop`
+(Ctrl-C, a lost frame) the next run's `AudioStart` would otherwise get
+the stored `Ack` and the stream would stay off. `Hello` makes the board
+forget the last request.
 
 `Audio { first: u32, held: u16, data }`: `data` is the **real** frames
 the DAC ISR handed to the DMA, in order (never underrun filler), 3 bytes
