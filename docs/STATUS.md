@@ -17,6 +17,21 @@
   the sign-off checklist (plan bottom, items 1, 2, 4, 5) and the Stage 2
   completion call. No `stage2-m7` tag until then. Plan:
   `docs/plan/stage-2.md` (D1-D11).
+- **Session 30 (2026-11-27): comprehensive review + fix round.** Human
+  asked for a review (correctness, performance, optimizations, Rust
+  quality), then "go ahead with all of them": `docs/reviews/stage2-comprehensive.md`
+  (K/P/Q rows, each with its outcome). Fixed: K1 loader stale Nak, K2
+  `play --audio` Hello, K3-K8, K12, K14, Q3 gate lints every board feature
+  set + gbc-pc windows-gnu, Q1 neutral `PcmFrame` audio (ADR 0044,
+  protocol 2), Q2 new crate `gbc-link-board` (ADR 0043), Q4 `take_once!`,
+  Q6 `rcc::modify` + ISR table, Q7 PLL2 in `clock.rs`, Q8 `nor.rs` split,
+  Q9 `fmt_buf`/`map_rom_image`, Q12-Q16, P1 scaler, P5 fused DAC pop. Full
+  gate with the board **exit 0** on e8b8efd (B1 60 s, B2 178, B3 1035, B4
+  742, B5 81). Board: scaler 196.7k -> 118.7k cycles; live fe mean
+  244.6k -> 167.1k (Pokemon Red), 231k -> 166.8k (Wario Land 3);
+  `audio_isr_max` 8,356 -> ~2.8k (tee on 10,496 -> ~5.3k); K2 seen working.
+  Human heard the player's audio after ADR 0044 (2026-11-27): "sounded
+  good". Rest: plan "Stage 3 carry-over tasks", comprehensive-review block.
 - **M7 results:** soak +73 ppm (bound 1000), 0 over budget, 0 underruns;
   worst case QSPI 3,382,818 (85.6% of the 50% line, report only); live
   player front end 245k mean (hashing now scripted-only); `player-script`
@@ -72,10 +87,10 @@
   case 85.6% of 3,951,279 (H735 projection 73.5%); shipped player soak 10
   min: 0 over budget, core max 3,390,856 (42.9%). Facts: docs/perf.md M6
   sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
-- **Board state:** `player` flashed (session 28 main, after the gate run), the B5 save fixture ROM (32 KiB) in the NOR, not Pokemon Red. To play (reloads the NOR if needed):
+- **Board state:** `player` flashed (session 30, HEAD e8b8efd, protocol 2), Pokemon Red (1 MiB) in the NOR. gbc-pc and firmware must come from the same commit (protocol 2). To play (reloads the NOR if needed):
   `scripts/play-on-board.sh <rom>` (see Needs human).
-- **Last updated:** 2026-11-26, session 29 (log
-  `logs/2026-11-26-29-stage2-m7-lows.md`; session 28: M7).
+- **Last updated:** 2026-11-27, session 30 (log
+  `logs/2026-11-27-30-stage2-comprehensive-review.md`; session 29: M7 lows).
 - **Model (human, 2026-11-25):** Opus is fine.
 
 ## Next up: Stage 2 sign-off (human), then Stage 3 prep
@@ -92,7 +107,7 @@ table off the player stack), the Stats-too-long drop (plan), Stage 1
 leftovers. Re-run `gate-stage2.sh` alone
 after any firmware or gate change (~45 min, board attached).
 
-Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
+Firmware map (ADR 0036, 0043; session 30 adds `crates/gbc-link-board` = Loader + Session + shared `Responder`, no_std, host-tested; `tools/hard-rules`; board lib `nor.rs`, `take_once.rs`, `rcc.rs`, `qspi::map_rom_image`; gbc-firmware `fmt_buf`, audio `PcmFrame`/`FrameMap`; `loader.rs`/`link_session.rs` below now live in gbc-link-board, re-exported by the board lib): `crates/gbc-firmware` (no_std headless loop,
 `CycleClock`, `rom_image` (ADR 0037), `video` (scaler), `headless::FrameSink`, `audio`, `paced` (`run_with`), `buttons`, `save` (RTC sync), `replay` (clock-table input), `player` (stats); root workspace), `crates/gbc-link`
 (COBS + CRC-32 serial protocol, no deps), `tools/gbc-pc` (Windows .exe
 loader client; `scripts/gbc-pc.sh` builds, runs it via interop, takes the
@@ -179,6 +194,36 @@ Working rules that matter here:
 - Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
+
+Open (session 30, 2026-11-27):
+- **Check on Windows (K6, 9d80f68):** gbc-pc now reads the keyboard only
+  while its console window (or that window's root owner, for Windows
+  Terminal / ConPTY) is the foreground window. Untested on Windows by an
+  agent: please confirm keys still work in `play` under both conhost and
+  Windows Terminal, and are ignored when another window has focus.
+- **Decision (Q13):** `tools/hard-rules` now holds the shared hard-rules
+  checker for gbc-firmware, gbc-link and gbc-link-board (dev-dependency).
+  gbc-core keeps its own copy, guarded by a drift test
+  (`tools/hard-rules/tests/core_copy.rs`), because a gbc-core
+  dev-dependency needs you. Approve gbc-core using it too?
+- **Sign-off item 2 (audio):** you heard the player's audio after ADR 0044
+  and said it sounded good. Count that as item 2, or still to do with
+  speakers on the DAC pins?
+- FYI, approved by you (2026-11-27, "go ahead with all of them"): ADR 0043
+  (new crate `gbc-link-board`, amends ADR 0036's layout) and ADR 0044
+  (neutral audio frame, link audio format byte, protocol 2; amends ADR
+  0041). H753 DAC codes bit-identical (test + host feed re-hashed to the
+  old committed hash); replay `feed=` baselines regenerated (agent-owned,
+  board = host in B3).
+- FYI: gate H3 lints more (display, paced, link, rom-qspi, player,
+  player-script, gbc-pc windows-gnu) and H7 names the 17 gbc-link-board
+  tests (stricter only). gbc-pc retries no longer resend refusal Naks
+  (K8): `persistent_nak_gives_up_after_retries` became
+  `refusal_nak_fails_at_once_without_resend` (not a gate test).
+- FYI: Pokemon Red live `core_max` +1.7% (1,349,528 -> 1,372,254, one
+  frame since boot) after the scaler/ISR changes, which add no core work;
+  within ADR 0042's layout noise; Wario Land 3 unchanged; B2 +3% ratchet
+  passed. Accepted, not rebaselined.
 
 Open (session 29, 2026-11-26):
 - **FYI, B1 measurement (08a5213):** the selftest's timed loop now runs
