@@ -603,9 +603,9 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 
 From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 30; fixed rows not repeated):
 
-- [ ] (K10) live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; an 8 MiB ROM's `fnv::hash` (~240 ms) underruns the first pops; skip or defer the hash in live mode (it is discarded) — board check
-- [ ] (K11) link UART RX DMA TEIF/FEIF/DMEIF never checked: a bus error freezes the link silently; count it and restart the stream
-- [ ] (K13) bin/paced.rs `sleep_te_cycles`: bound the `wfi` wait for TE edges
+- [ ] (K10) live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; an 8 MiB ROM's `fnv::hash` (~240 ms) underruns the first pops; skip or defer the hash in live mode (it is discarded) — board check (fixed 1aace5a; board check pending)
+- [x] (K11) link UART RX DMA TEIF/FEIF/DMEIF never checked: a bus error freezes the link silently; count it and restart the stream (done session 30; see review row)
+- [x] (K13) bin/paced.rs `sleep_te_cycles`: bound the `wfi` wait for TE edges (done session 30; see review row)
 - [ ] (P2) display stash: swap frame buffers instead of `copy_from_slice` (42-45k cycles on ~46% of frames); the core allows a swap after FRAME_READY — board A/B
 - [ ] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only)
 - [ ] (P5 rest) measure `audio_isr_max` after the fused pop (ea6e9dc); ISRs to ITCM on the H735
@@ -619,10 +619,10 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (M5) 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the 32 KiB D-cache unmeasured
 - [ ] (Q5) use PAC field writers instead of `w.bits()` + hand-coded constants (138 sites) while porting to the H735 PAC
 - [ ] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies
-- [ ] (Q11 rest) one source for the 2,000,000 baud default, `parse_baud`, and build.sh's memory map (read it from memory-x)
-- [ ] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature
+- [x] (Q11 rest) one source for the 2,000,000 baud default, `parse_baud`, and build.sh's memory map (read it from memory-x) (done session 30; see review row)
+- [x] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature (done session 30; see review row)
 - [ ] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire
-- [ ] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043)
+- [x] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043) (done session 30; see review row)
 - [x] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human (d2cfb51; human-approved 2026-11-27)
 
 Still open from M1-M6 (copied, also kept in their milestones):
