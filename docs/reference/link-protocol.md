@@ -106,8 +106,8 @@ separate run, and `--port null` needs no board). With `--audio` or
 
 ## Board side (as implemented, 2026-11-26)
 
-Code: `crates/gbc-nucleo-h753/src/link_session.rs` (the protocol logic,
-board-independent; host-tested by `tools/gbc-pc/tests/link_session.rs`,
+Code: `crates/gbc-link-board/src/link_session.rs` (the protocol logic,
+board-independent, ADR 0043; host-tested by `tools/gbc-pc/tests/link_session.rs`,
 which runs the real gbc-pc client against it), `src/link_uart.rs` (the
 UART), `src/joystick.rs` (the pins), and the `link-probe` image
 (`src/bin/link-probe.rs`, `./build.sh link-probe`). The `player` image

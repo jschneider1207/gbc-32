@@ -1,6 +1,7 @@
 # 0036: Firmware crate layout and the board boundary
 
-- Status: Accepted
+- Status: Accepted; amended by ADR 0043 (the link servers move to
+  `gbc-link-board`, and what a bin holds)
 - Date: 2026-11-25
 - Builds on: ADR 0005 and its 2026-11-25 amendment, ADR 0026 (ITCM placement
   at link time), ADR 0009 (unsafe-free core), plan `docs/plan/stage-2.md`
@@ -61,7 +62,8 @@ empty `[workspace]` table, as h7-bench does, so root `cargo test
   - the panic handler, HardFault (on its own stack) and DefaultHandler.
 
   Each bin (`headless` in M1, later `loader` and `player`) supplies only
-  `#[entry]` and its mode logic.
+  `#[entry]` and its mode logic (amended by ADR 0043: and the glue between
+  the board-independent crates and the lib's drivers).
 - **h7-bench depends on the lib** (`path = "../../crates/gbc-nucleo-h753"`)
   and deletes its own `board.rs` and `tcm.rs`. One copy of the bring-up code
   means the two cannot drift. The fault and panic handlers exist once per

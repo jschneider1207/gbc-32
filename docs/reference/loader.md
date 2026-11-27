@@ -1,7 +1,7 @@
 # ROM loader on the board (measured)
 
 The `loader` image (`crates/gbc-nucleo-h753/src/bin/loader.rs`), its
-session logic (`src/loader.rs`, host-tested by `tools/gbc-pc/tests/board.rs`)
+session logic (`crates/gbc-link-board/src/loader.rs` since ADR 0043, host-tested by `tools/gbc-pc/tests/board.rs`)
 and the design (ADR 0038). PC side: `scripts/gbc-pc.sh` (`tools/gbc-pc`).
 All figures are from 2026-11-25, NUCLEO-H753ZI + X-NUCLEO-GFX02Z1
 (MX25L6433F), ST-LINK VCP on COM5, CPU 472 MHz, QSPI 39 MHz for
