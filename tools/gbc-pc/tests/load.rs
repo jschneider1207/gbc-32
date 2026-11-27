@@ -149,9 +149,15 @@ fn delayed_reply_then_stale_duplicate_is_ignored() {
 }
 
 #[test]
-fn nak_once_is_resent() {
+fn busy_nak_is_resent_after_a_backoff() {
+    let t0 = std::time::Instant::now();
     let (_, s) = survives(Fault::NakRequest);
     assert_eq!((s.naks, s.resends), (1, 1));
+    assert!(
+        t0.elapsed() >= gbc_pc::client::BUSY_BACKOFF,
+        "{:?}",
+        t0.elapsed()
+    );
 }
 
 #[test]
@@ -175,7 +181,7 @@ fn faults_on_every_stage() {
 }
 
 #[test]
-fn persistent_nak_gives_up_after_retries() {
+fn refusal_nak_fails_at_once_without_resend() {
     let rom = rom(4000);
     let mut t = Faulty::new(
         SimBoard::new(FLASH),
@@ -187,14 +193,14 @@ fn persistent_nak_gives_up_after_retries() {
             e,
             Error::GaveUp {
                 request: "RomChunk",
-                attempts: 6,
+                attempts: 1,
                 last: Failure::Nak(NakCode::FlashError)
             }
         ),
         "{e:?}"
     );
     assert!(e.to_string().contains("Nak FlashError"), "{e}");
-    assert_eq!(t.requests, chunk_req(1) + 6);
+    assert_eq!(t.requests, chunk_req(1) + 1, "one attempt, no resend");
 }
 
 #[test]

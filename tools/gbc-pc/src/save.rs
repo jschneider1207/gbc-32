@@ -195,7 +195,7 @@ impl<T: Transport> Client<T> {
     /// Sends `sav` to the board: `SaveBegin { len, hash }`, then the
     /// chunks in order, each answered `Ack`. The last chunk's answer is the
     /// board's verdict: `Ack` = hash verified and the save applied; a
-    /// `Nak` (resent like any other, then [`Error::GaveUp`]) = refused,
+    /// `Nak` ([`Error::GaveUp`], not resent: a refusal) = refused,
     /// nothing applied. Runs `Hello` first if this client has not.
     /// `progress` gets the bytes acknowledged so far after each chunk.
     pub fn send_save(

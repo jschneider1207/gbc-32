@@ -4,7 +4,8 @@
 //! One request is outstanding at a time. Each new request takes the next
 //! `seq` (wrapping); a `Nak` (whatever its `seq`, since a frame the board
 //! could not decode has no trustworthy one) or a timeout resends the same
-//! frame with the same `seq`, up to [`Config::retries`] times. Replies
+//! frame with the same `seq` (a `Busy` after a short backoff; any other
+//! refusal `Nak` fails the request at once), up to [`Config::retries`] times. Replies
 //! with another `seq` are late answers to an earlier attempt (a resend
 //! the board answered twice) and are ignored, as are frames that fail
 //! COBS or CRC: their answer is lost and the timeout resends.
@@ -18,8 +19,12 @@ use gbc_link::{FrameDecoder, MAX_CHUNK, MAX_FRAME, Message, NakCode, PROTOCOL_VE
 use crate::fnv;
 use crate::transport::Transport;
 
+/// Pause before resending a request the board answered `Busy`, times the
+/// attempts so far (50 ms, 100 ms, ... within the retry limit).
+pub const BUSY_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Size of the ROM image header in front of the data (ADR 0037).
-pub const IMAGE_HEADER_LEN: u32 = 256;
+pub const IMAGE_HEADER_LEN: u32 = gbc_firmware::rom_image::HEADER_LEN as u32;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -418,6 +423,14 @@ impl<T: Transport> Client<T> {
                 Wait::Reply(r) => return Ok(r),
                 Wait::Nak(code) => {
                     self.stats.naks += 1;
+                    if !matches!(code, NakCode::BadCrc | NakCode::BadFrame | NakCode::Busy) {
+                        // A refusal: the same frame is refused again.
+                        return Err(Error::GaveUp {
+                            request: msg_name(msg),
+                            attempts,
+                            last: Failure::Nak(code),
+                        });
+                    }
                     Failure::Nak(code)
                 }
                 Wait::Timeout => {
@@ -431,6 +444,9 @@ impl<T: Transport> Client<T> {
                     attempts,
                     last,
                 });
+            }
+            if last == Failure::Nak(NakCode::Busy) {
+                std::thread::sleep(BUSY_BACKOFF * attempts);
             }
         }
     }
