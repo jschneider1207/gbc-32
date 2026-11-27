@@ -72,7 +72,7 @@ attribute (M7 P2), QSPI clock/SIOO/TCEN, display cost to the core.
 | Q4 | med | 11 copies (`Slot<T>` + `unsafe impl Sync` + `TAKEN`) | Hand-repeated take-once static pattern | one audited `TakeOnce<T>` or macro (S-M) | PENDING |
 | Q5 | med | audio_dac.rs, lcd_dma.rs, qspi.rs, link_uart.rs (138 `w.bits(`) | Raw bit constants where the PAC has typed field writers | use PAC fields while porting (M-L) | PENDING |
 | Q6 | med | qspi.rs, lcd_dma.rs, audio_dac.rs, lcd.rs | "No ISR touches RCC/GPIO/QUADSPI" restated in ~10 SAFETY comments; RCC RMWs in 6 modules, no critical section | `rcc::enable()` under `interrupt::free` + one ISR table (S-M) | PENDING |
-| Q7 | med | qspi.rs:655-700 `pll2_on` | QSPI driver owns PLL2 and stops it if running (*verified*); kills any other PLL2 consumer (SAI on H735) | clock plan in `clock.rs` (S-M) | PENDING |
+| Q7 | med | qspi.rs:655-700 `pll2_on` | QSPI driver owns PLL2 and stops it if running (*verified*); kills any other PLL2 consumer (SAI on H735) | clock plan in `clock.rs` (S-M) | **fixed** 2ffa51c (board check pending) |
 | Q8 | med | qspi.rs (1285 lines) | QUADSPI controller and MX25L6433F command set mixed; H735 has OCTOSPI | split controller / NOR (M) | PENDING |
 | Q9 | med | bin/headless.rs vs paced_board.rs, player.rs, h7-bench | `Dwt`, `Capture`, QSPI map+validate (3×), bounded `fmt::Write` (~8×), two display sinks (~390 lines) duplicated | shared `FmtBuf<N>`, `qspi::map_rom_image()`, one display sink (M) | PENDING |
 | Q10 | med-low | bin/headless.rs:83-88 | `rom-qspi,display` defines `IMAGE` twice (E0428, *verified*) | `compile_error!` or separate bins (S) | **fixed** ba19ac7: compile_error! in headless.rs |
