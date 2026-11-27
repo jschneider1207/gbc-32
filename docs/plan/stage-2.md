@@ -591,15 +591,39 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 - [x] (M7 T9) board loss after the lock: gate exit 2 vs 1 (never a pass; make it consistent). Done: once LOCK saw the board, a tool error or unexpected exit re-probes it; gone is exit 1 (`board_lost_check`, scripts/lib/gate-board.sh); tested in scripts/test-gate-board.sh
 - [x] (M7 T11) tests for the gate's own board-step parsing. Done: the verdicts moved verbatim to scripts/lib/gate-board.sh; scripts/test-gate-board.sh (gate H7) feeds them canned output; 63 of 63 mutants caught
 - [ ] (M7 P3, medium, accepted) bench with a realistic footprint: >= 1 MiB streaming synth ROM and a cart-RAM variant, QSPI A/B, LSUCNT; the H735 HyperRAM miss path is what matters
-- [ ] (M7 P4, medium, accepted) make the `gbc-firmware` audio sample format generic when SAI lands (ADR 0036: extract when duplicated)
+- [x] (M7 P4, medium) audio sample format board-neutral: done early (session 30, ADR 0044, ba6b626): `PcmFrame` i16 pair in the shared crates, DAC packing in the board ISR, link Audio format byte (protocol 2)
 - [ ] (M7 P5) move the ST7789V pixel format (video.rs:54-60) out of the shared crate
-- [ ] (M7 P6) scaler is 196k cycles: try an STRD-based store path
+- [x] (M7 P6) scaler: done as review P1 (session 30, f4b11d1): two pixels per u32, no stack row; ~45 instr per 8 px vs 74 (board cycles pending)
 - [ ] (M7 P7) set NVIC priorities (see platform item above; one task)
 - [ ] (M7 P8) player stack: 19,800 of 22,912 B scripted; move the 4 KiB clock table (player.rs:118) off the stack
 - [ ] (M7 P9) fe regression bound (B4 only checks < 100%); ratchet sits on +-1.7% noise; guard `player`, not just the bench
 - [ ] (M7 P10) p99 histogram range below a 550 MHz frame (player.rs:60-63); `Elapsed` wraps after 7.8 s at 550 MHz (paced.rs:517)
 - [ ] (session 29) player `queue_stats`: a Stats text over `MAX_STATS_EXTRA` (1016 B) drops the frame uncounted (not even `stats_dropped`); lines are ~885 B now
 - [ ] (M7 carry-over) H735 items: AXI 394,240 vs 262,144 B, memory-x chip and `CORE_TEXT_OFFSET` assert, ITCM reserve 3,854 B, HyperRAM rebaseline, 550 MHz projection, crystal SAI pacing clock (see architecture.md "Carry-over to Stage 3")
+
+From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 30; fixed rows not repeated):
+
+- [ ] (K10) live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; an 8 MiB ROM's `fnv::hash` (~240 ms) underruns the first pops; skip or defer the hash in live mode (it is discarded) — board check
+- [ ] (K11) link UART RX DMA TEIF/FEIF/DMEIF never checked: a bus error freezes the link silently; count it and restart the stream
+- [ ] (K13) bin/paced.rs `sleep_te_cycles`: bound the `wfi` wait for TE edges
+- [ ] (P2) display stash: swap frame buffers instead of `copy_from_slice` (42-45k cycles on ~46% of frames); the core allows a swap after FRAME_READY — board A/B
+- [ ] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only)
+- [ ] (P5 rest) measure `audio_isr_max` after the fused pop (ea6e9dc); ISRs to ITCM on the H735
+- [ ] (P6) `-C llvm-args=-align-loops=1`: ~4.4-6.3 KB ITCM back; A/B with layout-perturbed builds (M2 below)
+- [ ] (P7) H735 RAM plan: FRAME out of DTCM first, keep cart RAM internal, spend the 65,600 B save staging buffer, reuse the panel MPU region's 27 KB slack for DMA buffers, boot-check `TCM_AXI_SHARED`
+- [ ] (P8) H753 D2 SRAM1-3 (288 KiB) unused: room for 128 KiB saves (no speed gain; doesn't carry to the H735)
+- [ ] (M1) BTAC-off ratchet pass in h7-bench at ~+0.5-1% (ADR 0042: 0.11% layout noise vs +-1.7% with it on); stricter-only
+- [ ] (M2) variant decisions (LTO, opt-level, ITCM tier) from 4-8 ITCM start-pad builds per variant, not one build each
+- [ ] (M3) h7-bench README: the bench's cache state is not the shipped player's (scaler reads DTCM, writes non-cacheable); QSPI +1.24% is an upper bound
+- [ ] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard
+- [ ] (M5) 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the 32 KiB D-cache unmeasured
+- [ ] (Q5) use PAC field writers instead of `w.bits()` + hand-coded constants (138 sites) while porting to the H735 PAC
+- [ ] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies
+- [ ] (Q11 rest) one source for the 2,000,000 baud default, `parse_baud`, and build.sh's memory map (read it from memory-x)
+- [ ] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature
+- [ ] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire
+- [ ] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043)
+- [ ] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human
 
 Still open from M1-M6 (copied, also kept in their milestones):
 
