@@ -606,7 +606,8 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (K10) live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; an 8 MiB ROM's `fnv::hash` (~240 ms) underruns the first pops; skip or defer the hash in live mode (it is discarded) — board check (fixed 1aace5a; board check pending)
 - [x] (K11) link UART RX DMA TEIF/FEIF/DMEIF never checked: a bus error freezes the link silently; count it and restart the stream (done session 30; see review row)
 - [x] (K13) bin/paced.rs `sleep_te_cycles`: bound the `wfi` wait for TE edges (done session 30; see review row)
-- [ ] (P2) display stash: swap frame buffers instead of `copy_from_slice` (42-45k cycles on ~46% of frames); the core allows a swap after FRAME_READY — board A/B
+- [x] (P2) display stash: swap frame buffers instead of `copy_from_slice` (42-45k cycles on ~46% of frames); the core allows a swap after FRAME_READY — board A/B (done: P2 16f88a3, M4 bd38750, dac-probe e59c536)
+- [ ] (P2 follow-up) Wario Land 3 live skipped frames after the stash swap 536-847 vs 297-613 before (2 runs each, spread large); check over more live runs
 - [ ] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only)
 - [ ] (P5 rest) measure `audio_isr_max` after the fused pop (ea6e9dc); ISRs to ITCM on the H735
 - [ ] (P6) `-C llvm-args=-align-loops=1`: ~4.4-6.3 KB ITCM back; A/B with layout-perturbed builds (M2 below)
@@ -615,10 +616,10 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (M1) BTAC-off ratchet pass in h7-bench at ~+0.5-1% (ADR 0042: 0.11% layout noise vs +-1.7% with it on); stricter-only
 - [ ] (M2) variant decisions (LTO, opt-level, ITCM tier) from 4-8 ITCM start-pad builds per variant, not one build each
 - [x] (M3) h7-bench README: the bench's cache state is not the shipped player's (scaler reads DTCM, writes non-cacheable); QSPI +1.24% is an upper bound (done session 30; see review row)
-- [ ] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard (bench `max_at=` done 6a14794; player part open)
+- [x] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard (bench `max_at=` done 6a14794; player part open) (done: P2 16f88a3, M4 bd38750, dac-probe e59c536)
 - [ ] (M5) 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the 32 KiB D-cache unmeasured
 - [ ] (Q5) use PAC field writers instead of `w.bits()` + hand-coded constants (138 sites) while porting to the H735 PAC
-- [ ] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies (display fold done c2aac36, board diff format-identical; dac-probe left)
+- [x] (Q9 rest) fold the headless measurement display sink into `display.rs` (keep `stats display` lines byte-identical; needs a board run); dac-probe's `Out`/`LOG` Slot copies (display fold done c2aac36, board diff format-identical; dac-probe left) (done: P2 16f88a3, M4 bd38750, dac-probe e59c536)
 - [x] (Q11 rest) one source for the 2,000,000 baud default, `parse_baud`, and build.sh's memory map (read it from memory-x) (done session 30; see review row)
 - [x] (Q15 rest) intra-doc links to `crate::sim` in gbc-pc play.rs/transport.rs don't resolve without the `sim` feature (done session 30; see review row)
 - [x] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire (done session 30; see review row)
