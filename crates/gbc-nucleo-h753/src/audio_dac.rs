@@ -586,8 +586,11 @@ impl AudioDac {
         // PA4, PA5: analog (MODER 11, no pull; RM0433 26.4.2 and 11.3.13:
         // the DAC output needs the pin in analog mode). Analog is also the
         // reset state of both; written anyway.
-        // SAFETY: GPIOA belongs to nobody else in this lib; read-modify-
-        // write of pins 4 and 5's fields only.
+        // SAFETY: GPIOA is shared (joystick.rs read-modify-writes PA0's
+        // MODER/PUPDR fields), but both run only from the main thread during
+        // init and no interrupt handler touches GPIOA (the ISRs here are the
+        // DAC DMA and the LCD TE EXTI), so the read-modify-writes cannot
+        // interleave; this one changes pins 4 and 5's fields only.
         let gpioa = unsafe { &*pac::GPIOA::ptr() };
         // SAFETY: as above; 0b00 = no pull, 0b11 = analog.
         unsafe {
