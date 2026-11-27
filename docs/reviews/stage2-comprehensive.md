@@ -13,18 +13,18 @@ Outcome column: PENDING = not yet triaged into a fix or a plan task.
 |---|---|---|---|---|
 | K1 | med | nucleo loader.rs:216-224, :232-238 | Decode-error Nak is encoded into `self.reply` (the stored reply for `last_req`) without clearing `last_req`; "reply lost, then resend corrupted" makes every later resend get the stale `Nak`, load ends `GaveUp`. `link_session.rs` and `sim.rs` keep them separate. Untested (fault pairs never adjacent) | *verified*; **fixed** a77fca6: the bad-frame Nak has its own buffer; test `a_corrupt_resend_after_a_lost_reply_keeps_the_stored_reply` |
 | K2 | med | gbc-pc play.rs:145 + link_session.rs:322-331 | `play` sends no `Hello`, seqs restart at 0; after a run that ended without `AudioStop`, the next `AudioStart` seq 0 is byte-equal to `last_req` → treated as duplicate, audio never starts, PC stuck in Prefill | *verified* (dedup path); **fixed** 724dfe0: `play --audio` opens with flush + `Hello` (no-audio `play` unchanged); test `play_audio_after_a_run_that_ended_without_audio_stop` |
-| K3 | low | gbc-firmware save.rs:90, player.rs:847 | Board-started game without a loaded save dumps footer stamp 0; a later sync runs `Clock::sync(0, now)` (~20,000 days, MBC3 day carry) | PENDING |
+| K3 | low | gbc-firmware save.rs:90, player.rs:847 | Board-started game without a loaded save dumps footer stamp 0; a later sync runs `Clock::sync(0, now)` (~20,000 days, MBC3 day carry) | **fixed** 895f84d, baf2f61: stamp 0 means unknown, no advance (Clock::sync) |
 | K4 | low | gbc-pc play.rs:219 | Chord dump whose `SaveBegin` is corrupted: all `SaveChunk`s dropped, no retry, no save | **fixed** bd3189a: a `SaveChunk` with no job sends one `SaveDumpRequest`; tests `board_dump_with_corrupt_begin_is_requested_again`, `leftover_chunks_of_a_failed_dump_do_not_restart_it` |
-| K5 | low | gbc-pc audio.rs:116-119 | WAV size truncates/overflows past ~9.1 h capture | PENDING |
-| K6 | low | gbc-pc keyboard.rs:48 | `GetAsyncKeyState` is global: keys typed in other windows reach the game; F5 dumps, Esc quits | PENDING |
-| K7 | low | gbc-pc main.rs:101-104 | `--timeout-ms 0` accepted; every request `GaveUp` with no reason | PENDING |
+| K5 | low | gbc-pc audio.rs:116-119 | WAV size truncates/overflows past ~9.1 h capture | **fixed** 296e1a7: WAV cut at the u32 size limit |
+| K6 | low | gbc-pc keyboard.rs:48 | `GetAsyncKeyState` is global: keys typed in other windows reach the game; F5 dumps, Esc quits | **fixed** 9d80f68: keys read only while the console window (or its root owner) is foreground |
+| K7 | low | gbc-pc main.rs:101-104 | `--timeout-ms 0` accepted; every request `GaveUp` with no reason | **fixed** d1ac087: `--timeout-ms 0` rejected |
 | K8 | low | gbc-pc client.rs:407-420 | Resend on every Nak incl. refusals and `Busy`, no backoff | **fixed** 6738027: refusal Naks fail at once, `Busy` backs off 50 ms x attempts, BadCrc/BadFrame resent; tests `refusal_nak_fails_at_once_without_resend`, `busy_nak_is_resent_after_a_backoff` |
 | K9 | low | player.rs:555-571 | Stats > 1016 B dropped uncounted (`Text<1024>`) | already plan task (stage-2.md:295, :601) |
 | K10 | low | player.rs:123-127, paced.rs:330 | Live ramp (24 pops, 187 ms) sized for a 2 MiB ROM hash; 8 MiB ~240 ms → startup underruns; the hash is discarded in live mode | PENDING (board check) |
 | K11 | low | link_uart.rs:206-220 | RX DMA TEIF/FEIF/DMEIF never checked; a bus error freezes the link silently | PENDING |
 | K12 | low | link_session.rs:477-486 | `Hello` doesn't cancel a dump in progress (harmless today) | **fixed** d8f4698: `Hello` drops the dump; test `hello_drops_a_dump_being_sent` |
 | K13 | low | bin/paced.rs:252-254 | Unbounded `wfi` wait for TE edges (probe only) | PENDING |
-| K14 | low | audio_dac.rs:589 | SAFETY comment: "GPIOA belongs to nobody else" (joystick uses PA0; main thread only, no race) | PENDING |
+| K14 | low | audio_dac.rs:589 | SAFETY comment: "GPIOA belongs to nobody else" (joystick uses PA0; main thread only, no race) | **fixed** 1db0235: SAFETY comment corrected |
 
 No defects found in: COBS/CRC framing and sizes, baud/BRR math, debouncer
 and chord edge, rx_ring/AudioRing/AudioTee ordering, DC blocker, scaler
@@ -77,11 +77,11 @@ attribute (M7 P2), QSPI clock/SIOO/TCEN, display cost to the core.
 | Q9 | med | bin/headless.rs vs paced_board.rs, player.rs, h7-bench | `Dwt`, `Capture`, QSPI map+validate (3×), bounded `fmt::Write` (~8×), two display sinks (~390 lines) duplicated | shared `FmtBuf<N>`, `qspi::map_rom_image()`, one display sink (M) | PENDING |
 | Q10 | med-low | bin/headless.rs:83-88 | `rom-qspi,display` defines `IMAGE` twice (E0428, *verified*) | `compile_error!` or separate bins (S) | **fixed** ba19ac7: compile_error! in headless.rs |
 | Q11 | low-med | 6 places | Baud 2,000,000, `parse_baud`, NOR sector sizes, `IMAGE_HEADER_LEN`, memory map in build.sh duplicated | single source (S) | PENDING (client.rs `IMAGE_HEADER_LEN` now `gbc_firmware::rom_image::HEADER_LEN`, 6738027; rest open) |
-| Q12 | low | gbc-pc fnv.rs | Own FNV; comment says gbc-firmware isn't a dependency, but it is (*verified*) | use `gbc_firmware::fnv` (S) | PENDING |
+| Q12 | low | gbc-pc fnv.rs | Own FNV; comment says gbc-firmware isn't a dependency, but it is (*verified*) | use `gbc_firmware::fnv` (S) | **fixed** 7fd6c86: `gbc_pc::fnv` re-exports `gbc_firmware::fnv` |
 | Q13 | low | 3× tests/hard_rules.rs | Same ~440-line checker copied (a real tokenizer, not grep) | dev-dep crate (M; gbc-core part needs human) | PENDING |
 | Q14 | low | link_session.rs:446-450, loader.rs:220,252 | `encode(..).unwrap_or(0)` silently sends nothing | const-assert reply sizes, count failures (S) | **fixed** 764f80e: `REPLY_FRAME_MAX <= REPLY_MAX` const assert + `every_reply_fits_the_reply_buffer` tests; failures counted in `replies_dropped` |
-| Q15 | low | gbc-pc lib.rs | `pub mod sim` ships in the exe | cfg-gate (S) | PENDING |
-| Q16 | low | Cargo.toml, ADR 0036, lib.rs | Comment/doc drift ("h7-bench will depend", "bins hold only `#[entry]`") | S | PENDING |
+| Q15 | low | gbc-pc lib.rs | `pub mod sim` ships in the exe | cfg-gate (S) | **fixed** c7739b4: `sim` feature, enabled by a self dev-dependency |
+| Q16 | low | Cargo.toml, ADR 0036, lib.rs | Comment/doc drift ("h7-bench will depend", "bins hold only `#[entry]`") | S | **partly fixed** 1db0235: Cargo.toml drift only; ADR 0036 / lib.rs left |
 | Q17 | low | 7 probe bins (~3.2k lines) | Maintenance cost; decide which stay for Stage 3 | S | PENDING |
 | Q18 | low | pedantic clippy | 144 / 29 / 192 warnings (firmware/link/pc), mostly docs/must_use/casts | optional | — |
 
