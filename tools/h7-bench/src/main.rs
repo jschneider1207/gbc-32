@@ -297,8 +297,8 @@ fn blink(n: u32) {
 mod qspi_rom {
     use core::fmt::Write;
 
-    use gbc_firmware::rom_image::{self, HEADER_LEN, ImageError, ImageHeader};
-    use gbc_nucleo_h753::qspi::{self, Qspi};
+    use gbc_firmware::rom_image::{HEADER_LEN, ImageError, ImageHeader};
+    use gbc_nucleo_h753::qspi::{self, RomImageError};
     use gbc_nucleo_h753::{Uart, cycles};
 
     use crate::pack::{self, PackError};
@@ -340,26 +340,25 @@ mod qspi_rom {
     /// `headless-qspi` image) and checks the image there and its pack.
     /// On an error after mapping the window stays mapped and unused.
     pub fn open() -> Result<Pack, Fail> {
-        let mut q = Qspi::init(qspi::PRESCALER_SAFE);
-        q.set_prescaler(qspi::PRESCALER_MMAP).map_err(Fail::Map)?;
-        let mapped = q
-            .memory_mapped(&qspi::QUAD_IO_READ_XIP)
-            .map_err(|(_, e)| Fail::Map(e))?;
-        let window = mapped.bytes();
+        let image = qspi::map_rom_image().map_err(|e| match e {
+            RomImageError::Map(e) => Fail::Map(e),
+            RomImageError::Header(e) => Fail::Image("header", e),
+            RomImageError::Validate(e) => Fail::Image("validate", e),
+        })?;
         let t0 = cycles();
-        let header = rom_image::read_header(window).map_err(|e| Fail::Image("header", e))?;
-        let data = rom_image::validate(window).map_err(|e| Fail::Image("validate", e))?;
-        let roms = pack::parse(data).map_err(Fail::Pack)?;
-        let validate_cycles = cycles().wrapping_sub(t0);
+        let roms = pack::parse(image.rom()).map_err(Fail::Pack)?;
+        let validate_cycles = image
+            .validate_cycles
+            .wrapping_add(cycles().wrapping_sub(t0));
         let same_as_flash = roms
             .iter()
             .enumerate()
             .all(|(i, r)| *r == crate::bench::rom(i));
         Ok(Pack {
-            header,
+            header: image.header,
             validate_cycles,
             same_as_flash,
-            mapped,
+            mapped: image.mapped,
         })
     }
 
