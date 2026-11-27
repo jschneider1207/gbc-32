@@ -208,10 +208,12 @@ the start-up burst (ADR 0041).
 
 **Checking a capture against the host** (deterministic with no keys and
 no save): `headless <rom> --paced --frames N --dac-feed feed.bin` writes
-the host's DAC feed (LE u32 per frame; N video frames give ~547 N
-frames, so pick N > (first_frame + frames) / 547); WAV sample i maps back
-to the DAC code `(s >> 4) + 2048` and must equal feed frame
-`first_frame + i`. 2026-11-26, Pokemon Red (no keys), 60 s from frame
+the host's feed (since ADR 0044 s16le stereo, 4 bytes per frame; N video
+frames give ~547 N frames, so pick N > (first_frame + frames) / 547); WAV
+sample i maps back to the DAC code `(s >> 4) + 2048`, which must equal
+the code of feed frame `first_frame + i`, `clamp(((f + 8) >> 4) + 2048,
+0, 4095)` (`gbc_link::audio::code`; before ADR 0044 the feed held the
+codes). 2026-11-26, Pokemon Red (no keys), 60 s from frame
 901,120: all 1,971,968 frames equal, 0 gaps, 0 drops.
 
 ## Scripted mode

@@ -130,7 +130,7 @@ ms are up, so requests are answered between frames, never inside one. A
 dump goes out as whole frames, up to 4 KiB per TX transfer.
 
 **Per message**, as the tables above, plus:
-- `Hello`: `HelloReply` (protocol 1, max_chunk 1024, flash_len = the
+- `Hello`: `HelloReply` (protocol 2 since ADR 0044, max_chunk 1024, flash_len = the
   NOR's 8 MiB); drops a save load in progress and a dump still being
   sent, and stops the audio stream.
 - `RomBegin`: `AlreadyLoaded` if it names the running ROM (length and
@@ -202,10 +202,15 @@ request as a resend, so after a run that ended without `AudioStop`
 the stored `Ack` and the stream would stay off. `Hello` makes the board
 forget the last request.
 
-`Audio { first: u32, held: u16, data }`: `data` is the **real** frames
-the DAC ISR handed to the DMA, in order (never underrun filler), 3 bytes
-each (`gbc_link::audio::pack`: left code = DAC channel 1 in bits 0..=11,
-right in 12..=23, little-endian), at most 340 frames; the player sends
+`Audio { first: u32, held: u16, format: u8, data }` (protocol 2, ADR
+0044): `data` is the **real** frames the DAC ISR handed to the DMA, in
+order (never underrun filler), in sample `format`: 1 = U12, 3 bytes a
+frame (`gbc_link::audio::encode_u12`: left 12-bit code = DAC channel 1
+in bits 0..=11, right in 12..=23, little-endian; code = `clamp(2048 +
+n/16)` of the 16-bit sample, the code the DAC plays), at most 340
+frames, what the H753 sends; 2 = S16 (s16le pairs, at most 255 frames).
+Another value decodes, and `gbc-pc play` stops with an error naming the
+format. The player sends
 one message per DMA half, 256 frames (7.8 ms). `first` is the index of
 the first of them among all real frames fed since the board started
 (wrapping u32), so consecutive messages chain (`first + frames`) and a
@@ -227,7 +232,7 @@ The PC (`tools/gbc-pc/src/audio.rs`): checks the chain (gaps forward are
 filled with the last frame, at most 1 s each, so WAV sample i is frame
 `first_frame + i`; a jump back is a board reset, no fill), writes the
 real frames as a 16-bit stereo WAV at 32,768 Hz, sample = `(code - 2048)
-<< 4`, and prints `audio:` lines: the link's received bytes/s,
+<< 4` for U12 (`gbc_link::audio::sample`), and prints `audio:` lines: the link's received bytes/s,
 `first_frame`, frames, messages, gaps, missing, filled, held, and the
 board's `audio_*` fields from its last `Stats`.
 
