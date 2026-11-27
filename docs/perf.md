@@ -1794,6 +1794,52 @@ windows each, same ROM and NOR, 472 MHz, 2026-11-26:
 The front end drops by about 183 k cycles a frame (2.3% of the budget),
 the frame hash's measured cost; what is left is mostly the scaler.
 
+### Display stash cache attribute (M7 P2)
+
+M7 review P2 estimated (no measurement) that the display stash, the
+46,080 B copy of a frame taken while MDMA still reads the panel buffer
+(`display.rs`, `.axisram.stash`, region 4's Normal write-back
+write-allocate), might evict the core's QSPI ROM and cart-RAM lines from
+the 16 KiB D-cache on deferred frames. Measured 2026-11-26, 472 MHz,
+`player` (live), Wario Land 3 (2 MiB, MBC5) in the NOR, no input, 120 s
+via `play-on-board.sh --seconds 120`, each run freshly flashed. A
+temporary (uncommitted) build added a split of the core cycles: frames
+whose previous iteration stashed ("after") against the rest, and the
+variants re-attributed the stash on a spare MPU region (12, 64 KiB at
+0x2401_0000 with subregions 0, 6 and 7 disabled, so 40 of the stash's
+45 KiB, 0x2401_2000-0x2401_C000; the rest of it shares 8 KiB subregions
+with `AUDIO` and `CART_RAM`). Since-boot figures from the last `Stats`
+line with `total_frames` <= 7,500 (7,270-7,365 frames); fe from the 19-20
+windows of the session:
+
+| Variant | core mean | core max | after: n / mean | other: n / mean | fe mean | fe max | busy max | deferred / skipped |
+|---|---|---|---|---|---|---|---|---|
+| WBWA (main), run 1 | 1,260,983 | 1,886,378 | 3,386 / 1,222,835 | 3,979 / 1,293,446 | 231,208 | 330,076 | 2,139,309 | 3,386 / 613 |
+| WBWA (main), run 2 | 1,264,834 | 1,877,559 | 3,095 / 1,333,571 | 4,188 / 1,214,037 | 230,492 | 331,956 | 2,126,960 | 3,095 / 315 |
+| WB, no write-allocate | 1,264,547 | 1,887,287 | 2,829 / 1,276,803 | 4,441 / 1,256,741 | 228,979 | 330,382 | 2,140,712 | 2,830 / 525 |
+| non-cacheable | 1,254,400 | 1,875,456 | 3,377 / 1,250,691 | 3,936 / 1,257,584 | 308,608 | 499,985 | 2,286,072 | 3,378 / 467 |
+
+All runs: 0 underruns, 0 over budget, 0 display errors, 0 DAC restarts.
+Noise: the two identical baselines differ by 3.9 k (0.3%) in core mean,
+9 k in core max and 13 k in busy max. The after/other split carries no
+signal: which frames are deferred depends on the TE phase, so each
+bucket holds different game content, and its sign flips between the two
+baselines (-71 k, +120 k); a stash eviction cost would show as "after"
+consistently above "other" in every run.
+
+Decision: **keep write-back write-allocate**. No write-allocate is
+identical to the baseline within noise. Non-cacheable saves about 8.5 k
+(0.7%) of core mean, about two noise widths, but costs +78 k of fe mean
+and +168 k of fe max (the copy into, and the scaler's reads out of,
+uncached AXI SRAM) and +150 k of busy max, so the loop is worse overall.
+The estimate's 220 k a deferred frame does not happen; in this image the
+frame buffer is in DTCM, so the stash is the only frame-sized AXI
+traffic, and whatever it evicts is refetched at a cost below the noise
+(not broken down further). A full-size mapping would also need a layout
+change: AXI SRAM has about 750 B left before the 128 KiB-aligned panel
+buffer moves up and `.fault_stack` overflows (a 64 KiB-aligned stash
+overflowed it by 2,048 B).
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce
