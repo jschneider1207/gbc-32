@@ -1,5 +1,5 @@
-//! The hard-rules checker shared by `crates/gbc-firmware`, `gbc-link` and
-//! `gbc-link-board` (`tests/hard_rules.rs`), as a `[dev-dependencies]`
+//! The hard-rules checker shared by `crates/gbc-core`, `gbc-firmware`,
+//! `gbc-link` and `gbc-link-board` (`tests/hard_rules.rs`), as a `[dev-dependencies]`
 //! entry: dev-dependencies never enter the no_std (thumbv7em) build.
 //!
 //! The checker tokenizes every `.rs` file under a crate's `src` (comments
@@ -19,10 +19,10 @@
 //! as `#[cfg(test)] mod <name> { ... }` (other attributes may sit between
 //! the two). Nothing else counts as test code.
 //!
-//! **gbc-core keeps its own copy** (`crates/gbc-core/tests/hard_rules.rs`):
-//! adding even a dev-dependency to gbc-core needs the human (AGENTS.md).
-//! `tests/core_copy.rs` fails if core's copy of these functions drifts
-//! from this file.
+//! gbc-core uses it too (`crates/gbc-core/tests/hard_rules.rs`), as a
+//! dev-dependency approved by the human on 2026-11-27 (AGENTS.md normally
+//! escalates any gbc-core dependency); its dependency rule allows no normal
+//! dependency at all.
 
 use std::path::{Path, PathBuf};
 

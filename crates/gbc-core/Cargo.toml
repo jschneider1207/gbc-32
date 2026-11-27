@@ -10,6 +10,12 @@ publish.workspace = true
 # No dependencies: adding one needs human approval (AGENTS.md).
 [dependencies]
 
+# Dev-only: the shared hard-rules checker (tools/hard-rules) used by
+# tests/hard_rules.rs. Approved by the human 2026-11-27 (session 30); it must
+# never become a normal or build dependency (the test enforces that).
+[dev-dependencies]
+hard-rules = { path = "../../tools/hard-rules" }
+
 # Test-only hooks. No product build (desktop, firmware, romtest, the gate's
 # size and Ir checks) enables them; `scripts/check-sync-invariance.sh` does,
 # through `tools/bench`'s features of the same names (docs/perf.md
