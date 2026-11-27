@@ -570,7 +570,7 @@ reliably on the H753 after the 2026-11-25 USB drop.
 | # | Check | How | Result |
 |---|---|---|---|
 | 1 | Display | cgb-acid2 and dmg-acid2 look like their references; a game in motion looks acceptable (tearing, judder) | Partial (human, 2026-11-26): Wario Land 3 looked okay; colour test photo correct (order, orientation, not inverted). cgb-acid2/dmg-acid2 look not yet done. |
-| 2 | Audio | `cgb_sound`'s tones plus a game's music: no crackle or drift, right pitch | |
+| 2 | Audio | `cgb_sound`'s tones plus a game's music: no crackle or drift, right pitch | Done (human, 2026-11-27): heard the player's audio in several games after ADR 0044, "sounded good"; signed off. |
 | 3 | Input | every Game Boy button works on the input-test screen and in a game, with the joystick for the D-pad and PC input for the rest (and for all 8 on their own) | Done (human, 2026-11-26): buttons worked, PC input too. |
 | 4 | Real games at full speed | about 10 minutes each: Shantae, Alone in the Dark, Wario Land 3, LADX, Pokémon Crystal (save load and dump over the serial link, D6) | |
 | 5 | Power cycle | unplug and replug USB, then the banner shows `supply=ldo actvosrdy=1` and VOS0 (the supply write is only really exercised by a power-on reset) | |
