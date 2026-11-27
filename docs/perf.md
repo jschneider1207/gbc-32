@@ -1914,7 +1914,7 @@ Stack +120 B against the M5 figure (other changes since M5 too). The
 `--audio` columns are the second run of the same boot (no reflash, later
 game content), so they are not a clean audio-on/off pair.
 
-#### Session 31: stash swap (P2), stats cost (M4)
+#### Session 30 (cont.): stash swap (P2), stats cost (M4)
 
 `docs/reviews/stage2-comprehensive.md` P2 (16f88a3: a deferred frame is
 kept by swapping the loop's frame buffer with the display stash,
@@ -1983,6 +1983,67 @@ readbacks 12; cgb-acid2 756,851, 2; dmg-acid2 753,593, 2; cgb_sound
 2,468,349, 8; hdma_mode0 1,052,557, 2; rtc3test-sub-second 1,446,131,
 6, input 6/6, late 0). Host (gate H5): regenerated lists equal
 `tools/headless/expected/` (and the replay lists), no diff.
+
+#### Session 30 (cont.): COBS and CRC (P3)
+
+`docs/reviews/stage2-comprehensive.md` P3: the `--audio` tee encodes
+about 549 audio frames (1.6 kB) per video frame, and every byte went
+through an out-of-line `Sink::put`, an Option-checked COBS push and a
+two-lookup nibble CRC-32. Now (gbc-link only; the board's call site is
+unchanged): (a) CRC-32 slicing-by-4 (four const-generated 256-entry
+tables, 4 KiB `.rodata`, in flash on the board; single bytes and tails
+use the byte table) and (c) block-wise COBS (`cobs::Writer::push_slice`:
+each zero-free run up to the block's room found by a scan and copied in
+one go), both reached through a `put_all` override on the frame writer,
+so every field (`Audio.data`, chunk data, `Stats.extra`, the CRC) takes
+the slice path. (b), the STM32 CRC unit through a board hook, was not
+tried: (a) + (c) already reach the review's estimate. (a) and (c) were
+measured together only.
+
+Wire bytes are unchanged: property tests against the previous encoder
+(nibble CRC kept under `cfg(test)`, per-byte `push`) over every length
+0..=`MAX_PAYLOAD` / `MAX_CHUNK` at zero densities 0, 1/256, 1/16, 1/2 and
+all-zero, plus every zero position around the 254-byte block edge;
+mutation-checked (table order, dropped tail, a zero that does not close
+its block, 253-byte blocks, `put_all` without CRC: each fails).
+
+Measured 2026-11-27, A/B/A/B of `player` at 4d846f0 (before) and the
+P3 tree (after), 472 MHz, NUCLEO-H753ZI, Pokemon Red, `scripts/play-on-board.sh
+<copy> --seconds 80 --audio`, no input, 16 windows each. Before 1 ran on
+an image already up (fast path); the other three were flashed directly
+(`flash.sh`) just before, ROM already in the NOR. Same columns as above
+(fe = mean of the windows' `fe_mean`; maxima = largest window value;
+core max = `total_core_max`).
+
+| Pokemon Red, 80 s, `--audio` | before 1 / 2 | after 1 / 2 | change (means) |
+|---|---|---|---|
+| `audio_cyc_per_frame` | 116 / 116 | 51-52 / 51-53 | -65 (-56%) |
+| fe mean | 221,307 / 221,758 | 187,409 / 187,439 | -34.1 k (-15.4%) |
+| fe max | 317,034 / 326,008 | 250,283 / 251,160 | -71 k |
+| `fe_max_ex_stats` | 255,994 / 255,665 | 206,949 / 207,155 | -48.8 k |
+| `stats_max` (the report frame, M4) | 72,692 / 72,503 | 48,298 / 48,364 | -24.3 k (-33%) |
+| busy max | 1,665,287 / 1,597,195 | 1,557,666 / 1,551,704 | -77 k |
+| core mean | 881,345 / 873,817 | 875,606 / 874,516 | -0.3% |
+| core max | 1,387,519 / 1,363,275 | 1,378,973 / 1,364,435 | noise |
+| board underruns / over budget / audio dropped / timeouts | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | |
+| PC `underruns=` (frames) / `gaps=` | 0, 1 (169) / 0 | 1 (564), 1 (1,388) / 0 | PC side, both images |
+
+Reading: -65 cycles per audio frame is -35.7 k per video frame at 549
+frames, which the fe mean shows (-34.1 k; the review estimated 35-40 k).
+The `Stats` report frame (~0.9 kB through the same encoder) is 24 k
+cheaper, so fe max drops further. The PC's single underrun per run
+appears with both images, with the board's `audio_dropped` and
+`audio_timeouts` 0 and no gaps: the PC side, not the stream. `player.bin`
++4,560 B (the tables plus `push_slice`); `.itcm` 64,088 B unchanged, ITCM
+checks OK; stack_used 13,144 both. Kept.
+
+Save transfer (`crates/gbc-nucleo-h753/run-player-save.sh`, gate B5's
+invocation, at 4df60a8): PASS, the 32,816 B fixture round-tripped (dump
+hash verified, resends/naks/corrupt 0); the 1 MiB Pokemon Red load that
+followed verified its hash (the board's decode CRC on every chunk).
+Host: `cargo test -p gbc-link -p gbc-link-board -p gbc-pc -p
+gbc-firmware`, root and windows-gnu clippy, board clippy for every H3
+set: clean.
 
 ## ITCM placement plan
 
