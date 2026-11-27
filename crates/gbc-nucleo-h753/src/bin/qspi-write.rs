@@ -43,6 +43,7 @@
 use core::fmt::{self, Write};
 use core::hint::black_box;
 
+use gbc_firmware::fmt_buf::append_truncated;
 use gbc_nucleo_h753::qspi::{
     self, BLOCK_BYTES, NOR_BYTES, NorError, NorFlash, Op, PAGE_BYTES, QUAD_IO_READ,
     QUAD_IO_READ_XIP, Qspi, Read, SECTOR_BYTES,
@@ -155,9 +156,7 @@ struct Log<'a> {
 impl Write for Log<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let _ = self.out.write_str(s);
-        let n = s.len().min(self.buf.len() - self.len);
-        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
+        let _ = append_truncated(self.buf, &mut self.len, s);
         Ok(())
     }
 }

@@ -29,6 +29,7 @@
 
 use core::fmt::Write;
 
+use gbc_firmware::fmt_buf::append_truncated;
 use gbc_firmware::video::{OUT_H, OutFrame, scale_frame};
 use gbc_nucleo_h753::lcd::{self, FrameRate, Lcd};
 use gbc_nucleo_h753::lcd_dma::{self, LcdDma, Transfer, Y0, Y1};
@@ -48,10 +49,7 @@ struct Out<'a> {
 impl Write for Out<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let _ = self.uart.write_str(s);
-        let room = LOG_BYTES - self.len;
-        let n = s.len().min(room);
-        self.log[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
+        let _ = append_truncated(&mut self.log[..], &mut self.len, s);
         Ok(())
     }
 }

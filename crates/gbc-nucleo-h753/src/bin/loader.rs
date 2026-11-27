@@ -29,6 +29,7 @@
 
 use core::fmt::{self, Write};
 
+use gbc_firmware::fmt_buf::FmtBuf;
 use gbc_firmware::rom_image::{ImageError, ImageHeader};
 use gbc_link::ty;
 use gbc_nucleo_h753::loader::{Loader, Nor, Progress};
@@ -185,20 +186,9 @@ fn send(uart: &mut Uart, ring: &mut Ring, data: &[u8]) {
     }
 }
 
-/// A text report built in memory, then sent with [`send`].
-struct Text {
-    buf: [u8; 768],
-    len: usize,
-}
-
-impl Write for Text {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let n = s.len().min(self.buf.len() - self.len);
-        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
-        Ok(())
-    }
-}
+/// A text report built in memory, then sent with [`send`] (truncated at
+/// 768 bytes).
+type Text = FmtBuf<768>;
 
 /// `cycles` as milliseconds with one decimal.
 struct Ms(u32);
@@ -366,13 +356,9 @@ fn main() -> ! {
         if idle_ticks >= 300 && since_report >= 1000 {
             since_report = 0;
             board.banner(IMAGE);
-            let mut t = Text {
-                buf: [0; 768],
-                len: 0,
-            };
+            let mut t = Text::new();
             let _ = status(&mut t, &mut loader, &board.uart, &ring, &slow, (stored, dt));
-            let len = t.len;
-            send(&mut board.uart, &mut ring, &t.buf[..len]);
+            send(&mut board.uart, &mut ring, t.as_bytes());
             send(&mut board.uart, &mut ring, &[0]);
         }
     }

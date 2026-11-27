@@ -44,6 +44,7 @@ use gbc_core::{
 use gbc_firmware::buttons::{
     ChordEdge, Debouncer, FRAME_SAMPLES, RawInputs, SAVE_CHORD, Shared, merge, to_buttons,
 };
+use gbc_firmware::fmt_buf::FmtBuf;
 use gbc_firmware::fnv;
 use gbc_firmware::save::{self, Image, Layout};
 use gbc_nucleo_h753::joystick::Joystick;
@@ -135,35 +136,9 @@ impl Game for EmuGame {
     }
 }
 
-/// A text line built in memory, sent with a trailing 0x00.
-struct Text {
-    buf: [u8; 1024],
-    len: usize,
-}
-
-impl Text {
-    const fn new() -> Self {
-        Text {
-            buf: [0; 1024],
-            len: 0,
-        }
-    }
-    fn bytes(&mut self) -> &[u8] {
-        let n = self.len.min(self.buf.len() - 1);
-        self.buf[n] = 0;
-        &self.buf[..=n]
-    }
-}
-
-impl Write for Text {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let room = self.buf.len() - 1 - self.len;
-        let n = s.len().min(room);
-        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
-        Ok(())
-    }
-}
+/// A text line built in memory, sent with a trailing 0x00 (the last byte
+/// is kept for it: [`FmtBuf::reserving_nul`]).
+type Text = FmtBuf<1024>;
 
 /// Feeds what the DMA received to the session and hands its output to
 /// the transmit DMA (when idle).
@@ -226,7 +201,7 @@ fn main() -> ! {
     let mut echoed: Option<(u8, u8, u8)> = None;
     // Time in frames (the DWT counter wraps every 9.1 s).
     let (mut quiet, mut since_status) = (0u32, 0u32);
-    let mut text = Text::new();
+    let mut text = Text::reserving_nul();
     let mut t_frame = cycles();
     loop {
         let raw = deb.sample(joy.read());
@@ -266,7 +241,7 @@ fn main() -> ! {
             continue;
         }
         let now = (merged.bits(), raw.bits(), shared.pc().bits());
-        text.len = 0;
+        text.clear();
         if echoed != Some(now) {
             echoed = Some(now);
             let _ = write!(
@@ -282,7 +257,8 @@ fn main() -> ! {
         } else {
             continue;
         }
-        link.send(text.bytes());
+        let _ = text.push_nul();
+        link.send(text.as_bytes());
     }
 }
 
