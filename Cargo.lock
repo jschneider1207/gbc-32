@@ -648,11 +648,15 @@ name = "gbc-firmware"
 version = "0.1.0"
 dependencies = [
  "gbc-core",
+ "hard-rules",
 ]
 
 [[package]]
 name = "gbc-link"
 version = "0.1.0"
+dependencies = [
+ "hard-rules",
+]
 
 [[package]]
 name = "gbc-link-board"
@@ -660,6 +664,7 @@ version = "0.1.0"
 dependencies = [
  "gbc-firmware",
  "gbc-link",
+ "hard-rules",
 ]
 
 [[package]]
@@ -740,6 +745,10 @@ dependencies = [
  "web-sys",
  "windows",
 ]
+
+[[package]]
+name = "hard-rules"
+version = "0.1.0"
 
 [[package]]
 name = "hashbrown"

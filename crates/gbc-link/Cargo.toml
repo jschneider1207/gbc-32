@@ -12,3 +12,6 @@ workspace = true
 
 # No dependencies at all (D9); tests/hard_rules.rs enforces it.
 [dependencies]
+
+[dev-dependencies]
+hard-rules = { path = "../../tools/hard-rules" }

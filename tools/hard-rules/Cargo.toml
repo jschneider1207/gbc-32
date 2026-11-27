@@ -1,0 +1,15 @@
+[package]
+name = "hard-rules"
+description = "The source-level hard-rules checker shared by the no_std crates' tests/hard_rules.rs (infra, Q13)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Std-only and dependency-free. Used as a [dev-dependencies] entry only, so
+# it never enters a no_std build.
+[dependencies]

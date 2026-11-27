@@ -16,3 +16,6 @@ workspace = true
 [dependencies]
 gbc-firmware = { path = "../gbc-firmware" }
 gbc-link = { path = "../gbc-link" }
+
+[dev-dependencies]
+hard-rules = { path = "../../tools/hard-rules" }

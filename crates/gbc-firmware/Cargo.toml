@@ -13,3 +13,6 @@ workspace = true
 # Only gbc-core (ADR 0036, D9); tests/hard_rules.rs enforces it.
 [dependencies]
 gbc-core = { path = "../gbc-core" }
+
+[dev-dependencies]
+hard-rules = { path = "../../tools/hard-rules" }
