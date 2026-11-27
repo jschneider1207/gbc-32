@@ -1840,6 +1840,80 @@ change: AXI SRAM has about 750 B left before the 128 KiB-aligned panel
 buffer moves up and `.fault_stack` overflows (a 64 KiB-aligned stash
 overflowed it by 2,048 B).
 
+### Session 30 review fixes (scaler, DAC ISR)
+
+`docs/reviews/stage2-comprehensive.md` P1 (scaler two pixels per u32, no
+stack row, f4b11d1) and P5 (DAC ISR: neutral `PcmFrame` ring, the 12-bit
+conversion fused into the pop, ea6e9dc/4ac67b1; P4 ba6b626 and ADR 0044
+with it). Measured 2026-11-27, HEAD e8b8efd, 472 MHz, NUCLEO-H753ZI.
+
+**Scaler, isolated** (`headless-display-cgb-acid2`, `te-wait`, 587
+`FRAME_READY` frames of 600; `cd crates/gbc-nucleo-h753 && ./build.sh
+headless-display-cgb-acid2 && RUN_HEADLESS_READ_SECS=120
+./run-headless.sh out/headless-display-cgb-acid2.bin
+../../tools/headless/expected/cgb-acid2.txt`: EQUAL, 602 lines, display
+self-test passed, 0 mismatches, 0 transfer errors):
+
+| `stats display cpu` | before ("Display in the loop (M3)") | after | change |
+|---|---|---|---|
+| `scale_frame` min / mean / max | 195,927 / 196,671-196,682 / 197,247 | 117,510 / 118,674 / 120,169 | -78.0 k mean (-39.7%) |
+| `present` (setup) min / mean / max | 298 / 335 / 386 | 302 / 319 / 348 | noise |
+| worst_sum | 197,759 (2.50% of a frame) | 120,517 (1.53%) | |
+| `run_frame` mean / max | 681,453 / 753,464 | 682,443 / 753,509 | +0.15% / +0.01% (another build) |
+
+The review estimated 85-100 k; the measured 118.7 k is above it, still
+-40%.
+
+**Live `player`** (no input, `scripts/play-on-board.sh <copy of the ROM>
+--seconds N [--audio]`; fe = mean of the windows' `fe_mean`, fe max and
+busy max = largest window value, core max = `total_core_max`; ISR = the
+range of the windows' `audio_isr_max`). Pokemon Red 80 s, freshly loaded
+and flashed, 16 windows, against "No hashing in the live image":
+
+| Pokemon Red, 80 s | before (no audio) | after, no audio | after, `--audio` (next run, same boot) |
+|---|---|---|---|
+| fe mean | 244,589 | 167,126 (-77.5 k, -31.7%) | 231,321 |
+| fe_mean range | 217,603-253,741 | 160,302-175,748 | 185,832-238,185 |
+| fe max | 321,577 | 247,554 (-74.0 k) | 323,048 |
+| busy max (last window) | 1,605,867 | 1,518,411 (-87 k) | 1,590,351 |
+| core max | 1,349,528 | 1,372,254 (+22.7 k, +1.7%) | 1,356,540 (window max) |
+| core mean (mean of windows) | - | 880,410 | 879,994 |
+| `audio_isr_max` | 8,356 off / 10,496 tee on (ADR 0041, this game's intro) | 2,726-2,802 (-66%) | 5,208-5,290 (-50%) |
+| `audio_cyc_per_frame` (tee) | 107 (ADR 0041) | - | 116 |
+| over budget / underruns / dac_restarts / display_errors | 0 / 0 / 0 / - | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| presented / skipped (since boot) | - | 5,958 / 189 | 11,877 / 191 |
+| audio dropped / timeouts | - | - | 0 / 0 (PC: 0 underruns, 0 gaps) |
+| stack_used | 12,968 (M5) | 13,088 / 22,912 | 13,088 |
+
+Wario Land 3 120 s, freshly loaded and flashed, 24 windows, against the
+M7 P2 WBWA runs 1 / 2 (their core mean was a temporary build's since-boot
+figure, not reproducible from `Stats`):
+
+| Wario Land 3, 120 s | before (WBWA runs 1 / 2) | after, no audio | after, `--audio` (next run, same boot) |
+|---|---|---|---|
+| fe mean | 231,208 / 230,492 | 166,785 (-64 k, -27.8%) | 233,829 |
+| fe max | 330,076 / 331,956 | 247,162 | 321,692 |
+| busy max | 2,139,309 / 2,126,960 | 2,062,144 (-3.3%) | 2,142,274 |
+| core max | 1,886,378 / 1,877,559 | 1,886,758 | 1,876,027 (window max) |
+| core mean (mean of windows) | - | 1,120,298 | 1,229,879 |
+| `audio_isr_max` | - | 2,767-2,936 | 5,230-5,410 |
+| skipped (presented), since boot | 613 / 315 | 343 (8,147) | 877 (16,966) |
+| over budget / underruns / dac_restarts | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0; audio dropped 0, 117 cyc/frame |
+
+Reading: the scaler's -78 k per presented frame shows as -64 to -77 k of
+live fe mean (about 95-97% of frames are presented); fe max drops by
+74-85 k. The DAC ISR's worst case falls by 5.2-5.6 k cycles per half
+(`audio_dac::HALF` = 256 frames, about 2.1 halves per video frame, so
+about 11-12 k cycles per video frame, counted in `core`). The
+tee's main-loop pack/encode is 116-117 cycles per frame against ADR 0041's
+107 (+9, about 5 k per video frame while streaming: it now converts from
+`PcmFrame`), less than the ISR saves. Core max: Wario Land 3 equal; Pokemon
+Red +1.7% (one frame since boot; neither change adds work to `core`, the
+ISR part shrank, so a layout/single-frame effect, not checked further).
+Stack +120 B against the M5 figure (other changes since M5 too). The
+`--audio` columns are the second run of the same boot (no reflash, later
+game content), so they are not a clean audio-on/off pair.
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce
