@@ -587,8 +587,8 @@ fn run_with_live_input_and_service_matches_the_script() {
     assert_eq!(report.emulated, report.clock);
 }
 
-/// A service with `HASHES` off: the frame and feed hashes stay the hash of
-/// nothing, and everything else the run reports is the hashed run's (whose
+/// A service with `HASHES` off: the ROM, frame and feed hashes stay the
+/// hash of nothing, and everything else the run reports is the hashed run's (whose
 /// lines `run_with_live_input_and_service_matches_the_script` checks).
 #[test]
 fn run_with_hashes_off_leaves_the_hashes_and_nothing_else() {
@@ -613,11 +613,26 @@ fn run_with_hashes_off_leaves_the_hashes_and_nothing_else() {
     };
     assert_eq!(same(&off), same(&on));
     assert_eq!(off_log, on_log);
+    // The header skips the ROM hash (K10: an 8 MiB ROM would take about
+    // 240 ms before the first frame), only that.
+    let rom_fnv = |h: u64| format!(" rom_fnv={h:016x} ");
+    assert!(
+        on_lines[0].contains(&rom_fnv(fnv::hash(&rom))),
+        "{}",
+        on_lines[0]
+    );
+    assert!(
+        off_lines[0].contains(&rom_fnv(fnv::hash(&[]))),
+        "{}",
+        off_lines[0]
+    );
     // The lines differ only in the hash fields.
     assert_eq!(off_lines.len(), on_lines.len());
     let strip = |l: &str| {
         l.split(' ')
-            .filter(|f| !f.starts_with("fbs=") && !f.starts_with("feed="))
+            .filter(|f| {
+                !f.starts_with("fbs=") && !f.starts_with("feed=") && !f.starts_with("rom_fnv=")
+            })
             .collect::<Vec<_>>()
             .join(" ")
     };

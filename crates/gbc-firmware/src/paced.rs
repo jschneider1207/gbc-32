@@ -168,13 +168,18 @@ pub trait Service {
     #[inline]
     fn frame_done(&mut self, _frame: u32, _cycles: FrameCycles) {}
 
-    /// Whether the run hashes what it produced: the frame hash (`fbs`,
-    /// every completed frame) and the DAC feed hash (`feed`, every push).
+    /// Whether the run hashes what it produced and was given: the ROM
+    /// hash in the header line (`rom_fnv`, the whole image before the
+    /// first frame: about 240 ms for an 8 MiB ROM from the NOR, which the
+    /// live start ramp would otherwise have to cover), the frame hash
+    /// (`fbs`, every completed frame) and the DAC feed hash (`feed`, every
+    /// push).
     /// On (the default) for every run whose `paced` lines are compared;
     /// the live player, which discards its lines, turns it off (the frame
     /// hash alone is 2.3% of a frame on the board, docs/perf.md "Paced
-    /// loop (M4)"). Off, [`Report::fbs`] and [`Report::feed`] stay the hash
-    /// of nothing and [`FrameCycles::hash`] measures an empty interval;
+    /// loop (M4)"). Off, `rom_fnv` is the hash of no bytes, [`Report::fbs`]
+    /// and [`Report::feed`] stay the hash of nothing and
+    /// [`FrameCycles::hash`] measures an empty interval;
     /// every other effect of the run is the same. A constant, so the
     /// branches compile out.
     const HASHES: bool = true;
@@ -350,7 +355,7 @@ where
         out,
         "paced v1 rom_bytes={} rom_fnv={:016x} input_fnv={:016x} frames={frames}",
         rom.len(),
-        fnv::hash(rom),
+        fnv::hash(if V::HASHES { rom } else { &[] }),
         input.fnv(),
     )?;
     let (fill, tap_frames) = (ring.fill(), tap.frames());

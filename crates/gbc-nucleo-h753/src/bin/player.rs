@@ -90,7 +90,8 @@ const IMAGE: &str = "player";
 #[cfg(feature = "player-script")]
 const IMAGE: &str = "player-script";
 /// Only the scripted image's `paced` lines are compared, so only it hashes
-/// its frames and its DAC feed ([`Service::HASHES`]; 2.3% of a frame).
+/// the ROM for its header, its frames and its DAC feed ([`Service::HASHES`];
+/// the frame hash is 2.3% of a frame, the ROM hash about 30 ms per MiB).
 const HASHES: bool = cfg!(feature = "player-script");
 
 const ROM_NAME: &str = "qspi";
@@ -127,6 +128,13 @@ const MAX_CHANGES: usize = 256;
 /// start ramp (187 ms; `paced_board::start_dac`). Scripted mode uses
 /// [`RAMP_LEFT`] (4) as the `paced` image, so its speed figure stays
 /// comparable: a large ROM may then underrun at the start.
+///
+/// 24 was sized for the live run hashing a 2 MiB ROM before its first
+/// frame (about 60 ms). Since K10 the live run no longer hashes the ROM
+/// (`HASHES` off), so the ramp only has to cover `headless::start` and the
+/// first frames filling the ring, whatever the ROM size. 24 is kept as
+/// margin until a board run shows a smaller value has 0 underruns in the
+/// first Stats window.
 const LIVE_RAMP_LEFT: u32 = 24;
 
 static RING: FeedRing = FeedRing::new();
@@ -822,9 +830,10 @@ fn main() -> ! {
 
     if live {
         let mut input = LiveInput::<_, FRAME_SAMPLES>::new(Joystick::new(), &shared);
-        // The ring must be full before the ramp ends: the run first hashes
-        // the whole ROM for its header line (2 MiB from the NOR: about
-        // 60 ms, measured as 5 underruns at the start with RAMP_LEFT).
+        // The ring must be full before the ramp ends. The live run skips
+        // the ROM hash (`HASHES` off; with it, a 2 MiB ROM cost about
+        // 60 ms, measured as 5 underruns at the start with RAMP_LEFT, and
+        // an 8 MiB one would cost about 240 ms, past the 187 ms ramp).
         let _ = start_dac(&mut dac, LIVE_RAMP_LEFT);
         let _ = paced::run_with(
             rom,
