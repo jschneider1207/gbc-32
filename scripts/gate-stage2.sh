@@ -640,9 +640,11 @@ sub "scripts/test-board-lock.sh (scripts/lib/board-lock.sh: serializes, re-enter
 run_status scripts/test-board-lock.sh
 [ "${rc}" -eq 0 ] || fail "scripts/test-board-lock.sh exited ${rc}"
 # The board run scripts' pass/fail logic, on synthetic and committed
-# captures (never the board, never the board lock; human, 2026-11-26).
+# captures (never the board, never the board lock; human, 2026-11-26),
+# and test-gate-board: this gate's own verdicts on the board steps' output
+# (scripts/lib/gate-board.sh; M7 review T11).
 for t in test-run-headless test-check-report test-check-cycles test-check-itcm-elf test-run-paced test-run-replay \
-  test-check-selftest test-check-stage2-sets; do
+  test-check-selftest test-check-stage2-sets test-gate-board; do
   sub "scripts/${t}.sh (every failure mode of the script it tests, plus a pass case)"
   run_status "scripts/${t}.sh"
   [ "${rc}" -eq 0 ] || fail "scripts/${t}.sh exited ${rc}"
@@ -872,15 +874,11 @@ DISPLAY_BIN=${FW}/out/headless-display-cgb-acid2.bin
 stack_lines=()
 
 if [ "${board_wanted:-0}" = 1 ]; then
-# board_rc <what> <rc>: a board script's exit: 0 on, 1 a check failed, else
-# a tool error (the scripts' own contract: 2, or a crash).
-board_rc() {
-  case $2 in
-    0) ;;
-    1) fail "$1: a check failed (exit 1)" ;;
-    *) tool_error "$1 exited $2" ;;
-  esac
-}
+# The verdicts on what the board scripts print (board_rc, board_absent,
+# *_verdict): scripts/lib/gate-board.sh, tested by scripts/test-gate-board.sh
+# (H7).
+# shellcheck source=lib/gate-board.sh
+. scripts/lib/gate-board.sh
 # fresh_image <file>...: each was built by this run (H4 or the build below).
 fresh_image() {
   local f
@@ -937,13 +935,13 @@ drive=${H7_DRIVE:-E:} label=${H7_LABEL:-NOD_H753ZI} port=${H7_COM:-COM5}
 win() { (cd /mnt/c && cmd.exe /c "$1" 2> /dev/null || true) | tr -d '\r'; }
 case "${drive}" in [A-Za-z]:) ;; *) tool_error "H7_DRIVE=${drive} is not a drive letter like E:" ;; esac
 case "${port}" in COM[0-9] | COM[0-9][0-9]) ;; *) tool_error "H7_COM=${port} is not a port like COM5" ;; esac
-vol=$(win "vol ${drive}")
-case "${vol}" in *"${label}"*) ;; *) fail "no board: volume ${drive} is not labelled ${label} (${vol:-no answer}); attach the NUCLEO-H753ZI" ;; esac
-case "$(win "if exist ${drive}\\DETAILS.TXT echo yes")" in
-  *yes*) ;; *) fail "no board: ${drive} has no DETAILS.TXT (not an ST-LINK drive)" ;;
-esac
-ports=$(powershell.exe -NoProfile -NonInteractive -Command "[System.IO.Ports.SerialPort]::GetPortNames()" 2> /dev/null | tr -d '\r' || true)
-grep -qx "${port}" <<< "${ports}" || fail "no board: serial port ${port} is not present (ports: $(tr '\n' ' ' <<< "${ports}"))"
+# The probes board_absent (scripts/lib/gate-board.sh) judges.
+board_vol() { win "vol ${drive}"; }
+board_details() { win "if exist ${drive}\\DETAILS.TXT echo yes"; }
+board_ports() {
+  powershell.exe -NoProfile -NonInteractive -Command "[System.IO.Ports.SerialPort]::GetPortNames()" 2> /dev/null | tr -d '\r' || true
+}
+if why=$(board_absent); then fail "no board: ${why}"; fi
 echo "  board: ${drive} (${label}), ${port}"
 
 # sets_check: the run lists equal acceptance/stage2.toml; sets SAVE_FIXTURE.
@@ -955,23 +953,20 @@ sets_check() {
   set -e
   sed 's/^/  /' "${TMP}/sets.log"
   board_rc "scripts/check-stage2-sets.sh" "${rc}"
-  SAVE_FIXTURE=$(sed -n 's/^save_fixture=//p' "${TMP}/sets.log")
-  [ -n "${SAVE_FIXTURE}" ] || tool_error "scripts/check-stage2-sets.sh printed no save_fixture="
+  sets_verdict "${TMP}/sets.log"
 }
 # replay_run <dir> <list> <label>: run-replay.sh over a list; every entry
 # of the list must be in its summary as PASS with equal=yes and at least
 # one panel readback with 0 mismatches.
 replay_run() {
-  local out=$1 list=$2 n_want n_pass
+  local out=$1 list=$2
   set +e
   RUN_REPLAY_OUT=${out} ${FW}/run-replay.sh "${list}" > "${out}.log" 2>&1
   rc=$?
   set -e
   grep -E '^run-replay.sh: (===|summary|PASS|FAILED|TOOL ERROR)|^  [^ ]+: (PASS|FAIL|TOOL ERROR)|^  run-paced.sh: (speed|CHECK FAILED)|CHECK FAILED' "${out}.log" || true
   board_rc "run-replay.sh $3" "${rc}"
-  n_want=$(sed 's/#.*//' "${list}" | awk 'NF' | wc -l)
-  n_pass=$(grep -cE '^  [^ ]+: PASS equal=yes underruns=0 over_budget=0 core_max=[0-9]+ readbacks=[1-9][0-9]* mismatches=0( |$)' "${out}.log" || true)
-  [ "${n_pass}" = "${n_want}" ] || tool_error "run-replay.sh $3 exited 0 with ${n_pass} PASS lines for ${n_want} entries"
+  replay_verdict "${out}.log" "${list}" "$3"
   stack_lines+=("$(grep -ho 'stack_used=[0-9]*/[0-9]*' "${out}"/*.run-paced.log 2> /dev/null |
     sort -t= -k2 -n | tail -n 1 | sed "s|^|$3 player-script, deepest of the entries: |" || true)")
 }
@@ -1003,9 +998,7 @@ rc=$?
 set -e
 sed 's/^/  /' "${TMP}/b2.log"
 board_rc "run-qspi.sh (check-report.sh --qspi: expected-hashes.txt, both passes)" "${rc}"
-caps=("${TMP}"/b2/*.txt)
-[ ${#caps[@]} -eq 1 ] && [ -f "${caps[0]}" ] || tool_error "run-qspi.sh left ${#caps[@]} captures in ${TMP}/b2, not 1"
-grep -q '^check-report.sh: OK' "${TMP}/b2.log" || tool_error "run-qspi.sh exited 0 without check-report.sh's OK"
+qspi_verdict "${TMP}/b2.log" "${TMP}/b2"
 sub "check-cycles.sh --fresh (expected-cycles.txt +3%, two agreeing reports, real time)"
 set +e
 ${H7B}/check-cycles.sh --fresh "${caps[0]}" "${BENCH_BIN}" > "${TMP}/b2-cycles.log" 2>&1
@@ -1013,9 +1006,7 @@ rc=$?
 set -e
 grep -v '^check-report.sh: ' "${TMP}/b2-cycles.log" | sed 's/^/  /' || true
 board_rc "check-cycles.sh" "${rc}"
-grep -q '^check-cycles.sh: OK' "${TMP}/b2-cycles.log" || tool_error "check-cycles.sh exited 0 without its OK"
-grep -q '^REPORT: flash worst-case ' "${TMP}/b2-cycles.log" && grep -q '^REPORT: qspi worst-case ' "${TMP}/b2-cycles.log" ||
-  tool_error "check-cycles.sh printed no worst-case REPORT line for both passes"
+cycles_verdict "${TMP}/b2-cycles.log"
 stack_lines+=("B2 bench: $(tr -d '\000\r' < "${caps[0]}" | grep '^h7bench v1 stack used=' | tail -n 1 | sed 's/^h7bench v1 stack //' || true)")
 fi
 
@@ -1033,8 +1024,7 @@ rc=$?
 set -e
 grep -E '^run-headless.sh: ' "${TMP}/b3-display.log" | sed 's/^/  /' || true
 board_rc "run-headless.sh (display readback)" "${rc}"
-grep -q '^run-headless.sh: display self-test passed: .* 0 mismatches' "${TMP}/b3-display.log" ||
-  tool_error "run-headless.sh exited 0 without its display self-test line"
+display_verdict "${TMP}/b3-display.log"
 sub "run-replay.sh replay-set.txt (loads each ROM into the QSPI NOR)"
 replay_run "${TMP}/b3" ${FW}/replay-set.txt B3
 fi
@@ -1048,11 +1038,7 @@ sub "run-replay.sh soak-set.txt (35,837 frames; about 12 minutes)"
 replay_run "${TMP}/b4" ${FW}/soak-set.txt B4
 # Emulated speed against the board's own cycle counter (`stats paced
 # speed` ppm, run-paced.sh): the entry's bound must be the +-0.1%.
-speed=$(grep -h '^run-paced.sh: speed ppm=' "${TMP}/b4.log" "${TMP}"/b4/*.run-paced.log 2> /dev/null | tail -n 1 || true)
-[[ "${speed}" =~ ppm=([+-][0-9]+)\ \(bound\ ([0-9]+)\) ]] || tool_error "B4: no 'run-paced.sh: speed ppm=' line"
-ppm=${BASH_REMATCH[1]} bound=${BASH_REMATCH[2]}
-[ "${bound}" -le 1000 ] || fail "B4: the soak's speed bound was ${bound} ppm, not <= 1000 (soak-set.txt max_ppm)"
-[ "${ppm#[+-]}" -le 1000 ] || fail "B4: emulated speed ${ppm} ppm of the cycle counter (want within +-1000)"
+speed_verdict "${TMP}/b4.log" "${TMP}"/b4/*.run-paced.log
 echo "  emulated speed ${ppm} ppm of the board's cycle counter (bound ${bound})"
 fi
 
@@ -1068,7 +1054,7 @@ rc=$?
 set -e
 sed 's/^/  /' "${TMP}/b5.log"
 board_rc "run-player-save.sh" "${rc}"
-grep -q "^run-player-save: PASS fixture " "${TMP}/b5.log" || tool_error "run-player-save.sh exited 0 without its PASS line"
+save_verdict "${TMP}/b5.log"
 stack_lines+=("B5 player (live): $(grep -ao 'stack_used=[0-9]*/[0-9]*' "${TMP}/b5/play.txt" 2> /dev/null | tail -n 1 || true)")
 fi
 fi
