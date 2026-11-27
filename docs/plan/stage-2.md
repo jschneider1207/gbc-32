@@ -598,6 +598,7 @@ From the M7 review (`docs/reviews/stage2-m7.md`):
 - [ ] (M7 P8) player stack: 19,800 of 22,912 B scripted; move the 4 KiB clock table (player.rs:118) off the stack
 - [ ] (M7 P9) fe regression bound (B4 only checks < 100%); ratchet sits on +-1.7% noise; guard `player`, not just the bench
 - [ ] (M7 P10) p99 histogram range below a 550 MHz frame (player.rs:60-63); `Elapsed` wraps after 7.8 s at 550 MHz (paced.rs:517)
+- [ ] (session 29) player `queue_stats`: a Stats text over `MAX_STATS_EXTRA` (1016 B) drops the frame uncounted (not even `stats_dropped`); lines are ~885 B now
 - [ ] (M7 carry-over) H735 items: AXI 394,240 vs 262,144 B, memory-x chip and `CORE_TEXT_OFFSET` assert, ITCM reserve 3,854 B, HyperRAM rebaseline, 550 MHz projection, crystal SAI pacing clock (see architecture.md "Carry-over to Stage 3")
 
 Still open from M1-M6 (copied, also kept in their milestones):

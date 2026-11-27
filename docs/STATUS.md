@@ -10,7 +10,8 @@
   listening, buttons = sign-off items 1-3) are still open: the tags were
   set without them so work could continue overnight. **M7 (Stage 2 review
   and sign-off): agent work done** (session 28): full `gate-stage2.sh`
-  with the board **exit 0** (2676 s), three reviews recorded in
+  with the board **exit 0** (2676 s; re-run after session 29's fixes on
+  08a5213: **exit 0**, 2614 s), three reviews recorded in
   `docs/reviews/stage2-m7.md` (no high; every medium fixed or rejected
   with numbers). **Waiting on the human:** gate first-version approval,
   the sign-off checklist (plan bottom, items 1, 2, 4, 5) and the Stage 2
@@ -73,8 +74,8 @@
   sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
 - **Board state:** `player` flashed (session 28 main, after the gate run), the B5 save fixture ROM (32 KiB) in the NOR, not Pokemon Red. To play (reloads the NOR if needed):
   `scripts/play-on-board.sh <rom>` (see Needs human).
-- **Last updated:** 2026-11-26, session 28 (log
-  `logs/2026-11-26-28-stage2-m7.md`; session 27: M6).
+- **Last updated:** 2026-11-26, session 29 (log
+  `logs/2026-11-26-29-stage2-m7-lows.md`; session 28: M7).
 - **Model (human, 2026-11-25):** Opus is fine.
 
 ## Next up: Stage 2 sign-off (human), then Stage 3 prep
@@ -85,9 +86,10 @@ answer: the plan's "Stage 3 carry-over tasks" (end of
 `docs/plan/stage-2.md`) and architecture "Targets" carry-over list are
 the backlog; many need the H735 board (Stage 3 scope is the human's, so
 don't start Stage 3 itself). Board-independent ones that are fair game
-now: the M7 low fixes on this board (C3 fault path quiescing, C5 RX
-overflow count, C7 SAFETY comments, T9 exit code on board loss, T11
-tests of the gate's board-step parsing). Re-run `gate-stage2.sh` alone
+now: C3, C5, C7, C8, T9, T11 are done (session 29); remaining
+board-independent lows: C6 (NDTR ordering), C9 (PC13 vs LSE), P8 (clock
+table off the player stack), the Stats-too-long drop (plan), Stage 1
+leftovers. Re-run `gate-stage2.sh` alone
 after any firmware or gate change (~45 min, board attached).
 
 Firmware map (ADR 0036): `crates/gbc-firmware` (no_std headless loop,
@@ -177,6 +179,20 @@ Working rules that matter here:
 - Stale branch `m5-link` = a pre-squash copy of merged work; delete with `git branch -D m5-link` (agents may not force-delete).
 
 ## Needs human
+
+Open (session 29, 2026-11-26):
+- **FYI, B1 measurement (08a5213):** the selftest's timed loop now runs
+  from ITCM behind a `dsb; isb`. Cause of a B1 failure: C3 grew the image
+  and moved `<u32 as Display>::fmt` into the timed line's I-cache set (2
+  ways, with `Board::banner`), so after each banner the loop refilled from
+  flash (+1..3 cycles). Without the barrier, the LED toggle's GPIOB write
+  in flight gave 8000008. check-selftest.sh is unchanged; still 8000019 on
+  every line. Object if you see this as changing what B1 measures.
+- **Confirm (T9, ea406c8):** with the board gone after the lock, a tool
+  error now exits 1 (failure), not 2 (results not meaningful). Never a
+  pass either way.
+- FYI: B5 and `run-save-roundtrip.sh` now also require `rx_overflow=0`
+  (stricter only, a89fa81); gate H7 runs `scripts/test-gate-board.sh`.
 
 Open (session 28, 2026-11-26):
 - **Approve the first version of the gate's board steps B1-B5** (plan:

@@ -11,12 +11,12 @@ high findings. "Stage 3 task" = one-line task in `docs/plan/stage-2.md`
 |---|---|---|---|---|
 | C1 | med | audio_dac.rs `AudioDac::watchdog` (called player.rs:242, paced.rs:234) | `cycles()` is read before `LAST_AT`; an ISR in between plus a wrap gives a false DAC restart (~15 ms held) | **fixed** b6e9236 (`LAST_AT` read first); no host test feasible (read order vs ISR, board crate has no host harness); board: `dac_restarts=0` in 2 x 80 s player runs |
 | C2 | med | clock bring-up (SYSCFG CCCSR) | I/O compensation cell never enabled while QSPI runs at 99.2 MHz; DS12117 Tables 170/149 note 5 and RM0433 11.3.11 assume it | **fixed** 47f804b (CSI on, CCCSR.EN, bounded waits); banner `cccsr=0x00000101` seen on the board; B2 QSPI hash-equal at 99.2 MHz; gate B1 requires it, 0e7ab23 (seen failing) |
-| C3 | low | fault.rs `die()` | IRQs and DMA still running; `CR3.DMAT` left set interleaves TX with the FAULT line | Stage 3 task |
+| C3 | low | fault.rs `die()` | IRQs and DMA still running; `CR3.DMAT` left set interleaves TX with the FAULT line | **fixed** d8c8588 (session 29; board probe: clean FAULT line vs garbled before) |
 | C4 | low | DAC DMAUDR1 handling | not per RM0433 26.4.8 (re-init after underrun) | Stage 3 task |
-| C5 | low | link_uart | RX overflow (ring lap) is silent | Stage 3 task |
+| C5 | low | link_uart | RX overflow (ring lap) is silent | **fixed** d04dc62, a89fa81 (session 29; `rx_overflow=`, B5 requires 0; board: counts a forced lap) |
 | C6 | low | NDTR vs posted writes | ordering of NDTR reads against posted writes (reviewer's guess) | Stage 3 task |
-| C7 | low | qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window` | SAFETY comments rest on a false "no interrupt" premise | Stage 3 task |
-| C8 | low | qspi.rs vs clock.rs | cites DS12117 rev Y, clock.rs rev V | Stage 3 task |
+| C7 | low | qspi.rs regs/`Mapped::exit`, mpu `qspi_window`/`fmc_window` | SAFETY comments rest on a false "no interrupt" premise | **fixed** 8307e0d (comments only) |
+| C8 | low | qspi.rs vs clock.rs | cites DS12117 rev Y, clock.rs rev V | **fixed** 8307e0d (DS12117 Rev 10 throughout) |
 | C9 | low | clockcheck | ES0392 2.2.30: PC13 vs LSE during clockcheck | Stage 3 task |
 
 ## Test integrity
@@ -31,9 +31,9 @@ high findings. "Stage 3 task" = one-line task in `docs/plan/stage-2.md`
 | T6 | low | plan text vs `acceptance/stage2.toml` | +-0.1% claim vs DWT on the HSI | needs the human (asked) |
 | T7 | low | check-stage2-sets.sh | accepts unknown keys, no model check | **fixed** c4f5fa7: unknown keys exit 2, model `cgb-c` checked |
 | T8 | low | board runs | no boot nonce (guess) | Stage 3 task |
-| T9 | low | gate board steps | board loss after the lock is exit 2, not 1 (never a pass) | Stage 3 task |
+| T9 | low | gate board steps | board loss after the lock is exit 2, not 1 (never a pass) | **fixed** ea406c8 (exit 1; human asked to confirm) |
 | T10 | low | check-cycles.sh:82, gate-stage2.sh:717-719 | wrong comments | **fixed** 3f94b15 |
-| T11 | low | gate board-step parsing | no tests of the gate's own parsing | Stage 3 task |
+| T11 | low | gate board-step parsing | no tests of the gate's own parsing | **fixed** 3b6228c (`scripts/test-gate-board.sh` in H7; 63/63 mutants caught) |
 
 ## Performance and portability
 
