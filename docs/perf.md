@@ -2045,6 +2045,86 @@ Host: `cargo test -p gbc-link -p gbc-link-board -p gbc-pc -p
 gbc-firmware`, root and windows-gnu clippy, board clippy for every H3
 set: clean.
 
+#### Session 30 (cont.): BTAC-off ratchet (M1), layout sets (M2), align-loops (P6)
+
+`docs/reviews/stage2-comprehensive.md` M1, M2 and P6, 2026-11-27, at
+c396203 plus this change (built in the main checkout).
+
+**M2: layout sets.** `tools/h7-bench/layout-set.sh` (README.md "Layout
+sets") builds `bench-itcm-dtcm` at ITCM start pads 0/4/8/16/24 B
+(`H7_BENCH_ITCM_PAD`, `memory_x::ItcmSet::with_pad`: zero bytes at the start
+of `.itcm`; `.text_core` stays at its fixed address), runs each once on the
+board (run-qspi.sh, check-report.sh --qspi passed on all 20 runs below) and
+reports per line the set mean and the spread, (largest - smallest build
+mean) / set mean. `compare` calls a difference noise when it is below the
+larger of the two sets' spreads. The pad-0 images are byte-identical to
+build.sh's. `.itcm` is 64,032 / 64,032 / 64,040 / 64,048 / 64,056 B over the
+pads (pad 4 is absorbed by an alignment gap, but moves every function).
+
+Layout noise, the same source over the five pads (largest spread over the
+mean= and max= fields):
+
+| Lines | predictor on | predictor off (`btac-off`) |
+|---|---|---|
+| bound set (worst-case, cgb-raster, dmg-raster, event-storm, cpu_instrs), both passes | 1.18% (qspi cgb-raster max) | 0.10% (qspi worst-case max) |
+| all 30 lines | 2.51% (flash storm-div max) | 0.28% (qspi halt-irq max) |
+| worst-case set mean (flash) | 3,302,424 | 3,676,009 (+11.3%) |
+
+With the predictor on, a single build can sit 1.2% (cgb-raster) or 2.5%
+(storm-div) from another build of the same source; with it off, 0.28% at
+most. The predictor-on figures agree with ADR 0042's perturbation table.
+
+**M1: BTAC-off ratchet (ADR 0045).** Gate B2 now also runs
+`bench-itcm-dtcm-btacoff-pll480` (feature `btac-off`: ACTLR bits 13 and 14
+before the first workload) and checks it with `check-cycles.sh --fresh
+--tolerance-bp 90` against `tools/h7-bench/expected-cycles-btac-off.txt`:
+every line at most +0.90% (3x the 0.279% spread, rounded up). The +3%
+check on `expected-cycles.txt` is unchanged and its figures stay the
+reported ones. `--tolerance-bp` takes 1..300 only (it cannot loosen the
++3%). `./scripts/gate-stage2.sh --step B2` at 9a3cba4 (exit 3, every step
+that ran passed, 354 s): the BTAC-on pass within -0.60%..+0.35% of
+`expected-cycles.txt` over its 60 mean/max fields, the BTAC-off pass
+within -0.05%..+0.03% of the new baseline.
+
+**P6: `-C llvm-args=-align-loops=1`.** Sets of five, `--rustflags
+"-Cllvm-args=-align-loops=1"`, against the default sets above:
+
+| | default | `-align-loops=1` | change |
+|---|---|---|---|
+| `.itcm` (pad 0) | 64,032 B | 59,312 B | -4,720 B (ITCM free 1,248 -> 5,968 B) |
+| `.text_core` | 51,352 B | 49,656 B | -1,696 B |
+| `.text` | 34,144 B | 33,416 B | -728 B |
+
+Cycles, set mean of mean= (flash pass; the QSPI pass is within 0.15 points
+of it on every line), B against A, and the larger spread of the two sets:
+
+| Workload | predictor on: delta (spread) | verdict | predictor off: delta (spread) | verdict |
+|---|---|---|---|---|
+| worst-case | -0.76% (0.12%) | outside, faster | +0.22% (0.04%) | outside |
+| cgb-raster | +5.91% (2.25%) | outside | +1.17% (0.04%) | outside |
+| dmg-raster | +2.05% (0.25%) | outside | +0.96% (0.06%) | outside |
+| event-storm | -0.17% (0.84%) | noise | +0.77% (0.05%) | outside |
+| cpu_instrs | -0.82% (0.48%) | outside, faster | +1.10% (0.08%) | outside |
+| oam-lines | +4.07% (0.25%) | outside | +0.84% (0.08%) | outside |
+| dma-storm | +0.29% (0.60%) | noise | +2.24% (0.05%) | outside |
+| storm-spsw | +5.36% (1.53%) | outside | +8.04% (0.14%) | outside |
+| storm-div | +0.84% (2.49%) | noise | +3.86% (0.01%) | outside |
+| lines outside noise | 20 of 30 | | 30 of 30, all slower | |
+
+**Not adopted.** The cost is far outside the noise: with the predictor off
+every line is slower (+0.2% to +8%), and with it on cgb-raster (+5.9%),
+oam-lines (+4.1%) and dmg-raster (+2.0%) lose more than worst-case (-0.8%)
+gains. So LLVM's 8-byte loop alignment pays for itself even from
+zero-wait ITCM (the mechanism was not separated; the M7 fetches 64 bits at
+a time, so an unaligned loop head likely costs a fetch per iteration). The 4.7 KB of ITCM stays a known lever (a per-function
+`-align-loops` on cold code, or loops kept aligned only in the hot set),
+not a flag to flip; the ITCM placement tiers are unchanged.
+
+Board time: 20 set runs at about 3.5 min each (100 s read). Host: h7-bench
+clippy for its 8 feature sets (H3, now with `board,itcm,btac-off`),
+memory-x tests (two new, mutation-checked), `scripts/test-check-cycles.sh`
+(21 new cases; five mutants of the tolerance code each caught).
+
 ## ITCM placement plan
 
 Two plans, one per MCU. The final chip's plan is the one the gates enforce
@@ -2459,6 +2539,13 @@ re-validate on the new toolchain: run `scripts/check-bench.sh` and
 "without" build; the guards accept it, so nothing else needs editing).
 Keep the flag only if it still lowers Ir and `.text`; record both sets of
 numbers in ADR 0008 and restore `=100000`.
+
+**Not adopted: `-C llvm-args=-align-loops=1`** (review P6, 2026-11-27). It
+would free 4,720 B of ITCM in the bench image but costs up to +5.9%
+(cgb-raster, predictor on) and slows every workload with the predictor
+off, judged on five-build layout sets (section "Session 30 (cont.):
+BTAC-off ratchet (M1), layout sets (M2), align-loops (P6)"). LLVM's
+cortex-m7 loop alignment stays.
 
 ## Object-line summary (M10 review, 2026-11-24)
 
