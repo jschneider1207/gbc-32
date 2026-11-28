@@ -65,7 +65,13 @@ fn generate_memory_x() -> String {
         let text = fs::read_to_string(ITCM_SET).unwrap_or_else(|e| panic!("{ITCM_SET}: {e}"));
         let drop =
             env::var("H7_BENCH_ITCM_DROP").unwrap_or_else(|_| memory_x::ITCM_DROP_DEFAULT.into());
-        ItcmSet::parse(&text, &memory_x::drop_list(&drop))
+        // A/B layout sets only (layout-set.sh): bytes of pad at the start
+        // of `.itcm` (memory_x::ItcmSet::with_pad). Unset in every gate image.
+        let pad = env::var("H7_BENCH_ITCM_PAD").map_or(0, |p| {
+            p.parse()
+                .unwrap_or_else(|e| panic!("H7_BENCH_ITCM_PAD={p}: {e}"))
+        });
+        ItcmSet::parse(&text, &memory_x::drop_list(&drop)).with_pad(pad)
     });
     if feature("qemu") {
         memory_x::memory_x(Chip::Qemu, data, set.as_ref())
@@ -81,6 +87,7 @@ fn main() {
     println!("cargo:rerun-if-changed={ITCM_SET}");
     println!("cargo:rerun-if-env-changed=H7_BENCH_CPU_INSTRS");
     println!("cargo:rerun-if-env-changed=H7_BENCH_ITCM_DROP");
+    println!("cargo:rerun-if-env-changed=H7_BENCH_ITCM_PAD");
 
     let (itcm, dtcm, qemu) = (feature("itcm"), feature("dtcm"), feature("qemu"));
     assert!(

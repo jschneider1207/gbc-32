@@ -156,6 +156,10 @@ image bench-flash-axi-pll480 "" "$AXI_LO" "$AXI_HI"
 image bench-flash-dtcm-pll480 dtcm "$DTCM_LO" "$DTCM_HI"
 image bench-itcm-dtcm-pll480 itcm "$DTCM_LO" "$DTCM_HI"
 itcm_check bench-itcm-dtcm-pll480
+# The same image with the branch predictor off (feature btac-off, ADR 0045):
+# gate B2's second, tighter ratchet (expected-cycles-btac-off.txt).
+image bench-itcm-dtcm-btacoff-pll480 itcm,btac-off "$DTCM_LO" "$DTCM_HI"
+itcm_check bench-itcm-dtcm-btacoff-pll480
 
 echo "== host: expected lines (calls, frames, clocks, hash) against expected-hashes.txt"
 (cd host && locked cargo test --release)

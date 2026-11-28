@@ -156,6 +156,9 @@ pub struct ItcmSet {
     pub kept: usize,
     /// Globs in dropped tiers, left in flash.
     pub dropped: usize,
+    /// Bytes of zero pad at the start of `.itcm`, before the hot set
+    /// ([`ItcmSet::with_pad`]); 0 in every committed image.
+    pad: u32,
 }
 
 impl ItcmSet {
@@ -202,7 +205,27 @@ impl ItcmSet {
             rules,
             kept,
             dropped,
+            pad: 0,
         }
+    }
+
+    /// The same set with `bytes` of zero pad at the start of `.itcm`, so
+    /// every ITCM function moves by that much (or to its next alignment
+    /// boundary). A layout perturbation for A/B sets only
+    /// (`tools/h7-bench/layout-set.sh`, docs/perf.md "Session 30 (cont.):
+    /// BTAC-off ratchet (M1), layout sets (M2), align-loops (P6)"): the
+    /// branch predictor aliases on code addresses (ADR 0042), so one build
+    /// per variant is one sample of that noise. 0 emits the map unchanged.
+    ///
+    /// # Panics
+    /// When `bytes` is not a multiple of 4 or over 256.
+    pub fn with_pad(mut self, bytes: u32) -> ItcmSet {
+        assert!(
+            bytes.is_multiple_of(4) && bytes <= 256,
+            "ITCM pad {bytes}: want a multiple of 4, at most 256"
+        );
+        self.pad = bytes;
+        self
     }
 
     /// The rules, one `    *(<glob>)` line each.
@@ -242,13 +265,17 @@ pub const CORE_TEXT_MIN_BYTES: u32 = 0x4000;
 /// move nothing of gbc-core. gbc-core's generics instantiated in other
 /// crates are those crates' code and land in `.text`.
 fn write_itcm(s: &mut String, set: &ItcmSet) {
+    let pad = match set.pad {
+        0 => String::new(),
+        n => format!("    . = . + {n}; /* layout pad (ItcmSet::with_pad, A/B sets only) */\n"),
+    };
     write!(
         s,
         "
 SECTIONS {{
   .itcm : ALIGN(8) {{
     __sitcm = .;
-    /* The memory routines the set calls (docs/perf.md: part of the
+{}    /* The memory routines the set calls (docs/perf.md: part of the
        front end's ITCM reserve). */
     *(.text.__aeabi_memcpy* .text.__aeabi_memclr* .text.__aeabi_memset*)
     *(.text._R*17compiler_builtins3mem*)
@@ -271,6 +298,7 @@ ASSERT(__siitcm + SIZEOF(.itcm) <= __stext_core, \"the .itcm load image overlaps
 ASSERT(__stext_core == ORIGIN(FLASH) + {CORE_TEXT_OFFSET:#x}, \".text_core is not at its fixed address\");
 ASSERT(__etext_core - __stext_core > {CORE_TEXT_MIN_BYTES:#x}, \".text_core is nearly empty: its pattern no longer matches gbc-core\");
 ",
+        pad,
         set.rules()
     )
     .unwrap();
@@ -472,6 +500,32 @@ mod tests {
             !rules.contains('#'),
             "a trailing comment leaked into a rule"
         );
+    }
+
+    #[test]
+    fn itcm_pad_goes_after_sitcm_and_zero_changes_nothing() {
+        let set = ItcmSet::parse(&set_text(40), &[]);
+        let plain = memory_x(Chip::H753, Data::Dtcm, Some(&set));
+        assert_eq!(
+            plain,
+            memory_x(Chip::H753, Data::Dtcm, Some(&set.clone().with_pad(0)))
+        );
+        assert!(!plain.contains("layout pad"));
+        let padded = memory_x(Chip::H753, Data::Dtcm, Some(&set.with_pad(16)));
+        assert!(padded.contains("    __sitcm = .;\n    . = . + 16; /* layout pad"));
+        assert_eq!(
+            padded.replace(
+                "    . = . + 16; /* layout pad (ItcmSet::with_pad, A/B sets only) */\n",
+                ""
+            ),
+            plain
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ITCM pad 6")]
+    fn itcm_pad_not_a_word_multiple_panics() {
+        let _ = ItcmSet::parse(&set_text(40), &[]).with_pad(6);
     }
 
     #[test]

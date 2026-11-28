@@ -31,6 +31,12 @@ board = ["dep:gbc-nucleo-h753", "dep:gbc-firmware"]
 dtcm = []
 # The hot set of perf/itcm-sections.txt in ITCM (needs `dtcm`).
 itcm = ["dtcm"]
+# The ITCM image with the Cortex-M7 branch predictor off (ACTLR
+# DISBTACREAD | DISBTACALLOC, bits 13 and 14, set before the first
+# workload; ADR 0042). Its counts barely move with code layout, so gate B2
+# ratchets them at a tighter tolerance (ADR 0045). Banner placement
+# `itcm-dtcm-btacoff`.
+btac-off = ["itcm"]
 # Board bring-up only: the lib's init and banner, the cycle counter and a
 # TCM probe. No emulator.
 selftest = []

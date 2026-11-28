@@ -53,10 +53,16 @@ mod take_once;
 const PREFIX: &str = "h7bench v1";
 
 /// The placement's name, for the banner (a macro, for `concat!`).
-#[cfg(all(feature = "board", feature = "itcm"))]
+#[cfg(all(feature = "board", feature = "itcm", not(feature = "btac-off")))]
 macro_rules! placement {
     () => {
         "itcm-dtcm"
+    };
+}
+#[cfg(all(feature = "board", feature = "btac-off"))]
+macro_rules! placement {
+    () => {
+        "itcm-dtcm-btacoff"
     };
 }
 #[cfg(all(feature = "board", feature = "dtcm", not(feature = "itcm")))]
@@ -223,6 +229,8 @@ fn run(mut b: bench::Buffers) -> ! {
     use workload::WORKLOADS;
 
     let mut board = board::init(PREFIX);
+    #[cfg(feature = "btac-off")]
+    btac_off();
     // The clock this run actually has, for every banner (plan D11); about
     // 2 s, before the first workload.
     board.measure_clock();
@@ -289,6 +297,24 @@ fn blink(n: u32) {
     if n.is_multiple_of(8) {
         board::led::toggle();
     }
+}
+
+/// Turns the branch predictor off for the rest of the run: ACTLR (0xE000_E008)
+/// DISBTACREAD (bit 13) and DISBTACALLOC (bit 14), Cortex-M7 TRM, "Auxiliary
+/// Control Register". With them set, cycle counts move by at
+/// most about 0.1% with code layout instead of about 1.7% (ADR 0042), which is
+/// what the tighter BTAC-off ratchet relies on (ADR 0045). A diagnostic image
+/// only: the shipped firmware keeps the predictor on.
+#[cfg(feature = "btac-off")]
+fn btac_off() {
+    const ACTLR: *mut u32 = 0xE000_E008 as *mut u32;
+    const DISBTAC: u32 = (1 << 13) | (1 << 14);
+    // SAFETY: ACTLR is an always-present, privileged System Control Space
+    // register on the Cortex-M7 and the bench runs privileged; a
+    // read-modify-write sets only the two predictor bits.
+    unsafe { ACTLR.write_volatile(ACTLR.read_volatile() | DISBTAC) };
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
 }
 
 /// The bench pack in the QSPI NOR (`pack.rs`): mapped and checked once at

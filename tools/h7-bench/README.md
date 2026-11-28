@@ -78,6 +78,7 @@ name the figures below were taken under:
 | `bench-flash-axi-pll480` | none | Code in flash behind the I-cache; stack, emulator state and buffers in AXI SRAM behind the D-cache. |
 | `bench-flash-dtcm-pll480` | `dtcm` | Code in flash; stack, `Memory` and the core's lookup tables in DTCM; frame, audio and cart RAM buffers in AXI SRAM. |
 | `bench-itcm-dtcm-pll480` | `itcm` | As `flash-dtcm`, plus the hot set of `perf/itcm-sections.txt` in ITCM (docs/perf.md "ITCM placement plan"). |
+| `bench-itcm-dtcm-btacoff-pll480` | `itcm,btac-off` | As `itcm-dtcm` with the branch predictor off (ACTLR bits 13 and 14, before the first workload; banner `placement=itcm-dtcm-btacoff`). Diagnostic: the counts barely move with code layout, so gate B2 ratchets them tighter (`expected-cycles-btac-off.txt`, ADR 0045). Its figures are not the reported ones. |
 | `qemu`, `qemu-itcm` | `qemu` (+`itcm`) | Only with `H7_BENCH_QEMU=1`: the frame loop on QEMU (see "Build"). |
 | `bench-pack.bin` | (host) | Not an image: the fifteen workload ROMs as one blob for the QSPI NOR ("QSPI ROM placement"). |
 
@@ -607,6 +608,42 @@ names depend on the build path and move code (ADR 0042). The committed
 a6a2995 (`bench-itcm-dtcm-pll480`, both passes, boot 1 of two; the
 second boot passed against it, largest |delta| 0.047%; `docs/perf.md`
 "M6 worst-case report (shipped placement)").
+
+### Layout sets (`layout-set.sh`, A/B of build variants)
+
+One build of the ITCM image is one sample of the branch predictor's layout
+noise (ADR 0042: a 16 B ITCM shift moved a bound workload 1.70%), so a
+single build cannot tell a variant (a flag, a tier, an opt-level) from
+layout. `layout-set.sh` measures a variant as a set: the same source built at
+several ITCM start pads, each run once on the board, compared by the
+per-workload mean over the set.
+
+```
+./layout-set.sh run <label> [--btac-off] [--pads "0 4 8 16 24"] [--rustflags "<flag> ..."] [--secs 85]
+./layout-set.sh summary out/h753/sets/<label>
+./layout-set.sh compare out/h753/sets/<A> out/h753/sets/<B>
+```
+
+- `run` builds `bench-itcm-dtcm` (features `board,itcm`, plus `btac-off`
+  with `--btac-off`) once per pad into `out/h753/sets/<label>/`
+  (`pad<N>.bin`, section sizes in `sizes.txt`, flags and commit in
+  `flags.txt`), all before touching the board, then runs `run-qspi.sh` on
+  each in turn (loader, bench pack, image, `--secs` of serial;
+  `check-report.sh --qspi` must pass), then prints the summary. The pad is
+  `H7_BENCH_ITCM_PAD` (build.rs; `memory_x::ItcmSet::with_pad`): that many
+  zero bytes at the start of `.itcm`, so every ITCM function moves.
+  `.text_core` stays at its fixed address, so flash code does not move.
+  `--rustflags` adds rustc flags for the variant (as build.sh adds its path
+  remaps). Use 100 s with `--btac-off` (the first report comes later).
+- `summary`: per workload line (flash and QSPI pass), the set mean of the
+  builds' `mean=` and `max=`, min..max, and the spread, (largest - smallest)
+  / set mean, from each capture's last complete report.
+- `compare`: B's set mean against A's per line, `noise` when |delta| is
+  below the larger of the two spreads, else `OUTSIDE`.
+
+The arithmetic is `layout-set.exs` (Elixir, stdlib only). Build in the main
+checkout (ADR 0042), one cargo command at a time; each run holds the board
+lock. A set of five takes about 15 minutes of board time.
 
 ## Measurement
 
