@@ -109,6 +109,40 @@ fcap "$C" after; run "--fresh: start lines after both reports: rc 2" 2 --fresh "
 fcap "$C" none; run "--fresh: no start line: rc 2" 2 --fresh "$C" "$I" "$B"
 fcap "$C" between; run "without --fresh the stale report is accepted" 0 "$C" "$I" "$B"
 fcap "$C" before; run "--fresh with --update: rc 2" 2 --fresh --update "$C" "$I" "$tmp/o2"
+# --- --tolerance-bp: a tighter bound (gate B2's BTAC-off pass, ADR 0045) ---
+base "$B"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) mean=1000000 /\1 mean=1005000 /'
+run "--tolerance-bp 50: mean +0.50% exactly passes" 0 --tolerance-bp 50 "$C" "$I" "$B"
+[[ $last == *"lines within +0.50% of"* ]] && ok "tolerance named in the OK line" || bad "OK line does not name +0.50%"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) mean=1000000 /\1 mean=1005001 /'
+run "--tolerance-bp 50: mean +0.5001% fails" 1 --tolerance-bp 50 "$C" "$I" "$B"
+[[ $last == *"mean 1005001 > baseline 1000000 + 0.50%"* ]] && ok "tolerance named in the FAIL line" || bad "FAIL line does not name + 0.50%"
+run "the same +0.5001% passes without --tolerance-bp (+3%)" 0 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 cgb-raster .*) max=2000000 /\1 max=2010001 /'
+run "--tolerance-bp 50: max +0.50005% fails" 1 --tolerance-bp 50 "$C" "$I" "$B"
+cap "$C" qspi 's/^(h7bench v1 qspi worst-case .*) mean=1000000 /\1 mean=1005001 /'; base "$B" qspi
+run "--tolerance-bp 50: qspi mean +0.5001% fails" 1 --tolerance-bp 50 "$C" "$I" "$B"
+base "$B"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) mean=1000000 /\1 mean=1030000 /'
+run "--tolerance-bp 300: mean +3.00% passes" 0 --tolerance-bp 300 "$C" "$I" "$B"
+cap "$C" "" 's/^(h7bench v1 storm-div .*) mean=1000000 /\1 mean=1030001 /'
+run "--tolerance-bp 300: mean +3.0001% fails" 1 --tolerance-bp 300 "$C" "$I" "$B"
+cap "$C"
+run "--tolerance-bp 301 (looser than +3%): rc 2" 2 --tolerance-bp 301 "$C" "$I" "$B"
+run "--tolerance-bp 1000: rc 2" 2 --tolerance-bp 1000 "$C" "$I" "$B"
+run "--tolerance-bp 0: rc 2" 2 --tolerance-bp 0 "$C" "$I" "$B"
+run "--tolerance-bp 050: rc 2" 2 --tolerance-bp 050 "$C" "$I" "$B"
+run "--tolerance-bp 0.5: rc 2" 2 --tolerance-bp 0.5 "$C" "$I" "$B"
+run "--tolerance-bp without a value: rc 2" 2 "$C" "$I" "$B" --tolerance-bp
+run "--tolerance-bp as the last option, no value: rc 2" 2 --tolerance-bp
+run "--tolerance-bp with --update: rc 2" 2 --tolerance-bp 50 --update "$C" "$I" "$tmp/o3"
+[ ! -e "$tmp/o3" ] && ok "no file written by --tolerance-bp --update" || bad "--tolerance-bp --update wrote a file"
+fcap "$C" before
+run "--fresh --tolerance-bp 50 passes" 0 --fresh --tolerance-bp 50 "$C" "$I" "$B"
+run "--tolerance-bp 50 --fresh passes" 0 --tolerance-bp 50 --fresh "$C" "$I" "$B"
+fcap "$C" between
+run "--tolerance-bp 50 --fresh: stale report still rc 2" 2 --tolerance-bp 50 --fresh "$C" "$I" "$B"
+
 cap "$C"; base "$B" "" 's/cpu_hz=472000000/cpu_hz=480000000/'; run "baseline cpu_hz differs from the banner fails" 1 "$C" "$I" "$B"
 cap "$C"; base "$B" "" 's/placement=itcm-dtcm/placement=flash-axi/'; run "baseline placement differs from the banner fails" 1 "$C" "$I" "$B"
 cap "$C"; run "missing baseline file fails" 1 "$C" "$I" "$tmp/nope"

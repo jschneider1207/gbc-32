@@ -557,7 +557,7 @@ before: the second results array).
 ### Cycle baseline (`check-cycles.sh`, plan M6)
 
 ```
-./check-cycles.sh <capture> out/h753/bench-itcm-dtcm-pll480.bin [expected-cycles.txt]
+./check-cycles.sh [--fresh] [--tolerance-bp <n>] <capture> out/h753/bench-itcm-dtcm-pll480.bin [expected-cycles.txt]
 ./check-cycles.sh --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>
 ```
 
@@ -589,8 +589,20 @@ moved 0.67% once), so the counts do not repeat exactly. A core layout change
 moves bound workloads by up to about 1.2% (the core-first switch) and +-1.7%
 (ITCM shifts), and the storms by up to about 4.2%, so the margin of the +3%
 for a core change on the bound set is about 1.3-1.8 points, and a storm can
-exceed +3% from layout alone. No gate step runs this script yet (gate B2 is
-M7); only its host test runs in H7.
+exceed +3% from layout alone. Gate B2 runs it with `--fresh` (both reports
+from the boot it flashed); its host test runs in H7.
+
+**BTAC-off pass (ADR 0045).** Gate B2 also runs
+`bench-itcm-dtcm-btacoff-pll480` (same run-qspi.sh session shape) and checks
+it with `--tolerance-bp 90` against `expected-cycles-btac-off.txt`: every
+line at most + 0.90% instead of + 3%. `--tolerance-bp <n>` takes 1 to 300
+basis points only, so it can tighten the bound, never loosen it. With the
+predictor off a layout change moves the counts by at most 0.28% (five ITCM
+pads, "Layout sets" below), so a small real cost increase in the core that
+hides inside the +3% band with the predictor on still fails here. The +3%
+check on `expected-cycles.txt` is unchanged, and its figures stay the
+reported ones. The BTAC-off baseline follows the same `--update` rules
+(raising a line needs the human).
 
 `--update` writes a baseline from a 472 MHz capture that passes
 `check-report.sh` and refuses an existing file without `--force`. With

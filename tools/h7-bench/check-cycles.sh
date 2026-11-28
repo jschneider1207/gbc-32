@@ -2,7 +2,7 @@
 # The on-board cycle ratchet (plan Stage 2 M6, gate step B2): checks the
 # cycles per frame of one bench report against the committed baseline.
 #
-#   ./check-cycles.sh [--fresh] <capture.txt> <image.bin> [<expected-cycles.txt>]
+#   ./check-cycles.sh [--fresh] [--tolerance-bp <n>] <capture.txt> <image.bin> [<expected-cycles.txt>]
 #   ./check-cycles.sh --update [--force [--absorb-regression]] <capture.txt> <image.bin> <out-file>
 #
 # The capture is read-serial.sh's output of a `bench-itcm-dtcm-pll480` run
@@ -27,8 +27,12 @@
 #   - every baseline line has its workload line in the report (`flash <w>`
 #     is `h7bench v1 <w> calls=...`, `qspi <w>` is `h7bench v1 qspi <w>
 #     calls=...`), and both its mean and max are at most the baseline's
-#     + 3%, in integers: value * 100 <= base * 103. Faster is reported,
-#     never a failure. Each line's delta % is printed;
+#     + 3%, in integers: value * 100 <= base * 103 (value * 10000 <=
+#     base * 10300). With --tolerance-bp <n> the bound is + n basis points
+#     instead (value * 10000 <= base * (10000 + n)); n is an integer from
+#     1 to 300, so it can only tighten the +3%: gate B2 uses it for the
+#     BTAC-off pass, expected-cycles-btac-off.txt (ADR 0045). Faster is
+#     reported, never a failure. Each line's delta % is printed;
 #   - every workload line in the report has a baseline line (a new
 #     workload, or a QSPI pass the baseline lacks, needs a baseline line);
 #   - real time: every sign-off workload (`worst-case`, synth:worst-case,
@@ -74,7 +78,7 @@
 set -euo pipefail
 here=$(dirname "$(readlink -f "$0")")
 die() { echo "check-cycles.sh: $*" >&2; exit 2; }
-usage="usage: check-cycles.sh [--fresh] <capture> <image.bin> [<expected-cycles.txt>] | --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>"
+usage="usage: check-cycles.sh [--fresh] [--tolerance-bp <n>] <capture> <image.bin> [<expected-cycles.txt>] | --update [--force [--absorb-regression]] <capture> <image.bin> <out-file>"
 REAL_TIME=7902557   # one real-time frame at 472 MHz (472e6 / 59.7275)
 HALF=3951279        # the 50% figure (plan M6), report only
 # The sign-off workloads in this bench (plan B2: synth:worst-case and the
@@ -83,8 +87,22 @@ HALF=3951279        # the 50% figure (plan M6), report only
 # (run-replay.sh, stats player total_over_budget=0 in the player image).
 SIGNOFF="worst-case cpu_instrs"
 
-update=0 force=0 absorb=0 fresh=0
-if [ "${1:-}" = --fresh ]; then fresh=1; shift; [ "${1:-}" != --update ] || die "--fresh is for check mode, not --update"; fi
+update=0 force=0 absorb=0 fresh=0 tol=300
+# Check-mode options, in any order: --fresh, --tolerance-bp <n> (1..300).
+check_opt=0
+while :; do
+  case "${1:-}" in
+    --fresh) fresh=1; check_opt=1; shift ;;
+    --tolerance-bp)
+      [[ "${2:-}" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$2" -le 300 ] ||
+        die "--tolerance-bp '${2:-}': want an integer from 1 to 300 (basis points; it can only tighten the +3%)"
+      tol=$2; check_opt=1; shift 2 ;;
+    *) break ;;
+  esac
+done
+[ "$check_opt" = 0 ] || [ "${1:-}" != --update ] || die "--fresh and --tolerance-bp are for check mode, not --update"
+# The bound as a percentage, for messages: 300 -> 3.00.
+tol_pct=$(awk -v t="$tol" 'BEGIN { printf "%.2f", t / 100 }')
 if [ "${1:-}" = --update ]; then
   update=1; shift
   while :; do
@@ -267,7 +285,7 @@ if [ "$update" = 1 ]; then
   fi
   tmpout=$(mktemp "$out.XXXXXX")
   {
-    echo "# On-board cycles per frame, the M6 ratchet (check-cycles.sh; gate B2: > +3% fails)."
+    echo "# On-board cycles per frame, the M6 ratchet (check-cycles.sh; gate B2: > +3% fails, or the --tolerance-bp it passes)."
     echo "# Written by check-cycles.sh --update from $(basename "$cap")."
     echo "# Absorbing a regression into this file needs the human. Measure in the main checkout (ADR 0042)."
     echo "h7cycles v1 image=$(basename "$img") placement=$b_place cpu_hz=$b_hz commit=$commit image_bytes=$b_bytes image_cksum=$b_crc"
@@ -285,7 +303,7 @@ read -r _ h_place h_hz <<< "$(grep '^H ' <<< "$parsed")"
 [ "$b_place" = "$h_place" ] || bad "banner placement=$b_place, baseline placement=$h_place"
 [ "$b_hz" = "$h_hz" ] || bad "banner cpu_hz=$b_hz, baseline cpu_hz=$h_hz"
 
-cmp=$(awk -v rt="$REAL_TIME" -v half="$HALF" -v so=" $SIGNOFF " '
+cmp=$(awk -v rt="$REAL_TIME" -v half="$HALF" -v so=" $SIGNOFF " -v tol="$tol" -v tp="$tol_pct" '
   function pct(v, b) { return sprintf("%+.2f%%", (v / b - 1) * 100) }
   FNR == NR { if ($1 == "L") { k = $2 " " $3; bm[k] = $4; bx[k] = $5; border[++nb] = k } next }
   { k = $1 " " $2; gm[k] = $3; gx[k] = $4; gorder[++ng] = k }
@@ -295,8 +313,8 @@ cmp=$(awk -v rt="$REAL_TIME" -v half="$HALF" -v so=" $SIGNOFF " '
       k = border[i]
       if (!(k in gm)) { print "FAIL " k ": no such workload line in the report"; continue }
       printf "| %s | %d (%d) | %d (%d) | %s / %s |\n", k, gm[k], bm[k], gx[k], bx[k], pct(gm[k], bm[k]), pct(gx[k], bx[k])
-      if (gm[k] * 100 > bm[k] * 103) print "FAIL " k ": mean " gm[k] " > baseline " bm[k] " + 3% (" pct(gm[k], bm[k]) ")"
-      if (gx[k] * 100 > bx[k] * 103) print "FAIL " k ": max " gx[k] " > baseline " bx[k] " + 3% (" pct(gx[k], bx[k]) ")"
+      if (gm[k] * 10000 > bm[k] * (10000 + tol)) print "FAIL " k ": mean " gm[k] " > baseline " bm[k] " + " tp "% (" pct(gm[k], bm[k]) ")"
+      if (gx[k] * 10000 > bx[k] * (10000 + tol)) print "FAIL " k ": max " gx[k] " > baseline " bx[k] " + " tp "% (" pct(gx[k], bx[k]) ")"
     }
     for (i = 1; i <= ng; i++) {
       k = gorder[i]; split(k, p, " ")
@@ -316,4 +334,4 @@ while IFS= read -r line; do
 done <<< "$cmp"
 
 [ "$fail" -eq 0 ] || { echo "check-cycles.sh: FAILED against $base" >&2; exit 1; }
-echo "check-cycles.sh: OK: $(grep -c '^L ' <<< "$parsed") lines within +3% of $base"
+echo "check-cycles.sh: OK: $(grep -c '^L ' <<< "$parsed") lines within +$tol_pct% of $base"
