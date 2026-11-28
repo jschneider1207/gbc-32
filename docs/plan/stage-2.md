@@ -610,11 +610,13 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [ ] (P2 follow-up) Wario Land 3 live skipped frames after the stash swap 536-847 vs 297-613 before (2 runs each, spread large); check over more live runs
 - [x] (P3) audio-to-PC framing ~59k cycles/frame while streaming: STM32 CRC unit or slicing-by-4, block COBS (opt-in `--audio` only) (done 4df60a8: slicing-by-4 CRC + block COBS, byte-identical; audio_cyc_per_frame 116 -> 51, fe mean -34.1k; HW CRC not needed)
 - [ ] (P5 rest) measure `audio_isr_max` after the fused pop (ea6e9dc); ISRs to ITCM on the H735
-- [ ] (P6) `-C llvm-args=-align-loops=1`: ~4.4-6.3 KB ITCM back; A/B with layout-perturbed builds (M2 below)
+- [x] (P6) `-C llvm-args=-align-loops=1`: ~4.4-6.3 KB ITCM back; A/B with layout-perturbed builds (M2 below) (done session 30: M1 9a3cba4 ADR 0045 +0.90% BTAC-off ratchet; M2 layout-set.sh 892efe3; P6 measured, rejected 6c974e7)
+- [ ] (M2 follow-up, low) re-run the earlier single-build decisions (LTO/opt-level, ITCM tier swaps) as layout sets before relying on them again
+- [ ] (P6 follow-up, low) if ITCM room is ever needed: try `-align-loops=1` per function on cold/flash code only; measure with layout-set.sh
 - [ ] (P7) H735 RAM plan: FRAME out of DTCM first, keep cart RAM internal, spend the 65,600 B save staging buffer, reuse the panel MPU region's 27 KB slack for DMA buffers, boot-check `TCM_AXI_SHARED`
 - [ ] (P8) H753 D2 SRAM1-3 (288 KiB) unused: room for 128 KiB saves (no speed gain; doesn't carry to the H735)
-- [ ] (M1) BTAC-off ratchet pass in h7-bench at ~+0.5-1% (ADR 0042: 0.11% layout noise vs +-1.7% with it on); stricter-only
-- [ ] (M2) variant decisions (LTO, opt-level, ITCM tier) from 4-8 ITCM start-pad builds per variant, not one build each
+- [x] (M1) BTAC-off ratchet pass in h7-bench at ~+0.5-1% (ADR 0042: 0.11% layout noise vs +-1.7% with it on); stricter-only (done session 30: M1 9a3cba4 ADR 0045 +0.90% BTAC-off ratchet; M2 layout-set.sh 892efe3; P6 measured, rejected 6c974e7)
+- [x] (M2) variant decisions (LTO, opt-level, ITCM tier) from 4-8 ITCM start-pad builds per variant, not one build each (done session 30: M1 9a3cba4 ADR 0045 +0.90% BTAC-off ratchet; M2 layout-set.sh 892efe3; P6 measured, rejected 6c974e7)
 - [x] (M3) h7-bench README: the bench's cache state is not the shipped player's (scaler reads DTCM, writes non-cacheable); QSPI +1.24% is an upper bound (done session 30; see review row)
 - [x] (M4) `fe_max`/`busy_max` include the Stats-formatting frame; bench `max` without frame index/warm-up discard (bench `max_at=` done 6a14794; player part open) (done: P2 16f88a3, M4 bd38750, dac-probe e59c536)
 - [ ] (M5) 550 MHz projection assumes constant cycles; fixed-ns miss latency (QSPI ~500 cycles at 550 MHz) and the 32 KiB D-cache unmeasured
