@@ -42,3 +42,25 @@
 ## Left open
 - Needs human: K6 on Windows, Q13 gbc-core dev-dep, sign-off item 2 call.
 - Pokemon Red core_max +1.7% (one frame), accepted as layout noise.
+
+## Second round (human: "are you going to do the remaining tasks?")
+- Human signed off hardware item 2 (audio) and approved gbc-core's
+  dev-dependency on tools/hard-rules (Q13, d2cfb51).
+- Done: K10 1aace5a, K11 (landed in bea81df via another agent's commit,
+  see below), K13 b48b149, Q11 8974629, Q15 df3d99c, Q2 rest 54db549,
+  Q9 fold c2aac36, Q17 27421de, M3/M4-bench 6a14794, P2 16f88a3,
+  M4-player bd38750, dac-probe e59c536, P3 4df60a8, M2 892efe3,
+  M1 9a3cba4 (ADR 0045), P6 rejected (6c974e7), H8 B1 stack line a22f12e.
+- Board: final full gate exit 0 on 2838849; K10 Shantae 4 MiB live +
+  audio 0 underruns; K13 paced cgb_sound PASS, sleep_gate_te=203,
+  sleep_keep_te=7900234 (no timeout); player re-flashed.
+
+## Learned / surprises (second round)
+- The git index is shared: bea81df (a docs commit) swept another agent's
+  staged K11 hunks. It happened to be complete and built; no rewrite.
+  Agents now stage and commit in one command (memory updated).
+- An agent's `until ! pgrep -f "x"` wait loop matched its own command
+  line and never ended; killed by the orchestrator.
+- H8's B1 stack line was empty because grep saw a NUL in the capture and
+  treated the file as binary.
+- align-loops=1 frees 4.7 KB ITCM but costs up to +5.9% (cgb-raster).

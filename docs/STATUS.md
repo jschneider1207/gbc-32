@@ -31,7 +31,18 @@
   244.6k -> 167.1k (Pokemon Red), 231k -> 166.8k (Wario Land 3);
   `audio_isr_max` 8,356 -> ~2.8k (tee on 10,496 -> ~5.3k); K2 seen working.
   Human heard the player's audio after ADR 0044 (2026-11-27): "sounded
-  good". Rest: plan "Stage 3 carry-over tasks", comprehensive-review block.
+  good". Second round (human: do the remaining tasks): K10, K11
+  (`rx_dma_errors=`, B5 requires 0), K13, Q11/Q15/Q2 rests (SimBoard now
+  wraps the real Loader/Session), Q9 display fold (`display/measure.rs`),
+  Q13 incl. gbc-core (human-approved dev-dep), Q17 (all probe bins stay,
+  crate README), P2 stash swap (fe mean -8%), P3 slicing-by-4 CRC + block
+  COBS (audio encode 116 -> 51 cyc/frame, fe -34k with --audio), M1
+  BTAC-off ratchet in B2 at +0.90% (ADR 0045), M2 `tools/h7-bench/layout-set.sh`,
+  M3, M4 (`max_at=`, `stats_max=`, `fe_max_ex_stats=`), P6 align-loops
+  measured and rejected. Final full gate **exit 0** on 2838849 (B1 61 s,
+  B2 346, B3 1040, B4 742, B5 83). K10 board: Shantae 4 MiB live + audio,
+  0 underruns from the first window. Left (plan carry-over): P5 rest, P7,
+  M5, Q5 (H735/port-time), P8, P2/M2/P6 follow-ups.
 - **M7 results:** soak +73 ppm (bound 1000), 0 over budget, 0 underruns;
   worst case QSPI 3,382,818 (85.6% of the 50% line, report only); live
   player front end 245k mean (hashing now scripted-only); `player-script`
@@ -87,7 +98,7 @@
   case 85.6% of 3,951,279 (H735 projection 73.5%); shipped player soak 10
   min: 0 over budget, core max 3,390,856 (42.9%). Facts: docs/perf.md M6
   sections, `docs/reference/m6-evidence.md`, `docs/reviews/stage2-m6.md`.
-- **Board state:** `player` flashed (session 30, HEAD e8b8efd, protocol 2), Pokemon Red (1 MiB) in the NOR. gbc-pc and firmware must come from the same commit (protocol 2). To play (reloads the NOR if needed):
+- **Board state:** `player` flashed (session 30, re-flashed after the K13 paced run; built at 2838849, protocol 2), the B5 save fixture ROM (32 KiB) in the NOR. gbc-pc and firmware must come from the same commit (protocol 2). To play (reloads the NOR if needed):
   `scripts/play-on-board.sh <rom>` (see Needs human).
 - **Last updated:** 2026-11-27, session 30 (log
   `logs/2026-11-27-30-stage2-comprehensive-review.md`; session 29: M7 lows).
@@ -215,6 +226,13 @@ Open (session 30, 2026-11-27):
   tests (stricter only). gbc-pc retries no longer resend refusal Naks
   (K8): `persistent_nak_gives_up_after_retries` became
   `refusal_nak_fails_at_once_without_resend` (not a gate test).
+- FYI, new gate check (stricter only, agent's call, ADR 0045): B2 also
+  runs the bench with the branch predictor off and ratchets it at +0.90%
+  against `tools/h7-bench/expected-cycles-btac-off.txt` (layout noise
+  there is 0.28% vs 2.5% with it on). It catches ~1% real slowdowns; as
+  with the +3% check, absorbing a regression into its baseline is yours.
+- FYI: Wario Land 3 skipped more frames after the stash swap (536-847 vs
+  297-613, 2 runs each; spread large). Plan follow-up; no underruns.
 - FYI: Pokemon Red live `core_max` +1.7% (1,349,528 -> 1,372,254, one
   frame since boot) after the scaler/ISR changes, which add no core work;
   within ADR 0042's layout noise; Wario Land 3 unchanged; B2 +3% ratchet
