@@ -31,6 +31,9 @@
 #       (tools/h7-bench/run-qspi.sh): internal-flash and QSPI hashes equal
 #       expected-hashes.txt (check-report.sh); check-cycles.sh --fresh:
 #       every line <= expected-cycles.txt + 3% (two agreeing reports),
+#       and the same run of bench-itcm-dtcm-btacoff-pll480 (branch
+#       predictor off, ADR 0045): hashes as above, every line <=
+#       expected-cycles-btac-off.txt + BTACOFF_TOL_BP basis points,
 #       worst-case and cpu_instrs max < 7,902,557 (real time: the two
 #       sign-off workloads the bench runs; the other replay ROMs get their
 #       real-time bound from B3, over_budget=0 in the player image); the
@@ -374,7 +377,7 @@ done
 # h7-bench: every feature set tools/h7-bench/build.sh builds. Not
 # --all-targets: the bin has a test target, and thumbv7em has no `test`
 # crate.
-for f in board board,selftest board,clockcheck board,dtcm board,itcm qemu qemu,itcm; do
+for f in board board,selftest board,clockcheck board,dtcm board,itcm board,itcm,btac-off qemu qemu,itcm; do
   clippy tools/h7-bench "--features $f" -- --no-default-features --features "$f"
 done
 clippy tools/h7-bench/host "host" -- --all-targets
@@ -502,13 +505,14 @@ lock_sums > "${TMP}/locks.before"
 sub "crates/gbc-nucleo-h753/build.sh (boot, headless-cpu_instrs, headless-cgb-acid2)"
 run_status crates/gbc-nucleo-h753/build.sh
 [ "${rc}" -eq 0 ] || fail "crates/gbc-nucleo-h753/build.sh exited ${rc}"
-sub "tools/h7-bench/build.sh (selftest, clockcheck, three placements)"
+sub "tools/h7-bench/build.sh (selftest, clockcheck, three placements, the BTAC-off ITCM image)"
 run_status tools/h7-bench/build.sh
 [ "${rc}" -eq 0 ] || fail "tools/h7-bench/build.sh exited ${rc}"
 for img in crates/gbc-nucleo-h753/out/boot crates/gbc-nucleo-h753/out/headless-cpu_instrs \
   crates/gbc-nucleo-h753/out/headless-cgb-acid2 tools/h7-bench/out/h753/selftest-pll480 \
   tools/h7-bench/out/h753/clockcheck-pll480 tools/h7-bench/out/h753/bench-flash-axi-pll480 \
-  tools/h7-bench/out/h753/bench-flash-dtcm-pll480 tools/h7-bench/out/h753/bench-itcm-dtcm-pll480; do
+  tools/h7-bench/out/h753/bench-flash-dtcm-pll480 tools/h7-bench/out/h753/bench-itcm-dtcm-pll480 \
+  tools/h7-bench/out/h753/bench-itcm-dtcm-btacoff-pll480; do
   { [ -s "$img.elf" ] && [ -s "$img.bin" ] && [ "$img.elf" -nt "${TMP}/locks.before" ]; } ||
     fail "$img.{elf,bin} missing or not rebuilt by this run"
 done
@@ -755,6 +759,8 @@ memory-x tests::fault_stack_follows_the_axi_buffers
 memory-x tests::firmware_map_always_defines_the_lib_symbols
 memory-x tests::firmware_map_without_a_set_has_no_itcm_section
 memory-x tests::itcm_section_holds_the_rules_and_the_asserts
+memory-x tests::itcm_pad_goes_after_sitcm_and_zero_changes_nothing
+memory-x tests::itcm_pad_not_a_word_multiple_panics
 memory-x tests::keeps_every_glob_without_drops
 memory-x tests::memory_maps_and_placements
 memory-x tests::odd_glob_panics
@@ -918,6 +924,10 @@ FW=crates/gbc-nucleo-h753
 H7B=tools/h7-bench
 SELFTEST_BIN=${H7B}/out/h753/selftest-pll480.bin
 BENCH_BIN=${H7B}/out/h753/bench-itcm-dtcm-pll480.bin
+# B2's second pass: the same bench with the branch predictor off (ADR 0045),
+# whose counts move about 15 times less with code layout, ratcheted tighter.
+BTACOFF_BIN=${H7B}/out/h753/bench-itcm-dtcm-btacoff-pll480.bin
+BTACOFF_TOL_BP=90 # +0.90%: 3x the largest layout spread with the predictor off, 0.279% (ADR 0045)
 DISPLAY_BIN=${FW}/out/headless-display-cgb-acid2.bin
 stack_lines=()
 
@@ -951,7 +961,7 @@ if want B1 || want B2; then
     [ "${rc}" -eq 0 ] || fail "tools/h7-bench/build.sh exited ${rc}"
   fi
   want B1 && fresh_image "${SELFTEST_BIN}"
-  want B2 && fresh_image "${BENCH_BIN}" "${H7B}/out/h753/bench-pack.bin"
+  want B2 && fresh_image "${BENCH_BIN}" "${BTACOFF_BIN}" "${H7B}/out/h753/bench-pack.bin"
 fi
 fw_images=()
 { want B2 || want B3 || want B4 || want B5; } && fw_images+=(loader)
@@ -1039,7 +1049,7 @@ fi
 
 # =============================================================================
 if want B2; then
-step B2 "bench-itcm-dtcm-pll480, ROMs in internal flash and in the QSPI NOR: hashes, +3% cycles, real time"
+step B2 "bench-itcm-dtcm-pll480, ROMs in internal flash and in the QSPI NOR: hashes, +3% cycles, real time; BTAC off: hashes, tighter cycles"
 # =============================================================================
 mkdir -p "${TMP}/b2"
 set +e
@@ -1058,6 +1068,27 @@ grep -v '^check-report.sh: ' "${TMP}/b2-cycles.log" | sed 's/^/  /' || true
 board_rc "check-cycles.sh" "${rc}"
 cycles_verdict "${TMP}/b2-cycles.log"
 stack_lines+=("B2 bench: $(tr -d '\000\r' < "${caps[0]}" | grep '^h7bench v1 stack used=' | tail -n 1 | sed 's/^h7bench v1 stack //' || true)")
+# The BTAC-off pass (ADR 0045): an additional requirement; the +3% check
+# above and its figures (the reported ones) are unchanged.
+sub "run-qspi.sh bench-itcm-dtcm-btacoff-pll480 (branch predictor off)"
+mkdir -p "${TMP}/b2-btacoff"
+set +e
+H7_BENCH_RUNS=${TMP}/b2-btacoff ${H7B}/run-qspi.sh "${BTACOFF_BIN}" 100 > "${TMP}/b2-btacoff.log" 2>&1
+rc=$?
+set -e
+sed 's/^/  /' "${TMP}/b2-btacoff.log"
+board_rc "run-qspi.sh BTAC off (check-report.sh --qspi: expected-hashes.txt, both passes)" "${rc}"
+qspi_verdict "${TMP}/b2-btacoff.log" "${TMP}/b2-btacoff"
+sub "check-cycles.sh --fresh --tolerance-bp ${BTACOFF_TOL_BP} (expected-cycles-btac-off.txt)"
+set +e
+${H7B}/check-cycles.sh --fresh --tolerance-bp "${BTACOFF_TOL_BP}" "${caps[0]}" "${BTACOFF_BIN}" ${H7B}/expected-cycles-btac-off.txt > "${TMP}/b2-btacoff-cycles.log" 2>&1
+rc=$?
+set -e
+grep -v '^check-report.sh: ' "${TMP}/b2-btacoff-cycles.log" | sed 's/^/  /' || true
+board_rc "check-cycles.sh (BTAC off)" "${rc}"
+cycles_verdict "${TMP}/b2-btacoff-cycles.log"
+grep -q "^check-cycles.sh: OK: .* within +[0-9.]*% of .*expected-cycles-btac-off.txt\$" "${TMP}/b2-btacoff-cycles.log" ||
+  tool_error "check-cycles.sh (BTAC off) exited 0 without its OK against expected-cycles-btac-off.txt"
 fi
 
 # =============================================================================

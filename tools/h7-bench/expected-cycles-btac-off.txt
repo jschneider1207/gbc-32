@@ -1,0 +1,34 @@
+# On-board cycles per frame, the M6 ratchet (check-cycles.sh; gate B2: > +3% fails, or the --tolerance-bp it passes).
+# Written by check-cycles.sh --update from bench-itcm-dtcm-btacoff-pll480-20261127-163734.txt.
+# Absorbing a regression into this file needs the human. Measure in the main checkout (ADR 0042).
+h7cycles v1 image=bench-itcm-dtcm-btacoff-pll480.bin placement=itcm-dtcm-btacoff cpu_hz=472000000 commit=06b81d14687f image_bytes=735576 image_cksum=2336758446
+flash worst-case mean=3675717 max=3716134
+flash cgb-raster mean=3419920 max=3470981
+flash dmg-raster mean=2225367 max=2247807
+flash event-storm mean=2417536 max=2433933
+flash cpu_instrs mean=1668232 max=2397100
+flash dma-storm mean=3804259 max=3808311
+flash halt-irq mean=717675 max=719171
+flash apu-writes mean=981830 max=1005163
+flash oam-lines mean=1802839 max=1821138
+flash storm-control mean=3098981 max=3124461
+flash storm-apu mean=24914886 max=25135518
+flash storm-spsw mean=14525905 max=14658198
+flash storm-div mean=16561115 max=16706918
+flash storm-gdma mean=2989218 max=3015229
+flash storm-ppu mean=29059238 max=29372392
+qspi worst-case mean=3717547 max=3756946
+qspi cgb-raster mean=3421478 max=3473400
+qspi dmg-raster mean=2226727 max=2250508
+qspi event-storm mean=2419028 max=2436468
+qspi cpu_instrs mean=1668625 max=2397115
+qspi dma-storm mean=3806278 max=3811206
+qspi halt-irq mean=718885 max=720852
+qspi apu-writes mean=982780 max=1006052
+qspi oam-lines mean=1803634 max=1822513
+qspi storm-control mean=3100757 max=3127104
+qspi storm-apu mean=24915350 max=25135878
+qspi storm-spsw mean=14523310 max=14656742
+qspi storm-div mean=16558472 max=16703278
+qspi storm-gdma mean=3212290 max=3462374
+qspi storm-ppu mean=29060237 max=29365548
