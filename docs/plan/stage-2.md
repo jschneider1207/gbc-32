@@ -627,6 +627,7 @@ From the comprehensive review (`docs/reviews/stage2-comprehensive.md`, session 3
 - [x] (Q17) decide which probe bins (qspi-probe/-mmap/-write, lcd-probe, lcd-dma-probe, dac-probe, link-probe; ~3.2k lines) stay for Stage 3; move the rest to `examples/` or retire (done session 30; see review row)
 - [x] (Q2 rest) `SimBoard` answers messages with its own code; wrap the real `Loader`/`Session` (ADR 0043) (done session 30; see review row)
 - [x] (Q13 rest) gbc-core keeps its own hard-rules copy (drift test in `tools/hard-rules/tests/core_copy.rs`); a dev-dependency on `tools/hard-rules` needs the human (d2cfb51; human-approved 2026-11-27)
+- [ ] (Q13 improvement, optional, human 2026-11-27: only if needed) move the hard-rules checks out of the crates: one test target in `tools/hard-rules` that reads each crate's manifest and sources by path, so gbc-core, gbc-firmware, gbc-link and gbc-link-board drop their dev-dependency and `tests/hard_rules.rs` (gbc-core is then literally dependency-free again, matching `acceptance/README.md` item 8). The gate must keep every currently required hard-rules test name required (gate-stage1.sh `cargo test -p gbc-core --test hard_rules`, gate-stage2.sh H7).
 
 Still open from M1-M6 (copied, also kept in their milestones):
 
