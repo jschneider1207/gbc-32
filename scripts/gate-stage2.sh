@@ -1044,7 +1044,7 @@ set -e
 [ "${rc}" -eq 0 ] || tool_error "read-serial.sh exited ${rc} (serial unreadable)"
 run_status ${H7B}/check-selftest.sh "${TMP}/b1-serial.txt" "${SELFTEST_BIN}"
 board_rc "check-selftest.sh" "${rc}"
-stack_lines+=("B1 selftest: $(grep -o 'stack_used=[0-9]*' "${TMP}/b1-serial.txt" | tail -n 1 || true)")
+stack_lines+=("B1 selftest: $(tr -d '\000\r' < "${TMP}/b1-serial.txt" | grep -o 'stack_used=[0-9]*' | tail -n 1 || true)")
 fi
 
 # =============================================================================
